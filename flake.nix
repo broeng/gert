@@ -85,16 +85,19 @@
           '';
         };
         devGerrit = mkDevGerrit "dev-gerrit" "run";
+        devGerritSeed = mkDevGerrit "dev-gerrit-seed" "seed";
       in
       {
         packages = {
           default = gert;
           dev-gerrit = devGerrit;
+          dev-gerrit-seed = devGerritSeed;
         };
 
         apps = {
           default = flake-utils.lib.mkApp { drv = gert; };
           dev-gerrit = flake-utils.lib.mkApp { drv = devGerrit; };
+          dev-gerrit-seed = flake-utils.lib.mkApp { drv = devGerritSeed; };
         };
 
         devShells.default = craneLib.devShell {
