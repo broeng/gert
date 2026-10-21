@@ -94,12 +94,17 @@ impl GerritClient {
         let body = resp.into_body();
         match code {
             200..=299 => Ok(serde_json::from_slice(strip_xssi(&body))?),
-            401 | 403 => Err(Error::Unauthorized),
-            404 => Err(Error::NotFound),
-            _ => Err(Error::Status {
-                code,
-                body: snippet(&body),
-            }),
+            _ => Err(error_for_status(code, &body)),
+        }
+    }
+
+    /// Fails with [`Error::Unauthorized`] for anonymous sessions, for
+    /// everything that needs an account: no request is made.
+    fn require_auth(&self) -> Result<(), Error> {
+        if self.is_authenticated() {
+            Ok(())
+        } else {
+            Err(Error::Unauthorized)
         }
     }
 
@@ -249,6 +254,9 @@ impl GerritClient {
     /// `GET /accounts/self/preferences`. Anonymous access yields
     /// [`Error::Unauthorized`].
     pub async fn get_diff_preferences(&self) -> Result<DiffPreferences, Error> {
+        // Preferences belong to an account. Say so without a request (the
+        // server may answer 401 or 403 depending on its configuration).
+        self.require_auth()?;
         let v = self
             .get_json("/accounts/self/preferences.diff", &[])
             .await?;
@@ -278,6 +286,27 @@ pub(crate) fn strip_xssi(body: &[u8]) -> &[u8] {
             None => &[],
         },
         None => body,
+    }
+}
+
+/// Maps an error response. 400 and 409 carry the server's explanation as a
+/// plain-text body; it is kept whole (up to a sane limit) because the UI
+/// shows it to the user.
+fn error_for_status(code: u16, body: &[u8]) -> Error {
+    let message = || {
+        let text = String::from_utf8_lossy(body);
+        text.trim().chars().take(2000).collect::<String>()
+    };
+    match code {
+        400 => Error::BadRequest { message: message() },
+        401 => Error::Unauthorized,
+        403 => Error::Forbidden { message: message() },
+        404 => Error::NotFound,
+        409 => Error::Conflict { message: message() },
+        _ => Error::Status {
+            code,
+            body: snippet(body),
+        },
     }
 }
 
@@ -384,17 +413,22 @@ mod tests {
         let fake = FakeHttpClient::new();
         let c = client(&fake, "https://h", Auth::Anonymous);
         for (code, check) in [
+            (400, "badrequest"),
             (401, "unauthorized"),
-            (403, "unauthorized"),
+            (403, "forbidden"),
             (404, "notfound"),
+            (409, "conflict"),
             (500, "status"),
         ] {
-            fake.push_response(code, "oops");
+            fake.push_response(code, "oops\n");
             match (block_on(c.server_version()), check) {
                 (Err(Error::Unauthorized), "unauthorized") => {}
+                (Err(Error::Forbidden { message }), "forbidden")
+                | (Err(Error::BadRequest { message }), "badrequest")
+                | (Err(Error::Conflict { message }), "conflict") => assert_eq!(message, "oops"),
                 (Err(Error::NotFound), "notfound") => {}
                 (Err(Error::Status { code: c2, body }), "status") => {
-                    assert_eq!((c2, body.as_str()), (500, "oops"));
+                    assert_eq!((c2, body.as_str()), (500, "oops\n"));
                 }
                 (other, _) => panic!("{code}: {other:?}"),
             }
@@ -1080,11 +1114,11 @@ mod tests {
     #[test]
     fn diff_preferences_anonymous_is_unauthorized() {
         let fake = FakeHttpClient::new();
-        fake.push_response(403, "");
         let c = client(&fake, "https://h", Auth::Anonymous);
         assert!(matches!(
             block_on(c.get_diff_preferences()),
             Err(Error::Unauthorized)
         ));
+        assert!(fake.requests().is_empty());
     }
 }

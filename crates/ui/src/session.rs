@@ -111,7 +111,23 @@ impl Session {
     }
 }
 
-/// True if `e` means the credentials were refused.
+/// True if `e` means the credentials were refused (401). A 403 (logged in,
+/// but not allowed) is deliberately not included: it must not log the user out.
 pub fn is_unauthorized(e: &sync::Error) -> bool {
-    matches!(e, sync::Error::Api(gerrit_api::Error::Unauthorized))
+    matches!(e, sync::Error::Api(e) if e.is_unauthorized())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_401_means_login_again() {
+        let api = |e| sync::Error::Api(e);
+        assert!(is_unauthorized(&api(gerrit_api::Error::Unauthorized)));
+        assert!(!is_unauthorized(&api(gerrit_api::Error::Forbidden {
+            message: "no".into()
+        })));
+        assert!(!is_unauthorized(&api(gerrit_api::Error::NotFound)));
+    }
 }
