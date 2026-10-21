@@ -216,7 +216,7 @@ GPUI entities.)
     dependencies are vendored from `Cargo.lock`).
   - `devShells.default`: the toolchain, rust-analyzer, and every native
     library GPUI needs (vulkan-loader, wayland, libxkbcommon, xorg libxcb/X11,
-    fontconfig, freetype, openssl, ...), with `LD_LIBRARY_PATH` set so plain
+    fontconfig, freetype, ...), with `LD_LIBRARY_PATH` set so plain
     `cargo run` works.
   - The Rust toolchain comes from **rust-overlay** (latest stable), not nixpkgs.
 - It must work on **NixOS and on Nix running on other distros**. On non-NixOS
