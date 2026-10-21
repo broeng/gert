@@ -71,9 +71,15 @@ pub(crate) struct AccountInfo {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 pub(crate) struct ApprovalInfo {
-    // `ApprovalInfo` also carries the voter's `AccountInfo` fields; we only
-    // need the vote itself.
     pub value: Option<i32>,
+    pub date: Option<String>,
+    // `ApprovalInfo` also carries the voter's `AccountInfo` fields.
+    #[serde(rename = "_account_id")]
+    pub account_id: Option<u64>,
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -99,12 +105,8 @@ pub(crate) struct AttentionSetInfo {
     pub account: Option<AccountInfo>,
 }
 
-// `GitPerson` and the `CommitInfo` fields beyond `message` are not read yet
-// (the M2 change view will); they are decoded and checked against the spec so
-// that it is safe to start using them.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
-#[allow(dead_code)]
 pub(crate) struct GitPerson {
     pub name: Option<String>,
     pub email: Option<String>,
@@ -115,8 +117,9 @@ pub(crate) struct GitPerson {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
-#[allow(dead_code)]
 pub(crate) struct CommitInfo {
+    pub commit: Option<String>,
+    pub parents: Option<Vec<CommitInfo>>,
     pub subject: Option<String>,
     pub message: Option<String>,
     pub author: Option<GitPerson>,
@@ -128,7 +131,53 @@ pub(crate) struct CommitInfo {
 pub(crate) struct RevisionInfo {
     #[serde(rename = "_number")]
     pub number: Option<u32>,
+    /// A `ChangeKind`, kept as a string so unknown kinds cannot fail a page.
+    pub kind: Option<String>,
+    pub created: Option<String>,
+    pub uploader: Option<AccountInfo>,
+    #[serde(rename = "ref")]
+    pub ref_name: Option<String>,
+    pub description: Option<String>,
     pub commit: Option<CommitInfo>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ChangeMessageInfo {
+    pub id: Option<String>,
+    pub tag: Option<String>,
+    pub author: Option<AccountInfo>,
+    pub real_author: Option<AccountInfo>,
+    pub date: Option<String>,
+    pub message: Option<String>,
+    #[serde(rename = "_revision_number")]
+    pub revision_number: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct SubmitRequirementExpressionInfo {
+    pub expression: Option<String>,
+    pub fulfilled: Option<bool>,
+    /// `PASS`, `FAIL`, ...; a string so unknown values are kept.
+    pub status: Option<String>,
+    pub passing_atoms: Option<Vec<String>>,
+    pub failing_atoms: Option<Vec<String>>,
+    pub atom_explanations: Option<BTreeMap<String, String>>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct SubmitRequirementResultInfo {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// `SATISFIED`, `UNSATISFIED`, ...; a string so unknown values are kept.
+    pub status: Option<String>,
+    pub is_legacy: Option<bool>,
+    pub applicability_expression_result: Option<SubmitRequirementExpressionInfo>,
+    pub submittability_expression_result: Option<SubmitRequirementExpressionInfo>,
+    pub override_expression_result: Option<SubmitRequirementExpressionInfo>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -162,6 +211,8 @@ pub(crate) struct ChangeInfo {
     pub current_revision_number: Option<u32>,
     /// Keyed by commit SHA.
     pub revisions: Option<BTreeMap<String, RevisionInfo>>,
+    pub messages: Option<Vec<ChangeMessageInfo>>,
+    pub submit_requirements: Option<Vec<SubmitRequirementResultInfo>>,
     /// Set on the last element of a query page that has a successor.
     #[serde(rename = "_more_changes")]
     pub more_changes: Option<bool>,
@@ -209,6 +260,9 @@ mod tests {
         conforms::<GitPerson>(&spec, "GitPerson");
         conforms::<CommitInfo>(&spec, "CommitInfo");
         conforms::<RevisionInfo>(&spec, "RevisionInfo");
+        conforms::<ChangeMessageInfo>(&spec, "ChangeMessageInfo");
+        conforms::<SubmitRequirementExpressionInfo>(&spec, "SubmitRequirementExpressionInfo");
+        conforms::<SubmitRequirementResultInfo>(&spec, "SubmitRequirementResultInfo");
         conforms::<ChangeInfo>(&spec, "ChangeInfo");
     }
 
