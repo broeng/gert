@@ -1,55 +1,264 @@
-//! Tolerant decoding of SDK models.
+//! Wire types: what the Gerrit REST API sends, as far as we decode it.
 //!
-//! The SDK models Gerrit enums as closed Rust enums, so one unknown value
-//! would fail a whole page of results. We therefore pull the enum fields we
-//! care about out of the JSON first, and drop sub-trees we never read.
+//! These are deliberately tolerant (see CLAUDE.md, "Wire types and the
+//! OpenAPI spec"):
+//!
+//! * Unknown fields are ignored (serde's default; never `deny_unknown_fields`).
+//! * Enums we read keep unknown values ([`Status::Unknown`]); enums we do not
+//!   read are simply not declared, so their values cannot fail a page.
+//! * Anything a server may omit is an `Option` (or defaulted).
+//! * Timestamps stay strings here; [`crate::convert`] parses them.
+//!
+//! Every struct derives `Default` and, in tests, `Serialize`. The conformance
+//! test at the bottom serializes a default value (so every field appears,
+//! `None` as `null`) and checks each key against the property list of the
+//! matching schema in the vendored `spec/rest-api-openapi.json`. That catches
+//! typos and wrong `rename`s without macros or a field list to keep in sync.
 
-use gerrit_client::models::ChangeInfo;
-use serde_json::Value;
+use std::collections::BTreeMap;
 
-/// Top-level `ChangeInfo` keys we never convert; dropping them avoids
-/// failures on enums we do not model.
-const IGNORED_KEYS: &[&str] = &[
-    "submit_type",
-    "requirements",
-    "submit_records",
-    "submit_requirements",
-    "reviewer_updates",
-    "messages",
-    "problems",
-    "plugins",
-    "tracking_ids",
-    "actions",
-];
+use serde::Deserialize;
+#[cfg(test)]
+use serde::Serialize;
 
-/// A decoded change plus the fields we handle outside the SDK model.
-pub(crate) struct WireChange {
-    pub info: ChangeInfo,
-    /// Raw `status` string, so unknown statuses survive.
-    pub status: Option<String>,
+/// `ChangeInfo.status`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(from = "String")]
+#[cfg_attr(test, serde(into = "String"))]
+pub(crate) enum Status {
+    New,
+    Merged,
+    Abandoned,
+    /// A status this client does not know; the raw wire value.
+    Unknown(String),
 }
 
-pub(crate) fn parse_change(mut v: Value) -> Result<WireChange, serde_json::Error> {
-    let mut status = None;
-    if let Some(obj) = v.as_object_mut() {
-        status = match obj.remove("status") {
-            Some(Value::String(s)) => Some(s),
-            _ => None,
-        };
-        for k in IGNORED_KEYS {
-            obj.remove(*k);
-        }
-        if let Some(Value::Object(revs)) = obj.get_mut("revisions") {
-            for rev in revs.values_mut() {
-                if let Some(r) = rev.as_object_mut() {
-                    r.remove("kind");
-                    r.remove("actions");
-                }
-            }
+impl From<String> for Status {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "NEW" => Self::New,
+            "MERGED" => Self::Merged,
+            "ABANDONED" => Self::Abandoned,
+            _ => Self::Unknown(s),
         }
     }
-    Ok(WireChange {
-        info: serde_json::from_value(v)?,
-        status,
-    })
+}
+
+#[cfg(test)]
+impl From<Status> for String {
+    fn from(s: Status) -> Self {
+        match s {
+            Status::New => "NEW".into(),
+            Status::Merged => "MERGED".into(),
+            Status::Abandoned => "ABANDONED".into(),
+            Status::Unknown(s) => s,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct AccountInfo {
+    #[serde(rename = "_account_id")]
+    pub account_id: Option<u64>,
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ApprovalInfo {
+    // `ApprovalInfo` also carries the voter's `AccountInfo` fields; we only
+    // need the vote itself.
+    pub value: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct LabelInfo {
+    // Summary slots: whoever holds the label's best/worst vote. Only their
+    // presence matters to us.
+    pub approved: Option<AccountInfo>,
+    pub rejected: Option<AccountInfo>,
+    pub recommended: Option<AccountInfo>,
+    pub disliked: Option<AccountInfo>,
+    /// The current user's vote (`LABELS` option).
+    pub value: Option<i32>,
+    /// All votes (`DETAILED_LABELS` option).
+    pub all: Option<Vec<ApprovalInfo>>,
+    /// Permitted vote values, e.g. `{"-1": "This shall not be merged"}`.
+    pub values: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct AttentionSetInfo {
+    pub account: Option<AccountInfo>,
+}
+
+// `GitPerson` and the `CommitInfo` fields beyond `message` are not read yet
+// (the M2 change view will); they are decoded and checked against the spec so
+// that it is safe to start using them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[allow(dead_code)]
+pub(crate) struct GitPerson {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub date: Option<String>,
+    /// Time zone offset in minutes east of UTC.
+    pub tz: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+#[allow(dead_code)]
+pub(crate) struct CommitInfo {
+    pub subject: Option<String>,
+    pub message: Option<String>,
+    pub author: Option<GitPerson>,
+    pub committer: Option<GitPerson>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct RevisionInfo {
+    #[serde(rename = "_number")]
+    pub number: Option<u32>,
+    pub commit: Option<CommitInfo>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ChangeInfo {
+    #[serde(rename = "_number")]
+    pub number: Option<u64>,
+    pub change_id: Option<String>,
+    pub project: Option<String>,
+    pub branch: Option<String>,
+    pub subject: Option<String>,
+    pub status: Option<Status>,
+    pub owner: Option<AccountInfo>,
+    pub created: Option<String>,
+    pub updated: Option<String>,
+    pub insertions: Option<u32>,
+    pub deletions: Option<u32>,
+    pub labels: Option<BTreeMap<String, LabelInfo>>,
+    pub work_in_progress: Option<bool>,
+    pub is_private: Option<bool>,
+    pub unresolved_comment_count: Option<u32>,
+    pub total_comment_count: Option<u32>,
+    pub topic: Option<String>,
+    pub hashtags: Option<Vec<String>>,
+    /// Keyed by account id.
+    pub attention_set: Option<BTreeMap<String, AttentionSetInfo>>,
+    pub submittable: Option<bool>,
+    /// Keyed by reviewer state (`REVIEWER`, `CC`, ...).
+    pub reviewers: Option<BTreeMap<String, Vec<AccountInfo>>>,
+    pub current_revision: Option<String>,
+    pub current_revision_number: Option<u32>,
+    /// Keyed by commit SHA.
+    pub revisions: Option<BTreeMap<String, RevisionInfo>>,
+    /// Set on the last element of a query page that has a successor.
+    #[serde(rename = "_more_changes")]
+    pub more_changes: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn spec() -> Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/rest-api-openapi.json");
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        serde_json::from_str(&text).unwrap()
+    }
+
+    /// Checks that every JSON key `T` deserializes exists as a property of
+    /// `components.schemas.<schema>`.
+    fn conforms<T: Default + Serialize>(spec: &Value, schema: &str) {
+        let Value::Object(fields) = serde_json::to_value(T::default()).unwrap() else {
+            panic!("{schema}: wire struct does not serialize to an object");
+        };
+        assert!(!fields.is_empty(), "{schema}: no fields");
+        let props = spec["components"]["schemas"][schema]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("schema {schema} not found in spec"));
+        for key in fields.keys() {
+            assert!(
+                props.contains_key(key),
+                "{schema}: field `{key}` is not in the spec"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_structs_conform_to_the_spec() {
+        let spec = spec();
+        conforms::<AccountInfo>(&spec, "AccountInfo");
+        conforms::<ApprovalInfo>(&spec, "ApprovalInfo");
+        conforms::<LabelInfo>(&spec, "LabelInfo");
+        conforms::<AttentionSetInfo>(&spec, "AttentionSetInfo");
+        conforms::<GitPerson>(&spec, "GitPerson");
+        conforms::<CommitInfo>(&spec, "CommitInfo");
+        conforms::<RevisionInfo>(&spec, "RevisionInfo");
+        conforms::<ChangeInfo>(&spec, "ChangeInfo");
+    }
+
+    #[test]
+    fn conformance_check_catches_a_typo() {
+        #[derive(Default, Serialize)]
+        struct Typo {
+            subjct: Option<String>,
+        }
+        let spec = spec();
+        let r = std::panic::catch_unwind(|| conforms::<Typo>(&spec, "ChangeInfo"));
+        assert!(r.is_err());
+    }
+
+    fn status_of(v: Value) -> Option<Status> {
+        serde_json::from_value::<ChangeInfo>(v).unwrap().status
+    }
+
+    #[test]
+    fn status_keeps_unknown_values() {
+        assert_eq!(status_of(json!({"status": "NEW"})), Some(Status::New));
+        assert_eq!(
+            status_of(json!({"status": "ARCHIVED"})),
+            Some(Status::Unknown("ARCHIVED".into()))
+        );
+        assert_eq!(status_of(json!({})), None);
+    }
+
+    #[test]
+    fn unmodeled_fields_with_unknown_enum_values_are_ignored() {
+        let c: ChangeInfo = serde_json::from_value(json!({
+            "_number": 7,
+            "submit_type": "NEW_THING",
+            "future_field": {"a": [1, 2]},
+            "revisions": {"abc": {
+                "_number": 3,
+                "kind": "WHATEVER",
+                "actions": {"x": {"enabled": true}},
+                "new_thing": 1,
+            }},
+            "labels": {"Code-Review": {"optional": true, "blocking": false, "x": 1}},
+        }))
+        .unwrap();
+        assert_eq!(c.number, Some(7));
+        assert_eq!(c.revisions.unwrap()["abc"].number, Some(3));
+    }
+
+    #[test]
+    fn negative_ids_do_not_decode() {
+        assert!(serde_json::from_value::<AccountInfo>(json!({"_account_id": -1})).is_err());
+        assert!(serde_json::from_value::<ChangeInfo>(json!({"_number": -1})).is_err());
+    }
 }

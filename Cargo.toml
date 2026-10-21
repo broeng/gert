@@ -23,7 +23,6 @@ ui = { path = "crates/ui" }
 gpui-kit = { git = "https://github.com/longbridge/gpui-component", rev = "1676826d9d49b90f4d7b6808b69924f58796f6f1" } # v0.8.0
 # Must equal the gpui-pre version gpui-component pins at the rev above.
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
-gerrit_client = { git = "https://github.com/davido/gerrit-sdk-rust", tag = "v3.15.0-SNAPSHOT" }
 
 anyhow = "1"
 base64 = "0.22"

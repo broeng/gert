@@ -15,9 +15,9 @@ test-support = []
 [dependencies]
 base64.workspace = true
 futures.workspace = true
-gerrit_client.workspace = true
 http.workspace = true
 model.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
