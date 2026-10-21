@@ -473,6 +473,28 @@ fn paging_and_scrolling_follow_the_cursor(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_large_diff_scrolls_frame_by_frame(cx: &mut TestAppContext) {
+    // Each key press moves the cursor and draws a frame of variable-height
+    // rows, so this times what scrolling a 10k-line diff costs per frame.
+    let all = ResolvedDiffPreferences {
+        context: DiffContext::All,
+        ..prefs(DiffViewMode::SideBySide)
+    };
+    let (window, view, _) = open_with(cx, fixture("large_diff.response.json"), all);
+    let t = Instant::now();
+    let frames = 200;
+    for _ in 0..frames {
+        press(cx, window, "space");
+    }
+    let per_frame = t.elapsed() / frames;
+    eprintln!("large diff: {per_frame:?} per page-down frame (debug build)");
+    assert!(cursor(cx, &view) > 1_000);
+    // A debug build with the software test renderer: a guard against doing
+    // work per row on every frame, not a benchmark.
+    assert!(per_frame.as_millis() < 100, "{per_frame:?}");
+}
+
+#[gpui_kit::test]
 fn inline_sizing_and_font_overrides_render(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::Unified);
     cx.update(|cx| {

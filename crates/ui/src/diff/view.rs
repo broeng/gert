@@ -4,7 +4,7 @@
 //! per diff or mode change. Rendering only turns the visible slice of rows
 //! into elements.
 
-use std::{ops::Range, sync::Arc};
+use std::{cell, rc::Rc, sync::Arc};
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
@@ -59,9 +59,23 @@ pub struct DiffView {
     expansion: Expansion,
     cursor: usize,
     focus: FocusHandle,
-    scroll: UniformListScrollHandle,
-    /// Row height at the last render; also what the page size derives from.
+    /// Variable-height rows: code lines have one height, inline threads
+    /// (and their editors) their own, so the list measures what it renders.
+    list: ListState,
+    /// Row height of a code line at the last render; also what the page
+    /// size derives from and the height hint of rows not measured yet.
     row_height: Pixels,
+    /// Window width at the last render. A change makes the list forget its
+    /// height hints, which are put back afterwards.
+    window_width: Pixels,
+    /// Height of the list's viewport at the last render. (The list's own
+    /// state is borrowed while it renders rows, so rows cannot ask it.)
+    viewport: Pixels,
+    /// The cursor row asks the list to scroll it into view in the next
+    /// frame (cleared when that row has been painted).
+    reveal: Rc<cell::Cell<Option<Reveal>>>,
+    /// Styling of the current frame, shared by the row renderers.
+    style: Option<Rc<Style>>,
     /// Set by the owner.
     status: Option<DiffStatus>,
     /// The view's own message ("nothing is hidden"); goes away when the
@@ -80,6 +94,18 @@ impl Focusable for DiffView {
 
 const DEFAULT_PAGE_ROWS: usize = 20;
 
+/// How far above and below the viewport the list measures rows.
+const OVERDRAW: Pixels = px(300.);
+
+/// How the cursor row is brought into view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reveal {
+    /// Scroll as little as possible.
+    Nearest,
+    /// Put the row in the middle of the viewport.
+    Center,
+}
+
 impl DiffView {
     pub fn new(diff: Diff, prefs: ResolvedDiffPreferences, cx: &mut Context<Self>) -> Self {
         let expansion = Expansion::default();
@@ -89,6 +115,9 @@ impl DiffView {
             &expansion,
         ));
         let cursor = layout.first_selectable().unwrap_or(0);
+        let row_height = super::paint::row_height(cx.theme().mono_font_size);
+        let list = ListState::new(layout.len(), ListAlignment::Top, OVERDRAW);
+        list.reset_with_uniform_height(layout.len(), row_height);
         Self {
             diff: Arc::new(diff),
             prefs,
@@ -98,8 +127,12 @@ impl DiffView {
             expansion,
             cursor,
             focus: cx.focus_handle(),
-            scroll: UniformListScrollHandle::new(),
-            row_height: px(20.),
+            list,
+            row_height,
+            window_width: px(0.),
+            viewport: px(0.),
+            reveal: Rc::new(cell::Cell::new(None)),
+            style: None,
             status: None,
             hint: None,
         }
@@ -211,7 +244,7 @@ impl DiffView {
     /// Moves the cursor to `row` (clamped to a selectable row) and scrolls
     /// it into view.
     pub fn set_cursor(&mut self, row: usize, cx: &mut Context<Self>) {
-        self.move_to(row, ScrollStrategy::Nearest, cx);
+        self.move_to(row, Reveal::Nearest, cx);
     }
 
     /// First row in the viewport, as of the last frame.
@@ -258,27 +291,33 @@ impl DiffView {
             .or_else(|| self.layout.find(anchor))
             .unwrap_or_else(|| self.cursor.min(self.layout.len().saturating_sub(1)));
         self.cursor = self.snap(row);
+        self.reset_list();
         let rel = rel.min(self.page_rows().saturating_sub(1));
-        self.scroll
-            .scroll_to_item_strict_with_offset(self.cursor, ScrollStrategy::Top, rel);
+        self.list.scroll_to(ListOffset {
+            item_ix: self.cursor.saturating_sub(rel),
+            offset_in_item: px(0.),
+        });
+        self.reveal.set(Some(Reveal::Nearest));
+    }
+
+    /// Forgets the measured row heights (the rows changed) and hints that
+    /// every row is as tall as a code line until it has been rendered.
+    fn reset_list(&self) {
+        self.list
+            .reset_with_uniform_height(self.layout.len(), self.row_height);
     }
 
     /// First row (at least partly) in the viewport.
     fn top_row(&self) -> usize {
-        let y = -self.scroll.0.borrow().base_handle.offset().y;
-        if y <= px(0.) || self.row_height <= px(0.) {
-            return 0;
-        }
-        (y / self.row_height).floor() as usize
+        self.list.logical_scroll_top().item_ix
     }
 
     fn page_rows(&self) -> usize {
-        let item = self.scroll.0.borrow().last_item_size;
-        match item {
-            Some(s) if self.row_height > px(0.) => {
-                ((s.item.height / self.row_height).floor() as usize).max(1)
-            }
-            _ => DEFAULT_PAGE_ROWS,
+        let h = self.list.viewport_bounds().size.height;
+        if h > px(0.) && self.row_height > px(0.) {
+            ((h / self.row_height).floor() as usize).max(1)
+        } else {
+            DEFAULT_PAGE_ROWS
         }
     }
 
@@ -292,14 +331,32 @@ impl DiffView {
             .unwrap_or(0)
     }
 
-    fn move_to(&mut self, row: usize, strategy: ScrollStrategy, cx: &mut Context<Self>) {
+    fn move_to(&mut self, row: usize, how: Reveal, cx: &mut Context<Self>) {
         if self.layout.is_empty() {
             return;
         }
         self.cursor = self.snap(row);
         self.hint = None;
-        self.scroll.scroll_to_item(self.cursor, strategy);
+        self.scroll_to_cursor(how);
         cx.notify();
+    }
+
+    /// Brings the cursor row into view. A row near the viewport is placed
+    /// by the heights measured so far; a far one by its index, since rows
+    /// that were never rendered only have a guessed height. Either way the
+    /// row asks for the exact position when it is painted (see
+    /// [`autoscroll_probe`]), so neither guess needs to be right.
+    fn scroll_to_cursor(&mut self, how: Reveal) {
+        let (top, page) = (self.top_row(), self.page_rows());
+        let near = self.cursor + 3 * page >= top && self.cursor <= top + 3 * page;
+        match how {
+            Reveal::Nearest if near => self.list.scroll_to_reveal_item(self.cursor),
+            _ => self.list.scroll_to(ListOffset {
+                item_ix: self.cursor.saturating_sub(page / 4),
+                offset_in_item: px(0.),
+            }),
+        }
+        self.reveal.set(Some(how));
     }
 
     /// Moves by `delta` selectable rows (rows that cannot hold the cursor
@@ -320,7 +377,7 @@ impl DiffView {
                 left -= 1;
             }
         }
-        self.move_to(i, ScrollStrategy::Nearest, cx);
+        self.move_to(i, Reveal::Nearest, cx);
     }
 
     /// Changes what is folded and rebuilds. The cursor stays on its file
@@ -387,6 +444,30 @@ impl DiffView {
         );
     }
 
+    /// The list forgets the height hints of its rows when its width
+    /// changes (every row may wrap differently), and the scroll bar then
+    /// only knows the rows rendered so far. After a change of the window
+    /// width or of the code row height the hints are put back once the
+    /// frame is done, keeping the scroll position.
+    fn sync_list_hints(&mut self, row_height: Pixels, window: &Window, cx: &mut Context<Self>) {
+        let width = window.viewport_size().width;
+        if width == self.window_width && row_height == self.row_height {
+            return;
+        }
+        let first = self.window_width == px(0.);
+        self.window_width = width;
+        self.row_height = row_height;
+        if first {
+            return; // the hints from `new` are in place
+        }
+        cx.defer_in(window, |this, _, cx| {
+            let top = this.list.logical_scroll_top();
+            this.reset_list();
+            this.list.scroll_to(top);
+            cx.notify();
+        });
+    }
+
     // --- actions ---------------------------------------------------------
 
     fn line_down(&mut self, _: &LineDown, _: &mut Window, cx: &mut Context<Self>) {
@@ -399,13 +480,13 @@ impl DiffView {
 
     fn next_chunk(&mut self, _: &NextChunk, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(row) = self.layout.next_chunk(self.cursor) {
-            self.move_to(row, ScrollStrategy::Center, cx);
+            self.move_to(row, Reveal::Center, cx);
         }
     }
 
     fn prev_chunk(&mut self, _: &PrevChunk, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(row) = self.layout.prev_chunk(self.cursor) {
-            self.move_to(row, ScrollStrategy::Center, cx);
+            self.move_to(row, Reveal::Center, cx);
         }
     }
 
@@ -426,11 +507,11 @@ impl DiffView {
     }
 
     fn cursor_top(&mut self, _: &CursorTop, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, ScrollStrategy::Nearest, cx);
+        self.move_to(0, Reveal::Nearest, cx);
     }
 
     fn cursor_bottom(&mut self, _: &CursorBottom, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(usize::MAX, ScrollStrategy::Nearest, cx);
+        self.move_to(usize::MAX, Reveal::Nearest, cx);
     }
 
     fn toggle_mode_action(&mut self, _: &ToggleMode, _: &mut Window, cx: &mut Context<Self>) {
@@ -481,85 +562,99 @@ impl DiffView {
 
     fn click_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
-        self.move_to(row, ScrollStrategy::Nearest, cx);
+        self.move_to(row, Reveal::Nearest, cx);
     }
 
     // --- rendering -------------------------------------------------------
 
-    fn render_rows(
-        &mut self,
-        range: Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    /// The element of one row. Called by the list for the rows it lays out,
+    /// so it must not depend on anything that is expensive per row.
+    fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let layout = self.layout.clone();
-        let (max_old, max_new) = layout.max_numbers();
-        let style = Style::new(
-            self.font_family.clone(),
-            self.prefs.line_length,
-            self.prefs.hide_line_numbers,
-            self.focus.is_focused(window),
-            (max_old, max_new),
-            window,
-            cx,
-        );
-        let end = range.end.min(layout.len());
-        let start = range.start.min(end);
-        layout.rows()[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, row)| {
-                let ix = start + i;
-                let body = match row {
-                    Row::Side { left, right } => h_flex()
-                        .size_full()
-                        .child(cell_element(left.as_ref(), style.old_gutter, &style))
-                        .child(
-                            cell_element(right.as_ref(), style.new_gutter, &style)
-                                .border_l_1()
-                                .border_color(style.palette.divider),
-                        )
-                        .into_any_element(),
-                    Row::Unified { old, new, cell } => h_flex()
-                        .size_full()
-                        .child(number_element(*old, style.old_gutter, cell.kind, &style))
-                        .child(number_element(*new, style.new_gutter, cell.kind, &style))
-                        .child(text_pane(cell, &style))
-                        .into_any_element(),
-                    Row::Fold(fold) => fold_element(fold, ix, &style, cx),
-                    Row::Hidden(hidden) => hidden_element(hidden, &style),
-                    Row::Notice(n) => h_flex()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .text_color(style.palette.muted_fg)
-                        .child(n.text())
-                        .into_any_element(),
-                };
-                let selected = ix == self.cursor && row.selectable();
-                div()
-                    .id(("diff-row", ix))
-                    .relative()
-                    .w_full()
-                    .h(style.row_height)
-                    .child(body)
-                    .when(selected, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .bg(style.palette.cursor_bg)
-                                .border_l_2()
-                                .border_color(style.palette.cursor_bar),
-                        )
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.click_row(ix, window, cx);
-                    }))
-                    .into_any_element()
+        let (Some(row), Some(style)) = (layout.rows().get(ix), self.style.clone()) else {
+            return div().into_any_element();
+        };
+        let body = match row {
+            Row::Side { left, right } => h_flex()
+                .size_full()
+                .child(cell_element(left.as_ref(), style.old_gutter, &style))
+                .child(
+                    cell_element(right.as_ref(), style.new_gutter, &style)
+                        .border_l_1()
+                        .border_color(style.palette.divider),
+                )
+                .into_any_element(),
+            Row::Unified { old, new, cell } => h_flex()
+                .size_full()
+                .child(number_element(*old, style.old_gutter, cell.kind, &style))
+                .child(number_element(*new, style.new_gutter, cell.kind, &style))
+                .child(text_pane(cell, &style))
+                .into_any_element(),
+            Row::Fold(fold) => fold_element(fold, ix, &style, cx),
+            Row::Hidden(hidden) => hidden_element(hidden, &style),
+            Row::Notice(n) => h_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .text_color(style.palette.muted_fg)
+                .child(n.text())
+                .into_any_element(),
+        };
+        let selected = ix == self.cursor && row.selectable();
+        let reveal = self.reveal.get().filter(|_| selected);
+        let viewport = self.viewport;
+        div()
+            .id(("diff-row", ix))
+            .relative()
+            .w_full()
+            .h(style.row_height)
+            .child(body)
+            .when(selected, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(style.palette.cursor_bg)
+                        .border_l_2()
+                        .border_color(style.palette.cursor_bar),
+                )
             })
-            .collect()
+            .when_some(reveal, |d, how| {
+                d.child(autoscroll_probe(self.reveal.clone(), how, viewport))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.click_row(ix, window, cx);
+            }))
+            .into_any_element()
     }
+}
+
+/// An invisible child of the cursor row. While a scroll to the cursor is
+/// pending it asks the list (via the window's autoscroll request) to make
+/// this row's real bounds visible, which stays exact when rows above it
+/// turn out taller than guessed.
+fn autoscroll_probe(
+    pending: Rc<cell::Cell<Option<Reveal>>>,
+    how: Reveal,
+    viewport: Pixels,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let target = match how {
+                Reveal::Nearest => bounds,
+                // A request as tall as the viewport, centered on the row,
+                // ends with the row in the middle.
+                Reveal::Center => Bounds {
+                    origin: point(bounds.left(), bounds.center().y - viewport / 2.),
+                    size: size(bounds.size.width, viewport.max(bounds.size.height)),
+                },
+            };
+            window.request_autoscroll(target);
+        },
+        move |_, (), _, _| pending.set(None),
+    )
+    .absolute()
+    .inset_0()
 }
 
 fn number_element(n: Option<u32>, width: Pixels, kind: LineKind, style: &Style) -> Div {
@@ -652,7 +747,7 @@ fn fold_element(
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 window.focus(&this.focus, cx);
-                this.move_to(ix, ScrollStrategy::Nearest, cx);
+                this.move_to(ix, Reveal::Nearest, cx);
                 match top {
                     Some(top) => this.reveal_step(ix, top, cx),
                     None => this.expand_fold(ix, cx),
@@ -701,7 +796,7 @@ fn hidden_element(hidden: &HiddenRow, style: &Style) -> AnyElement {
 }
 
 impl Render for DiffView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (family, size, row_height, bg, fg, strip) = {
             let t = cx.theme();
             let strip = match (&self.status, &self.hint) {
@@ -731,16 +826,21 @@ impl Render for DiffView {
                 strip,
             )
         };
-        self.row_height = row_height;
-        let count = self.layout.len();
-        let list = uniform_list(
-            "diff-rows",
-            count,
-            cx.processor(|this, range: Range<usize>, window, cx| {
-                this.render_rows(range, window, cx)
-            }),
-        )
-        .track_scroll(&self.scroll);
+        self.sync_list_hints(row_height, window, cx);
+        self.viewport = self.list.viewport_bounds().size.height;
+        self.style = Some(Rc::new(Style::new(
+            self.font_family.clone(),
+            self.prefs.line_length,
+            self.prefs.hide_line_numbers,
+            self.focus.is_focused(window),
+            self.layout.max_numbers(),
+            window,
+            cx,
+        )));
+        let list = list(
+            self.list.clone(),
+            cx.processor(|this, ix, _window, cx| this.render_row(ix, cx)),
+        );
         let list = match self.sizing {
             DiffSizing::Fill => list.size_full(),
             DiffSizing::Inline { max_rows } => list
@@ -790,7 +890,7 @@ impl Render for DiffView {
                     .w_full()
                     .when(self.sizing == DiffSizing::Fill, |d| d.flex_1().min_h_0())
                     .child(list)
-                    .vertical_scrollbar(&self.scroll),
+                    .vertical_scrollbar(&self.list),
             )
     }
 }
