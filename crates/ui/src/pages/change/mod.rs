@@ -21,17 +21,21 @@
 mod state;
 #[cfg(test)]
 mod tests;
+mod thread_list;
+mod threads;
 mod view;
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    sync::Arc,
     time::Duration,
 };
 
 use gpui_kit::*;
 use jiff::Timestamp;
 use model::{
-    ChangeDetail, ChangeNumber, DiffKey, DiffPair, FileEntry, FilesKey, RelatedChange, RevisionId,
+    ChangeDetail, ChangeNumber, DiffKey, DiffPair, FileCommentCounts, FileEntry, FilesKey,
+    RelatedChange, RevisionId, Thread, ThreadId,
 };
 use store::CachedFileList;
 use sync::PollPolicy;
@@ -53,6 +57,7 @@ use crate::{
     tracker::Tracker,
 };
 use state::{Block, Content, PatchSel, step};
+use threads::ThreadFilter;
 
 /// Rows an inline diff shows before it scrolls inside.
 pub const INLINE_MAX_ROWS: usize = 40;
@@ -138,6 +143,20 @@ pub struct ChangePage {
     /// The change's comment threads, shown in the inline diffs.
     comments: Entity<ChangeComments>,
     outbox: Entity<DraftOutbox>,
+    /// The threads as last read from `comments`.
+    threads: Arc<Vec<Thread>>,
+    /// The filter the user picked; `None` is the default for the threads.
+    thread_filter: Option<ThreadFilter>,
+    /// Indexes into `threads` of those the list shows.
+    listed: Vec<usize>,
+    /// The thread under the thread cursor (`shift-n` / `shift-p`).
+    thread_cursor: Option<ThreadId>,
+    /// Comment numbers per file for the pair being compared.
+    counts: BTreeMap<String, FileCommentCounts>,
+    /// The patch-set level threads, as cards (made once the change is
+    /// there).
+    ps_view: Option<Entity<DiffView>>,
+    ps_sub: Option<Subscription>,
     _ticker: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -194,6 +213,13 @@ impl ChangePage {
             related_task: None,
             comments: comments.clone(),
             outbox,
+            threads: Arc::default(),
+            thread_filter: None,
+            listed: Vec::new(),
+            thread_cursor: None,
+            counts: BTreeMap::new(),
+            ps_view: None,
+            ps_sub: None,
             _ticker: Task::ready(()),
             _subs: Vec::new(),
         };
@@ -288,6 +314,38 @@ impl ChangePage {
     #[cfg(test)]
     pub(crate) fn inline_view(&self, path: &str) -> Option<Entity<DiffView>> {
         self.inline.get(path).and_then(|i| i.view.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn counts_for_test(&self, path: &str) -> Option<FileCommentCounts> {
+        self.counts.get(path).copied()
+    }
+
+    /// The ids of the threads the list shows, in order.
+    #[cfg(test)]
+    pub(crate) fn listed_for_test(&self) -> Vec<String> {
+        self.listed
+            .iter()
+            .map(|&i| match &self.threads[i].id {
+                ThreadId::Comment(id) => id.clone(),
+                ThreadId::Draft(id) => format!("draft{}", id.0),
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn threads_for_test(&self) -> Arc<Vec<Thread>> {
+        self.threads.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thread_cursor_for_test(&self) -> Option<ThreadId> {
+        self.thread_cursor.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ps_view_for_test(&self) -> Option<Entity<DiffView>> {
+        self.ps_view.clone()
     }
 
     #[cfg(test)]
@@ -411,7 +469,7 @@ impl ChangePage {
             self.related = None;
             self.related_cursor = None;
         }
-        self.rebuild_blocks();
+        self.read_threads(cx);
         if let Some(key) = key {
             self.load_files(key, network, cx);
         }
@@ -476,6 +534,7 @@ impl ChangePage {
             .unwrap_or_else(|| self.cursor.min(self.files.list.len().saturating_sub(1)));
         let paths: HashSet<_> = self.files.list.iter().map(|f| f.path.as_str()).collect();
         self.inline.retain(|p, _| paths.contains(p.as_str()));
+        self.recount();
         self.rebuild_blocks();
         self.restore_scroll();
         cx.notify();
@@ -545,6 +604,7 @@ impl ChangePage {
             requirements: d.map_or(0, |d| d.submit_requirements.len()),
             labels: d.map_or(0, |d| d.votes.len()),
             files: self.files.list.len(),
+            threads: self.listed.len(),
             related: self.related.as_ref().map_or(0, |r| r.changes.len()),
             messages: d.map_or(0, |d| d.messages.len()),
         }
@@ -797,7 +857,8 @@ impl ChangePage {
 
     /// Hands the change's threads to every inline diff.
     fn apply_threads(&mut self, cx: &mut Context<Self>) {
-        let threads = self.comments.read(cx).threads();
+        self.read_threads(cx);
+        let threads = self.threads.clone();
         let views: Vec<_> = self
             .inline
             .iter()
@@ -844,6 +905,12 @@ impl ChangePage {
             let s = self.settings.read(cx);
             (s.resolved(), s.font_family())
         };
+        if let Some(view) = &self.ps_view {
+            view.update(cx, |v, cx| {
+                v.set_preferences(prefs.clone(), cx);
+                v.set_font_family(font.clone(), cx);
+            });
+        }
         let paths: Vec<String> = self.inline.keys().cloned().collect();
         for path in paths {
             let key = self.diff_key(&path, cx);
@@ -912,6 +979,7 @@ impl ChangePage {
             base: self.sel.base_number(d),
             target,
             path: file.path.clone(),
+            thread: None,
         }));
     }
 

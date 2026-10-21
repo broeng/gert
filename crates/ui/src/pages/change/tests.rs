@@ -97,12 +97,37 @@ fn page_with(
     view: ChangeView,
     routes: impl FnOnce(&RouteHttpClient),
 ) -> Fixture {
+    let auth = online.then_some(Auth::Anonymous);
+    page_as(cx, auth, setup(), view, routes)
+}
+
+/// Like [`page_with`], signed in (so that comments can be written).
+fn page_signed_in(
+    cx: &mut TestAppContext,
+    view: ChangeView,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fixture {
+    let mut server = setup();
+    server.username = Some("u".into());
+    let auth = Auth::Basic {
+        username: "u".into(),
+        password: "p".into(),
+    };
+    page_as(cx, Some(auth), server, view, routes)
+}
+
+fn page_as(
+    cx: &mut TestAppContext,
+    auth: Option<Auth>,
+    server: crate::session::ServerSetup,
+    view: ChangeView,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fixture {
     let http = RouteHttpClient::new();
     http.route("/diff", 200, diff_body());
     routes(&http);
     let env = env_with(seeded(), &http);
-    let auth = online.then_some(Auth::Anonymous);
-    let session = Session::new(&env, &setup(), auth).expect("session");
+    let session = Session::new(&env, &server, auth).expect("session");
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
     let (window, page) = open(cx, |window, cx| {
@@ -117,11 +142,14 @@ fn page_with(
                 ChangeEvent::Refreshed => return,
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::OpenDiff(d) => format!(
-                    "diff {} {:?}..{} {}",
+                    "diff {} {:?}..{} {}{}",
                     d.change,
                     d.base.map(|b| b.0),
                     d.target,
-                    d.path
+                    d.path,
+                    d.thread
+                        .as_ref()
+                        .map_or_else(String::new, |t| format!(" thread={t:?}"))
                 ),
             };
             log.lock().expect("log").push(text);
@@ -469,4 +497,210 @@ fn inline_diffs_show_the_threads_of_their_file(cx: &mut TestAppContext) {
             .collect();
         assert_eq!(shown, [model::ThreadId::Comment("c1".into())]);
     });
+}
+
+// --- comments: counts, thread list, patch-set level threads ----------------
+
+const COMMENTS: &str = r#"{
+  "src/a.rs": [
+    {"id":"a1","patch_set":3,"line":5,"message":"fix this\nplease","updated":"2024-06-15 10:00:00.000000000","unresolved":true,"author":{"_account_id":5,"name":"Rita"}},
+    {"id":"a2","patch_set":3,"line":9,"message":"fine","updated":"2024-06-15 10:01:00.000000000","unresolved":false}
+  ],
+  "src/b.rs": [
+    {"id":"b1","patch_set":1,"line":2,"message":"old","updated":"2024-06-15 10:00:00.000000000","unresolved":true}
+  ],
+  "/PATCHSET_LEVEL": [
+    {"id":"p1","patch_set":3,"message":"overall","updated":"2024-06-15 10:02:00.000000000","unresolved":true}
+  ]
+}"#;
+
+fn with_comments(cx: &mut TestAppContext) -> Fixture {
+    page_with(cx, true, ChangeView::default(), |http| {
+        http.route_json("/comments", COMMENTS);
+    })
+}
+
+fn listed(cx: &mut TestAppContext, f: &Fixture) -> Vec<String> {
+    let mut ids = cx.update(|cx| f.page.read(cx).listed_for_test());
+    ids.sort();
+    ids
+}
+
+#[gpui_kit::test]
+fn the_file_list_counts_the_comments_of_the_selected_pair(cx: &mut TestAppContext) {
+    let f = with_comments(cx);
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        let a = p.counts_for_test("src/a.rs").expect("counts");
+        assert_eq!((a.comments, a.unresolved, a.drafts), (2, 1, 0));
+        // b.rs has a comment on PS1 only: not in Base..PS3.
+        let b = p.counts_for_test("src/b.rs").expect("counts");
+        assert_eq!((b.comments, b.elsewhere), (0, 1));
+        assert_eq!(p.counts_for_test("src/c.rs"), None);
+    });
+    // Another pair counts again: PS1..PS3 shows PS1's comment on the left.
+    press(cx, &f, &["b"]);
+    cx.update(|cx| {
+        let b = f.page.read(cx).counts_for_test("src/b.rs").expect("counts");
+        assert_eq!((b.comments, b.unresolved, b.elsewhere), (1, 1, 0));
+    });
+}
+
+#[gpui_kit::test]
+fn the_thread_list_defaults_to_unresolved_and_the_filter_keys_change_it(cx: &mut TestAppContext) {
+    let f = with_comments(cx);
+    assert_eq!(listed(cx, &f), ["a1", "b1", "p1"]);
+    press(cx, &f, &["shift-a"]);
+    assert_eq!(listed(cx, &f), ["a1", "a2", "b1", "p1"]);
+    press(cx, &f, &["shift-d"]);
+    assert!(listed(cx, &f).is_empty());
+    press(cx, &f, &["shift-u"]);
+    assert_eq!(listed(cx, &f), ["a1", "b1", "p1"]);
+    // The blocks follow: a heading, the rows, the patch-set comments.
+    cx.update(|cx| {
+        let b = f.page.read(cx).blocks_for_test();
+        let at = b
+            .iter()
+            .position(|b| *b == Block::ThreadsHeader)
+            .expect("header");
+        assert_eq!(
+            b[at..at + 5],
+            [
+                Block::ThreadsHeader,
+                Block::Thread(0),
+                Block::Thread(1),
+                Block::Thread(2),
+                Block::PatchSetComments
+            ]
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn without_unresolved_threads_the_list_shows_all(cx: &mut TestAppContext) {
+    let resolved = r#"{"src/a.rs":[{"id":"a2","patch_set":3,"line":9,"message":"fine","updated":"2024-06-15 10:01:00.000000000","unresolved":false}]}"#;
+    let f = page_with(cx, true, ChangeView::default(), |http| {
+        http.route_json("/comments", resolved);
+    });
+    assert_eq!(listed(cx, &f), ["a2"]);
+}
+
+fn thread_cursor(cx: &mut TestAppContext, f: &Fixture) -> Option<String> {
+    cx.update(|cx| match f.page.read(cx).thread_cursor_for_test() {
+        Some(model::ThreadId::Comment(id)) => Some(id),
+        _ => None,
+    })
+}
+
+/// Moves the thread cursor to the thread `id` with shift-n.
+fn to_thread(cx: &mut TestAppContext, f: &Fixture, id: &str) {
+    for _ in 0..6 {
+        if thread_cursor(cx, f).as_deref() == Some(id) {
+            return;
+        }
+        press(cx, f, &["shift-n"]);
+    }
+    panic!("no thread {id}");
+}
+
+#[gpui_kit::test]
+fn x_opens_the_diff_of_the_thread_with_a_pair_that_shows_it(cx: &mut TestAppContext) {
+    let f = with_comments(cx);
+    // shift-p from nowhere starts at the end, shift-n at the start.
+    press(cx, &f, &["shift-n"]);
+    assert!(thread_cursor(cx, &f).is_some());
+    to_thread(cx, &f, "a1");
+    press(cx, &f, &["x"]);
+    // Shown in the current pair (Base..PS3): that pair, with the thread.
+    to_thread(cx, &f, "b1");
+    press(cx, &f, &["x"]);
+    let events = f.events.lock().expect("log").clone();
+    assert_eq!(
+        events,
+        [
+            "diff 7 None..3 src/a.rs thread=Comment(\"a1\")".to_owned(),
+            // PS1's comment is not in Base..PS3: its own patch set.
+            "diff 7 None..1 src/b.rs thread=Comment(\"b1\")".to_owned(),
+        ]
+    );
+    // Enter still opens the file under the file cursor.
+    press(cx, &f, &["enter"]);
+    assert_eq!(
+        f.events.lock().expect("log").last().map(String::as_str),
+        Some("diff 7 None..3 /COMMIT_MSG")
+    );
+}
+
+#[gpui_kit::test]
+fn a_patchset_level_thread_opens_as_a_card_on_the_page(cx: &mut TestAppContext) {
+    let f = with_comments(cx);
+    to_thread(cx, &f, "p1");
+    press(cx, &f, &["x"]);
+    assert!(f.events.lock().expect("log").is_empty(), "no diff page");
+    cx.update_window(f.window, |_, window, cx| {
+        let view = f.page.read(cx).ps_view_for_test().expect("view");
+        assert!(view.read(cx).focus_for_test().is_focused(window));
+        assert_eq!(
+            view.read(cx).cursor_thread(),
+            Some(model::ThreadId::Comment("p1".into()))
+        );
+    })
+    .expect("window");
+    // Esc hands the focus back to the page.
+    press(cx, &f, &["escape", "j"]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/a.rs"));
+}
+
+fn type_text(cx: &mut TestAppContext, f: &Fixture, text: &str) {
+    cx.update_window(f.window, |_, window, cx| window.input(text, cx))
+        .expect("input");
+}
+
+#[gpui_kit::test]
+fn c_writes_a_patchset_level_draft_on_the_current_patch_set(cx: &mut TestAppContext) {
+    let f = page_signed_in(cx, ChangeView::default(), |http| {
+        http.route_json("/comments", COMMENTS);
+        http.route(
+            "/revisions/sha3/drafts",
+            201,
+            ")]}'\n{\"id\":\"srv1\",\"patch_set\":3,\"path\":\"/PATCHSET_LEVEL\",\"updated\":\"2024-06-15 10:05:00.000000000\",\"message\":\"looks good\"}",
+        );
+    });
+    // A target other than the current one does not matter.
+    press(cx, &f, &["shift-t"]);
+    press(cx, &f, &["c"]);
+    type_text(cx, &f, "  looks good  ");
+    let key = if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    };
+    press(cx, &f, &[key]);
+    cx.run_until_parked();
+    let drafts: Vec<_> = cx.update(|cx| {
+        f.page
+            .read(cx)
+            .threads_for_test()
+            .iter()
+            .flat_map(|t| t.entries.iter())
+            .filter_map(|e| match e {
+                model::Entry::Draft(d) => Some((d.path.clone(), d.patch_set.0, d.message.clone())),
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(
+        drafts,
+        [("/PATCHSET_LEVEL".to_owned(), 3, "looks good".to_owned())]
+    );
+    assert!(
+        f.http
+            .requested()
+            .iter()
+            .any(|r| r.contains("/revisions/sha3/drafts")),
+        "{:?}",
+        f.http.requested()
+    );
+    // The thread list has it (a new unresolved thread of its own).
+    assert!(listed(cx, &f).iter().any(|id| id.starts_with("draft")));
 }

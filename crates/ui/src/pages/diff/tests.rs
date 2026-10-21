@@ -89,6 +89,7 @@ fn route(path: &str) -> DiffRoute {
         base: None,
         target: PatchSetNumber(3),
         path: path.into(),
+        thread: None,
     }
 }
 
@@ -120,6 +121,16 @@ fn diff_page_as(
     http: RouteHttpClient,
     auth: gerrit_api::Auth,
 ) -> Page {
+    diff_page_route(cx, store, route(path), http, auth)
+}
+
+fn diff_page_route(
+    cx: &mut TestAppContext,
+    store: Store,
+    route: DiffRoute,
+    http: RouteHttpClient,
+    auth: gerrit_api::Auth,
+) -> Page {
     let env = env_with(store, &http);
     let mut server = setup();
     if let gerrit_api::Auth::Basic { username, .. } = &auth {
@@ -128,13 +139,12 @@ fn diff_page_as(
     let session = crate::session::Session::new(&env, &server, Some(auth)).expect("session");
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
-    let path = path.to_owned();
     let mut settings_out = None;
     let (window, page) = open(cx, |window, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
         settings_out = Some(settings.clone());
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
-        let page = cx.new(|cx| DiffPage::new(session, settings, route(&path), outbox, cx));
+        let page = cx.new(|cx| DiffPage::new(session, settings, route, outbox, cx));
         cx.subscribe(&page, move |_, ev: &super::DiffPageEvent, _| {
             let text = match ev {
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
@@ -534,6 +544,34 @@ fn cached_comments_show_first_and_the_server_refreshes_them(cx: &mut TestAppCont
     assert_eq!(got, ["new", "old"]);
     assert_eq!(requests(&p.http, "/comments"), 1);
     assert!(p.events.lock().expect("log").is_empty());
+}
+
+#[gpui_kit::test]
+fn a_route_with_a_thread_puts_the_cursor_on_it_once_the_comments_are_there(
+    cx: &mut TestAppContext,
+) {
+    let http = http();
+    http.route_json("/comments", &comments_json(&["one", "two"]));
+    let p = diff_page_route(
+        cx,
+        seeded(),
+        DiffRoute {
+            thread: Some(model::ThreadId::Comment("two".into())),
+            ..route("src/a.rs")
+        },
+        http,
+        gerrit_api::Auth::Anonymous,
+    );
+    cx.update(|cx| {
+        let v = p.page.read(cx).view_for_test().expect("view");
+        let v = v.read(cx);
+        let two = model::ThreadId::Comment("two".into());
+        assert_eq!(v.cursor_thread(), Some(two.clone()));
+        assert!(v.is_thread_open(&two));
+    });
+    // Moving to another file does not carry the thread along.
+    press(cx, p.window, &["]"]);
+    assert_eq!(p.events.lock().expect("log").clone(), ["open src/b.rs"]);
 }
 
 #[gpui_kit::test]

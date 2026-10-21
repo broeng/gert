@@ -82,6 +82,8 @@ pub struct DiffPage {
     /// The change's comment threads, shown in the diff.
     comments: Entity<ChangeComments>,
     outbox: Entity<DraftOutbox>,
+    /// The thread the route asked the cursor to be on, until it is found.
+    want_thread: Option<model::ThreadId>,
     _subs: Vec<Subscription>,
 }
 
@@ -105,6 +107,7 @@ impl DiffPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let comments = outbox.update(cx, |o, cx| o.comments(route.change, cx));
+        let want_thread = route.thread.clone();
         let mut this = Self {
             session,
             settings: settings.clone(),
@@ -125,6 +128,7 @@ impl DiffPage {
             prefetch: None,
             comments: comments.clone(),
             outbox,
+            want_thread,
             _subs: Vec::new(),
         };
         this._subs
@@ -356,7 +360,17 @@ impl DiffPage {
             old_path,
         };
         let threads = self.comments.read(cx).threads();
-        view.update(cx, |v, cx| v.set_threads(context, threads, cx));
+        let any = !threads.is_empty();
+        let want = self.want_thread.clone();
+        let found = view.update(cx, |v, cx| {
+            v.set_threads(context, threads, cx);
+            want.is_some_and(|id| v.focus_thread(&id, cx))
+        });
+        // Wait for the comments if they are not there yet; once they are
+        // and the thread is not among them (deleted), forget the wish.
+        if found || any {
+            self.want_thread = None;
+        }
     }
 
     /// Fetches the next file's diff in the background so that `]` is
@@ -408,6 +422,7 @@ impl DiffPage {
         if file.path != self.route.path {
             cx.emit(DiffPageEvent::OpenFile(DiffRoute {
                 path: file.path.clone(),
+                thread: None,
                 ..self.route.clone()
             }));
         }
