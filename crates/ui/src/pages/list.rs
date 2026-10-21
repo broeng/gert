@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -692,8 +693,7 @@ impl Render for ChangeListPage {
 
         let mut body = v_flex()
             .id("change-list-scroll")
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll);
         for i in 0..self.sections.len() {
@@ -742,7 +742,14 @@ impl Render for ChangeListPage {
             .on_action(cx.listener(Self::refresh_action))
             .size_full()
             .child(self.render_header(&cols, cx))
-            .child(body)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(body)
+                    .vertical_scrollbar(&self.scroll),
+            )
             .children(self.render_footer(cx))
     }
 }

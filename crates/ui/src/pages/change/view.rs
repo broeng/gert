@@ -1,6 +1,7 @@
 //! Rendering of the change page blocks.
 
 use gpui_kit::component::button::Button;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -887,6 +888,7 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::focus_files))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::page_up))
+            .relative()
             .size_full()
             .child(
                 list(
@@ -895,5 +897,6 @@ impl Render for ChangePage {
                 )
                 .size_full(),
             )
+            .vertical_scrollbar(&self.list)
     }
 }

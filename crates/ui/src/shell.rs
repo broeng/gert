@@ -5,6 +5,7 @@ use gerrit_api::Auth;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -63,6 +64,12 @@ impl Page {
 
 /// Registers key bindings. Call once after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
+    // Always show the scroll bars: the default only shows them while
+    // scrolling, which hides that a long list or diff scrolls at all.
+    gpui_kit::component::Theme::set_scrollbar_mode(
+        gpui_kit::component::scroll::ScrollbarMode::Always,
+        cx,
+    );
     actions::bind_keys(cx);
     crate::diff::bind_keys(cx);
 }
@@ -78,6 +85,7 @@ pub struct Shell {
     search: Entity<InputState>,
     focus: FocusHandle,
     help: bool,
+    help_scroll: ScrollHandle,
     window_active: bool,
     credentials_task: Option<Task<()>>,
     settings: Entity<DiffSettings>,
@@ -138,6 +146,7 @@ impl Shell {
             search,
             focus: cx.focus_handle(),
             help: false,
+            help_scroll: ScrollHandle::new(),
             window_active: window.is_window_active(),
             credentials_task: None,
             settings: cx.new(|_| DiffSettings::new(diff)),
@@ -691,19 +700,26 @@ impl Shell {
                     .child(
                         // Two columns of groups; the whole panel scrolls if
                         // the window is too short.
-                        div()
-                            .id("help-scroll")
-                            .overflow_y_scroll()
+                        v_flex()
+                            .relative()
                             .min_h_0()
-                            .px_4()
-                            .py_2()
                             .child(
-                                h_flex()
-                                    .items_start()
-                                    .gap_8()
-                                    .child(v_flex().children(left))
-                                    .child(v_flex().children(right)),
-                            ),
+                                div()
+                                    .id("help-scroll")
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.help_scroll)
+                                    .px_4()
+                                    .py_2()
+                                    .child(
+                                        h_flex()
+                                            .items_start()
+                                            .gap_8()
+                                            .child(v_flex().children(left))
+                                            .child(v_flex().children(right)),
+                                    ),
+                            )
+                            .vertical_scrollbar(&self.help_scroll),
                     )
                     .child(
                         div()

@@ -6,6 +6,7 @@
 
 use std::{ops::Range, sync::Arc};
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -573,7 +574,7 @@ impl Render for DiffView {
         )
         .track_scroll(&self.scroll);
         let list = match self.sizing {
-            DiffSizing::Fill => list.w_full().flex_1().min_h_0(),
+            DiffSizing::Fill => list.size_full(),
             DiffSizing::Inline { max_rows } => list
                 .with_sizing_behavior(ListSizingBehavior::Infer)
                 .w_full()
@@ -613,6 +614,13 @@ impl Render for DiffView {
                     .text_color(fg)
                     .child(text)
             }))
-            .child(list)
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .when(self.sizing == DiffSizing::Fill, |d| d.flex_1().min_h_0())
+                    .child(list)
+                    .vertical_scrollbar(&self.scroll),
+            )
     }
 }
