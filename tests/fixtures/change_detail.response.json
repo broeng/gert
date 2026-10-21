@@ -1,0 +1,43 @@
+)]}'
+{
+  "_number": 12345,
+  "branch": "main",
+  "change_id": "I8473b95934b5732ac55d26311a706c9c2bde9940",
+  "created": "2013-02-01 09:59:32.126000000",
+  "current_revision": "0123456789abcdef0123456789abcdef01234567",
+  "current_revision_number": 2,
+  "id": "my%2Fproject~12345",
+  "owner": {
+    "_account_id": 1000001
+  },
+  "project": "my/project",
+  "reviewers": {
+    "CC": [
+      {
+        "_account_id": 1000003,
+        "email": "cc@example.com"
+      }
+    ],
+    "REVIEWER": [
+      {
+        "_account_id": 1000002,
+        "name": "Rev One"
+      }
+    ]
+  },
+  "revisions": {
+    "0123456789abcdef0123456789abcdef01234567": {
+      "_number": 2,
+      "commit": {
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "message": "Fix the frobnicator\n\nLonger description.\n\nChange-Id: I8473b95934b5732ac55d26311a706c9c2bde9940\n",
+        "subject": "Fix the frobnicator"
+      },
+      "created": "2013-02-01 09:59:32.126000000",
+      "ref": "refs/changes/45/12345/2"
+    }
+  },
+  "status": "ABANDONED",
+  "subject": "Fix the frobnicator",
+  "updated": "2013-02-01 09:59:32.126000000"
+}

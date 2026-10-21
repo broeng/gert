@@ -1,0 +1,137 @@
+{
+  "all": [
+    {
+      "_account_id": 1000001,
+      "_more_accounts": true,
+      "avatars": [
+        {
+          "height": 1,
+          "url": "https://gerrit.example.com/"
+        }
+      ],
+      "date": "2013-02-01 09:59:32.126000000",
+      "deleted": true,
+      "display_name": "Jane Doe",
+      "email": "jane.doe@example.com",
+      "inactive": true,
+      "name": "Jane Doe",
+      "permitted_voting_range": {
+        "max": 1,
+        "min": 1
+      },
+      "post_submit": true,
+      "secondary_emails": [
+        "secondary_emails-value"
+      ],
+      "status": "status-value",
+      "tag": "tag-value",
+      "tags": [
+        "tags-value"
+      ],
+      "username": "jdoe",
+      "value": 1
+    }
+  ],
+  "approved": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  },
+  "blocking": true,
+  "default_value": 1,
+  "description": "description-value",
+  "disliked": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  },
+  "optional": true,
+  "recommended": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  },
+  "rejected": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  },
+  "value": 1,
+  "values": {
+    " 0": "values-value",
+    "+1": "values-value",
+    "-1": "values-value"
+  }
+}

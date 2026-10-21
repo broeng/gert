@@ -1,0 +1,194 @@
+{
+  "_number": 2,
+  "actions": {
+    "key": {
+      "enabled": true,
+      "enabled_options": [
+        "enabled_options-value"
+      ],
+      "label": "label-value",
+      "method": "method-value",
+      "title": "title-value"
+    }
+  },
+  "branch": "main",
+  "commit": {
+    "author": {
+      "date": "2013-02-01 09:59:32.126000000",
+      "email": "jane.doe@example.com",
+      "name": "Jane Doe",
+      "tz": 60
+    },
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "committer": {
+      "date": "2013-02-01 09:59:32.126000000",
+      "email": "jane.doe@example.com",
+      "name": "Jane Doe",
+      "tz": 60
+    },
+    "message": "Fix the frobnicator\n\nLonger description.\n\nChange-Id: I8473b95934b5732ac55d26311a706c9c2bde9940\n",
+    "parents": [
+      {
+        "author": {
+          "date": "2013-02-01 09:59:32.126000000",
+          "email": "jane.doe@example.com",
+          "name": "Jane Doe",
+          "tz": 60
+        },
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "committer": {
+          "date": "2013-02-01 09:59:32.126000000",
+          "email": "jane.doe@example.com",
+          "name": "Jane Doe",
+          "tz": 60
+        },
+        "message": "Fix the frobnicator\n\nLonger description.\n\nChange-Id: I8473b95934b5732ac55d26311a706c9c2bde9940\n",
+        "parents": [],
+        "resolve_conflicts_web_links": [
+          {
+            "image_url": "image_url-value",
+            "name": "Jane Doe",
+            "tooltip": "tooltip-value",
+            "url": "https://gerrit.example.com/"
+          }
+        ],
+        "subject": "Fix the frobnicator",
+        "web_links": [
+          {
+            "image_url": "image_url-value",
+            "name": "Jane Doe",
+            "tooltip": "tooltip-value",
+            "url": "https://gerrit.example.com/"
+          }
+        ]
+      }
+    ],
+    "resolve_conflicts_web_links": [
+      {
+        "image_url": "image_url-value",
+        "name": "Jane Doe",
+        "tooltip": "tooltip-value",
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "subject": "Fix the frobnicator",
+    "web_links": [
+      {
+        "image_url": "image_url-value",
+        "name": "Jane Doe",
+        "tooltip": "tooltip-value",
+        "url": "https://gerrit.example.com/"
+      }
+    ]
+  },
+  "commit_with_footers": "commit_with_footers-value",
+  "conflicts": {
+    "base": "base-value",
+    "contains_conflicts": true,
+    "merge_strategy": "merge_strategy-value",
+    "no_base_reason": "HISTORIC_DATA_WITHOUT_BASE",
+    "ours": "ours-value",
+    "theirs": "theirs-value"
+  },
+  "created": "2013-02-01 09:59:32.126000000",
+  "description": "description-value",
+  "fetch": {
+    "http": {
+      "commands": {
+        "key": "commands-value"
+      },
+      "ref": "refs/changes/45/12345/2",
+      "url": "https://gerrit.example.com/"
+    }
+  },
+  "files": {
+    "src/Main.java": {
+      "binary": true,
+      "diffs_too_expensive_to_compute": true,
+      "lines_deleted": 1,
+      "lines_inserted": 1,
+      "new_mode": 1,
+      "new_sha": "new_sha-value",
+      "old_mode": 1,
+      "old_path": "old_path-value",
+      "old_sha": "old_sha-value",
+      "size": 1,
+      "size_delta": 1,
+      "status": "status-value"
+    }
+  },
+  "kind": "REWORK",
+  "parents_data": [
+    {
+      "branch_name": "branch_name-value",
+      "change_id": "I8473b95934b5732ac55d26311a706c9c2bde9940",
+      "change_number": 1,
+      "change_status": "change_status-value",
+      "commit_id": "commit_id-value",
+      "is_merged_in_target_branch": true,
+      "patch_set_number": 1
+    }
+  ],
+  "push_certificate": {
+    "certificate": "certificate-value",
+    "key": {
+      "fingerprint": "fingerprint-value",
+      "id": "my%2Fproject~12345",
+      "key": "key-value",
+      "problems": [
+        "problems-value"
+      ],
+      "status": "BAD",
+      "user_ids": [
+        "user_ids-value"
+      ]
+    }
+  },
+  "real_uploader": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  },
+  "ref": "refs/changes/45/12345/2",
+  "uploader": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  }
+}
