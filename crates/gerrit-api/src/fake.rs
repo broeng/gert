@@ -79,11 +79,40 @@ type Route = (String, u16, Vec<u8>);
 ///
 /// A request is answered by the route with the longest `needle` that occurs
 /// in its path and query (`/changes/5?o=` ...); with no match the answer is
-/// `404`. Cloning shares the routes and the request log.
+/// `404`. A needle that starts with an HTTP method and a space
+/// (`"POST /changes/5/"`) only answers requests with that method. Cloning
+/// shares the routes and the request log.
 #[derive(Clone, Default)]
 pub struct RouteHttpClient {
     routes: Arc<Mutex<Vec<Route>>>,
     requests: Arc<Mutex<Vec<String>>>,
+    sent: Arc<Mutex<Vec<SentRequest>>>,
+}
+
+/// A request as the [`RouteHttpClient`] saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentRequest {
+    pub method: String,
+    /// Path and query.
+    pub target: String,
+    pub body: Vec<u8>,
+}
+
+impl SentRequest {
+    /// The body as text (lossy).
+    pub fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
+/// Splits `"POST /x"` into the method and the rest.
+fn split_method(needle: &str) -> (Option<&str>, &str) {
+    match needle.split_once(' ') {
+        Some((m, rest)) if !m.is_empty() && m.bytes().all(|b| b.is_ascii_uppercase()) => {
+            (Some(m), rest)
+        }
+        _ => (None, needle),
+    }
 }
 
 impl RouteHttpClient {
@@ -105,6 +134,11 @@ impl RouteHttpClient {
         self.route(needle, 200, format!(")]}}'\n{json}"))
     }
 
+    /// Method, path, query and body of every request seen so far.
+    pub fn sent(&self) -> Vec<SentRequest> {
+        self.sent.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Path and query of every request seen so far.
     pub fn requested(&self) -> Vec<String> {
         self.requests
@@ -124,13 +158,28 @@ impl HttpClient for RouteHttpClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(target.clone());
+        let method = req.method().as_str().to_owned();
+        self.sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(SentRequest {
+                method: method.clone(),
+                target: target.clone(),
+                body: req.body().clone(),
+            });
         let (status, body) = self
             .routes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter(|(needle, ..)| target.contains(needle.as_str()))
-            .max_by_key(|(needle, ..)| needle.len())
+            .filter(|(needle, ..)| {
+                let (m, path) = split_method(needle);
+                m.is_none_or(|m| m == method) && target.contains(path)
+            })
+            .max_by_key(|(needle, ..)| {
+                let (m, path) = split_method(needle);
+                path.len() + usize::from(m.is_some())
+            })
             .map_or((404, b"not found".to_vec()), |(_, s, b)| (*s, b.clone()));
         let resp = http::Response::builder()
             .status(status)
@@ -168,5 +217,23 @@ mod tests {
         );
         assert_eq!(get(&c, "/changes/2").0, 404);
         assert_eq!(c.requested().len(), 3);
+    }
+
+    #[test]
+    fn a_method_in_the_needle_restricts_the_route() {
+        let c = RouteHttpClient::new();
+        c.route("PUT /x", 204, "put").route("DELETE /x", 200, "del");
+        let send = |m: &str| {
+            let req = http::Request::builder()
+                .method(m)
+                .uri("https://g.example.com/x")
+                .body(b"body".to_vec())
+                .expect("request");
+            let resp = futures::executor::block_on(c.send(req)).expect("reply");
+            resp.status().as_u16()
+        };
+        assert_eq!((send("PUT"), send("DELETE"), send("GET")), (204, 200, 404));
+        assert_eq!(c.sent()[0].method, "PUT");
+        assert_eq!(c.sent()[0].body_text(), "body");
     }
 }
