@@ -70,10 +70,10 @@ Claude writes most of the code and the user reviews it. So:
 | Concern | Choice |
 |---|---|
 | Language | Rust, latest stable (no `rust-toolchain.toml` pin) |
-| UI | GPUI, git dependency pinned to a specific `zed-industries/zed` rev |
-| Widgets/theming | [gpui-component](https://github.com/longbridge/gpui-component), Zed-like dark/light themes following the system setting |
+| UI | GPUI, obtained **only** through `gpui-kit`'s re-exports |
+| Widgets/theming | `gpui-kit` from [gpui-component](https://github.com/longbridge/gpui-component), git dependency pinned to a commit; Zed-like dark/light themes following the system setting |
 | Gerrit models | `gerrit_client` from [gerrit-sdk-rust](https://github.com/davido/gerrit-sdk-rust), **models only**, git tag pin |
-| HTTP | our own async client over an `HttpClient` trait; production impl is `reqwest` on a small dedicated tokio runtime (same pattern as Zed's `reqwest_client`) |
+| HTTP | our own async client over an `HttpClient` trait; the production impl in `app` adapts `gpui-pre-reqwest-client` (Zed's reqwest client, which manages its own tokio runtime) |
 | Storage | SQLite via `rusqlite` (bundled), called from GPUI's background executor |
 | Secrets | `keyring` |
 | Config | TOML at `<config_dir>/<app>/config.toml`; cache DB in `<cache_dir>/<app>/` (via `directories`) |
@@ -82,13 +82,21 @@ Claude writes most of the code and the user reviews it. So:
 
 ### GPUI pinning
 
-- GPUI and gpui-component are pinned by git rev. **gpui-component itself pins a
-  zed rev; our `gpui` rev must match it exactly**, or Cargo builds two
-  incompatible copies of GPUI. When bumping, bump gpui-component first and take
-  its zed rev.
+- gpui-component (crate `gpui-kit`) is pinned by **git commit**. It pulls
+  GPUI from crates.io as Zed's `gpui-pre-*` snapshot crates, pinned with an
+  exact `=x.y.z` requirement in its workspace `Cargo.toml`.
+- **Never depend on `gpui` / `gpui-pre` directly.** Use `gpui_kit::*`, which
+  re-exports GPUI, plus `gpui_kit::component` and `gpui_kit::assets`. A
+  second, differently-versioned GPUI would compile but be type-incompatible.
+- The only allowed direct `gpui-pre-*` dependency is `gpui-pre-reqwest-client`
+  in `app`, and its version **must equal** the `=x.y.z` that gpui-component's
+  workspace `Cargo.toml` uses at our pinned commit. Bump both together.
+- Do **not** git-pin `zed-industries/zed`. That would give a GPUI that
+  gpui-component's widgets can't use.
 - GPUI's API is unstable and largely undocumented. When unsure, read the source
-  at the pinned rev (in `~/.cargo/git/checkouts/`) and gpui-component's examples
-  rather than guessing from memory; APIs change between revs.
+  at the pinned versions (`~/.cargo/registry/src/*/gpui-pre-*`,
+  `~/.cargo/git/checkouts/gpui-component-*`, especially its `examples/`)
+  rather than guessing from memory; APIs change between snapshots.
 
 ### gerrit-sdk-rust
 
@@ -119,7 +127,8 @@ crates/
                 writes come later.
   sync/         polling and cache refresh: server -> store -> UI notifications.
   ui/           GPUI views, built on gpui-component.
-  app/          binary: wiring, config, keyring, reqwest/tokio HttpClient impl.
+  app/          binary: wiring, config, keyring, HttpClient impl over
+                gpui-pre-reqwest-client.
 tests/fixtures/ schema-generated JSON fixtures
 xtask/          fixture generation and other dev tooling (`cargo xtask ...`)
 ```
