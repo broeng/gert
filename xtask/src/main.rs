@@ -25,7 +25,7 @@ fn main() -> Result<()> {
             }
             let spec_path = match spec_path {
                 Some(p) => p,
-                None => spec::locate()?,
+                None => spec::default_path(),
             };
             let out = out.unwrap_or_else(|| spec::repo_root().join("tests/fixtures"));
             fixtures::generate(&spec_path, &out)
