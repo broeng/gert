@@ -14,6 +14,8 @@ mod error;
 mod poll;
 mod syncer;
 
-pub use error::Error;
+pub use error::{Error, PendingDraft};
 pub use poll::{PollPolicy, PollState};
-pub use syncer::{QueryUpdate, RefreshSource, Syncer};
+pub use syncer::{
+    CommentsView, DraftSave, PublishOutcome, QueryUpdate, RefreshSource, RetryReport, Syncer,
+};

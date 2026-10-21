@@ -46,6 +46,10 @@ pub struct Syncer {
     client: GerritClient,
     store: Arc<Mutex<Store>>,
     server: ServerId,
+    /// Serializes everything that talks to the server about drafts
+    /// (uploads, publishing, refreshing the draft list), so that a refresh
+    /// never sees a draft that is uploaded but not yet recorded as such.
+    drafts_lock: Arc<futures::lock::Mutex<()>>,
 }
 
 impl Syncer {
@@ -54,6 +58,7 @@ impl Syncer {
             client,
             store,
             server,
+            drafts_lock: Arc::default(),
         }
     }
 
@@ -321,6 +326,10 @@ fn first_page_unchanged(cached: &CachedQuery, fresh: &[ChangeSummary], more: boo
         std::cmp::Ordering::Less => false,
     }
 }
+
+mod comments;
+
+pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
 
 #[cfg(test)]
 mod tests;
