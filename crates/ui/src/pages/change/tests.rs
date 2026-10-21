@@ -704,3 +704,85 @@ fn c_writes_a_patchset_level_draft_on_the_current_patch_set(cx: &mut TestAppCont
     // The thread list has it (a new unresolved thread of its own).
     assert!(listed(cx, &f).iter().any(|id| id.starts_with("draft")));
 }
+
+fn reviewed(cx: &mut TestAppContext, f: &Fixture, path: &str) -> bool {
+    cx.update(|cx| f.page.read(cx).is_reviewed_for_test(path))
+}
+
+const PUT_B: &str = "PUT /changes/7/revisions/sha3/files/src%2Fb.rs/reviewed";
+const DELETE_A: &str = "DELETE /changes/7/revisions/sha3/files/src%2Fa.rs/reviewed";
+
+#[gpui_kit::test]
+fn r_marks_the_file_under_the_cursor_reviewed_and_again_clears_it(cx: &mut TestAppContext) {
+    let f = page_signed_in(cx, ChangeView::default(), |http| {
+        http.route(PUT_B, 201, "");
+        http.route(DELETE_A, 204, "");
+    });
+    // The seed has src/a.rs marked.
+    assert!(reviewed(cx, &f, "src/a.rs") && !reviewed(cx, &f, "src/b.rs"));
+    press(cx, &f, &["j", "j", "r"]);
+    assert!(reviewed(cx, &f, "src/b.rs"));
+    press(cx, &f, &["k", "r"]);
+    assert!(!reviewed(cx, &f, "src/a.rs"));
+    let sent: Vec<_> = f
+        .http
+        .sent()
+        .into_iter()
+        .filter(|r| r.target.ends_with("/reviewed"))
+        .map(|r| format!("{} {}", r.method, r.target))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            "PUT /a/changes/7/revisions/sha3/files/src%2Fb.rs/reviewed",
+            "DELETE /a/changes/7/revisions/sha3/files/src%2Fa.rs/reviewed",
+        ]
+    );
+    assert_eq!(cx.update(|cx| f.page.read(cx).hint_for_test()), None);
+}
+
+#[gpui_kit::test]
+fn the_mark_goes_back_when_the_server_refuses(cx: &mut TestAppContext) {
+    let f = page_signed_in(cx, ChangeView::default(), |http| {
+        http.route(PUT_B, 403, "not allowed");
+    });
+    press(cx, &f, &["j", "j", "r"]);
+    assert!(!reviewed(cx, &f, "src/b.rs"));
+    let (note, error) = cx
+        .update(|cx| f.page.read(cx).hint_for_test())
+        .expect("a note");
+    assert!(error && note.contains("src/b.rs"), "{note}");
+    // A 403 is not a login problem.
+    assert!(f.events.lock().expect("log").is_empty());
+}
+
+#[gpui_kit::test]
+fn a_failed_request_keeps_the_mark_that_was_there(cx: &mut TestAppContext) {
+    // Nothing is routed for the mark: the fake answers 404.
+    let f = page_signed_in(cx, ChangeView::default(), |_| {});
+    press(cx, &f, &["j", "r"]);
+    assert!(reviewed(cx, &f, "src/a.rs"));
+    assert!(cx.update(|cx| f.page.read(cx).hint_for_test()).is_some());
+}
+
+#[gpui_kit::test]
+fn a_401_on_the_mark_goes_to_the_login_flow(cx: &mut TestAppContext) {
+    let f = page_signed_in(cx, ChangeView::default(), |http| {
+        http.route(PUT_B, 401, "");
+    });
+    press(cx, &f, &["j", "j", "r"]);
+    assert!(!reviewed(cx, &f, "src/b.rs"));
+    assert_eq!(*f.events.lock().expect("log"), ["unauthorized"]);
+}
+
+#[gpui_kit::test]
+fn r_only_hints_for_anonymous_sessions(cx: &mut TestAppContext) {
+    let f = page(cx, true, ChangeView::default());
+    press(cx, &f, &["j", "r"]);
+    assert!(!reviewed(cx, &f, "src/b.rs"));
+    let (note, error) = cx
+        .update(|cx| f.page.read(cx).hint_for_test())
+        .expect("a note");
+    assert!(!error && note.starts_with("Sign in"), "{note}");
+    assert!(f.http.sent().iter().all(|r| r.method == "GET"));
+}

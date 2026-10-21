@@ -101,6 +101,28 @@ impl ChangePage {
 
     fn status_line(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let status = self.status_text(cx);
+        match self.hint.current() {
+            Some((text, error)) => h_flex()
+                .gap_3()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if error {
+                            theme.danger
+                        } else {
+                            theme.foreground
+                        })
+                        .child(text.to_owned()),
+                )
+                .child(status)
+                .into_any_element(),
+            None => status,
+        }
+    }
+
+    fn status_text(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         match &self.status {
             Status::Refreshing | Status::LoadingMore => div()
@@ -901,6 +923,7 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::threads_drafts))
             .on_action(cx.listener(Self::threads_all))
             .on_action(cx.listener(Self::new_patchset_comment_action))
+            .on_action(cx.listener(Self::toggle_reviewed))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::page_up))
             .relative()

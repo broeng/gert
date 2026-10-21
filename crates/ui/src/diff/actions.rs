@@ -140,8 +140,8 @@ pub fn entries() -> Vec<Entry> {
             "Show the whole file; again: fold unchanged lines",
         ),
         // PolyGerrit: `c` comments on the cursor line. On a thread it
-        // replies (`a` and `r` are the reply dialog and "reviewed", which
-        // come later).
+        // replies (`a` and `r`, the reply dialog and "reviewed", belong to
+        // the pages).
         e(
             "C",
             "c",

@@ -641,3 +641,123 @@ fn a_comment_written_on_the_page_is_saved_uploaded_and_shown(cx: &mut TestAppCon
     });
     assert_eq!((threads, synced), (1, true));
 }
+
+fn reviewed_store(paths: &[&str]) -> Store {
+    let mut store = seeded();
+    let server = store.server_id(URL).expect("server");
+    let files: Vec<_> = PATHS
+        .iter()
+        .map(|p| file(p, FileStatus::Modified))
+        .collect();
+    let marks: Vec<String> = paths.iter().map(|p| (*p).to_owned()).collect();
+    store
+        .save_file_list(server, &files_key(), &files, Some(&marks), now())
+        .expect("files");
+    store
+}
+
+fn is_reviewed(cx: &mut TestAppContext, p: &Page) -> bool {
+    cx.update(|cx| p.page.read(cx).is_reviewed_for_test())
+}
+
+const PUT_A: &str = "PUT /changes/7/revisions/sha3/files/src%2Fa.rs/reviewed";
+const DELETE_A: &str = "DELETE /changes/7/revisions/sha3/files/src%2Fa.rs/reviewed";
+
+#[gpui_kit::test]
+fn r_toggles_the_reviewed_mark_of_the_shown_file(cx: &mut TestAppContext) {
+    let http = http();
+    http.route(PUT_A, 201, "").route(DELETE_A, 204, "");
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http,
+        signed_in(),
+    );
+    assert!(!is_reviewed(cx, &p));
+    press(cx, p.window, &["r"]);
+    assert!(is_reviewed(cx, &p));
+    press(cx, p.window, &["r"]);
+    assert!(!is_reviewed(cx, &p));
+    let sent: Vec<_> = p
+        .http
+        .sent()
+        .into_iter()
+        .filter(|r| r.target.ends_with("/reviewed"))
+        .map(|r| r.method)
+        .collect();
+    assert_eq!(sent, ["PUT", "DELETE"]);
+}
+
+#[gpui_kit::test]
+fn the_cached_marks_show_on_the_diff_page(cx: &mut TestAppContext) {
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&["src/a.rs"]),
+        route("src/a.rs"),
+        http(),
+        signed_in(),
+    );
+    assert!(is_reviewed(cx, &p));
+    let other = diff_page_route(
+        cx,
+        reviewed_store(&["src/a.rs"]),
+        route("src/b.rs"),
+        http(),
+        signed_in(),
+    );
+    assert!(!is_reviewed(cx, &other));
+}
+
+#[gpui_kit::test]
+fn a_refused_mark_is_taken_back_with_a_note(cx: &mut TestAppContext) {
+    let http = http();
+    http.route(PUT_A, 403, "no");
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http,
+        signed_in(),
+    );
+    press(cx, p.window, &["r"]);
+    assert!(!is_reviewed(cx, &p));
+    let note = cx.update(|cx| p.page.read(cx).hint_for_test());
+    assert!(matches!(note, Some((t, true)) if t.contains("src/a.rs")));
+    assert!(
+        p.events.lock().expect("log").is_empty(),
+        "403 keeps the login"
+    );
+}
+
+#[gpui_kit::test]
+fn a_401_on_the_mark_asks_for_a_login(cx: &mut TestAppContext) {
+    let http = http();
+    http.route(PUT_A, 401, "");
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http,
+        signed_in(),
+    );
+    press(cx, p.window, &["r"]);
+    assert!(!is_reviewed(cx, &p));
+    assert_eq!(*p.events.lock().expect("log"), ["unauthorized"]);
+}
+
+#[gpui_kit::test]
+fn r_only_hints_when_anonymous(cx: &mut TestAppContext) {
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http(),
+        gerrit_api::Auth::Anonymous,
+    );
+    press(cx, p.window, &["r"]);
+    assert!(!is_reviewed(cx, &p));
+    let note = cx.update(|cx| p.page.read(cx).hint_for_test());
+    assert!(matches!(note, Some((t, false)) if t.starts_with("Sign in")));
+    assert!(p.http.sent().iter().all(|r| r.method == "GET"));
+}

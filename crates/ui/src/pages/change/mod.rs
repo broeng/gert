@@ -48,9 +48,11 @@ use crate::{
         actions::{NextFile, PrevFile},
     },
     diff_load::{LoadError, load_diff},
+    hint::Hint,
     nav::{ChangeView, DiffRoute},
     outbox::DraftOutbox,
     pages::list::Status,
+    reviewed,
     row::browser_url,
     session::{Session, is_unauthorized},
     settings::DiffSettings,
@@ -157,6 +159,8 @@ pub struct ChangePage {
     /// there).
     ps_view: Option<Entity<DiffView>>,
     ps_sub: Option<Subscription>,
+    /// A note for the user (why a key did nothing, a failed request).
+    hint: Hint,
     _ticker: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -220,6 +224,7 @@ impl ChangePage {
             counts: BTreeMap::new(),
             ps_view: None,
             ps_sub: None,
+            hint: Hint::default(),
             _ticker: Task::ready(()),
             _subs: Vec::new(),
         };
@@ -346,6 +351,16 @@ impl ChangePage {
     #[cfg(test)]
     pub(crate) fn ps_view_for_test(&self) -> Option<Entity<DiffView>> {
         self.ps_view.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_reviewed_for_test(&self, path: &str) -> bool {
+        self.files.reviewed.contains(path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hint_for_test(&self) -> Option<(String, bool)> {
+        self.hint.current().map(|(t, e)| (t.to_owned(), e))
     }
 
     #[cfg(test)]
@@ -1123,6 +1138,72 @@ impl ChangePage {
 
     fn page_up(&mut self, _: &ScrollPageUp, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll_page(false);
+        cx.notify();
+    }
+
+    /// `r`: marks the file under the cursor reviewed, or clears the mark.
+    /// The mark changes on screen at once; if the request fails it goes
+    /// back and a note says why.
+    fn toggle_reviewed(&mut self, _: &ToggleReviewed, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = reviewed::unavailable(&self.session) {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        let (Some(key), Some(path)) = (
+            self.files.key.clone(),
+            self.cursor_path().map(str::to_owned),
+        ) else {
+            return;
+        };
+        let reviewed = !self.files.reviewed.contains(&path);
+        self.mark_reviewed(&path, reviewed);
+        cx.notify();
+        let syncer = self.session.syncer().clone();
+        let (change, sha, sent) = (self.number, key.target.sha.clone(), path.clone());
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(reviewed::send(syncer, change, sha, sent, reviewed))
+                .await;
+            this.update(cx, |this, cx| {
+                this.reviewed_result(&key, &path, reviewed, outcome, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn mark_reviewed(&mut self, path: &str, reviewed: bool) {
+        if reviewed {
+            self.files.reviewed.insert(path.to_owned());
+        } else {
+            self.files.reviewed.remove(path);
+        }
+    }
+
+    fn reviewed_result(
+        &mut self,
+        key: &FilesKey,
+        path: &str,
+        reviewed: bool,
+        outcome: reviewed::Outcome,
+        cx: &mut Context<Self>,
+    ) {
+        let (error, login) = match outcome {
+            reviewed::Outcome::Done => return,
+            reviewed::Outcome::Unauthorized => (None, true),
+            reviewed::Outcome::Failed(e) => (Some(e), false),
+        };
+        // Back to what the server has, unless another pair is shown now.
+        if self.files.key.as_ref() == Some(key) && self.files.reviewed.contains(path) == reviewed {
+            self.mark_reviewed(path, !reviewed);
+        }
+        if let Some(e) = error {
+            let note = reviewed::failure_note(path, reviewed, &e);
+            self.hint.say(note, true, cx, |p| &mut p.hint);
+        }
+        if login {
+            cx.emit(ChangeEvent::Unauthorized);
+        }
         cx.notify();
     }
 
