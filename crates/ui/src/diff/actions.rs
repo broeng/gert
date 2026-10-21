@@ -34,6 +34,18 @@ actions!(
         /// `e` / `shift-e`: open / close every comment thread of the file.
         ExpandThreads,
         CollapseThreads,
+        /// `c`: a new comment on the cursor line; on a thread, a reply (or
+        /// the thread's draft, edited).
+        NewComment,
+        /// `q`: reply to the thread under the cursor, quoting its last message.
+        QuoteReply,
+        /// `d`: reply "Done" to the thread under the cursor and resolve it.
+        ThreadDone,
+        // In the draft editor (key context `DraftEditor`).
+        /// Ctrl-Enter / Ctrl-S: save the draft.
+        SaveDraft,
+        /// Esc: close the editor.
+        CancelDraft,
         // Declared for the diff page (handled there, not by the widget).
         PrevFile,
         NextFile,
@@ -43,8 +55,11 @@ actions!(
 /// Key context of the diff view.
 pub const DIFF_VIEW: &str = "DiffView";
 
-// Single-letter bindings must not fire while text is being typed (inline
-// comment editors, M3), which mark their key context "Input".
+/// Key context of the inline draft editor, inside [`DIFF_VIEW`].
+pub const DRAFT_EDITOR: &str = "DraftEditor";
+
+// Single-letter bindings must not fire while text is being typed (the inline
+// draft editor), whose text field marks its key context "Input".
 const KEYS: &str = "DiffView && !Input";
 
 fn e(
@@ -124,10 +139,54 @@ pub fn entries() -> Vec<Entry> {
             ShowFullFile,
             "Show the whole file; again: fold unchanged lines",
         ),
+        // PolyGerrit: `c` comments on the cursor line. On a thread it
+        // replies (`a` and `r` are the reply dialog and "reviewed", which
+        // come later).
+        e(
+            "C",
+            "c",
+            NewComment,
+            "Comment on the cursor line; on a thread: reply, or edit your draft",
+        ),
+        e("Q", "q", QuoteReply, "Reply to the thread, quoting it"),
+        e(
+            "D",
+            "d",
+            ThreadDone,
+            "Reply \"Done\" to the thread, resolving it",
+        ),
+    ]
+}
+
+/// Bindings of the draft editor. They work while the text field has the
+/// focus (so not under `!Input`), and the field itself handles Ctrl-Enter
+/// (it emits an event the view saves on).
+pub fn editor_entries() -> Vec<Entry> {
+    fn ed(
+        keys: &'static str,
+        key: &'static str,
+        action: impl Action,
+        description: &'static str,
+    ) -> Entry {
+        Entry {
+            binding: KeyBinding::new(key, action, Some(DRAFT_EDITOR)),
+            keys,
+            description,
+        }
+    }
+    vec![
+        ed(
+            "Ctrl-Enter / Ctrl-S",
+            "secondary-s",
+            SaveDraft,
+            "Save the draft being edited",
+        ),
+        ed("Esc", "escape", CancelDraft, "Close the draft editor"),
     ]
 }
 
 /// Registers the diff bindings. Call once at startup.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(entries().into_iter().map(|e| e.binding));
+    cx.bind_keys(editor_entries().into_iter().map(|e| e.binding));
 }

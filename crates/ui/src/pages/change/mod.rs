@@ -728,8 +728,10 @@ impl ChangePage {
                         v.set_status(None, cx);
                     }),
                     None => {
+                        let can_comment = self.session.can_comment();
                         let view = cx.new(|cx| {
                             let mut v = DiffView::new(diff, prefs, cx);
+                            v.set_can_comment(can_comment, cx);
                             v.set_sizing(
                                 DiffSizing::Inline {
                                     max_rows: Some(INLINE_MAX_ROWS),
@@ -808,9 +810,11 @@ impl ChangePage {
 
     fn inline_event(&mut self, path: &str, ev: &DiffEvent, cx: &mut Context<Self>) {
         match ev {
-            DiffEvent::RetryDraft(id) => {
-                let (change, id) = (self.number, *id);
-                self.outbox.update(cx, |o, cx| o.retry(change, id, cx));
+            DiffEvent::Draft(request) => {
+                let (change, request) = (self.number, request.clone());
+                let detail = self.detail.clone();
+                self.outbox
+                    .update(cx, |o, cx| o.request(change, request, detail.as_ref(), cx));
             }
             DiffEvent::ModeChanged(mode) => {
                 let mode = *mode;

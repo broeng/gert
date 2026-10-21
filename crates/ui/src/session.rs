@@ -105,6 +105,13 @@ impl Session {
         &self.syncer
     }
 
+    /// Whether the user is signed in, so that comments can be written
+    /// (also while the password is still loading: drafts are kept locally
+    /// and uploaded later).
+    pub fn can_comment(&self) -> bool {
+        self.username.is_some()
+    }
+
     /// False while credentials are still loading.
     pub fn can_sync(&self) -> bool {
         self.can_sync

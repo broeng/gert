@@ -309,8 +309,10 @@ impl DiffPage {
             let s = self.settings.read(cx);
             (s.resolved(), s.font_family())
         };
+        let can_comment = self.session.can_comment();
         let view = cx.new(|cx| {
             let mut v = DiffView::new(diff, prefs, cx);
+            v.set_can_comment(can_comment, cx);
             v.set_sizing(DiffSizing::Fill, cx);
             v.set_font_family(font, cx);
             v
@@ -323,9 +325,11 @@ impl DiffPage {
                 });
             }
             DiffEvent::RowsChanged => {}
-            DiffEvent::RetryDraft(id) => {
-                let (change, id) = (this.route.change, *id);
-                this.outbox.update(cx, |o, cx| o.retry(change, id, cx));
+            DiffEvent::Draft(request) => {
+                let (change, request) = (this.route.change, request.clone());
+                let detail = this.detail.clone();
+                this.outbox
+                    .update(cx, |o, cx| o.request(change, request, detail.as_ref(), cx));
             }
         }));
         self.view = Some(view);

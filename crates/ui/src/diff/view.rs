@@ -4,6 +4,7 @@
 //! per diff or mode change. Rendering only turns the visible slice of rows
 //! into elements.
 
+mod editing;
 mod thread_card;
 
 use std::{cell, collections::HashMap, rc::Rc, sync::Arc};
@@ -12,9 +13,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::{
-    Diff, DiffPair, DiffViewMode, LocalDraftId, ResolvedDiffPreferences, Thread, ThreadId,
-};
+use model::{Diff, DiffPair, DiffViewMode, ResolvedDiffPreferences, Thread, ThreadId};
 
 use super::{
     actions::*,
@@ -45,14 +44,18 @@ pub enum DiffStatus {
     Error(SharedString),
 }
 
+pub use editing::DraftRequest;
+use editing::{DraftEditor, EditKey, UnsavedBuffers};
+
 pub enum DiffEvent {
     /// The rows were rebuilt (folds opened, context or mode changed, a new
     /// diff): an inline owner has to measure the view again.
     RowsChanged,
     /// The view mode was toggled; the owner may want to remember it.
     ModeChanged(DiffViewMode),
-    /// "Retry" was pressed on a draft whose upload failed.
-    RetryDraft(LocalDraftId),
+    /// The user wrote, changed, deleted or retried a draft. The owner does
+    /// the work (the view does no I/O); the drafts come back as threads.
+    Draft(DraftRequest),
 }
 
 /// Which file of which patch set pair the view shows: what decides where
@@ -108,6 +111,17 @@ pub struct DiffView {
     /// Threads the user opened or closed by hand, whatever their state
     /// says. Kept across [`Self::set_threads`].
     thread_open: HashMap<ThreadId, bool>,
+    /// Whether the user may write comments (signed in).
+    can_comment: bool,
+    /// The open draft editor, if any.
+    editor: Option<DraftEditor>,
+    /// Text of closed editors that was not saved; see `editing`.
+    unsaved: UnsavedBuffers,
+    /// The thread of a new comment while its editor is open (it has no
+    /// entries and occupies the last slot).
+    new_thread: Option<Thread>,
+    /// The draft whose "delete?" question is on screen.
+    confirm_delete: Option<model::LocalDraftId>,
 }
 
 impl EventEmitter<DiffEvent> for DiffView {}
@@ -174,6 +188,11 @@ impl DiffView {
             slots: Vec::new(),
             thread_context: None,
             thread_open: HashMap::new(),
+            can_comment: false,
+            editor: None,
+            unsaved: HashMap::new(),
+            new_thread: None,
+            confirm_delete: None,
         }
     }
 
@@ -206,22 +225,62 @@ impl DiffView {
         threads: Arc<Vec<Thread>>,
         cx: &mut Context<Self>,
     ) {
-        let (mut shown, mut slots) = (Vec::new(), Vec::new());
-        for (i, t) in threads.iter().enumerate() {
-            if let Some(side) = t.side_in(context.pair, &context.path, context.old_path.as_deref())
-            {
-                shown.push(i);
-                slots.push(ThreadSlot {
-                    side,
-                    location: t.location,
-                });
-            }
-        }
         let keep = self.keep_position();
         let old_threads = std::mem::replace(&mut self.threads, threads);
-        let old_shown = std::mem::replace(&mut self.shown, shown);
+        let old_shown = self.shown.clone();
         self.thread_context = Some(context);
-        if slots == self.slots {
+        self.reslot(keep, old_threads, old_shown, cx);
+    }
+
+    /// The thread indexes and layout slots for the current threads, context
+    /// and the editor's new thread, if any.
+    fn compute_slots(&self) -> (Vec<usize>, Vec<ThreadSlot>) {
+        let (mut shown, mut slots) = (Vec::new(), Vec::new());
+        if let Some(context) = &self.thread_context {
+            for (i, t) in self.threads.iter().enumerate() {
+                if let Some(side) =
+                    t.side_in(context.pair, &context.path, context.old_path.as_deref())
+                {
+                    shown.push(i);
+                    slots.push(ThreadSlot {
+                        side,
+                        location: t.location,
+                    });
+                }
+            }
+        }
+        if let (Some(t), Some(EditKey::New(side, _))) =
+            (&self.new_thread, self.editor.as_ref().map(|e| &e.key))
+        {
+            slots.push(ThreadSlot {
+                side: *side,
+                location: t.location,
+            });
+        }
+        (shown, slots)
+    }
+
+    /// Takes the threads, the context and the new-comment thread as they
+    /// are now. If no thread moved (the same places, maybe other
+    /// contents), only the affected rows are measured again; otherwise the
+    /// rows are rebuilt, keeping the cursor and the opened folds.
+    fn reslot(
+        &mut self,
+        keep: Keep,
+        old_threads: Arc<Vec<Thread>>,
+        old_shown: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let (shown, slots) = self.compute_slots();
+        let unchanged = slots == self.slots;
+        self.shown = shown;
+        self.slots = slots;
+        // An editor whose thread is gone (the draft was deleted
+        // elsewhere) has nothing to show in.
+        if self.editor.is_some() && self.editor_slot().is_none() {
+            self.editor = None;
+        }
+        if unchanged {
             let mut changed = false;
             for &ix in self.layout.thread_rows() {
                 let Some(Row::Thread(tr)) = self.layout.rows().get(ix) else {
@@ -243,7 +302,6 @@ impl DiffView {
             let top = self.list.logical_scroll_top();
             top.item_ix == 0 && top.offset_in_item == px(0.)
         };
-        self.slots = slots;
         self.rebuild_with(keep, None);
         if at_top {
             // Threads at the top of the file (file comments) must not end
@@ -255,6 +313,13 @@ impl DiffView {
         }
         cx.emit(DiffEvent::RowsChanged);
         cx.notify();
+    }
+
+    /// Places the threads again after the editor's new thread came or went.
+    fn reslot_now(&mut self, cx: &mut Context<Self>) {
+        let keep = self.keep_position();
+        let (threads, shown) = (self.threads.clone(), self.shown.clone());
+        self.reslot(keep, threads, shown, cx);
     }
 
     /// The threads shown in this diff, in the layout's slot order.
@@ -438,6 +503,7 @@ impl DiffView {
     fn reset_list(&self) {
         self.list
             .reset_with_uniform_height(self.layout.len(), self.row_height);
+        self.register_editor_focus();
     }
 
     /// First row (at least partly) in the viewport.
@@ -470,7 +536,11 @@ impl DiffView {
     }
 
     fn thread_at(&self, slot: usize) -> Option<&Thread> {
-        self.shown.get(slot).and_then(|&i| self.threads.get(i))
+        match self.shown.get(slot) {
+            Some(&i) => self.threads.get(i),
+            None if slot == self.shown.len() => self.new_thread.as_ref(),
+            None => None,
+        }
     }
 
     /// The thread on `row`, if it is a thread row.
@@ -1100,6 +1170,9 @@ impl Render for DiffView {
             .on_action(cx.listener(Self::prev_thread))
             .on_action(cx.listener(Self::expand_threads))
             .on_action(cx.listener(Self::collapse_threads))
+            .on_action(cx.listener(Self::new_comment))
+            .on_action(cx.listener(Self::quote_reply))
+            .on_action(cx.listener(Self::thread_done))
             .when(self.sizing == DiffSizing::Fill, |d| d.size_full())
             .when(self.sizing != DiffSizing::Fill, |d| d.w_full())
             .bg(bg)

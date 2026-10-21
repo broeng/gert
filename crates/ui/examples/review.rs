@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! cargo run -p ui --example review [--dark|--light] [--unified] [--font NAME] [--files N] [--csd]
+//!                                   [--drafts ok|fail|offline]
 //! ```
 //!
 //! Open the first change with `j`, `Enter`. Requests that no route matches
@@ -160,9 +161,31 @@ fn comments() -> String {
     format!(")]}}'\n{body}")
 }
 
-fn server(files: Option<usize>) -> RouteHttpClient {
+/// How the fake server treats draft writes (`--drafts`): it accepts them,
+/// refuses them (400), or is unreachable (503).
+#[derive(Clone, Copy, PartialEq)]
+enum Drafts {
+    Ok,
+    Fail,
+    Offline,
+}
+
+fn server(files: Option<usize>, drafts: Drafts) -> RouteHttpClient {
     let http = RouteHttpClient::new();
     http.route("/changes/12345/comments", 200, comments());
+    // Drafts are not kept: the server answers a fixed receipt, which is all
+    // the screenshots need.
+    http.route("/changes/12345/drafts", 200, ")]}'\n{}");
+    let sha3 = "3".repeat(40);
+    let (status, body) = match drafts {
+        Drafts::Ok => (
+            201,
+            ")]}'\n{\"id\":\"d1\",\"patch_set\":3,\"updated\":\"2024-06-15 10:00:00.000000000\"}",
+        ),
+        Drafts::Fail => (400, "This comment is not welcome here"),
+        Drafts::Offline => (503, "unavailable"),
+    };
+    http.route(&format!("/revisions/{sha3}/drafts"), status, body);
     let ex = |name: &str| read(&format!("example/{name}"));
     let hw = |name: &str| read(&format!("handwritten/{name}"));
     http.route("/accounts/self/detail", 200, ex("account.json"));
@@ -179,7 +202,6 @@ fn server(files: Option<usize>) -> RouteHttpClient {
     http.route("/changes/?q=", 200, ex("query.json"));
     http.route("/changes/12345?", 200, ex("change.json"));
     http.route("/related", 200, ex("related.json"));
-    let sha3 = "3".repeat(40);
     http.route(
         &format!("revisions/{sha3}/files"),
         200,
@@ -249,6 +271,7 @@ fn main() {
     let mut font = None;
     let mut files = None;
     let mut csd = false;
+    let mut drafts = Drafts::Ok;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dark" => mode = Some(ThemeMode::Dark),
@@ -259,6 +282,13 @@ fn main() {
             // buttons and the window frame on a compositor that draws its own.
             "--csd" => csd = true,
             "--files" => files = args.next().and_then(|n| n.parse().ok()),
+            "--drafts" => {
+                drafts = match args.next().as_deref() {
+                    Some("fail") => Drafts::Fail,
+                    Some("offline") => Drafts::Offline,
+                    _ => Drafts::Ok,
+                }
+            }
             other => {
                 eprintln!("review: unknown argument {other:?}");
                 std::process::exit(2);
@@ -266,7 +296,7 @@ fn main() {
         }
     }
 
-    let http = server(files);
+    let http = server(files, drafts);
     let mut store = Store::open_in_memory().unwrap_or_else(|e| {
         eprintln!("review: {e}");
         std::process::exit(2);

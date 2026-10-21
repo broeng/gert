@@ -16,7 +16,7 @@ use model::{
 };
 
 use super::{
-    DiffEvent, DiffSizing, DiffView,
+    DiffEvent, DiffSizing, DiffView, DraftRequest,
     layout::{Expansion, Layout, LayoutOptions, Row},
 };
 
@@ -127,7 +127,8 @@ fn open_with(
             let text = match ev {
                 DiffEvent::RowsChanged => "rows".to_owned(),
                 DiffEvent::ModeChanged(m) => format!("mode {m:?}"),
-                DiffEvent::RetryDraft(id) => format!("retry {id:?}"),
+                DiffEvent::Draft(DraftRequest::Retry(id)) => format!("retry {id:?}"),
+                DiffEvent::Draft(req) => format!("draft {req:?}"),
             };
             log.lock().expect("log").push(text);
         })
@@ -1094,3 +1095,5 @@ fn clicking_a_thread_header_toggles_it_and_retry_asks_the_owner(cx: &mut TestApp
     assert!(!is_open(cx, &view, "a"));
     assert_eq!(cursor(cx, &view), row);
 }
+
+mod editing;
