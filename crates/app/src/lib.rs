@@ -1,6 +1,7 @@
 //! Wiring for the desktop client: configuration, secrets and the HTTP
 //! transport. The `ui` crate does the rest.
 
+pub mod backend;
 pub mod config;
 pub mod http;
 pub mod secrets;
