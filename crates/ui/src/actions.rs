@@ -77,6 +77,25 @@ pub fn entries() -> Vec<Entry> {
     list_entries().into_iter().chain(global_entries()).collect()
 }
 
+/// A titled section of the help overlay.
+pub struct HelpGroup {
+    pub title: &'static str,
+    pub entries: Vec<Entry>,
+}
+
+/// The help overlay, grouped by where the keys apply.
+pub fn help_groups() -> Vec<HelpGroup> {
+    let g = |title, entries| HelpGroup { title, entries };
+    vec![
+        g("Everywhere", global_entries()),
+        g("Change lists", list_entries()),
+        g("Change page", change_entries()),
+        g("Diff page", diff_page_entries()),
+        g("In a diff", crate::diff::actions::entries()),
+        g("Diff preferences panel ( , )", diff_prefs_entries()),
+    ]
+}
+
 /// Entries of the change page (file cursor, inline diffs, patch sets).
 pub fn change_entries() -> Vec<Entry> {
     use crate::diff::actions::{NextFile, PrevFile};
