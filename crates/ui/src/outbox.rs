@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use gpui_kit::*;
 use model::{ChangeDetail, ChangeNumber, LocalDraftId};
-use sync::DraftSave;
+use sync::{DraftCounts, DraftSave};
 
 use crate::{
     comments::ChangeComments,
@@ -40,6 +40,9 @@ pub enum OutboxEvent {
 pub struct DraftOutbox {
     session: Session,
     comments: HashMap<ChangeNumber, WeakEntity<ChangeComments>>,
+    /// Drafts not on the server, over all changes (for the title bar).
+    counts: DraftCounts,
+    counts_task: Option<Task<()>>,
 }
 
 impl EventEmitter<OutboxEvent> for DraftOutbox {}
@@ -49,7 +52,48 @@ impl DraftOutbox {
         Self {
             session,
             comments: HashMap::new(),
+            counts: DraftCounts::default(),
+            counts_task: None,
         }
+    }
+
+    /// Counts the drafts and uploads the pending ones. Call it when the
+    /// session starts (login, restored credentials): drafts written last
+    /// time may still be waiting.
+    pub fn resume(&mut self, cx: &mut Context<Self>) {
+        self.refresh_counts(cx);
+        self.retry_all(cx);
+    }
+
+    /// The drafts that are not on the server.
+    pub fn counts(&self) -> DraftCounts {
+        self.counts
+    }
+
+    /// Reads the counts from the database; observers are notified when
+    /// they changed.
+    fn refresh_counts(&mut self, cx: &mut Context<Self>) {
+        let syncer = self.session.syncer().clone();
+        self.counts_task = Some(cx.spawn(async move |this, cx| {
+            let counts = cx
+                .background_spawn(async move { syncer.draft_counts() })
+                .await;
+            this.update(cx, |this, cx| match counts {
+                Ok(counts) if counts != this.counts => {
+                    this.counts = counts;
+                    cx.notify();
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("counting drafts: {e}"),
+            })
+            .ok();
+        }));
+    }
+
+    /// Tells the listeners that the drafts of `change` changed.
+    fn announce(&mut self, change: ChangeNumber, cx: &mut Context<Self>) {
+        cx.emit(OutboxEvent::Changed(change));
+        self.refresh_counts(cx);
     }
 
     /// The comments of `change`, shared with every other page showing it.
@@ -123,7 +167,7 @@ impl DraftOutbox {
     /// uploads it.
     pub fn save(&mut self, save: DraftSave, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
-        let upload = self.session.can_sync();
+        let upload = self.session.can_upload();
         cx.spawn(async move |this, cx| {
             let local = {
                 let syncer = syncer.clone();
@@ -137,8 +181,7 @@ impl DraftOutbox {
                 Err(e) => return log::warn!("saving a draft: {e}"),
             };
             let (change, id) = (draft.change, draft.local_id);
-            this.update(cx, |_, cx| cx.emit(OutboxEvent::Changed(change)))
-                .ok();
+            this.update(cx, |this, cx| this.announce(change, cx)).ok();
             if !upload {
                 return;
             }
@@ -156,7 +199,7 @@ impl DraftOutbox {
     /// Deletes the draft locally and, if the server has it, there.
     pub fn delete(&mut self, change: ChangeNumber, id: LocalDraftId, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
-        let upload = self.session.can_sync();
+        let upload = self.session.can_upload();
         cx.spawn(async move |this, cx| {
             let local = {
                 let syncer = syncer.clone();
@@ -167,8 +210,7 @@ impl DraftOutbox {
                 Ok(outcome) => outcome,
                 Err(e) => return log::warn!("deleting a draft: {e}"),
             };
-            this.update(cx, |_, cx| cx.emit(OutboxEvent::Changed(change)))
-                .ok();
+            this.update(cx, |this, cx| this.announce(change, cx)).ok();
             // A draft the server never saw is gone; one it has waits for
             // the server's confirmation.
             if outcome != store::DeleteOutcome::Pending || !upload {
@@ -187,7 +229,7 @@ impl DraftOutbox {
 
     /// Tries a failed draft again.
     pub fn retry(&mut self, change: ChangeNumber, id: LocalDraftId, cx: &mut Context<Self>) {
-        if !self.session.can_sync() {
+        if !self.session.can_upload() {
             return;
         }
         let syncer = self.session.syncer().clone();
@@ -204,22 +246,37 @@ impl DraftOutbox {
     /// Uploads every pending draft of the server (after the connection is
     /// back: the login, a successful poll). Failed drafts are not retried.
     /// Pages that show comments are told when something changed.
-    // Called after login and polls (a later commit).
-    #[allow(dead_code)]
     pub fn retry_all(&mut self, cx: &mut Context<Self>) {
-        if !self.session.can_sync() {
+        self.retry_pending(false, cx);
+    }
+
+    /// The title bar's retry: also tries the failed drafts that may work
+    /// on a second try (see `Syncer::retry_failed_drafts`).
+    pub fn retry_everything(&mut self, cx: &mut Context<Self>) {
+        self.retry_pending(true, cx);
+    }
+
+    fn retry_pending(&mut self, failed_too: bool, cx: &mut Context<Self>) {
+        if !self.session.can_upload() {
             return;
         }
         let syncer = self.session.syncer().clone();
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { syncer.retry_pending_drafts().await })
+                .background_spawn(async move {
+                    if failed_too {
+                        syncer.retry_failed_drafts().await
+                    } else {
+                        syncer.retry_pending_drafts().await
+                    }
+                })
                 .await;
             this.update(cx, |this, cx| match result {
                 Ok(report) => {
                     if report.synced + report.deleted + report.rejected > 0 {
                         this.changed_everywhere(cx);
                     }
+                    this.refresh_counts(cx);
                 }
                 Err(e) if is_unauthorized(&e) => cx.emit(OutboxEvent::Unauthorized),
                 Err(e) => log::warn!("retrying drafts: {e}"),
@@ -242,11 +299,10 @@ impl DraftOutbox {
             Err(e) if is_unauthorized(&e) => cx.emit(OutboxEvent::Unauthorized),
             Err(e) => log::warn!("uploading a draft of change {change}: {e}"),
         }
-        cx.emit(OutboxEvent::Changed(change));
+        self.announce(change, cx);
     }
 
     /// Any change with comments on screen may have drafts that moved.
-    #[allow(dead_code)]
     fn changed_everywhere(&mut self, cx: &mut Context<Self>) {
         let live: Vec<ChangeNumber> = self
             .comments
@@ -255,7 +311,7 @@ impl DraftOutbox {
             .map(|(n, _)| *n)
             .collect();
         for change in live {
-            cx.emit(OutboxEvent::Changed(change));
+            self.announce(change, cx);
         }
     }
 }
@@ -327,7 +383,9 @@ mod tests {
         let mut store = Store::open_in_memory().expect("store");
         store.server_id(URL).expect("server");
         let env = env_with(store, http);
-        let session = Session::new(&env, &setup(), Some(signed_in())).expect("session");
+        let mut server = setup();
+        server.username = Some("u".into());
+        let session = Session::new(&env, &server, Some(signed_in())).expect("session");
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
         let comments = cx.update(|cx| outbox.update(cx, |o, cx| o.comments(CHANGE, cx)));
         let states: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -536,5 +594,32 @@ mod tests {
         cx.run_until_parked();
         let fresh = cx.update(|cx| fx.outbox.update(cx, |o, cx| o.comments(CHANGE, cx)));
         assert_ne!(fresh.entity_id(), id);
+    }
+
+    #[gpui_kit::test]
+    fn the_counts_follow_the_drafts_and_resume_uploads_what_waited(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/revisions/sha1/drafts", 503, "down");
+        let fx = fx(cx, &http);
+        let counts = |cx: &mut TestAppContext| cx.update(|cx| fx.outbox.read(cx).counts());
+        assert!(counts(cx).is_empty());
+        save(cx, &fx, "waits");
+        assert_eq!((counts(cx).pending, counts(cx).failed), (1, 0));
+
+        // The server is back: resume (the login, or a poll) uploads it.
+        http.route("/revisions/sha1/drafts", 201, receipt("srv1"));
+        cx.update(|cx| fx.outbox.update(cx, |o, cx| o.resume(cx)));
+        cx.run_until_parked();
+        assert!(counts(cx).is_empty());
+
+        // A refusal is a failed draft; the title bar's retry tries it again
+        // only if the server's answer leaves hope.
+        http.route("/revisions/sha1/drafts", 500, "oops");
+        save(cx, &fx, "flaky");
+        assert_eq!((counts(cx).pending, counts(cx).failed), (0, 1));
+        http.route("/revisions/sha1/drafts", 201, receipt("srv2"));
+        cx.update(|cx| fx.outbox.update(cx, |o, cx| o.retry_everything(cx)));
+        cx.run_until_parked();
+        assert!(counts(cx).is_empty());
     }
 }

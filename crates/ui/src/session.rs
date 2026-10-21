@@ -112,6 +112,11 @@ impl Session {
         self.username.is_some()
     }
 
+    /// Whether drafts can be sent: signed in, and the password is known.
+    pub fn can_upload(&self) -> bool {
+        self.can_sync && self.can_comment()
+    }
+
     /// False while credentials are still loading.
     pub fn can_sync(&self) -> bool {
         self.can_sync

@@ -330,6 +330,7 @@ fn first_page_unchanged(cached: &CachedQuery, fresh: &[ChangeSummary], more: boo
 mod comments;
 
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
+pub use store::DraftCounts;
 
 #[cfg(test)]
 mod tests;

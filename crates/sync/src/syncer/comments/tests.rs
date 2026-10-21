@@ -934,3 +934,62 @@ fn anonymous_sessions_cannot_write() {
     );
     assert!(http.requests().is_empty());
 }
+
+#[test]
+fn draft_counts_follow_a_draft_through_pending_failed_and_synced() {
+    let f = fx();
+    assert!(f.syncer.draft_counts().unwrap().is_empty());
+    // Offline: pending, and counted as such.
+    f.http.push_error("dns error");
+    let d = block_on(f.syncer.save_draft(create("a"))).unwrap().unwrap();
+    assert_eq!(
+        f.syncer.draft_counts().unwrap(),
+        DraftCounts {
+            pending: 1,
+            failed: 0
+        }
+    );
+    // Refused: failed, no longer pending.
+    f.http.push_response(409, "closed");
+    block_on(f.syncer.retry_pending_drafts()).unwrap();
+    assert_eq!(
+        f.syncer.draft_counts().unwrap(),
+        DraftCounts {
+            pending: 0,
+            failed: 1
+        }
+    );
+    // A manual retry that works clears it.
+    f.http.push_response(201, draft_reply("srv1", "a"));
+    block_on(f.syncer.retry_failed_draft(d.local_id)).unwrap();
+    assert!(f.syncer.draft_counts().unwrap().is_empty());
+}
+
+#[test]
+fn retrying_failed_drafts_leaves_the_definite_rejections_alone() {
+    let f = fx();
+    f.http.push_response(500, "oops");
+    let flaky = block_on(f.syncer.save_draft(create("flaky")))
+        .unwrap()
+        .unwrap();
+    f.http.push_response(409, "closed");
+    let refused = block_on(f.syncer.save_draft(create("refused")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        f.syncer.draft_counts().unwrap(),
+        DraftCounts {
+            pending: 0,
+            failed: 2
+        }
+    );
+    f.http.push_response(201, draft_reply("srv1", "flaky"));
+    let report = block_on(f.syncer.retry_failed_drafts()).unwrap();
+    assert_eq!((report.synced, report.rejected), (1, 0));
+    assert_eq!(draft(&f, flaky.local_id).sync, DraftSync::Synced);
+    assert!(matches!(
+        draft(&f, refused.local_id).sync,
+        DraftSync::Failed { .. }
+    ));
+    assert_eq!(f.http.requests().len(), 3, "the refused one was not sent");
+}

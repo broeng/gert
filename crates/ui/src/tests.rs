@@ -266,3 +266,179 @@ fn cached_server_diff_preferences_sit_under_the_local_overrides(cx: &mut TestApp
         assert_eq!(settings.font_family().as_deref(), Some("Iosevka"));
     });
 }
+
+// --- drafts that are not on the server ----------------------------------
+
+mod drafts {
+    use gerrit_api::fake::RouteHttpClient;
+    use gpui_kit::{AppContext as _, Entity, TestAppContext};
+    use model::{ChangeNumber, DraftInput, Location, PatchSetNumber, PatchSetRef, Side};
+    use store::{DraftFailure, Store};
+
+    use super::{env_with, open, seeded, setup, spec};
+    use crate::{
+        outbox::DraftOutbox,
+        pages::list::ListEvent,
+        session::{Backend, BackendError, SavedQuery, ServerSetup, Startup},
+        shell::Shell,
+    };
+
+    /// A keyring that has the password.
+    struct Keyring;
+
+    impl Backend for Keyring {
+        fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
+            Ok(Some("secret".into()))
+        }
+
+        fn save_login(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Vec<SavedQuery>, BackendError> {
+            Err(BackendError("not used".into()))
+        }
+    }
+
+    const RECEIPT: &str = r#")]}'
+{"id":"srv1","patch_set":1,"updated":"2024-06-15 10:00:00.000000000"}"#;
+
+    fn input(message: &str) -> DraftInput {
+        DraftInput {
+            path: "a.rs".into(),
+            side: Side::Revision,
+            parent: None,
+            location: Location::Line(3),
+            in_reply_to: None,
+            message: message.into(),
+            unresolved: true,
+        }
+    }
+
+    /// A store with a pending draft (`pending`) and a failed one (`failed`:
+    /// whether a retry may help). (The fake server gives every draft the
+    /// same id, so tests that upload two would clash.)
+    fn store_with_drafts(pending: bool, failed: Option<bool>) -> Store {
+        let mut store = seeded(&[("status:open", &[1])]);
+        let server = setup().server;
+        let now = "2024-06-15T10:00:00Z".parse().expect("ts");
+        let target = PatchSetRef {
+            number: PatchSetNumber(1),
+            sha: "sha1".into(),
+        };
+        if pending {
+            let d = store
+                .create_draft(server, ChangeNumber(7), &target, &input("waits"), now)
+                .expect("draft");
+            store
+                .record_draft_failure(
+                    server,
+                    d.local_id,
+                    d.version,
+                    &DraftFailure::Transient("offline".into()),
+                    now,
+                )
+                .expect("failure");
+        }
+        if let Some(retryable) = failed {
+            let d = store
+                .create_draft(server, ChangeNumber(7), &target, &input("refused"), now)
+                .expect("draft");
+            store
+                .record_draft_failure(
+                    server,
+                    d.local_id,
+                    d.version,
+                    &DraftFailure::Rejected {
+                        error: "no".into(),
+                        retryable,
+                    },
+                    now,
+                )
+                .expect("failure");
+        }
+        store
+    }
+
+    fn start(
+        cx: &mut TestAppContext,
+        store: Store,
+        http: &RouteHttpClient,
+    ) -> (gpui_kit::AnyWindowHandle, Entity<Shell>) {
+        let mut env = env_with(store, http);
+        env.backend = std::sync::Arc::new(Keyring);
+        let startup = Startup {
+            env,
+            server: Some(ServerSetup {
+                username: Some("u".into()),
+                ..setup()
+            }),
+            queries: vec![spec("Open", "status:open")],
+            diff: Default::default(),
+        };
+        let started = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        started
+    }
+
+    fn counts(cx: &mut TestAppContext, shell: &Entity<Shell>) -> (usize, usize) {
+        cx.update(|cx| {
+            let outbox: Entity<DraftOutbox> = shell.read(cx).outbox_for_test().expect("outbox");
+            let c = outbox.read(cx).counts();
+            (c.pending, c.failed)
+        })
+    }
+
+    fn uploads(http: &RouteHttpClient) -> usize {
+        http.requested()
+            .iter()
+            .filter(|r| r.contains("/revisions/sha1/drafts"))
+            .count()
+    }
+
+    #[gpui_kit::test]
+    fn drafts_that_waited_go_up_when_the_session_starts(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/revisions/sha1/drafts", 201, RECEIPT);
+        let (_window, shell) = start(cx, store_with_drafts(true, Some(false)), &http);
+        // The pending draft went up with the restored credentials; the
+        // refused one stays failed.
+        assert_eq!(uploads(&http), 1);
+        assert_eq!(counts(cx, &shell), (0, 1));
+    }
+
+    #[gpui_kit::test]
+    fn a_successful_refresh_retries_pending_drafts(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/revisions/sha1/drafts", 503, "down");
+        let (_window, shell) = start(cx, store_with_drafts(true, Some(false)), &http);
+        assert_eq!(counts(cx, &shell), (1, 1));
+        let before = uploads(&http);
+
+        // Back online: the next successful refresh brings the draft up.
+        http.route("/revisions/sha1/drafts", 201, RECEIPT);
+        let page = cx
+            .update(|cx| shell.read(cx).list_page_for_test())
+            .expect("list page");
+        cx.update(|cx| page.update(cx, |_, cx| cx.emit(ListEvent::Refreshed)));
+        cx.run_until_parked();
+        assert_eq!(uploads(&http), before + 1);
+        assert_eq!(counts(cx, &shell), (0, 1));
+    }
+
+    #[gpui_kit::test]
+    fn the_indicators_retry_tries_failed_drafts_again(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/revisions/sha1/drafts", 201, RECEIPT);
+        let (_window, shell) = start(cx, store_with_drafts(false, Some(true)), &http);
+        assert_eq!(counts(cx, &shell), (0, 1));
+        let before = uploads(&http);
+        cx.update(|cx| shell.update(cx, |s, cx| s.retry_drafts_for_test(cx)));
+        cx.run_until_parked();
+        assert_eq!(uploads(&http), before + 1);
+        assert_eq!(counts(cx, &shell), (0, 0));
+    }
+}

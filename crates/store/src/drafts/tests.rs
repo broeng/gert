@@ -750,3 +750,87 @@ fn publishing_forgets_synced_drafts_only() {
         0
     );
 }
+
+#[test]
+fn draft_counts_separate_pending_from_failed_per_server() {
+    let (mut s, a) = setup();
+    let b = s.server_id("https://b.example").unwrap();
+    assert!(s.draft_counts(a).unwrap().is_empty());
+    let make = |s: &mut Store, server, n: &str, at| {
+        s.create_draft(server, CHANGE, &ps(2), &input(n), ts(at))
+            .unwrap()
+    };
+    let pending = make(&mut s, a, "pending", T0);
+    let failed = make(&mut s, a, "failed", T1);
+    let synced = make(&mut s, a, "synced", T1);
+    let deleted = make(&mut s, a, "deleted", T2);
+    make(&mut s, b, "elsewhere", T2);
+    let rejected = DraftFailure::Rejected {
+        error: "no".into(),
+        retryable: false,
+    };
+    s.record_draft_failure(a, failed.local_id, failed.version, &rejected, ts(T2))
+        .unwrap();
+    s.record_draft_uploaded(a, synced.local_id, synced.version, "srv1", ts(T2))
+        .unwrap();
+    s.record_draft_uploaded(a, deleted.local_id, deleted.version, "srv2", ts(T2))
+        .unwrap();
+    s.delete_draft(a, deleted.local_id).unwrap();
+    // The pending one and the deletion waiting for the server count as
+    // pending, the refused one as failed, the synced one not at all.
+    assert_eq!(
+        s.draft_counts(a).unwrap(),
+        DraftCounts {
+            pending: 2,
+            failed: 1
+        }
+    );
+    assert_eq!(
+        s.draft_counts(b).unwrap(),
+        DraftCounts {
+            pending: 1,
+            failed: 0
+        }
+    );
+    s.retry_failed_draft(a, failed.local_id).unwrap();
+    s.delete_draft(a, pending.local_id).unwrap();
+    assert_eq!(
+        s.draft_counts(a).unwrap(),
+        DraftCounts {
+            pending: 2,
+            failed: 0
+        },
+        "the retried draft is pending again and the never-uploaded deleted one is gone; \
+         the deletion still waits"
+    );
+}
+
+#[test]
+fn failed_drafts_lists_only_the_refused_ones_oldest_first() {
+    let (mut s, id) = setup();
+    let a = s
+        .create_draft(id, CHANGE, &ps(2), &input("a"), ts(T0))
+        .unwrap();
+    let b = s
+        .create_draft(id, CHANGE, &ps(2), &input("b"), ts(T1))
+        .unwrap();
+    let c = s
+        .create_draft(id, ChangeNumber(9), &ps(2), &input("c"), ts(T2))
+        .unwrap();
+    let rejected = DraftFailure::Rejected {
+        error: "no".into(),
+        retryable: true,
+    };
+    for d in [&c, &a] {
+        s.record_draft_failure(id, d.local_id, d.version, &rejected, ts(T3))
+            .unwrap();
+    }
+    let ids: Vec<_> = s
+        .failed_drafts(id)
+        .unwrap()
+        .iter()
+        .map(|d| d.local_id)
+        .collect();
+    assert_eq!(ids, [a.local_id, c.local_id]);
+    assert!(s.load_draft(id, b.local_id).unwrap().is_some());
+}

@@ -113,6 +113,8 @@ fn page_with(
         cx.subscribe(&page, move |_, ev: &ChangeEvent, _| {
             let text = match ev {
                 ChangeEvent::Unauthorized => "unauthorized".to_owned(),
+                // Not what these tests are about (the shell retries drafts).
+                ChangeEvent::Refreshed => return,
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::OpenDiff(d) => format!(
                     "diff {} {:?}..{} {}",
