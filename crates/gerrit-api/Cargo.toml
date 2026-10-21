@@ -21,5 +21,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# Blocking HTTP for the opt-in tests against a local dev Gerrit
+# (tests/dev_gerrit.rs). No TLS, no default features: the dev Gerrit is
+# plain http on 127.0.0.1. Speaks the `http` crate types we already use.
+ureq = { version = "3", default-features = false }
+
 [lints]
 workspace = true
