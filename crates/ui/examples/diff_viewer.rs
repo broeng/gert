@@ -100,6 +100,7 @@ fn main() {
             cx.subscribe(&view, |_, ev: &DiffEvent, _| match ev {
                 DiffEvent::RowsChanged => eprintln!("rows changed"),
                 DiffEvent::ModeChanged(m) => eprintln!("mode: {m:?}"),
+                DiffEvent::RetryDraft(id) => eprintln!("retry draft {id:?}"),
             })
             .detach();
             let focus = view.read(cx).focus_handle(cx);

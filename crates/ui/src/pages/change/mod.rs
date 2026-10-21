@@ -30,14 +30,17 @@ use std::{
 
 use gpui_kit::*;
 use jiff::Timestamp;
-use model::{ChangeDetail, ChangeNumber, DiffKey, FileEntry, FilesKey, RelatedChange, RevisionId};
+use model::{
+    ChangeDetail, ChangeNumber, DiffKey, DiffPair, FileEntry, FilesKey, RelatedChange, RevisionId,
+};
 use store::CachedFileList;
 use sync::PollPolicy;
 
 use crate::{
     actions::*,
+    comments::{ChangeComments, CommentsEvent},
     diff::{
-        DiffEvent, DiffSizing, DiffStatus, DiffView,
+        DiffEvent, DiffSizing, DiffStatus, DiffView, ThreadContext,
         actions::{NextFile, PrevFile},
     },
     diff_load::{LoadError, load_diff},
@@ -129,6 +132,8 @@ pub struct ChangePage {
     task: Option<Task<()>>,
     files_task: Option<Task<()>>,
     related_task: Option<Task<()>>,
+    /// The change's comment threads, shown in the inline diffs.
+    comments: Entity<ChangeComments>,
     _ticker: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -150,6 +155,7 @@ impl ChangePage {
         window_active: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        let comments = cx.new(|cx| ChangeComments::new(session.clone(), number, cx));
         let mut this = Self {
             session,
             settings: settings.clone(),
@@ -181,11 +187,17 @@ impl ChangePage {
             task: None,
             files_task: None,
             related_task: None,
+            comments: comments.clone(),
             _ticker: Task::ready(()),
             _subs: Vec::new(),
         };
         this._subs
             .push(cx.observe(&settings, |this, _, cx| this.settings_changed(cx)));
+        this._subs
+            .push(cx.subscribe(&comments, |this, _, ev, cx| match ev {
+                CommentsEvent::Changed => this.apply_threads(cx),
+                CommentsEvent::Unauthorized => cx.emit(ChangeEvent::Unauthorized),
+            }));
         let syncer = this.session.syncer().clone();
         this.task = Some(cx.spawn(async move |this, cx| {
             let cached = cx
@@ -337,6 +349,14 @@ impl ChangePage {
                 match result {
                     Ok(detail) => {
                         this.track.success(now);
+                        // A change that moved may have new comments.
+                        let moved = this
+                            .detail
+                            .as_ref()
+                            .is_some_and(|d| d.summary.updated != detail.summary.updated);
+                        if moved {
+                            this.comments.update(cx, |c, cx| c.change_updated(cx));
+                        }
                         this.detail = Some(detail);
                         this.fetched_at = Some(now);
                         this.status = Status::Idle;
@@ -685,6 +705,8 @@ impl ChangePage {
             let s = self.settings.read(cx);
             (s.resolved(), s.font_family())
         };
+        let context = self.thread_context(path);
+        let threads = self.comments.read(cx).threads();
         let Some(inline) = self.inline.get_mut(path) else {
             return;
         };
@@ -711,6 +733,9 @@ impl ChangePage {
                                 cx,
                             );
                             v.set_font_family(font, cx);
+                            if let Some(context) = context {
+                                v.set_threads(context, threads, cx);
+                            }
                             v
                         });
                         let owned = path.to_owned();
@@ -743,8 +768,46 @@ impl ChangePage {
         cx.notify();
     }
 
+    /// Which file of which patch set pair an inline diff shows.
+    fn thread_context(&self, path: &str) -> Option<ThreadContext> {
+        let d = self.detail.as_ref()?;
+        Some(ThreadContext {
+            pair: DiffPair {
+                base: self.sel.base_number(d),
+                target: self.sel.target_number(d)?,
+            },
+            path: path.to_owned(),
+            old_path: self
+                .files
+                .list
+                .iter()
+                .find(|f| f.path == path)
+                .and_then(|f| f.old_path.clone()),
+        })
+    }
+
+    /// Hands the change's threads to every inline diff.
+    fn apply_threads(&mut self, cx: &mut Context<Self>) {
+        let threads = self.comments.read(cx).threads();
+        let views: Vec<_> = self
+            .inline
+            .iter()
+            .filter_map(|(p, i)| Some((p.clone(), i.view.clone()?)))
+            .collect();
+        for (path, view) in views {
+            if let Some(context) = self.thread_context(&path) {
+                let threads = threads.clone();
+                view.update(cx, |v, cx| v.set_threads(context, threads, cx));
+            }
+        }
+    }
+
     fn inline_event(&mut self, path: &str, ev: &DiffEvent, cx: &mut Context<Self>) {
         match ev {
+            DiffEvent::RetryDraft(id) => {
+                // Drafts are edited and retried from batch 3b on.
+                log::debug!("retry of draft {id:?} requested; not handled yet");
+            }
             DiffEvent::ModeChanged(mode) => {
                 let mode = *mode;
                 self.settings.update(cx, |s, cx| {

@@ -2,6 +2,7 @@
 //! work runs on the background executor.
 
 mod actions;
+mod comments;
 pub mod diff;
 mod diff_load;
 mod labels;

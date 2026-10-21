@@ -109,9 +109,18 @@ fn diff_page_with(
     path: &str,
     http: RouteHttpClient,
 ) -> Page {
+    diff_page_as(cx, store, path, http, gerrit_api::Auth::Anonymous)
+}
+
+fn diff_page_as(
+    cx: &mut TestAppContext,
+    store: Store,
+    path: &str,
+    http: RouteHttpClient,
+    auth: gerrit_api::Auth,
+) -> Page {
     let env = env_with(store, &http);
-    let session = crate::session::Session::new(&env, &setup(), Some(gerrit_api::Auth::Anonymous))
-        .expect("session");
+    let session = crate::session::Session::new(&env, &setup(), Some(auth)).expect("session");
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
     let path = path.to_owned();
@@ -469,4 +478,77 @@ fn the_view_mode_survives_moving_between_files(cx: &mut TestAppContext) {
         let v = page.read(cx).view_for_test().expect("view");
         assert_eq!(v.read(cx).mode(), DiffViewMode::Unified);
     });
+}
+
+// --- comment threads ---------------------------------------------------
+
+fn comments_json(ids: &[&str]) -> String {
+    let entries: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            format!(
+                r#"{{"id":"{id}","patch_set":3,"line":1,"message":"say {id}","updated":"2024-06-15 10:00:00.000000000","unresolved":true,"author":{{"_account_id":5,"name":"Rita"}}}}"#
+            )
+        })
+        .collect();
+    format!(r#"{{"src/a.rs":[{}]}}"#, entries.join(","))
+}
+
+fn shown_threads(cx: &mut TestAppContext, p: &Page) -> Vec<String> {
+    cx.update(|cx| {
+        let v = p.page.read(cx).view_for_test().expect("view");
+        v.read(cx)
+            .shown_threads()
+            .map(|t| match &t.id {
+                model::ThreadId::Comment(id) => id.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn cached_comments_show_first_and_the_server_refreshes_them(cx: &mut TestAppContext) {
+    let mut store = seeded();
+    let server = store.server_id(URL).expect("server");
+    let mut cached =
+        crate::diff::tests::threads::comment("old", model::Location::Line(1), "cached", true);
+    cached.path = "src/a.rs".into();
+    cached.patch_set = PatchSetNumber(3);
+    store
+        .save_comments(server, ChangeNumber(7), &[cached], now())
+        .expect("comments");
+    let http = http();
+    http.route_json("/comments", &comments_json(&["old", "new"]));
+    let p = diff_page_with(cx, store, "src/a.rs", http);
+    let mut got = shown_threads(cx, &p);
+    got.sort();
+    assert_eq!(got, ["new", "old"]);
+    assert_eq!(requests(&p.http, "/comments"), 1);
+    assert!(p.events.lock().expect("log").is_empty());
+}
+
+#[gpui_kit::test]
+fn a_401_on_comments_sends_the_user_to_login_but_a_403_does_not(cx: &mut TestAppContext) {
+    let http = http();
+    http.route("/comments", 401, "no");
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http);
+    assert!(
+        p.events
+            .lock()
+            .expect("log")
+            .contains(&"unauthorized".to_owned())
+    );
+
+    // Logged in, but not allowed: the user stays logged in.
+    let http = self::http();
+    http.route("/comments", 403, "forbidden");
+    let auth = gerrit_api::Auth::Basic {
+        username: "alice".into(),
+        password: "secret".into(),
+    };
+    let p = diff_page_as(cx, seeded(), "src/a.rs", http, auth);
+    assert!(p.events.lock().expect("log").is_empty());
+    // The diff itself still works.
+    cx.update(|cx| assert!(p.page.read(cx).view_for_test().is_some()));
 }

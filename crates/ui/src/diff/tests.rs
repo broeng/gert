@@ -127,6 +127,7 @@ fn open_with(
             let text = match ev {
                 DiffEvent::RowsChanged => "rows".to_owned(),
                 DiffEvent::ModeChanged(m) => format!("mode {m:?}"),
+                DiffEvent::RetryDraft(id) => format!("retry {id:?}"),
             };
             log.lock().expect("log").push(text);
         })
@@ -588,4 +589,308 @@ fn large_diff_layout_is_fast_and_numbered() {
     // Generous: ~1 ms/1k lines in debug builds on a laptop. Guards against
     // an accidental quadratic step, not against noise.
     assert!(best.as_millis() < 1500, "{best:?}");
+}
+
+// --- comment threads ---------------------------------------------------
+
+pub(crate) mod threads {
+    use model::{
+        Comment, Draft, DraftSync, Entry, LocalDraftId, Location, PatchSetNumber, Side, Thread,
+        ThreadId,
+    };
+
+    use crate::testing::account;
+
+    pub(crate) fn comment(
+        id: &str,
+        location: Location,
+        message: &str,
+        unresolved: bool,
+    ) -> Comment {
+        Comment {
+            id: id.to_owned(),
+            path: "f".into(),
+            patch_set: PatchSetNumber(2),
+            side: Side::Revision,
+            parent: None,
+            location,
+            in_reply_to: None,
+            message: message.to_owned(),
+            author: Some(account(7, "Reviewer Rita")),
+            updated: "2024-06-15T10:00:00Z".parse().expect("timestamp"),
+            unresolved,
+            commit_id: None,
+            tag: None,
+            change_message_id: None,
+            robot_id: None,
+            context: Vec::new(),
+        }
+    }
+
+    /// A thread of one comment on patch set 2 of file `f`.
+    pub(crate) fn thread(id: &str, location: Location, message: &str, unresolved: bool) -> Thread {
+        let c = comment(id, location, message, unresolved);
+        Thread {
+            id: ThreadId::Comment(id.to_owned()),
+            path: c.path.clone(),
+            patch_set: c.patch_set,
+            side: c.side,
+            parent: None,
+            location,
+            entries: vec![Entry::Published(c)],
+            orphaned: false,
+        }
+    }
+
+    pub(crate) fn draft(n: i64, location: Location, message: &str, sync: DraftSync) -> Draft {
+        Draft {
+            local_id: LocalDraftId(n),
+            server_id: None,
+            change: model::ChangeNumber(1),
+            patch_set: PatchSetNumber(2),
+            revision: "sha2".into(),
+            path: "f".into(),
+            side: Side::Revision,
+            parent: None,
+            location,
+            in_reply_to: None,
+            message: message.to_owned(),
+            unresolved: true,
+            updated: "2024-06-15T10:05:00Z".parse().expect("timestamp"),
+            sync,
+            attempts: 0,
+            last_error: None,
+            version: 1,
+        }
+    }
+}
+
+use model::{DiffPair, DraftSync, Entry, Location, PatchSetNumber, Side, Thread, ThreadId};
+
+use super::ThreadContext;
+use threads::{draft, thread};
+
+pub(crate) fn thread_context(base: Option<u32>, target: u32) -> ThreadContext {
+    ThreadContext {
+        pair: DiffPair {
+            base: base.map(PatchSetNumber),
+            target: PatchSetNumber(target),
+        },
+        path: "f".into(),
+        old_path: None,
+    }
+}
+
+pub(crate) fn give_threads(cx: &mut TestAppContext, view: &Entity<DiffView>, threads: Vec<Thread>) {
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_threads(thread_context(None, 2), Arc::new(threads), cx)
+        })
+    });
+    cx.run_until_parked();
+}
+
+fn thread_rows(cx: &mut TestAppContext, view: &Entity<DiffView>) -> Vec<usize> {
+    cx.update(|cx| view.read(cx).layout().thread_rows().to_vec())
+}
+
+fn at13(id: &str, message: &str) -> Thread {
+    thread(id, Location::Line(13), message, true)
+}
+
+#[gpui_kit::test]
+fn j_and_k_step_over_thread_rows(cx: &mut TestAppContext) {
+    let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    give_threads(cx, &view, vec![at13("t", "please fix")]);
+    // Row 4 is old13/new13, row 5 its thread.
+    assert_eq!(thread_rows(cx, &view), [5]);
+    assert_eq!(rows(cx, &view), 18);
+    press(cx, window, "n");
+    assert_eq!(cursor(cx, &view), 4);
+    press(cx, window, "j");
+    assert_eq!(cursor(cx, &view), 6);
+    press(cx, window, "k");
+    assert_eq!(cursor(cx, &view), 4);
+    // The last line row is the end, not a thread row (here there is none
+    // after it, so also check `end` after a thread at the very end).
+    press(cx, window, "end");
+    assert_eq!(cursor(cx, &view), 17);
+    give_threads(
+        cx,
+        &view,
+        vec![thread("e", Location::Line(41), "late", true)],
+    );
+    press(cx, window, "end");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert!(!matches!(v.layout().rows()[v.cursor()], Row::Thread(_)));
+    });
+    press(cx, window, "j");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert!(!matches!(v.layout().rows()[v.cursor()], Row::Thread(_)));
+    });
+}
+
+#[gpui_kit::test]
+fn the_initial_cursor_skips_threads_at_the_top(cx: &mut TestAppContext) {
+    let (_, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    let anchor_before = anchor(cx, &view);
+    give_threads(
+        cx,
+        &view,
+        vec![thread("f", Location::File, "about the file", true)],
+    );
+    assert_eq!(thread_rows(cx, &view), [0]);
+    // The cursor kept its line (the leading fold), now one row down.
+    assert_eq!(cursor(cx, &view), 1);
+    assert_eq!(anchor(cx, &view), anchor_before);
+    let fresh = Layout::build_with_threads(
+        &sample(),
+        &LayoutOptions::from_prefs(&prefs(DiffViewMode::SideBySide)),
+        &Expansion::default(),
+        &[super::layout::ThreadSlot {
+            side: model::DiffSide::Right,
+            location: Location::File,
+        }],
+    );
+    assert_eq!(fresh.first_selectable(), Some(1));
+}
+
+#[gpui_kit::test]
+fn new_threads_keep_the_cursor_line_and_the_opened_folds(cx: &mut TestAppContext) {
+    let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
+    press(cx, window, "enter"); // open the first fold
+    go_to_second_fold(cx, window, &view, 17);
+    press(cx, window, "j"); // c36
+    let line = anchor(cx, &view);
+    let before = cursor(cx, &view);
+    events.lock().expect("log").clear();
+    give_threads(cx, &view, vec![at13("t", "x")]);
+    assert_eq!(fold_lines(cx, &view), [18]);
+    assert_eq!(anchor(cx, &view), line);
+    // The thread row came in above the cursor.
+    assert_eq!(cursor(cx, &view), before + 1);
+    assert_eq!(*events.lock().expect("log"), ["rows"]);
+    // And it goes away again the same way.
+    give_threads(cx, &view, Vec::new());
+    assert_eq!(cursor(cx, &view), before);
+    assert_eq!(anchor(cx, &view), line);
+    assert_eq!(fold_lines(cx, &view), [18]);
+}
+
+#[gpui_kit::test]
+fn unchanged_places_only_remeasure_instead_of_rebuilding(cx: &mut TestAppContext) {
+    let (_, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
+    give_threads(cx, &view, vec![at13("t", "one")]);
+    let ptr = |cx: &mut TestAppContext| {
+        cx.update(|cx| std::ptr::from_ref(view.read(cx).layout()) as usize)
+    };
+    let first = ptr(cx);
+    events.lock().expect("log").clear();
+    // The text changed, the place did not.
+    give_threads(cx, &view, vec![at13("t", "two\nlines")]);
+    assert_eq!(ptr(cx), first);
+    assert_eq!(*events.lock().expect("log"), ["rows"]);
+    // Nothing changed at all: nothing to tell.
+    give_threads(cx, &view, vec![at13("t", "two\nlines")]);
+    assert_eq!(*events.lock().expect("log"), ["rows"]);
+    // Another place: rebuilt.
+    give_threads(
+        cx,
+        &view,
+        vec![thread("t", Location::Line(14), "two", true)],
+    );
+    assert_ne!(ptr(cx), first);
+}
+
+#[gpui_kit::test]
+fn only_threads_of_this_file_and_pair_are_shown(cx: &mut TestAppContext) {
+    let (_, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    let mut other_ps = at13("a", "other patch set");
+    other_ps.patch_set = PatchSetNumber(1);
+    let mut other_file = at13("b", "other file");
+    other_file.path = "g".into();
+    let mut parent = thread("c", Location::Line(14), "on the base", true);
+    parent.side = Side::Parent;
+    let threads = Arc::new(vec![other_ps, other_file, parent, at13("d", "mine")]);
+    let shown = |cx: &mut TestAppContext, ctx: ThreadContext| {
+        cx.update(|cx| {
+            view.update(cx, |v, cx| v.set_threads(ctx, threads.clone(), cx));
+            view.read(cx)
+                .shown_threads()
+                .map(|t| match &t.id {
+                    ThreadId::Comment(id) => id.clone(),
+                    ThreadId::Draft(d) => format!("{d:?}"),
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    // Against the parent: the base-side thread and the one on patch set 2.
+    assert_eq!(shown(cx, thread_context(None, 2)), ["c", "d"]);
+    // Against patch set 1: its right-side thread shows on the left.
+    assert_eq!(shown(cx, thread_context(Some(1), 2)), ["a", "d"]);
+    // Another patch set: only its own threads.
+    assert_eq!(shown(cx, thread_context(None, 1)), ["a"]);
+}
+
+#[gpui_kit::test]
+fn threads_open_by_default_unless_resolved(cx: &mut TestAppContext) {
+    let (_, view, _) = open(cx, sample(), DiffViewMode::Unified);
+    let open_of = |cx: &mut TestAppContext, id: &str| {
+        cx.update(|cx| view.read(cx).is_thread_open(&ThreadId::Comment(id.into())))
+    };
+    let mut with_draft = thread("d", Location::Line(14), "answered", false);
+    with_draft.entries.push(Entry::Draft(draft(
+        1,
+        Location::Line(14),
+        "my reply",
+        DraftSync::PendingCreate,
+    )));
+    let all = vec![
+        at13("open", "unresolved"),
+        thread("done", Location::Line(15), "resolved", false),
+        with_draft,
+    ];
+    give_threads(cx, &view, all.clone());
+    assert!(open_of(cx, "open"));
+    assert!(!open_of(cx, "done"));
+    // A resolved thread with a draft of the user's stays open.
+    assert!(open_of(cx, "d"));
+}
+
+#[gpui_kit::test]
+fn draft_states_render_in_both_modes(cx: &mut TestAppContext) {
+    let (_, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    let mut t = at13("t", "reviewed\n\nwith a blank line");
+    let mut pending = draft(1, Location::Line(13), "pending", DraftSync::PendingUpdate);
+    pending.last_error = Some("offline".into());
+    let failed = draft(
+        2,
+        Location::Line(13),
+        "failed",
+        DraftSync::Failed {
+            op: model::DraftOp::Create,
+            error: "HTTP 500".into(),
+            retryable: true,
+        },
+    );
+    let refused = draft(
+        3,
+        Location::Line(13),
+        "refused",
+        DraftSync::Failed {
+            op: model::DraftOp::Create,
+            error: "forbidden".into(),
+            retryable: false,
+        },
+    );
+    t.entries
+        .extend([pending, failed, refused].map(Entry::Draft));
+    give_threads(cx, &view, vec![t]);
+    cx.update(|cx| view.update(cx, |v, cx| v.set_mode(DiffViewMode::Unified, cx)));
+    cx.run_until_parked();
+    let row = thread_rows(cx, &view)[0];
+    let h = cx.update(|cx| view.read(cx).row_height_for_test(row));
+    assert!(h.is_some_and(|h| h > px(60.)), "{h:?}");
 }

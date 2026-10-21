@@ -30,6 +30,13 @@ pub struct Palette {
     rebase: Hsla,
     removed_mark: Hsla,
     added_mark: Hsla,
+    /// Background of the text a comment thread is anchored at.
+    comment_mark: Hsla,
+    /// Comment cards: unresolved (needs attention) and resolved.
+    pub unresolved: Hsla,
+    pub resolved: Hsla,
+    pub danger: Hsla,
+    pub card_fg: Hsla,
     alpha_row: f32,
     alpha_gutter: f32,
 }
@@ -62,6 +69,11 @@ impl Palette {
             rebase: t.muted_foreground,
             removed_mark: t.danger.opacity(alpha_mark),
             added_mark: t.success.opacity(alpha_mark),
+            comment_mark: t.warning.opacity(if dark { 0.30 } else { 0.35 }),
+            unresolved: t.warning,
+            resolved: t.muted_foreground,
+            danger: t.danger,
+            card_fg: t.foreground,
             alpha_row,
             alpha_gutter,
         }
@@ -108,6 +120,9 @@ pub struct Style {
     pub hide_numbers: bool,
     /// Left offset of the line-length marker inside a text pane.
     pub ruler: Option<Pixels>,
+    /// The UI font and size, for comment cards (the view's text is code).
+    pub ui_family: SharedString,
+    pub ui_size: Pixels,
 }
 
 impl Style {
@@ -136,6 +151,8 @@ impl Style {
             new_gutter: gutter(max_new),
             hide_numbers,
             ruler: (line_length > 0).then(|| char_w * line_length as f32),
+            ui_family: t.font_family.clone(),
+            ui_size: t.font_size,
         }
     }
 }
@@ -149,8 +166,9 @@ fn digits(mut n: u32) -> usize {
     d
 }
 
-/// Highlight runs of a cell: intraline marks, and dimmed tab markers.
-/// Sorted and non-overlapping, as `StyledText` wants.
+/// Highlight runs of a cell: intraline marks, the text comment threads are
+/// anchored at, and dimmed tab markers. Sorted and non-overlapping, as
+/// `StyledText` wants. Where marks and comments overlap, the mark shows.
 pub fn line_highlights(cell: &Cell, p: &Palette) -> Vec<(Range<usize>, HighlightStyle)> {
     let mark = (cell.kind != LineKind::Common && !cell.due_to_rebase).then(|| HighlightStyle {
         background_color: Some(p.mark_bg(cell.kind)),
@@ -161,7 +179,8 @@ pub fn line_highlights(cell: &Cell, p: &Palette) -> Vec<(Range<usize>, Highlight
         ..Default::default()
     };
     let marks: &[Range<usize>] = if mark.is_some() { &cell.marks } else { &[] };
-    if cell.tabs.is_empty() {
+    let comments = &cell.comments;
+    if cell.tabs.is_empty() && comments.is_empty() {
         return marks
             .iter()
             .map(|r| (r.clone(), mark.unwrap_or_default()))
@@ -171,6 +190,7 @@ pub fn line_highlights(cell: &Cell, p: &Palette) -> Vec<(Range<usize>, Highlight
     let mut cuts: Vec<usize> = marks
         .iter()
         .chain(&cell.tabs)
+        .chain(comments)
         .flat_map(|r| [r.start, r.end])
         .collect();
     cuts.sort_unstable();
@@ -181,14 +201,17 @@ pub fn line_highlights(cell: &Cell, p: &Palette) -> Vec<(Range<usize>, Highlight
             let (a, b) = (w[0], w[1]);
             let in_mark = covers(marks, a);
             let in_tab = covers(&cell.tabs, a);
+            let in_comment = covers(comments, a);
             let mut style = HighlightStyle::default();
             if in_mark {
                 style.background_color = mark.and_then(|m| m.background_color);
+            } else if in_comment {
+                style.background_color = Some(p.comment_mark);
             }
             if in_tab {
                 style.color = tab.color;
             }
-            (in_mark || in_tab).then_some((a..b, style))
+            (in_mark || in_tab || in_comment).then_some((a..b, style))
         })
         .collect()
 }
