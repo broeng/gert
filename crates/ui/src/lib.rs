@@ -9,6 +9,7 @@ mod labels;
 mod list_model;
 mod login;
 mod nav;
+mod outbox;
 mod pages;
 mod row;
 mod session;

@@ -38,6 +38,7 @@ use crate::{
     },
     diff_load::{LoadError, context_label, load_diff},
     nav::DiffRoute,
+    outbox::DraftOutbox,
     session::{Session, is_unauthorized},
     settings::DiffSettings,
 };
@@ -80,6 +81,7 @@ pub struct DiffPage {
     prefetch: Option<Task<()>>,
     /// The change's comment threads, shown in the diff.
     comments: Entity<ChangeComments>,
+    outbox: Entity<DraftOutbox>,
     _subs: Vec<Subscription>,
 }
 
@@ -99,9 +101,10 @@ impl DiffPage {
         session: Session,
         settings: Entity<DiffSettings>,
         route: DiffRoute,
+        outbox: Entity<DraftOutbox>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let comments = cx.new(|cx| ChangeComments::new(session.clone(), route.change, cx));
+        let comments = outbox.update(cx, |o, cx| o.comments(route.change, cx));
         let mut this = Self {
             session,
             settings: settings.clone(),
@@ -121,6 +124,7 @@ impl DiffPage {
             task: None,
             prefetch: None,
             comments: comments.clone(),
+            outbox,
             _subs: Vec::new(),
         };
         this._subs
@@ -320,8 +324,8 @@ impl DiffPage {
             }
             DiffEvent::RowsChanged => {}
             DiffEvent::RetryDraft(id) => {
-                // Drafts are edited and retried from batch 3b on.
-                log::debug!("retry of draft {id:?} requested; not handled yet");
+                let (change, id) = (this.route.change, *id);
+                this.outbox.update(cx, |o, cx| o.retry(change, id, cx));
             }
         }));
         self.view = Some(view);

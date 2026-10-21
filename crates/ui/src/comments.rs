@@ -11,7 +11,10 @@ use std::sync::Arc;
 use gpui_kit::*;
 use model::{ChangeNumber, Thread};
 
-use crate::session::{Session, is_unauthorized};
+use crate::{
+    outbox::{DraftOutbox, OutboxEvent},
+    session::{Session, is_unauthorized},
+};
 
 pub enum CommentsEvent {
     /// The threads changed (loaded from the cache, or refreshed).
@@ -28,6 +31,9 @@ pub struct ChangeComments {
     /// Another refresh was asked for while one was running.
     again: bool,
     task: Option<Task<()>>,
+    /// The cache read after a draft changed.
+    reload_task: Option<Task<()>>,
+    _outbox: Option<Subscription>,
 }
 
 impl EventEmitter<CommentsEvent> for ChangeComments {}
@@ -42,9 +48,38 @@ impl ChangeComments {
             refreshing: false,
             again: false,
             task: None,
+            reload_task: None,
+            _outbox: None,
         };
         this.load(cx);
         this
+    }
+
+    /// Reloads from the cache (no network) whenever the outbox reports that
+    /// a draft of this change moved, so threads show a draft and its sync
+    /// state at once.
+    pub fn follow(&mut self, outbox: &Entity<DraftOutbox>, cx: &mut Context<Self>) {
+        self._outbox = Some(cx.subscribe(outbox, |this, _, ev: &OutboxEvent, cx| {
+            if matches!(ev, OutboxEvent::Changed(c) if *c == this.change) {
+                this.reload(cx);
+            }
+        }));
+    }
+
+    /// Reads the cache again.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        let syncer = self.session.syncer().clone();
+        let change = self.change;
+        self.reload_task = Some(cx.spawn(async move |this, cx| {
+            let cached = cx
+                .background_spawn(async move { syncer.cached_comments(change) })
+                .await;
+            this.update(cx, |this, cx| match cached {
+                Ok(view) => this.apply(view.threads(), cx),
+                Err(e) => log::warn!("reading cached comments of change {change}: {e}"),
+            })
+            .ok();
+        }));
     }
 
     pub fn threads(&self) -> Arc<Vec<Thread>> {

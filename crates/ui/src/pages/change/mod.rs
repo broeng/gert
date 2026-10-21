@@ -45,6 +45,7 @@ use crate::{
     },
     diff_load::{LoadError, load_diff},
     nav::{ChangeView, DiffRoute},
+    outbox::DraftOutbox,
     pages::list::Status,
     row::browser_url,
     session::{Session, is_unauthorized},
@@ -134,6 +135,7 @@ pub struct ChangePage {
     related_task: Option<Task<()>>,
     /// The change's comment threads, shown in the inline diffs.
     comments: Entity<ChangeComments>,
+    outbox: Entity<DraftOutbox>,
     _ticker: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -153,9 +155,10 @@ impl ChangePage {
         number: ChangeNumber,
         view: ChangeView,
         window_active: bool,
+        outbox: Entity<DraftOutbox>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let comments = cx.new(|cx| ChangeComments::new(session.clone(), number, cx));
+        let comments = outbox.update(cx, |o, cx| o.comments(number, cx));
         let mut this = Self {
             session,
             settings: settings.clone(),
@@ -188,6 +191,7 @@ impl ChangePage {
             files_task: None,
             related_task: None,
             comments: comments.clone(),
+            outbox,
             _ticker: Task::ready(()),
             _subs: Vec::new(),
         };
@@ -805,8 +809,8 @@ impl ChangePage {
     fn inline_event(&mut self, path: &str, ev: &DiffEvent, cx: &mut Context<Self>) {
         match ev {
             DiffEvent::RetryDraft(id) => {
-                // Drafts are edited and retried from batch 3b on.
-                log::debug!("retry of draft {id:?} requested; not handled yet");
+                let (change, id) = (self.number, *id);
+                self.outbox.update(cx, |o, cx| o.retry(change, id, cx));
             }
             DiffEvent::ModeChanged(mode) => {
                 let mode = *mode;

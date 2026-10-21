@@ -16,6 +16,7 @@ use crate::{
     actions::{self, *},
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
+    outbox::{DraftOutbox, OutboxEvent},
     pages::{
         change::{ChangeEvent, ChangePage},
         diff::{DiffPage, DiffPageEvent},
@@ -78,6 +79,9 @@ pub fn init(cx: &mut App) {
 pub struct Shell {
     env: Env,
     session: Option<Session>,
+    /// The drafts of the current session; present exactly when `session` is.
+    outbox: Option<Entity<DraftOutbox>>,
+    outbox_sub: Option<Subscription>,
     queries: Vec<SavedQuery>,
     nav: NavState,
     page: Page,
@@ -141,6 +145,8 @@ impl Shell {
         let mut this = Self {
             env,
             session: None,
+            outbox: None,
+            outbox_sub: None,
             queries,
             nav: NavState::new(Route::Login),
             page: Page::Login(login),
@@ -180,7 +186,7 @@ impl Shell {
             Some(Auth::Anonymous)
         };
         match Session::new(&self.env, &setup, auth) {
-            Ok(session) => self.session = Some(session),
+            Ok(session) => self.set_session(Some(session), window, cx),
             Err(e) => {
                 self.prefill = Some(prefill_from(
                     &setup,
@@ -206,7 +212,7 @@ impl Shell {
                     let auth = Auth::Basic { username, password };
                     match Session::new(&this.env, &setup, Some(auth)) {
                         Ok(session) => {
-                            this.session = Some(session);
+                            this.set_session(Some(session), window, cx);
                             this.show(window, cx);
                             this.load_diff_preferences(cx);
                         }
@@ -233,6 +239,37 @@ impl Shell {
             })
             .ok();
         }));
+    }
+
+    /// Replaces the session, and with it the outbox of drafts.
+    fn set_session(
+        &mut self,
+        session: Option<Session>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.outbox_sub = None;
+        self.outbox = session.as_ref().map(|s| {
+            let outbox = cx.new(|_| DraftOutbox::new(s.clone()));
+            self.outbox_sub =
+                Some(
+                    cx.subscribe_in(&outbox, window, |this, _, ev: &OutboxEvent, window, cx| {
+                        if matches!(ev, OutboxEvent::Unauthorized) {
+                            this.unauthorized(window, cx);
+                        }
+                    }),
+                );
+            outbox
+        });
+        self.session = session;
+    }
+
+    /// The outbox of the current session.
+    fn outbox_for(&mut self, session: &Session, cx: &mut Context<Self>) -> Entity<DraftOutbox> {
+        match &self.outbox {
+            Some(outbox) => outbox.clone(),
+            None => cx.new(|_| DraftOutbox::new(session.clone())),
+        }
     }
 
     /// Reads the cached diff preferences of the signed-in user right away,
@@ -280,7 +317,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.session = None;
+        self.set_session(None, window, cx);
         self.prefill = Some(prefill_from(setup, notice));
         self.nav.reset(Route::Login);
         self.show(window, cx);
@@ -404,7 +441,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Page {
         let settings = self.settings.clone();
-        let page = cx.new(|cx| ChangePage::new(session, settings, number, view, active, cx));
+        let outbox = self.outbox_for(&session, cx);
+        let page =
+            cx.new(|cx| ChangePage::new(session, settings, number, view, active, outbox, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
@@ -427,7 +466,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Page {
         let settings = self.settings.clone();
-        let page = cx.new(|cx| DiffPage::new(session, settings, route, cx));
+        let outbox = self.outbox_for(&session, cx);
+        let page = cx.new(|cx| DiffPage::new(session, settings, route, outbox, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
@@ -478,7 +518,7 @@ impl Shell {
         };
         match Session::new(&self.env, &setup, Some(auth)) {
             Ok(session) => {
-                self.session = Some(session);
+                self.set_session(Some(session), window, cx);
                 self.queries = outcome.queries.clone();
                 self.nav.reset(Route::Dashboard);
                 self.show(window, cx);
@@ -494,7 +534,8 @@ impl Shell {
     /// The server refused our credentials: back to the login page, with the
     /// server filled in.
     fn unauthorized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(s) = self.session.take() {
+        if let Some(s) = self.session.clone() {
+            self.set_session(None, window, cx);
             self.prefill = Some(LoginPrefill {
                 base_url: s.base_url,
                 username: s.username,
