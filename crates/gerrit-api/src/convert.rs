@@ -6,11 +6,11 @@ use model::{
     Account, AccountId, AttentionEntry, ChangeDetail, ChangeMessage, ChangeNumber, ChangeStatus,
     ChangeSummary, ChangedChunk, Comment, CommentRange, Commit, CommitParent, ContextLine, Diff,
     DiffChangeType, DiffChunk, DiffContext, DiffFileMeta, DiffPreferences, DiffViewMode,
-    DraftHandling, DraftInput, ExpressionResult, ExpressionStatus, FileEntry, FileStatus,
-    GitPerson, IntralineEdit, IntralineStatus, LabelSummary, LabelValue, LabelVote, Location,
-    PatchSetNumber, RelatedChange, ReviewInput, ReviewResult, Revision, RevisionId, RevisionKind,
-    Side, SubmitRequirement, SubmitRequirementStatus, Timestamp, TimestampParseError, Whitespace,
-    file_order, parse_gerrit_timestamp,
+    DraftHandling, DraftInput, DraftReceipt, ExpressionResult, ExpressionStatus, FileEntry,
+    FileStatus, GitPerson, IntralineEdit, IntralineStatus, LabelSummary, LabelValue, LabelVote,
+    Location, PatchSetNumber, RelatedChange, ReviewInput, ReviewResult, Revision, RevisionId,
+    RevisionKind, Side, SubmitRequirement, SubmitRequirementStatus, Timestamp, TimestampParseError,
+    Whitespace, file_order, parse_gerrit_timestamp,
 };
 
 use crate::wire::{
@@ -569,6 +569,15 @@ where
         }
     }
     Ok(out)
+}
+
+/// The answer to creating or updating a draft: the server sends neither
+/// the patch set nor an author, so only the id and time are taken.
+pub(crate) fn draft_receipt(c: &wire::CommentInfo) -> Result<DraftReceipt, ConversionError> {
+    Ok(DraftReceipt {
+        id: required(c.id.clone(), "comment.id")?,
+        updated: timestamp(c.updated.as_deref(), "comment.updated")?,
+    })
 }
 
 fn wire_range(r: CommentRange) -> wire::Range {

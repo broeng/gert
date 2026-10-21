@@ -30,7 +30,7 @@ pub use diff::{
     ChangedChunk, Diff, DiffChangeType, DiffChunk, DiffFileMeta, IntralineEdit, IntralineStatus,
     line_marks,
 };
-pub use draft::{Draft, DraftInput, DraftOp, DraftSync, LocalDraftId};
+pub use draft::{Draft, DraftInput, DraftOp, DraftReceipt, DraftSync, LocalDraftId};
 pub use file::{COMMIT_MSG_PATH, FileEntry, FileStatus, MERGE_LIST_PATH, file_order};
 pub use ids::{AccountId, ChangeNumber, PatchSetNumber, RevisionId};
 pub use keys::{DiffKey, FilesKey};
