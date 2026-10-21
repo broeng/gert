@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use base64::Engine as _;
 use model::{
-    Account, ChangeDetail, ChangeNumber, ChangeSummary, Diff, DiffPreferences, FileEntry,
-    PatchSetNumber, RelatedChange, RevisionId,
+    Account, ChangeDetail, ChangeNumber, ChangeSummary, Comment, Diff, DiffPreferences, DraftInput,
+    FileEntry, PatchSetNumber, RelatedChange, ReviewInput, ReviewResult, RevisionId,
 };
 use serde_json::Value;
 
@@ -74,28 +74,69 @@ impl GerritClient {
         url
     }
 
-    async fn get_json(&self, path: &str, query: &[(&str, String)]) -> Result<Value, Error> {
+    /// Sends a request and returns the body of a 2xx answer (XSSI guard
+    /// not yet removed). `body` is sent as JSON.
+    async fn send(
+        &self,
+        method: http::Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, Error> {
         let url = self.url(path, query);
         let mut builder = http::Request::builder()
-            .method(http::Method::GET)
+            .method(method)
             .uri(url)
             .header(http::header::ACCEPT, "application/json");
+        if body.is_some() {
+            builder = builder.header(
+                http::header::CONTENT_TYPE,
+                "application/json; charset=UTF-8",
+            );
+        }
         if let Auth::Basic { username, password } = &self.auth {
             let token =
                 base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
             builder = builder.header(http::header::AUTHORIZATION, format!("Basic {token}"));
         }
         let req = builder
-            .body(Vec::new())
+            .body(body.unwrap_or_default())
             .map_err(|e| Error::InvalidUrl(e.to_string()))?;
 
         let resp = self.http.send(req).await?;
         let code = resp.status().as_u16();
         let body = resp.into_body();
         match code {
-            200..=299 => Ok(serde_json::from_slice(strip_xssi(&body))?),
+            200..=299 => Ok(body),
             _ => Err(error_for_status(code, &body)),
         }
+    }
+
+    async fn get_json(&self, path: &str, query: &[(&str, String)]) -> Result<Value, Error> {
+        let body = self.send(http::Method::GET, path, query, None).await?;
+        Ok(serde_json::from_slice(strip_xssi(&body))?)
+    }
+
+    /// A write with a JSON body (`POST`, `PUT`). Anonymous sessions are
+    /// refused up front.
+    async fn write_json<B: serde::Serialize>(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: &B,
+    ) -> Result<Value, Error> {
+        self.require_auth()?;
+        let bytes = serde_json::to_vec(body)?;
+        let body = self.send(method, path, &[], Some(bytes)).await?;
+        Ok(serde_json::from_slice(strip_xssi(&body))?)
+    }
+
+    /// A write without a request or response body (`DELETE`, or a `PUT`
+    /// that only toggles a flag). The answer's body is ignored.
+    async fn write_empty(&self, method: http::Method, path: &str) -> Result<(), Error> {
+        self.require_auth()?;
+        self.send(method, path, &[], None).await?;
+        Ok(())
     }
 
     /// Fails with [`Error::Unauthorized`] for anonymous sessions, for
@@ -249,6 +290,154 @@ impl GerritClient {
         Ok(convert::related(&info)?)
     }
 
+    /// `GET /changes/{n}/comments`: the published comments of all patch
+    /// sets, by path (special files first), in server order within a path.
+    pub async fn get_comments(&self, change: ChangeNumber) -> Result<Vec<Comment>, Error> {
+        let v = self
+            .get_json(&format!("/changes/{change}/comments"), &[])
+            .await?;
+        let map: BTreeMap<String, Vec<wire::CommentInfo>> = serde_json::from_value(v)?;
+        Ok(convert::comments_by_path(map, convert::comment)?)
+    }
+
+    /// `GET /changes/{n}/drafts`: the signed-in user's drafts on all patch
+    /// sets, as [`Comment`]s without an author. Anonymous sessions have
+    /// none, and no request is made.
+    pub async fn get_drafts(&self, change: ChangeNumber) -> Result<Vec<Comment>, Error> {
+        if !self.is_authenticated() {
+            return Ok(Vec::new());
+        }
+        let v = self
+            .get_json(&format!("/changes/{change}/drafts"), &[])
+            .await?;
+        let map: BTreeMap<String, Vec<wire::CommentInfo>> = serde_json::from_value(v)?;
+        Ok(convert::comments_by_path(map, convert::comment)?)
+    }
+
+    /// `GET /changes/{n}/robotcomments`: comments of automated reviewers,
+    /// with [`Comment::robot_id`] set.
+    pub async fn get_robot_comments(&self, change: ChangeNumber) -> Result<Vec<Comment>, Error> {
+        let v = self
+            .get_json(&format!("/changes/{change}/robotcomments"), &[])
+            .await?;
+        let map: BTreeMap<String, Vec<wire::RobotCommentInfo>> = serde_json::from_value(v)?;
+        Ok(convert::comments_by_path(map, convert::robot_comment)?)
+    }
+
+    /// `PUT /changes/{n}/revisions/{rev}/drafts`: creates a draft. Returns
+    /// it as the server stored it (with its id). A patch set that does not
+    /// exist (any more) or a closed change is [`Error::Conflict`] or
+    /// [`Error::BadRequest`] with the server's message.
+    pub async fn create_draft(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        draft: &DraftInput,
+    ) -> Result<Comment, Error> {
+        let v = self
+            .write_json(
+                http::Method::PUT,
+                &revision_path(change, target, "/drafts"),
+                &convert::draft_input(draft),
+            )
+            .await?;
+        let info: wire::CommentInfo = serde_json::from_value(v)?;
+        Ok(convert::comment(&info, Some(&draft.path))?)
+    }
+
+    /// `PUT /changes/{n}/revisions/{rev}/drafts/{id}`: replaces a draft.
+    /// [`Error::NotFound`] if the draft is gone (published or deleted
+    /// elsewhere).
+    pub async fn update_draft(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        draft_id: &str,
+        draft: &DraftInput,
+    ) -> Result<Comment, Error> {
+        let v = self
+            .write_json(
+                http::Method::PUT,
+                &revision_path(
+                    change,
+                    target,
+                    &format!("/drafts/{}", encode_component(draft_id)),
+                ),
+                &convert::draft_input(draft),
+            )
+            .await?;
+        let info: wire::CommentInfo = serde_json::from_value(v)?;
+        Ok(convert::comment(&info, Some(&draft.path))?)
+    }
+
+    /// `DELETE /changes/{n}/revisions/{rev}/drafts/{id}`. [`Error::NotFound`]
+    /// means the draft does not exist (any more).
+    pub async fn delete_draft(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        draft_id: &str,
+    ) -> Result<(), Error> {
+        self.write_empty(
+            http::Method::DELETE,
+            &revision_path(
+                change,
+                target,
+                &format!("/drafts/{}", encode_component(draft_id)),
+            ),
+        )
+        .await
+    }
+
+    /// `POST /changes/{n}/revisions/{rev}/review`: posts a message, votes
+    /// and drafts. Problems with the request (a label value the user may
+    /// not set, a closed change) come back as [`Error::BadRequest`] or
+    /// [`Error::Conflict`] carrying the server's text; a part of the
+    /// request that failed although the review was accepted is in
+    /// [`ReviewResult::error`].
+    pub async fn post_review(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        review: &ReviewInput,
+    ) -> Result<ReviewResult, Error> {
+        let v = self
+            .write_json(
+                http::Method::POST,
+                &revision_path(change, target, "/review"),
+                &convert::review_input(review),
+            )
+            .await?;
+        let result: wire::ReviewResult = serde_json::from_value(v)?;
+        Ok(convert::review_result(&result))
+    }
+
+    /// `PUT` or `DELETE /changes/{n}/revisions/{rev}/files/{file}/reviewed`:
+    /// marks the file reviewed (or not) for the signed-in user. Marking an
+    /// already marked file is not an error.
+    pub async fn set_reviewed(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        path: &str,
+        reviewed: bool,
+    ) -> Result<(), Error> {
+        let method = if reviewed {
+            http::Method::PUT
+        } else {
+            http::Method::DELETE
+        };
+        self.write_empty(
+            method,
+            &revision_path(
+                change,
+                target,
+                &format!("/files/{}/reviewed", encode_component(path)),
+            ),
+        )
+        .await
+    }
+
     /// The signed-in user's diff settings: `GET /accounts/self/preferences.diff`,
     /// plus the diff view mode, which Gerrit keeps in
     /// `GET /accounts/self/preferences`. Anonymous access yields
@@ -321,6 +510,8 @@ mod tests {
     use model::{AccountId, ChangeStatus, PatchSetNumber};
 
     use super::*;
+    use serde_json::json;
+
     use crate::fake::FakeHttpClient;
 
     const CHANGE: &str = r#"{
@@ -1166,5 +1357,412 @@ mod tests {
             Err(Error::Unauthorized)
         ));
         assert!(fake.requests().is_empty());
+    }
+
+    const COMMENTS: &str = r#"{
+        "src/b.rs": [
+            {"patch_set": 1, "id": "c1", "line": 4, "updated": "2024-03-01 10:00:00.000000000",
+             "message": "Why?", "unresolved": true, "author": {"_account_id": 7, "name": "Bob"},
+             "commit_id": "aaa"},
+            {"patch_set": 1, "id": "c2", "line": 4, "in_reply_to": "c1", "side": "PARENT",
+             "parent": 2, "updated": "2024-03-01 11:00:00.000000000", "message": "Because.",
+             "unresolved": false, "tag": "mytag", "change_message_id": "m1"}
+        ],
+        "/COMMIT_MSG": [
+            {"patch_set": 2, "id": "c3", "updated": "2024-03-02 10:00:00.000000000",
+             "message": "typo", "range": {"start_line": 2, "start_character": 3,
+              "end_line": 2, "end_character": 9}, "line": 2,
+             "context_lines": [{"line_number": 2, "context_line": "Subject"}, {}]}
+        ],
+        "/PATCHSET_LEVEL": [
+            {"patch_set": 3, "id": "c4", "updated": "2024-03-03 10:00:00.000000000",
+             "message": "Overall fine", "in_reply_to": ""}
+        ]
+    }"#;
+
+    fn sha_rev() -> RevisionId {
+        RevisionId::from("0123abcd")
+    }
+
+    #[test]
+    fn comments_are_flattened_by_path_with_special_files_first() {
+        use model::{Location, Side};
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi(COMMENTS));
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let cs = block_on(c.get_comments(ChangeNumber(5))).unwrap();
+        assert_eq!(fake.requests()[0].uri(), "https://h/changes/5/comments");
+        let order: Vec<_> = cs
+            .iter()
+            .map(|c| (c.path.as_str(), c.id.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("/COMMIT_MSG", "c3"),
+                ("/PATCHSET_LEVEL", "c4"),
+                ("src/b.rs", "c1"),
+                ("src/b.rs", "c2")
+            ]
+        );
+        // c3: range wins over line; context lines without a number dropped.
+        assert!(matches!(cs[0].location, Location::Range(r) if r.start_character == 3));
+        assert_eq!(cs[0].context.len(), 1);
+        assert_eq!(cs[0].side, Side::Revision);
+        // c4: an empty in_reply_to is none; no location is a file comment.
+        assert_eq!(cs[1].in_reply_to, None);
+        assert_eq!(cs[1].location, Location::File);
+        assert!(cs[1].is_patch_set_level());
+        // c1/c2.
+        assert_eq!(cs[2].location, Location::Line(4));
+        assert!(cs[2].unresolved);
+        assert_eq!(cs[2].author.as_ref().map(|a| a.id.0), Some(7));
+        assert_eq!(cs[2].commit_id, Some(RevisionId::from("aaa")));
+        assert_eq!(cs[3].side, Side::Parent);
+        assert_eq!(cs[3].parent, Some(2));
+        assert_eq!(cs[3].in_reply_to.as_deref(), Some("c1"));
+        assert_eq!(cs[3].tag.as_deref(), Some("mytag"));
+        assert_eq!(cs[3].change_message_id.as_deref(), Some("m1"));
+        assert!(!cs[3].unresolved);
+    }
+
+    #[test]
+    fn comments_with_unknown_side_and_extra_fields_still_load() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{"a": [{"patch_set": 1, "id": "x", "updated": "2024-03-01 10:00:00.000000000",
+                    "side": "SIDEWAYS", "future": {"a": 1}, "fix_suggestions": [{"fix_id": "f"}]}]}"#,
+            ),
+        );
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let cs = block_on(c.get_comments(ChangeNumber(1))).unwrap();
+        assert_eq!(cs[0].side, model::Side::Revision);
+        assert_eq!(cs[0].message, "");
+    }
+
+    #[test]
+    fn comment_missing_required_fields_is_a_conversion_error() {
+        for bad in [
+            r#"{"a": [{"id": "x", "updated": "2024-03-01 10:00:00.000000000"}]}"#,
+            r#"{"a": [{"patch_set": 1, "updated": "2024-03-01 10:00:00.000000000"}]}"#,
+            r#"{"a": [{"patch_set": 1, "id": "x"}]}"#,
+            r#"{"a": [{"patch_set": 1, "id": "x", "updated": "2024-03-01 10:00:00.000000000",
+                "range": {"start_line": 1}}]}"#,
+        ] {
+            let fake = FakeHttpClient::new();
+            fake.push_response(200, xssi(bad));
+            let c = client(&fake, "https://h", Auth::Anonymous);
+            assert!(
+                matches!(
+                    block_on(c.get_comments(ChangeNumber(1))),
+                    Err(Error::Conversion(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn drafts_need_an_account_and_come_without_authors() {
+        let fake = FakeHttpClient::new();
+        let anon = client(&fake, "https://h", Auth::Anonymous);
+        assert!(
+            block_on(anon.get_drafts(ChangeNumber(5)))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(fake.requests().is_empty());
+
+        fake.push_response(
+            200,
+            xssi(
+                r#"{"f.rs": [{"patch_set": 2, "id": "d1", "line": 3,
+                    "updated": "2024-03-01 10:00:00.000000000", "message": "wip",
+                    "unresolved": true, "in_reply_to": "c1"}]}"#,
+            ),
+        );
+        let c = client(&fake, "https://h", basic());
+        let ds = block_on(c.get_drafts(ChangeNumber(5))).unwrap();
+        assert_eq!(fake.requests()[0].uri(), "https://h/a/changes/5/drafts");
+        assert_eq!((ds[0].id.as_str(), ds[0].path.as_str()), ("d1", "f.rs"));
+        assert!(ds[0].author.is_none() && ds[0].unresolved);
+    }
+
+    #[test]
+    fn robot_comments_carry_the_robot_id() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{"f.rs": [{"patch_set": 1, "id": "r1", "robot_id": "lint", "robot_run_id": "9",
+                    "url": "https://x", "properties": {"a": "b"}, "line": 1,
+                    "updated": "2024-03-01 10:00:00.000000000", "message": "unused"}]}"#,
+            ),
+        );
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let cs = block_on(c.get_robot_comments(ChangeNumber(5))).unwrap();
+        assert_eq!(
+            fake.requests()[0].uri(),
+            "https://h/changes/5/robotcomments"
+        );
+        assert!(cs[0].is_robot());
+        assert_eq!(cs[0].robot_id.as_deref(), Some("lint"));
+    }
+
+    fn draft_input() -> DraftInput {
+        DraftInput {
+            path: "src/a b.rs".into(),
+            side: model::Side::Revision,
+            parent: None,
+            location: model::Location::Line(7),
+            in_reply_to: Some("c1".into()),
+            message: "Fix \"this\"\nüñí".into(),
+            unresolved: true,
+        }
+    }
+
+    fn body_json(req: &http::Request<Vec<u8>>) -> Value {
+        serde_json::from_slice(req.body()).unwrap()
+    }
+
+    #[test]
+    fn create_draft_puts_json_to_the_revision() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            201,
+            xssi(
+                r#"{"id": "d9", "patch_set": 2, "path": "src/a b.rs", "line": 7,
+                    "updated": "2024-03-01 10:00:00.000000000", "message": "m",
+                    "in_reply_to": "c1", "unresolved": true}"#,
+            ),
+        );
+        let c = client(&fake, "https://h", basic());
+        let got = block_on(c.create_draft(ChangeNumber(5), &sha_rev(), &draft_input())).unwrap();
+        assert_eq!(got.id, "d9");
+        let req = &fake.requests()[0];
+        assert_eq!(req.method(), http::Method::PUT);
+        assert_eq!(req.uri(), "https://h/a/changes/5/revisions/0123abcd/drafts");
+        assert_eq!(
+            req.headers()["content-type"],
+            "application/json; charset=UTF-8"
+        );
+        assert!(req.headers().contains_key("authorization"));
+        assert_eq!(
+            body_json(req),
+            json!({"path": "src/a b.rs", "side": "REVISION", "line": 7, "in_reply_to": "c1",
+                   "message": "Fix \"this\"\nüñí", "unresolved": true})
+        );
+    }
+
+    #[test]
+    fn range_drafts_send_the_range_and_its_end_line() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            201,
+            xssi(r#"{"id": "d1", "patch_set": 1, "updated": "2024-03-01 10:00:00.000000000"}"#),
+        );
+        let c = client(&fake, "https://h", basic());
+        let mut d = draft_input();
+        d.side = model::Side::Parent;
+        d.parent = Some(2);
+        d.in_reply_to = None;
+        d.location = model::Location::Range(model::CommentRange {
+            start_line: 3,
+            start_character: 1,
+            end_line: 5,
+            end_character: 4,
+        });
+        // The answer has no path: the request's is used.
+        let got = block_on(c.create_draft(ChangeNumber(5), &sha_rev(), &d)).unwrap();
+        assert_eq!(got.path, "src/a b.rs");
+        assert_eq!(
+            body_json(&fake.requests()[0]),
+            json!({"path": "src/a b.rs", "side": "PARENT", "parent": 2, "line": 5,
+                   "range": {"start_line": 3, "start_character": 1, "end_line": 5,
+                             "end_character": 4},
+                   "message": "Fix \"this\"\nüñí", "unresolved": true})
+        );
+        // A file comment has neither line nor range.
+        fake.push_response(
+            201,
+            xssi(r#"{"id": "d2", "patch_set": 1, "updated": "2024-03-01 10:00:00.000000000"}"#),
+        );
+        d.location = model::Location::File;
+        block_on(c.create_draft(ChangeNumber(5), &sha_rev(), &d)).unwrap();
+        let sent = body_json(&fake.requests()[1]);
+        assert!(sent.get("line").is_none() && sent.get("range").is_none());
+    }
+
+    #[test]
+    fn update_and_delete_draft_address_the_draft_id() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(r#"{"id": "d/1", "patch_set": 2, "updated": "2024-03-01 10:00:00.000000000"}"#),
+        );
+        fake.push_response(204, "");
+        fake.push_response(404, "Not Found: d1");
+        let c = client(&fake, "https://h", basic());
+        block_on(c.update_draft(ChangeNumber(5), &sha_rev(), "d/1", &draft_input())).unwrap();
+        block_on(c.delete_draft(ChangeNumber(5), &sha_rev(), "d/1")).unwrap();
+        assert!(matches!(
+            block_on(c.delete_draft(ChangeNumber(5), &sha_rev(), "d/1")),
+            Err(Error::NotFound)
+        ));
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::PUT);
+        assert_eq!(
+            reqs[0].uri(),
+            "https://h/a/changes/5/revisions/0123abcd/drafts/d%2F1"
+        );
+        assert_eq!(reqs[1].method(), http::Method::DELETE);
+        assert!(reqs[1].body().is_empty());
+        assert!(!reqs[1].headers().contains_key("content-type"));
+    }
+
+    #[test]
+    fn writes_are_refused_for_anonymous_sessions_without_a_request() {
+        let fake = FakeHttpClient::new();
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let n = ChangeNumber(5);
+        assert!(matches!(
+            block_on(c.create_draft(n, &sha_rev(), &draft_input())),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(c.update_draft(n, &sha_rev(), "d", &draft_input())),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(c.delete_draft(n, &sha_rev(), "d")),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(c.post_review(n, &sha_rev(), &ReviewInput::default())),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(c.set_reviewed(n, &sha_rev(), "f", true)),
+            Err(Error::Unauthorized)
+        ));
+        assert!(fake.requests().is_empty());
+    }
+
+    #[test]
+    fn write_errors_carry_the_servers_message() {
+        let fake = FakeHttpClient::new();
+        let c = client(&fake, "https://h", basic());
+        fake.push_response(409, "change is closed\n");
+        match block_on(c.create_draft(ChangeNumber(5), &sha_rev(), &draft_input())) {
+            Err(Error::Conflict { message }) => assert_eq!(message, "change is closed"),
+            other => panic!("{other:?}"),
+        }
+        fake.push_response(400, "label \"Code-Review\": 2 is not a permitted value");
+        match block_on(c.post_review(ChangeNumber(5), &sha_rev(), &ReviewInput::default())) {
+            Err(Error::BadRequest { message }) => {
+                assert!(message.contains("not a permitted value"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        fake.push_response(403, "not permitted: write on refs/heads/x");
+        assert!(matches!(
+            block_on(c.set_reviewed(ChangeNumber(5), &sha_rev(), "f", true)),
+            Err(Error::Forbidden { .. })
+        ));
+        fake.push_response(401, "");
+        assert!(matches!(
+            block_on(c.delete_draft(ChangeNumber(5), &sha_rev(), "d")),
+            Err(Error::Unauthorized)
+        ));
+        fake.push_error("connection reset");
+        let e = block_on(c.delete_draft(ChangeNumber(5), &sha_rev(), "d")).unwrap_err();
+        assert!(e.is_retryable());
+    }
+
+    #[test]
+    fn post_review_sends_labels_drafts_and_attention_set() {
+        use model::{AttentionSetInput, DraftHandling, NotifyHandling};
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(r#"{"labels": {"Code-Review": 1}, "ready": true, "reviewers": {}}"#),
+        );
+        let c = client(&fake, "https://h", basic());
+        let mut review = ReviewInput::with_message("Looks good");
+        review.labels.insert("Code-Review".into(), 1);
+        review.notify = Some(NotifyHandling::Owner);
+        review.tag = Some("t".into());
+        review.add_to_attention_set = vec![AttentionSetInput {
+            user: AccountId(4),
+            reason: "please look".into(),
+        }];
+        review.remove_from_attention_set = vec![AttentionSetInput {
+            user: AccountId(5),
+            reason: "done".into(),
+        }];
+        review.ready = Some(true);
+        let res = block_on(c.post_review(ChangeNumber(5), &sha_rev(), &review)).unwrap();
+        assert_eq!(res.labels["Code-Review"], 1);
+        assert_eq!(res.ready, Some(true));
+        assert_eq!(res.error, None);
+        let req = &fake.requests()[0];
+        assert_eq!(req.method(), http::Method::POST);
+        assert_eq!(req.uri(), "https://h/a/changes/5/revisions/0123abcd/review");
+        assert_eq!(
+            body_json(req),
+            json!({
+                "message": "Looks good",
+                "labels": {"Code-Review": 1},
+                "drafts": "PUBLISH_ALL_REVISIONS",
+                "tag": "t",
+                "notify": "OWNER",
+                "ready": true,
+                "add_to_attention_set": [{"user": "4", "reason": "please look"}],
+                "remove_from_attention_set": [{"user": "5", "reason": "done"}],
+            })
+        );
+
+        // Empty message and labels are left out; drafts handling is kept.
+        fake.push_response(200, xssi("{}"));
+        let mut quiet = ReviewInput::with_message("  ");
+        quiet.drafts = DraftHandling::Keep;
+        block_on(c.post_review(ChangeNumber(5), &sha_rev(), &quiet)).unwrap();
+        assert_eq!(body_json(&fake.requests()[1]), json!({"drafts": "KEEP"}));
+    }
+
+    #[test]
+    fn review_result_error_is_reported_not_raised() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(r#"{"error": "reviewer x not found", "labels": {}}"#),
+        );
+        let c = client(&fake, "https://h", basic());
+        let res =
+            block_on(c.post_review(ChangeNumber(5), &sha_rev(), &ReviewInput::default())).unwrap();
+        assert_eq!(res.error.as_deref(), Some("reviewer x not found"));
+    }
+
+    #[test]
+    fn reviewed_marks_use_put_and_delete_with_an_encoded_path() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(201, "");
+        fake.push_response(200, "OK");
+        fake.push_response(204, "");
+        let c = client(&fake, "https://h", basic());
+        block_on(c.set_reviewed(ChangeNumber(5), &sha_rev(), "src/a b.rs", true)).unwrap();
+        // Already marked: 200 with a plain-text body is fine.
+        block_on(c.set_reviewed(ChangeNumber(5), &sha_rev(), "src/a b.rs", true)).unwrap();
+        block_on(c.set_reviewed(ChangeNumber(5), &sha_rev(), "src/a b.rs", false)).unwrap();
+        let reqs = fake.requests();
+        let methods: Vec<_> = reqs.iter().map(|r| r.method().as_str()).collect();
+        assert_eq!(methods, ["PUT", "PUT", "DELETE"]);
+        assert_eq!(
+            reqs[0].uri(),
+            "https://h/a/changes/5/revisions/0123abcd/files/src%2Fa%20b.rs/reviewed"
+        );
+        assert!(reqs[0].body().is_empty());
     }
 }

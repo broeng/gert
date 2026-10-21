@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 
 use model::{
     Account, AccountId, AttentionEntry, ChangeDetail, ChangeMessage, ChangeNumber, ChangeStatus,
-    ChangeSummary, ChangedChunk, Commit, CommitParent, Diff, DiffChangeType, DiffChunk,
-    DiffContext, DiffFileMeta, DiffPreferences, DiffViewMode, ExpressionResult, ExpressionStatus,
-    FileEntry, FileStatus, GitPerson, IntralineEdit, IntralineStatus, LabelSummary, LabelValue,
-    LabelVote, PatchSetNumber, RelatedChange, Revision, RevisionId, RevisionKind,
-    SubmitRequirement, SubmitRequirementStatus, Timestamp, TimestampParseError, Whitespace,
+    ChangeSummary, ChangedChunk, Comment, CommentRange, Commit, CommitParent, ContextLine, Diff,
+    DiffChangeType, DiffChunk, DiffContext, DiffFileMeta, DiffPreferences, DiffViewMode,
+    DraftHandling, DraftInput, ExpressionResult, ExpressionStatus, FileEntry, FileStatus,
+    GitPerson, IntralineEdit, IntralineStatus, LabelSummary, LabelValue, LabelVote, Location,
+    PatchSetNumber, RelatedChange, ReviewInput, ReviewResult, Revision, RevisionId, RevisionKind,
+    Side, SubmitRequirement, SubmitRequirementStatus, Timestamp, TimestampParseError, Whitespace,
     file_order, parse_gerrit_timestamp,
 };
 
@@ -487,6 +488,141 @@ pub(crate) fn diff_preferences(
         view_mode: general
             .and_then(|g| g.diff_view.as_deref())
             .and_then(DiffViewMode::from_wire),
+    }
+}
+
+fn range(r: &wire::Range) -> Result<CommentRange, ConversionError> {
+    Ok(CommentRange {
+        start_line: required(r.start_line, "range.start_line")?,
+        start_character: required(r.start_character, "range.start_character")?,
+        end_line: required(r.end_line, "range.end_line")?,
+        end_character: required(r.end_character, "range.end_character")?,
+    })
+}
+
+/// A comment or draft from a by-file list: `path` is the map key, used
+/// when the comment does not carry one itself.
+pub(crate) fn comment(
+    c: &wire::CommentInfo,
+    path: Option<&str>,
+) -> Result<Comment, ConversionError> {
+    let range = c.range.as_ref().map(range).transpose()?;
+    Ok(Comment {
+        id: required(c.id.clone(), "comment.id")?,
+        path: required(
+            c.path.clone().or_else(|| path.map(str::to_owned)),
+            "comment.path",
+        )?,
+        patch_set: PatchSetNumber(required(c.patch_set, "comment.patch_set")?),
+        side: Side::from_wire(c.side.as_deref()),
+        parent: c.parent,
+        location: Location::from_parts(c.line, range),
+        in_reply_to: c.in_reply_to.clone().filter(|r| !r.is_empty()),
+        message: c.message.clone().unwrap_or_default(),
+        author: c.author.as_ref().map(account).transpose()?,
+        updated: timestamp(c.updated.as_deref(), "comment.updated")?,
+        unresolved: c.unresolved.unwrap_or(false),
+        commit_id: c.commit_id.clone().map(RevisionId::from),
+        tag: c.tag.clone(),
+        change_message_id: c.change_message_id.clone(),
+        robot_id: None,
+        context: c
+            .context_lines
+            .iter()
+            .flatten()
+            .filter_map(|l| {
+                Some(ContextLine {
+                    line_number: l.line_number?,
+                    text: l.context_line.clone().unwrap_or_default(),
+                })
+            })
+            .collect(),
+    })
+}
+
+pub(crate) fn robot_comment(
+    c: &wire::RobotCommentInfo,
+    path: Option<&str>,
+) -> Result<Comment, ConversionError> {
+    let mut out = comment(&c.comment, path)?;
+    // A robot comment is recognised by its robot id; keep that even if the
+    // server sent it empty.
+    out.robot_id = Some(c.robot_id.clone().unwrap_or_default());
+    Ok(out)
+}
+
+/// The by-file map of `/comments`, `/drafts` and `/robotcomments` as a flat
+/// list: by path (special files first), then in server order within a path.
+pub(crate) fn comments_by_path<T, F>(
+    map: BTreeMap<String, Vec<T>>,
+    convert: F,
+) -> Result<Vec<Comment>, ConversionError>
+where
+    F: Fn(&T, Option<&str>) -> Result<Comment, ConversionError>,
+{
+    let mut paths: Vec<_> = map.keys().cloned().collect();
+    paths.sort_by(|a, b| file_order(a, b));
+    let mut out = Vec::new();
+    for path in paths {
+        for c in map.get(&path).into_iter().flatten() {
+            out.push(convert(c, Some(&path))?);
+        }
+    }
+    Ok(out)
+}
+
+fn wire_range(r: CommentRange) -> wire::Range {
+    wire::Range {
+        start_line: Some(r.start_line),
+        start_character: Some(r.start_character),
+        end_line: Some(r.end_line),
+        end_character: Some(r.end_character),
+    }
+}
+
+pub(crate) fn draft_input(d: &DraftInput) -> wire::DraftInput {
+    wire::DraftInput {
+        path: Some(d.path.clone()),
+        side: Some(d.side.as_wire().to_owned()),
+        parent: d.parent,
+        // The server wants `line` to equal the range's end line.
+        line: d.location.line(),
+        range: d.location.range().map(wire_range),
+        in_reply_to: d.in_reply_to.clone(),
+        message: Some(d.message.clone()),
+        unresolved: Some(d.unresolved),
+    }
+}
+
+pub(crate) fn review_input(r: &ReviewInput) -> wire::ReviewInput {
+    let attention = |list: &[model::AttentionSetInput]| {
+        (!list.is_empty()).then(|| {
+            list.iter()
+                .map(|a| wire::AttentionSetInput {
+                    user: Some(a.user.to_string()),
+                    reason: Some(a.reason.clone()),
+                })
+                .collect()
+        })
+    };
+    wire::ReviewInput {
+        message: r.message.clone().filter(|m| !m.trim().is_empty()),
+        tag: r.tag.clone(),
+        labels: (!r.labels.is_empty()).then(|| r.labels.clone()),
+        drafts: Some(DraftHandling::as_wire(r.drafts).to_owned()),
+        notify: r.notify.map(|n| n.as_wire().to_owned()),
+        work_in_progress: r.work_in_progress,
+        ready: r.ready,
+        add_to_attention_set: attention(&r.add_to_attention_set),
+        remove_from_attention_set: attention(&r.remove_from_attention_set),
+    }
+}
+
+pub(crate) fn review_result(r: &wire::ReviewResult) -> ReviewResult {
+    ReviewResult {
+        labels: r.labels.clone().unwrap_or_default(),
+        ready: r.ready,
+        error: r.error.clone().filter(|e| !e.is_empty()),
     }
 }
 
