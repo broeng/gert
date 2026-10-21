@@ -4,14 +4,14 @@ use anyhow::Context as _;
 use gert::{
     APP_NAME,
     backend::{AppBackend, queries_to_ui},
-    config::{Config, Paths},
+    config::{Config, DiffConfig, Paths},
     http::GpuiHttpClient,
     secrets::Keyring,
 };
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 use store::Store;
-use ui::{Env, ServerSetup, Shell, Startup};
+use ui::{Env, LocalDiff, ServerSetup, Shell, Startup};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -49,7 +49,14 @@ fn startup() -> anyhow::Result<Startup> {
         },
         server,
         queries: queries_to_ui(&config.queries),
-        diff: Default::default(),
+        diff: LocalDiff {
+            preferences: config
+                .diff
+                .as_ref()
+                .map(DiffConfig::preferences)
+                .unwrap_or_default(),
+            font_family: config.diff.and_then(|d| d.font_family),
+        },
     })
 }
 

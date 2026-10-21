@@ -22,6 +22,7 @@ gerrit-api.workspace = true
 http.workspace = true
 keyring.workspace = true
 log.workspace = true
+model.workspace = true
 reqwest_client.workspace = true
 serde.workspace = true
 store.workspace = true
