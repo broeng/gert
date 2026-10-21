@@ -31,7 +31,6 @@
           fontconfig
           freetype
           libxkbcommon
-          openssl
           vulkan-loader
           wayland
           libx11
