@@ -2,6 +2,7 @@
 //! transport. The `ui` crate does the rest.
 
 pub mod config;
+pub mod http;
 pub mod secrets;
 
 /// Single source of the (working) application name. Used for config and
