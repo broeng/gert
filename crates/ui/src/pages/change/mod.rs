@@ -30,20 +30,17 @@ use std::{
 
 use gpui_kit::*;
 use jiff::Timestamp;
-use model::{
-    ChangeDetail, ChangeNumber, DiffContext, DiffKey, FileEntry, FilesKey, RelatedChange,
-    RevisionId,
-};
+use model::{ChangeDetail, ChangeNumber, DiffKey, FileEntry, FilesKey, RelatedChange, RevisionId};
 use store::CachedFileList;
 use sync::PollPolicy;
 
 use crate::{
     actions::*,
     diff::{
-        DiffEvent, DiffSizing, DiffStatus, DiffView, Expand,
+        DiffEvent, DiffSizing, DiffStatus, DiffView,
         actions::{NextFile, PrevFile},
     },
-    diff_load::{LoadError, context_label, expanded_context, load_diff},
+    diff_load::{LoadError, load_diff},
     nav::{ChangeView, DiffRoute},
     pages::list::Status,
     row::browser_url,
@@ -92,8 +89,6 @@ enum Phase {
 /// One expanded file.
 struct Inline {
     key: DiffKey,
-    /// Set after an expansion request; replaces the preferred context.
-    ctx: Option<DiffContext>,
     view: Option<Entity<DiffView>>,
     phase: Phase,
     error: Option<String>,
@@ -270,11 +265,6 @@ impl ChangePage {
     #[cfg(test)]
     pub(crate) fn inline_ready(&self, path: &str) -> bool {
         self.inline.get(path).is_some_and(|i| i.view.is_some())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inline_context(&self, path: &str) -> Option<DiffContext> {
-        self.inline.get(path).map(|i| i.key.context)
     }
 
     #[cfg(test)]
@@ -586,7 +576,7 @@ impl ChangePage {
 
     // ---- inline diffs ----
 
-    fn diff_key(&self, path: &str, ctx: Option<DiffContext>, cx: &App) -> Option<DiffKey> {
+    fn diff_key(&self, path: &str, cx: &App) -> Option<DiffKey> {
         let files = self.files.key.as_ref()?;
         let prefs = self.settings.read(cx).resolved();
         Some(DiffKey {
@@ -595,7 +585,6 @@ impl ChangePage {
             target: files.target.clone(),
             path: path.to_owned(),
             whitespace: prefs.ignore_whitespace,
-            context: ctx.unwrap_or(prefs.context),
         })
     }
 
@@ -603,14 +592,13 @@ impl ChangePage {
         if self.inline.contains_key(path) {
             return;
         }
-        let Some(key) = self.diff_key(path, None, cx) else {
+        let Some(key) = self.diff_key(path, cx) else {
             return;
         };
         self.inline.insert(
             path.to_owned(),
             Inline {
                 key,
-                ctx: None,
                 view: None,
                 phase: Phase::Queued,
                 error: None,
@@ -708,15 +696,10 @@ impl ChangePage {
         match result {
             Ok(diff) => {
                 inline.error = None;
-                // Say which context an expanded diff shows; the default
-                // context needs no label.
-                let status = inline
-                    .ctx
-                    .map(|c| DiffStatus::Info(format!("Context: {}", context_label(c)).into()));
                 match &inline.view {
                     Some(view) => view.update(cx, |v, cx| {
                         v.set_diff(diff, cx);
-                        v.set_status(status, cx);
+                        v.set_status(None, cx);
                     }),
                     None => {
                         let view = cx.new(|cx| {
@@ -728,7 +711,6 @@ impl ChangePage {
                                 cx,
                             );
                             v.set_font_family(font, cx);
-                            v.set_status(status, cx);
                             v
                         });
                         let owned = path.to_owned();
@@ -742,10 +724,10 @@ impl ChangePage {
             }
             Err(LoadError::Unauthorized) => cx.emit(ChangeEvent::Unauthorized),
             Err(e) => {
-                // A refetch (more context) that fails must not pass
-                // silently behind the diff that is still shown.
+                // A refetch (other whitespace option) that fails must not
+                // pass silently behind the diff that is still shown.
                 if let Some(view) = &inline.view {
-                    let msg = format!("Could not load more lines: {e}");
+                    let msg = format!("Could not load the diff: {e}");
                     view.update(cx, |v, cx| {
                         v.set_status(Some(DiffStatus::Error(msg.into())), cx)
                     });
@@ -769,38 +751,20 @@ impl ChangePage {
                     s.update_session(|p| p.view_mode = Some(mode), cx)
                 });
             }
-            DiffEvent::ExpandRequested(expand) => self.expand_context(path, expand, cx),
-        }
-    }
-
-    /// An inline diff asked for more lines: refetch with a larger context
-    /// (see [`expanded_context`]); the view keeps its cursor in `set_diff`.
-    fn expand_context(&mut self, path: &str, expand: &Expand, cx: &mut Context<Self>) {
-        let Some(current) = self.inline.get(path).map(|i| i.key.context) else {
-            return;
-        };
-        let ctx = expanded_context(current, expand);
-        let Some(key) = self.diff_key(path, Some(ctx), cx) else {
-            return;
-        };
-        if let Some(inline) = self.inline.get_mut(path) {
-            inline.ctx = Some(ctx);
-            inline.key = key;
-            inline.phase = Phase::Queued;
-            if let Some(view) = &inline.view {
-                let msg = format!("Loading context: {}\u{2026}", context_label(ctx));
-                view.update(cx, |v, cx| {
-                    v.set_status(Some(DiffStatus::Busy(msg.into())), cx)
-                });
+            DiffEvent::RowsChanged => {
+                // Folds were opened or the layout changed: the row is
+                // taller or shorter now.
+                self.remeasure(Block::File(self.index_of(path)));
+                if self.cursor_path() == Some(path) {
+                    self.reveal_cursor();
+                }
+                cx.notify();
             }
         }
-        self.remeasure(Block::File(self.index_of(path)));
-        self.pump(cx);
-        cx.notify();
     }
 
     /// Whitespace, context, mode, font ...: apply to the open inline diffs
-    /// and refetch those whose key changed.
+    /// and refetch those whose key changed (only whitespace does).
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         let (prefs, font) = {
             let s = self.settings.read(cx);
@@ -808,7 +772,7 @@ impl ChangePage {
         };
         let paths: Vec<String> = self.inline.keys().cloned().collect();
         for path in paths {
-            let key = self.diff_key(&path, self.inline.get(&path).and_then(|i| i.ctx), cx);
+            let key = self.diff_key(&path, cx);
             let Some(inline) = self.inline.get_mut(&path) else {
                 continue;
             };
@@ -903,13 +867,12 @@ impl ChangePage {
         } else {
             for p in &paths {
                 if !self.inline.contains_key(p)
-                    && let Some(key) = self.diff_key(p, None, cx)
+                    && let Some(key) = self.diff_key(p, cx)
                 {
                     self.inline.insert(
                         p.clone(),
                         Inline {
                             key,
-                            ctx: None,
                             view: None,
                             phase: Phase::Queued,
                             error: None,

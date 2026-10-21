@@ -263,7 +263,6 @@ fn diff_key(path: &str) -> DiffKey {
         target: ps(2, "bbb"),
         path: path.into(),
         whitespace: Whitespace::IgnoreAll,
-        context: DiffContext::Lines(5),
     }
 }
 
@@ -370,7 +369,7 @@ fn refresh_diff_round_trip_and_request() {
         f.http.requests()[0].uri().to_string(),
         format!(
             "{BASE}/changes/7/revisions/bbb/files/dir%2Fmy%20file.rs/diff\
-             ?base=1&context=5&intraline&whitespace=IGNORE_ALL"
+             ?base=1&intraline&whitespace=IGNORE_ALL"
         )
     );
     // Another whitespace mode is a different cache entry.

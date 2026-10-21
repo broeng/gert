@@ -11,13 +11,13 @@ use gerrit_api::{Auth, GerritClient, fake::FakeHttpClient};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, WindowOptions, px, size};
 use model::{
-    ChangeNumber, ChangedChunk, Diff, DiffChangeType, DiffChunk, DiffViewMode,
+    ChangeNumber, ChangedChunk, Diff, DiffChangeType, DiffChunk, DiffContext, DiffViewMode,
     ResolvedDiffPreferences, RevisionId,
 };
 
 use super::{
-    DiffEvent, DiffSizing, DiffView, Expand,
-    layout::{Layout, LayoutOptions, Row},
+    DiffEvent, DiffSizing, DiffView,
+    layout::{Expansion, Layout, LayoutOptions, Row},
 };
 
 /// A fixture parsed through the real client, as the app would see it.
@@ -43,8 +43,14 @@ fn lines(l: &[&str]) -> Vec<String> {
     l.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// Changes at line 13 and 39, a hidden region (old 16.., new 15..) between.
+/// A whole-file diff like the server sends it (it never folds): lines 1-12,
+/// a 2:1 change at 13, 24 more lines, an insertion before the last 3 lines.
+/// With a context of 3 the rows are (side by side): fold(9), c10-c12,
+/// old13/new13, old14/-, c15-c17, fold(18), c36-c38, -/added, c39-c41.
 fn sample() -> Diff {
+    let common = |from: u32, to: u32| DiffChunk::Common {
+        lines: (from..=to).map(|n| format!("c{n}")).collect(),
+    };
     Diff {
         meta_a: None,
         meta_b: None,
@@ -52,46 +58,28 @@ fn sample() -> Diff {
         intraline_status: None,
         diff_header: Vec::new(),
         chunks: vec![
-            DiffChunk::Skip { lines: 10 },
-            DiffChunk::Common {
-                lines: lines(&["c11", "c12"]),
-            },
+            common(1, 12),
             DiffChunk::Changed(ChangedChunk {
                 a: lines(&["old13", "old14"]),
                 b: lines(&["new13"]),
                 ..Default::default()
             }),
-            DiffChunk::Common {
-                lines: lines(&["c15"]),
-            },
-            DiffChunk::Skip { lines: 24 },
+            common(15, 38),
             DiffChunk::Changed(ChangedChunk {
                 a: Vec::new(),
-                b: lines(&["added40"]),
+                b: lines(&["added"]),
                 ..Default::default()
             }),
-            DiffChunk::Common {
-                lines: lines(&["c41"]),
-            },
+            common(39, 41),
         ],
         binary: false,
     }
 }
 
-/// `sample()` after asking for the whole file: the hidden lines are there.
-fn sample_expanded() -> Diff {
-    let mut d = sample();
-    let fill = |from: u32, to: u32| DiffChunk::Common {
-        lines: (from..=to).map(|n| format!("c{n}")).collect(),
-    };
-    d.chunks[4] = fill(16, 39);
-    d.chunks[0] = fill(1, 10);
-    d
-}
-
 fn prefs(mode: DiffViewMode) -> ResolvedDiffPreferences {
     ResolvedDiffPreferences {
         view_mode: mode,
+        context: DiffContext::Lines(3),
         ..Default::default()
     }
 }
@@ -102,6 +90,14 @@ fn open(
     cx: &mut TestAppContext,
     diff: Diff,
     mode: DiffViewMode,
+) -> (AnyWindowHandle, Entity<DiffView>, Events) {
+    open_with(cx, diff, prefs(mode))
+}
+
+fn open_with(
+    cx: &mut TestAppContext,
+    diff: Diff,
+    prefs: ResolvedDiffPreferences,
 ) -> (AnyWindowHandle, Entity<DiffView>, Events) {
     let events: Events = Arc::default();
     let log = events.clone();
@@ -118,7 +114,7 @@ fn open(
             },
             cx,
             |window, cx| {
-                let view = cx.new(|cx| DiffView::new(diff, prefs(mode), cx));
+                let view = cx.new(|cx| DiffView::new(diff, prefs, cx));
                 let focus = view.read(cx).focus_for_test();
                 window.focus(&focus, cx);
                 view
@@ -129,13 +125,7 @@ fn open(
     cx.update(|cx| {
         cx.subscribe(&view, move |_, ev: &DiffEvent, _| {
             let text = match ev {
-                DiffEvent::ExpandRequested(Expand::All) => "expand all".to_owned(),
-                DiffEvent::ExpandRequested(Expand::Skip(s)) => {
-                    format!(
-                        "expand {}+{} @{}/{}",
-                        s.old_start, s.lines, s.old_start, s.new_start
-                    )
-                }
+                DiffEvent::RowsChanged => "rows".to_owned(),
                 DiffEvent::ModeChanged(m) => format!("mode {m:?}"),
             };
             log.lock().expect("log").push(text);
@@ -163,7 +153,7 @@ fn anchor(cx: &mut TestAppContext, view: &Entity<DiffView>) -> (Option<u32>, Opt
 #[gpui_kit::test]
 fn j_and_k_move_the_cursor_and_stop_at_the_ends(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
-    // rows: skip, c11, c12, old13/new13, old14/-, c15, skip, -/added40, c41
+    // 17 rows, see `sample`.
     assert_eq!(cursor(cx, &view), 0);
     press(cx, window, "k");
     assert_eq!(cursor(cx, &view), 0);
@@ -173,32 +163,32 @@ fn j_and_k_move_the_cursor_and_stop_at_the_ends(cx: &mut TestAppContext) {
     press(cx, window, "down");
     press(cx, window, "up");
     assert_eq!(cursor(cx, &view), 2);
-    for _ in 0..20 {
+    for _ in 0..30 {
         press(cx, window, "j");
     }
-    assert_eq!(cursor(cx, &view), 8);
+    assert_eq!(cursor(cx, &view), 16);
     press(cx, window, "home");
     assert_eq!(cursor(cx, &view), 0);
     press(cx, window, "end");
-    assert_eq!(cursor(cx, &view), 8);
+    assert_eq!(cursor(cx, &view), 16);
 }
 
 #[gpui_kit::test]
 fn n_and_p_jump_between_changed_chunks(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
     press(cx, window, "n");
-    assert_eq!(cursor(cx, &view), 3);
+    assert_eq!(cursor(cx, &view), 4);
     assert_eq!(anchor(cx, &view), (Some(13), Some(13)));
     // Inside the first chunk `n` still goes to the next one.
     press(cx, window, "j");
     press(cx, window, "n");
-    assert_eq!(cursor(cx, &view), 7);
+    assert_eq!(cursor(cx, &view), 13);
     press(cx, window, "n"); // no further chunk: stay
-    assert_eq!(cursor(cx, &view), 7);
+    assert_eq!(cursor(cx, &view), 13);
     press(cx, window, "p");
-    assert_eq!(cursor(cx, &view), 3);
+    assert_eq!(cursor(cx, &view), 4);
     press(cx, window, "p");
-    assert_eq!(cursor(cx, &view), 3);
+    assert_eq!(cursor(cx, &view), 4);
 }
 
 #[gpui_kit::test]
@@ -214,37 +204,142 @@ fn m_toggles_the_mode_and_keeps_the_line(cx: &mut TestAppContext) {
     press(cx, window, "shift-m");
     cx.update(|cx| assert_eq!(view.read(cx).mode(), DiffViewMode::SideBySide));
     assert_eq!(anchor(cx, &view), (Some(14), None));
+    let log = events.lock().expect("log").clone();
     assert_eq!(
-        *events.lock().expect("log"),
+        log.iter()
+            .filter(|e| e.starts_with("mode"))
+            .collect::<Vec<_>>(),
         ["mode Unified", "mode SideBySide"]
     );
 
     // On an inserted line the new-side number is what stays.
     press(cx, window, "n");
-    assert_eq!(anchor(cx, &view), (None, Some(39)));
+    assert_eq!(anchor(cx, &view), (None, Some(38)));
     press(cx, window, "m");
-    assert_eq!(anchor(cx, &view), (None, Some(39)));
+    assert_eq!(anchor(cx, &view), (None, Some(38)));
+}
+
+fn rows(cx: &mut TestAppContext, view: &Entity<DiffView>) -> usize {
+    cx.update(|cx| view.read(cx).layout().len())
+}
+
+fn fold_lines(cx: &mut TestAppContext, view: &Entity<DiffView>) -> Vec<u32> {
+    cx.update(|cx| {
+        view.read(cx)
+            .layout()
+            .rows()
+            .iter()
+            .filter_map(|r| match r {
+                Row::Fold(f) => Some(f.lines),
+                _ => None,
+            })
+            .collect()
+    })
 }
 
 #[gpui_kit::test]
-fn enter_on_a_skip_row_requests_expansion(cx: &mut TestAppContext) {
+fn the_server_diff_is_folded_by_the_context_preference(cx: &mut TestAppContext) {
+    let (_, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
+    assert_eq!(rows(cx, &view), 17);
+    assert_eq!(fold_lines(cx, &view), [9, 18]);
+    // The owner is never asked for anything.
+    assert!(events.lock().expect("log").is_empty());
+}
+
+#[gpui_kit::test]
+fn enter_opens_the_fold_under_the_cursor_only(cx: &mut TestAppContext) {
     let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
-    press(cx, window, "enter"); // row 0 is the leading skip
-    // A row that is not a skip does nothing.
-    press(cx, window, "j");
+    press(cx, window, "enter"); // row 0 is the leading fold
+    assert_eq!(fold_lines(cx, &view), [18]);
+    assert_eq!(rows(cx, &view), 17 - 1 + 9);
+    // The cursor is on the first line that was hidden.
+    assert_eq!(anchor(cx, &view), (Some(1), Some(1)));
+    assert_eq!(*events.lock().expect("log"), ["rows"]);
+    // On a line nothing happens.
     press(cx, window, "enter");
-    press(cx, window, "shift-x");
-    assert_eq!(
-        *events.lock().expect("log"),
-        ["expand 1+10 @1/1", "expand all"]
-    );
-    cx.update(|cx| assert_eq!(view.read(cx).cursor(), 1));
+    assert_eq!(rows(cx, &view), 25);
+    // `x` does the same as Enter.
+    go_to_second_fold(cx, window, &view, 17);
+    press(cx, window, "x");
+    assert!(fold_lines(cx, &view).is_empty());
+    assert_eq!(anchor(cx, &view), (Some(18), Some(17)));
+}
+
+fn go_to_second_fold(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    view: &Entity<DiffView>,
+    presses: usize,
+) {
+    for _ in 0..presses {
+        press(cx, window, "j");
+    }
+    assert_eq!(anchor(cx, view), (Some(18), Some(17)));
 }
 
 #[gpui_kit::test]
-fn shift_x_without_hidden_lines_says_so_instead_of_asking_the_owner(cx: &mut TestAppContext) {
-    let (window, view, events) = open(cx, sample_expanded(), DiffViewMode::SideBySide);
-    cx.update(|cx| assert!(!view.read(cx).has_hidden_lines()));
+fn alt_up_and_down_reveal_ten_lines_and_keep_the_cursor_on_the_fold(cx: &mut TestAppContext) {
+    let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    go_to_second_fold(cx, window, &view, 9);
+    press(cx, window, "alt-up");
+    assert_eq!(fold_lines(cx, &view), [9, 8]);
+    // Ten lines were added above the fold, the cursor stayed on the fold
+    // so that the key can be pressed again.
+    assert_eq!(cursor(cx, &view), 19);
+    assert_eq!(anchor(cx, &view), (Some(28), Some(27)));
+    // Fewer than ten lines left: they are all shown.
+    press(cx, window, "alt-down");
+    assert_eq!(fold_lines(cx, &view), [9]);
+    assert_eq!(rows(cx, &view), 17 + 18 - 1);
+}
+
+#[gpui_kit::test]
+fn the_edge_next_to_the_file_boundary_offers_nothing(cx: &mut TestAppContext) {
+    let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    // The first fold borders on the start of the file above.
+    press(cx, window, "alt-up");
+    assert_eq!(fold_lines(cx, &view), [9, 18]);
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).hint(),
+            Some("Nothing to show above this range")
+        );
+    });
+    // Below it works (and the 9 hidden lines all fit in ten).
+    press(cx, window, "alt-down");
+    assert_eq!(fold_lines(cx, &view), [18]);
+    // On a line: a hint, no change.
+    press(cx, window, "alt-down");
+    cx.update(|cx| assert_eq!(view.read(cx).hint(), Some("Not on a folded range")));
+    assert_eq!(fold_lines(cx, &view), [18]);
+}
+
+#[gpui_kit::test]
+fn shift_x_opens_every_fold_and_again_folds_them(cx: &mut TestAppContext) {
+    let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
+    press(cx, window, "n");
+    press(cx, window, "j");
+    let before = anchor(cx, &view);
+    press(cx, window, "shift-x");
+    assert!(fold_lines(cx, &view).is_empty());
+    assert_eq!(rows(cx, &view), 41 + 1);
+    cx.update(|cx| assert!(view.read(cx).all_expanded()));
+    assert_eq!(anchor(cx, &view), before);
+    assert_eq!(*events.lock().expect("log"), ["rows"]);
+    press(cx, window, "shift-x");
+    assert_eq!(fold_lines(cx, &view), [9, 18]);
+    assert_eq!(anchor(cx, &view), before);
+    cx.update(|cx| assert!(!view.read(cx).all_expanded()));
+}
+
+#[gpui_kit::test]
+fn shift_x_without_folds_says_so(cx: &mut TestAppContext) {
+    let all = ResolvedDiffPreferences {
+        context: DiffContext::All,
+        ..prefs(DiffViewMode::SideBySide)
+    };
+    let (window, view, events) = open_with(cx, sample(), all);
+    cx.update(|cx| assert!(!view.read(cx).has_folds()));
     press(cx, window, "shift-x");
     assert!(events.lock().expect("log").is_empty());
     cx.update(|cx| {
@@ -256,44 +351,99 @@ fn shift_x_without_hidden_lines_says_so_instead_of_asking_the_owner(cx: &mut Tes
     // The message goes away with the next move.
     press(cx, window, "j");
     cx.update(|cx| assert_eq!(view.read(cx).hint(), None));
+}
 
-    // With hidden lines the owner is asked, and there is no message.
+#[gpui_kit::test]
+fn opened_folds_survive_mode_and_diff_changes(cx: &mut TestAppContext) {
+    let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    press(cx, window, "enter");
+    go_to_second_fold(cx, window, &view, 17);
+    press(cx, window, "m");
+    // The first fold stays open in unified mode (9 + 3 + ... rows).
+    assert_eq!(fold_lines(cx, &view), [18]);
+    let a = anchor(cx, &view);
+    // The same diff again (e.g. the cache answered after a refetch).
+    cx.update(|cx| view.update(cx, |v, cx| v.set_diff(sample(), cx)));
+    assert_eq!(fold_lines(cx, &view), [18]);
+    assert_eq!(anchor(cx, &view), a);
+    // The owner can hand a remembered state to a new view.
+    let kept: Expansion = cx.update(|cx| view.read(cx).expansion().clone());
+    let (_, other, _) = open(cx, sample(), DiffViewMode::Unified);
+    cx.update(|cx| other.update(cx, |v, cx| v.set_expansion(kept, cx)));
+    assert_eq!(fold_lines(cx, &other), [18]);
+}
+
+#[gpui_kit::test]
+fn changing_the_context_refolds_locally_and_keeps_opened_folds(cx: &mut TestAppContext) {
     let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
-    cx.update(|cx| assert!(view.read(cx).has_hidden_lines()));
-    press(cx, window, "shift-x");
-    assert_eq!(*events.lock().expect("log"), ["expand all"]);
-    cx.update(|cx| assert_eq!(view.read(cx).hint(), None));
+    press(cx, window, "enter");
+    let set = |cx: &mut TestAppContext, c| {
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.set_preferences(
+                    ResolvedDiffPreferences {
+                        context: c,
+                        ..prefs(DiffViewMode::SideBySide)
+                    },
+                    cx,
+                )
+            })
+        })
+    };
+    set(cx, DiffContext::All);
+    assert!(fold_lines(cx, &view).is_empty());
+    assert_eq!(rows(cx, &view), 42);
+    set(cx, DiffContext::Lines(1));
+    // 12 lines: the first run folds 11 but the user opened it before.
+    assert_eq!(fold_lines(cx, &view), [22]);
+    set(cx, DiffContext::Lines(3));
+    assert_eq!(fold_lines(cx, &view), [18]);
+    // Only layout changes: no event asks the owner for a diff.
+    assert!(events.lock().expect("log").iter().all(|e| e == "rows"));
 }
 
 #[gpui_kit::test]
 fn a_new_diff_keeps_the_cursor_on_its_line(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
-    // Rest on the second skip row (hidden lines 16..39).
-    for _ in 0..6 {
-        press(cx, window, "j");
+    press(cx, window, "n");
+    press(cx, window, "n");
+    assert_eq!(anchor(cx, &view), (None, Some(38)));
+    // Another version of the diff (say, other whitespace handling) whose
+    // line 38 is the same.
+    let mut other = sample();
+    if let DiffChunk::Common { lines } = &mut other.chunks[0] {
+        lines[0] = "changed".into();
     }
-    assert_eq!(anchor(cx, &view), (Some(16), Some(15)));
-    cx.update(|cx| view.update(cx, |v, cx| v.set_diff(sample_expanded(), cx)));
-    cx.run_until_parked();
-    // The hidden region is now lines, and the cursor is on its first line.
-    assert_eq!(anchor(cx, &view), (Some(16), Some(15)));
+    cx.update(|cx| view.update(cx, |v, cx| v.set_diff(other, cx)));
+    assert_eq!(anchor(cx, &view), (None, Some(38)));
+    cx.update(|cx| view.update(cx, |v, cx| v.set_diff(sample(), cx)));
+    assert_eq!(anchor(cx, &view), (None, Some(38)));
+}
+
+#[gpui_kit::test]
+fn server_skips_are_shown_but_cannot_hold_the_cursor(cx: &mut TestAppContext) {
+    let mut d = sample();
+    d.chunks.insert(0, DiffChunk::Skip { lines: 5 });
+    let (window, view, _) = open(cx, d, DiffViewMode::SideBySide);
     cx.update(|cx| {
         let v = view.read(cx);
-        assert_eq!(v.layout().len(), 10 + 2 + 2 + 1 + 24 + 1 + 1);
-        assert!(matches!(v.layout().rows()[v.cursor()], Row::Side { .. }));
+        assert!(matches!(v.layout().rows()[0], Row::Hidden(_)));
+        assert_eq!(v.cursor(), 1);
     });
-
-    // From a line that exists in both diffs it stays on that line.
-    press(cx, window, "n");
-    assert_eq!(anchor(cx, &view), (None, Some(39)));
-    cx.update(|cx| view.update(cx, |v, cx| v.set_diff(sample(), cx)));
-    assert_eq!(anchor(cx, &view), (None, Some(39)));
+    press(cx, window, "k");
+    assert_eq!(cursor(cx, &view), 1);
+    press(cx, window, "enter"); // nothing to open
+    assert_eq!(rows(cx, &view), 26);
 }
 
 #[gpui_kit::test]
 fn paging_and_scrolling_follow_the_cursor(cx: &mut TestAppContext) {
     let diff = fixture("large_diff.response.json");
-    let (window, view, _) = open(cx, diff, DiffViewMode::SideBySide);
+    let all = ResolvedDiffPreferences {
+        context: DiffContext::All,
+        ..prefs(DiffViewMode::SideBySide)
+    };
+    let (window, view, _) = open_with(cx, diff, all);
     let len = cx.update(|cx| view.read(cx).layout().len());
     assert!(len > 5_000, "{len}");
     press(cx, window, "space");
@@ -375,7 +525,9 @@ fn fixtures_lay_out_in_both_modes() {
                     tab_size: 8,
                     show_tabs: true,
                     intraline: true,
+                    context: DiffContext::Lines(3),
                 },
+                &Expansion::default(),
             );
             assert!(!l.is_empty(), "{name}");
             // Line numbers never go backwards.
@@ -393,12 +545,15 @@ fn fixtures_lay_out_in_both_modes() {
 #[test]
 fn large_diff_layout_is_fast_and_numbered() {
     let d = fixture("large_diff.response.json");
-    let opts = LayoutOptions::from_prefs(&ResolvedDiffPreferences::default());
+    let opts = LayoutOptions {
+        context: DiffContext::All,
+        ..LayoutOptions::from_prefs(&ResolvedDiffPreferences::default())
+    };
     let mut best = std::time::Duration::MAX;
     for mode in [DiffViewMode::SideBySide, DiffViewMode::Unified] {
         let opts = LayoutOptions { mode, ..opts };
         let t = Instant::now();
-        let l = Layout::build(&d, &opts);
+        let l = Layout::build(&d, &opts, &Expansion::default());
         let took = t.elapsed();
         best = best.min(took);
         eprintln!("large diff, {mode:?}: {} rows in {took:?}", l.len());

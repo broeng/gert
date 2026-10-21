@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use gerrit_api::{Auth, fake::RouteHttpClient};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext};
-use model::{ChangeNumber, DiffContext, FileStatus, FilesKey, PatchSetNumber, PatchSetRef};
+use model::{ChangeNumber, FileStatus, FilesKey, PatchSetNumber, PatchSetRef};
 use store::{ServerId, Store};
 
 use super::{ChangeEvent, ChangePage, state::Block};
@@ -15,7 +15,7 @@ use crate::{
     nav::ChangeView,
     session::Session,
     settings::DiffSettings,
-    testing::{detail, file},
+    testing::{detail, file, whole_file},
     tests::{URL, env_with, open, setup},
 };
 
@@ -82,12 +82,6 @@ struct Fixture {
 fn diff_body() -> Vec<u8> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/handwritten/diff_rename.response.json");
-    std::fs::read(path).expect("fixture")
-}
-
-fn diff_with_skip() -> Vec<u8> {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/diff.response.json");
     std::fs::read(path).expect("fixture")
 }
 
@@ -293,32 +287,6 @@ fn i_toggles_the_inline_diff_of_the_current_file(cx: &mut TestAppContext) {
     cx.update(|cx| assert!(f.page.read(cx).expanded_paths().is_empty()));
 }
 
-/// A failed refetch used to vanish: the old diff stayed with no sign of it.
-#[gpui_kit::test]
-fn a_failed_whole_file_request_shows_an_error_on_the_inline_diff(cx: &mut TestAppContext) {
-    let f = page_with(cx, true, ChangeView::default(), |http| {
-        http.route("%2FCOMMIT_MSG/diff", 200, diff_with_skip());
-        http.route("%2FCOMMIT_MSG/diff?context=ALL", 500, "boom");
-    });
-    press(cx, &f, &["i"]);
-    cx.update_window(f.window, |_, window, cx| {
-        let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
-        let focus = view.read(cx).focus_for_test();
-        window.focus(&focus, cx);
-    })
-    .expect("focus");
-    press(cx, &f, &["shift-x"]);
-    cx.update(|cx| {
-        let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
-        match view.read(cx).status() {
-            Some(crate::diff::DiffStatus::Error(m)) => {
-                assert!(m.contains("Could not load more lines"), "{m}")
-            }
-            other => panic!("expected an error status, got {other:?}"),
-        }
-    });
-}
-
 #[gpui_kit::test]
 fn shift_i_expands_every_file_and_again_collapses_them(cx: &mut TestAppContext) {
     let f = page(cx, true, ChangeView::default());
@@ -335,40 +303,41 @@ fn shift_i_expands_every_file_and_again_collapses_them(cx: &mut TestAppContext) 
     cx.update(|cx| assert_eq!(f.page.read(cx).expanded_paths().len(), PATHS.len()));
 }
 
+fn inline_folds(cx: &mut TestAppContext, f: &Fixture) -> usize {
+    cx.update(|cx| {
+        let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
+        view.read(cx)
+            .layout()
+            .rows()
+            .iter()
+            .filter(|r| matches!(r, crate::diff::layout::Row::Fold(_)))
+            .count()
+    })
+}
+
 #[gpui_kit::test]
-fn showing_the_whole_file_in_an_inline_diff_refetches_with_all_context(cx: &mut TestAppContext) {
+fn an_inline_diff_is_folded_and_shift_x_opens_it_without_a_request(cx: &mut TestAppContext) {
     let f = page_with(cx, true, ChangeView::default(), |http| {
-        http.route("%2FCOMMIT_MSG/diff", 200, diff_with_skip());
+        http.route("%2FCOMMIT_MSG/diff", 200, whole_file());
     });
     press(cx, &f, &["i"]);
-    cx.update(|cx| {
-        assert_eq!(
-            f.page.read(cx).inline_context("/COMMIT_MSG"),
-            Some(DiffContext::Lines(10))
-        );
-    });
-    // Focus the inline view (as a click would) and ask for the whole file.
+    assert_eq!(inline_folds(cx, &f), 2);
+    // No context is requested: the server would ignore it.
+    assert!(f.http.requested().iter().all(|r| !r.contains("context")));
+    // Focus the inline view (as a click would) and open the folds.
     cx.update_window(f.window, |_, window, cx| {
         let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
         let focus = view.read(cx).focus_for_test();
         window.focus(&focus, cx);
     })
     .expect("focus");
+    let n = f.http.requested().len();
     press(cx, &f, &["shift-x"]);
-    cx.update(|cx| {
-        assert_eq!(
-            f.page.read(cx).inline_context("/COMMIT_MSG"),
-            Some(DiffContext::All)
-        );
-    });
-    assert!(f.http.requested().iter().any(|r| r.contains("context=ALL")));
-    // The view says which context it shows now.
+    assert_eq!(inline_folds(cx, &f), 0);
+    assert_eq!(f.http.requested().len(), n);
     cx.update(|cx| {
         let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
-        assert_eq!(
-            view.read(cx).status(),
-            Some(&crate::diff::DiffStatus::Info("Context: whole file".into()))
-        );
+        assert_eq!(view.read(cx).status(), None);
     });
     // Esc hands the focus back to the file list: j moves the page cursor.
     press(cx, &f, &["escape", "j"]);

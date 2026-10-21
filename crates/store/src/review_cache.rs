@@ -176,11 +176,10 @@ impl Store {
         let json = serde_json::to_string(diff)?;
         self.conn.execute(
             "INSERT INTO diffs
-                 (server_id, change_number, base_sha, target_sha, path, whitespace, context,
+                 (server_id, change_number, base_sha, target_sha, path, whitespace,
                   json, size, fetched_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT (server_id, change_number, base_sha, target_sha, path, whitespace,
-                          context)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (server_id, change_number, base_sha, target_sha, path, whitespace)
              DO UPDATE SET json = excluded.json, size = excluded.size,
                            fetched_ms = excluded.fetched_ms",
             params![
@@ -190,7 +189,6 @@ impl Store {
                 key.target.sha.as_str(),
                 key.path,
                 key.whitespace.as_wire(),
-                key.context.to_wire(),
                 json,
                 i64::try_from(json.len()).unwrap_or(i64::MAX),
                 millis(fetched_at)
@@ -205,15 +203,14 @@ impl Store {
             .query_row(
                 "SELECT json, fetched_ms FROM diffs
                  WHERE server_id = ?1 AND change_number = ?2 AND base_sha = ?3
-                   AND target_sha = ?4 AND path = ?5 AND whitespace = ?6 AND context = ?7",
+                   AND target_sha = ?4 AND path = ?5 AND whitespace = ?6",
                 params![
                     server.0,
                     number(key.change),
                     sha(&key.base),
                     key.target.sha.as_str(),
                     key.path,
-                    key.whitespace.as_wire(),
-                    key.context.to_wire()
+                    key.whitespace.as_wire()
                 ],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -233,15 +230,14 @@ impl Store {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM diffs
                  WHERE server_id = ?1 AND change_number = ?2 AND base_sha = ?3
-                   AND target_sha = ?4 AND path = ?5 AND whitespace = ?6 AND context = ?7)",
+                   AND target_sha = ?4 AND path = ?5 AND whitespace = ?6)",
             params![
                 server.0,
                 number(key.change),
                 sha(&key.base),
                 key.target.sha.as_str(),
                 key.path,
-                key.whitespace.as_wire(),
-                key.context.to_wire()
+                key.whitespace.as_wire()
             ],
             |r| r.get(0),
         )?)

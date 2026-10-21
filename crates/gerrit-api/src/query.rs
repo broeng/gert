@@ -1,4 +1,4 @@
-use model::{DiffContext, DiffKey, PatchSetNumber, Whitespace};
+use model::{DiffKey, PatchSetNumber, Whitespace};
 
 /// Optional extra data for change queries (`o=` parameters).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +76,6 @@ pub struct DiffParams {
     /// Compare against this patch set; `None` compares against the parent
     /// commit.
     pub base: Option<PatchSetNumber>,
-    pub context: DiffContext,
     /// Ask for intraline edits.
     pub intraline: bool,
     pub whitespace: Whitespace,
@@ -86,7 +85,6 @@ impl Default for DiffParams {
     fn default() -> Self {
         Self {
             base: None,
-            context: DiffContext::Lines(10),
             intraline: true,
             whitespace: Whitespace::IgnoreNone,
         }
@@ -98,7 +96,6 @@ impl DiffParams {
     pub fn for_key(key: &DiffKey) -> Self {
         Self {
             base: key.base.as_ref().map(|b| b.number),
-            context: key.context,
             intraline: true,
             whitespace: key.whitespace.clone(),
         }
@@ -110,7 +107,6 @@ impl DiffParams {
         if let Some(base) = self.base {
             q.push(("base", base.to_string()));
         }
-        q.push(("context", self.context.to_wire()));
         if self.intraline {
             q.push(("intraline", String::new()));
         }

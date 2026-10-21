@@ -18,8 +18,7 @@ use std::sync::Arc;
 use futures::{FutureExt, executor::block_on, future::BoxFuture};
 use gerrit_api::{Auth, ChangeQuery, DiffParams, Error, GerritClient, HttpClient, HttpError};
 use model::{
-    ChangeNumber, ChangeStatus, DiffChangeType, DiffChunk, DiffContext, FileStatus, PatchSetNumber,
-    RevisionId,
+    ChangeNumber, ChangeStatus, DiffChangeType, DiffChunk, FileStatus, PatchSetNumber, RevisionId,
 };
 
 /// Blocking `ureq` behind the async trait; fine for tests.
@@ -223,9 +222,33 @@ fn files_with_and_without_base() {
     assert!(!paths.contains(&"src/retry.rs"), "{paths:?}");
 }
 
+/// How many `skip` chunks a raw anonymous diff request with `context=ctx`
+/// returns (our client never sends `context`).
+fn raw_skip_chunks(n: ChangeNumber, rev: &RevisionId, path: &str, ctx: &str) -> usize {
+    let url = format!(
+        "{}/changes/{n}/revisions/{rev}/files/{path}/diff?context={ctx}",
+        base_url().trim_end_matches('/')
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut resp = agent.get(&url).call().expect("raw diff request");
+    assert_eq!(resp.status().as_u16(), 200, "{url}");
+    let body = resp.body_mut().read_to_string().expect("body");
+    let json = body.strip_prefix(")]}'").expect("XSSI guard").trim_start();
+    let v: serde_json::Value = serde_json::from_str(json).expect("json");
+    v["content"]
+        .as_array()
+        .expect("content")
+        .iter()
+        .filter(|c| c.get("skip").is_some())
+        .count()
+}
+
 #[test]
 #[ignore = "needs GERT_TEST_GERRIT"]
-fn diffs_and_the_context_parameter() {
+fn diffs_are_whole_files_whatever_the_context() {
     let c = alice();
     let n = find(&c, "Retry failed jobs with exponential backoff");
     let rev = current_sha(&c, n);
@@ -251,39 +274,34 @@ fn diffs_and_the_context_parameter() {
     let del = diff("src/old.rs", &DiffParams::default());
     assert_eq!(del.change_type, Some(DiffChangeType::Deleted));
 
-    // `context=`: data/big.txt has 400 lines with edits at lines 20 and 380.
-    // Gerrit 3.14 answers 200 for `ALL` (and for any other value) and always
-    // returns the whole file in `content`, never a `skip` chunk, so the
-    // client has to collapse unchanged runs itself.
-    let mut summary = Vec::new();
-    for ctx in [
-        DiffContext::Lines(0),
-        DiffContext::Lines(3),
-        DiffContext::Lines(10),
-        DiffContext::All,
-    ] {
-        let params = DiffParams {
-            context: ctx,
-            ..DiffParams::default()
-        };
-        let d = diff("data/big.txt", &params);
-        let skips = d
-            .chunks
+    // data/big.txt has 400 lines with edits at lines 20 and 380. Gerrit 3.14
+    // ignores `context` and always returns the whole file, never a `skip`
+    // chunk, so the client folds unchanged runs itself (so our requests
+    // do not send `context` at all). A future Gerrit that honors it would
+    // still pass: skips are only tolerated when `context=N` was sent.
+    let d = diff("data/big.txt", &DiffParams::default());
+    assert!(
+        !d.chunks
             .iter()
-            .filter(|ch| matches!(ch, DiffChunk::Skip { .. }))
-            .count();
+            .any(|ch| matches!(ch, DiffChunk::Skip { .. })),
+        "a request without context must return the whole file"
+    );
+    assert_eq!(d.b_len(), d.meta_b.as_ref().unwrap().lines);
+    assert_eq!(d.a_len(), d.meta_a.as_ref().unwrap().lines);
+    let whole = d.chunks.len();
+    for ctx in ["0", "3", "10", "ALL"] {
+        let skips = raw_skip_chunks(n, &rev, "data%2Fbig.txt", ctx);
+        println!("context={ctx}: {skips} skip chunks (request without context: {whole} chunks)");
+        if ctx == "ALL" {
+            assert_eq!(skips, 0, "context=ALL must not skip anything");
+        }
+        if skips == 0 {
+            continue;
+        }
         println!(
-            "context={}: {} chunks, {} skip chunks, covers {} lines",
-            ctx.to_wire(),
-            d.chunks.len(),
-            skips,
-            d.b_len()
+            "this Gerrit folds server-side for context={ctx}; the client copes with `skip` chunks"
         );
-        assert_eq!(d.b_len(), d.meta_b.as_ref().unwrap().lines);
-        summary.push((d.chunks.len(), skips));
     }
-    let all = summary.last().unwrap();
-    assert_eq!(all.1, 0, "context=ALL must not skip anything");
 
     // Against another patch set.
     let delta = diff(

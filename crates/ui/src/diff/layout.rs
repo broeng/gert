@@ -10,14 +10,39 @@
 //!   offsets again.
 //! - A [`model::ChangedChunk`] flagged `common` (equal apart from ignored
 //!   whitespace) is shown as plain common lines and is not a navigable chunk.
+//!   For folding it counts as unchanged, like any other common line.
+//!
+//! Folding. Gerrit 3.x ignores the `context` parameter and always sends the
+//! whole file, so unchanged lines are folded here, like PolyGerrit does.
+//! Every run of unchanged lines is looked at on its own:
+//! - next to a change it keeps `n` lines (the context preference) on that
+//!   side: `n` after the previous change, `n` before the next one; at the
+//!   start or end of the file only the side facing a change keeps lines;
+//! - what is left in between becomes one [`FoldRow`], unless it is fewer than
+//!   [`MIN_FOLD`] lines (a fold row would save nothing) or the context is
+//!   "whole file";
+//! - a file without any change (a pure rename or mode change) keeps its first
+//!   `n` lines and folds the rest;
+//! - [`Expansion`] records what the user revealed, per run, and is applied on
+//!   top of the context, so it survives context and mode changes.
+//!
+//! A [`DiffChunk::Skip`] (not sent by Gerrit 3.x, but by other servers) can
+//! not be expanded locally: its lines were never received. It becomes a
+//! [`Row::Hidden`], and unchanged runs next to one are not folded.
 
-use std::{ops::Range, sync::Arc};
+use std::{collections::BTreeMap, ops::Range, sync::Arc};
 
-use model::{Diff, DiffChangeType, DiffChunk, DiffViewMode, ResolvedDiffPreferences};
+use model::{Diff, DiffChangeType, DiffChunk, DiffContext, DiffViewMode, ResolvedDiffPreferences};
 
 /// Lines longer than this are cut (and end in `…`). Shaping minified
 /// one-liners of hundreds of kilobytes would stall the frame.
 pub const MAX_LINE_BYTES: usize = 4096;
+
+/// Folds hiding fewer lines than this are not made: the lines are shown.
+pub const MIN_FOLD: u32 = 3;
+
+/// How many lines "+N above / below" reveal.
+pub const REVEAL_STEP: u32 = 10;
 
 /// What the layout is built from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +53,8 @@ pub struct LayoutOptions {
     pub show_tabs: bool,
     /// Use the server's intraline edits.
     pub intraline: bool,
+    /// How many unchanged lines to keep around changes.
+    pub context: DiffContext,
 }
 
 impl LayoutOptions {
@@ -37,6 +64,7 @@ impl LayoutOptions {
             tab_size: prefs.tab_size,
             show_tabs: prefs.show_tabs,
             intraline: prefs.intraline_difference,
+            context: prefs.context,
         }
     }
 }
@@ -64,16 +92,84 @@ pub struct Cell {
     pub due_to_rebase: bool,
 }
 
-/// A run of unchanged lines the server did not send.
+/// A folded run of unchanged lines (see the module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SkipRow {
+pub struct FoldRow {
+    /// How many lines are hidden.
     pub lines: u32,
     /// First hidden line number on the old and new side (1-based).
     pub old_start: u32,
     pub new_start: u32,
-    /// Nothing but hidden lines precedes / follows it in the diff.
-    pub at_start: bool,
-    pub at_end: bool,
+    /// Identifies the run of unchanged lines this fold is part of (the old
+    /// line number of the run's first line), for [`Expansion`].
+    pub run: u32,
+    /// Lines can be revealed at the top / bottom edge of the fold: it borders
+    /// on a change there (or, in a file without changes, on the start).
+    /// Revealing from the far side of a fold at a file end would not help
+    /// anyone, so those edges offer nothing.
+    pub above: bool,
+    pub below: bool,
+}
+
+/// What the user revealed of the folds of one file. Keyed by run, not by
+/// fold, so it applies to whatever the context preference folds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Expansion {
+    /// Show everything.
+    all: bool,
+    runs: BTreeMap<u32, Reveal>,
+}
+
+/// Lines revealed from the top / bottom edge of a run's fold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Reveal {
+    top: u32,
+    bottom: u32,
+}
+
+impl Expansion {
+    /// Reveals `n` more lines at the top edge of the fold of `run` (the
+    /// ones next to the preceding lines).
+    pub fn reveal_top(&mut self, run: u32, n: u32) {
+        let r = self.runs.entry(run).or_default();
+        r.top = r.top.saturating_add(n);
+    }
+
+    /// Reveals `n` more lines at the bottom edge of the fold of `run`.
+    pub fn reveal_bottom(&mut self, run: u32, n: u32) {
+        let r = self.runs.entry(run).or_default();
+        r.bottom = r.bottom.saturating_add(n);
+    }
+
+    /// Reveals the whole fold of `run`.
+    pub fn reveal_run(&mut self, run: u32) {
+        self.runs.insert(
+            run,
+            Reveal {
+                top: u32::MAX,
+                bottom: 0,
+            },
+        );
+    }
+
+    /// Reveals every fold of the file.
+    pub fn reveal_everything(&mut self) {
+        self.all = true;
+    }
+
+    /// Folds everything again.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Whether everything is revealed by [`Self::reveal_everything`].
+    pub fn is_everything(&self) -> bool {
+        self.all
+    }
+
+    fn get(&self, run: u32) -> Reveal {
+        self.runs.get(&run).copied().unwrap_or_default()
+    }
 }
 
 /// A one-line message in place of (or above) the lines.
@@ -111,8 +207,19 @@ pub enum Row {
         new: Option<u32>,
         cell: Cell,
     },
-    Skip(SkipRow),
+    Fold(FoldRow),
+    /// Lines the server left out (`skip`): they were never received and
+    /// cannot be shown.
+    Hidden(HiddenRow),
     Notice(Notice),
+}
+
+/// See [`Row::Hidden`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HiddenRow {
+    pub lines: u32,
+    pub old_start: u32,
+    pub new_start: u32,
 }
 
 impl Row {
@@ -120,7 +227,8 @@ impl Row {
         match self {
             Self::Side { left, .. } => left.as_ref().map(|c| c.number),
             Self::Unified { old, .. } => *old,
-            Self::Skip(s) => Some(s.old_start),
+            Self::Fold(s) => Some(s.old_start),
+            Self::Hidden(s) => Some(s.old_start),
             Self::Notice(_) => None,
         }
     }
@@ -129,20 +237,24 @@ impl Row {
         match self {
             Self::Side { right, .. } => right.as_ref().map(|c| c.number),
             Self::Unified { new, .. } => *new,
-            Self::Skip(s) => Some(s.new_start),
+            Self::Fold(s) => Some(s.new_start),
+            Self::Hidden(s) => Some(s.new_start),
             Self::Notice(_) => None,
         }
     }
 
     /// Whether the line cursor may rest on this row.
     pub fn selectable(&self) -> bool {
-        !matches!(self, Self::Notice(_))
+        !matches!(self, Self::Notice(_) | Self::Hidden(_))
     }
 
     fn covers(&self, side: Side, n: u32) -> bool {
+        let range = |start: u32, lines: u32| start..start + lines;
         match (self, side) {
-            (Self::Skip(s), Side::Old) => (s.old_start..s.old_start + s.lines).contains(&n),
-            (Self::Skip(s), Side::New) => (s.new_start..s.new_start + s.lines).contains(&n),
+            (Self::Fold(s), Side::Old) => range(s.old_start, s.lines).contains(&n),
+            (Self::Fold(s), Side::New) => range(s.new_start, s.lines).contains(&n),
+            (Self::Hidden(s), Side::Old) => range(s.old_start, s.lines).contains(&n),
+            (Self::Hidden(s), Side::New) => range(s.new_start, s.lines).contains(&n),
             (_, Side::Old) => self.old_number() == Some(n),
             (_, Side::New) => self.new_number() == Some(n),
         }
@@ -175,7 +287,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn build(diff: &Diff, opts: &LayoutOptions) -> Self {
+    pub fn build(diff: &Diff, opts: &LayoutOptions, expansion: &Expansion) -> Self {
         let mut b = Builder {
             opts: *opts,
             rows: Vec::new(),
@@ -189,33 +301,19 @@ impl Layout {
             if diff.chunks.is_empty() {
                 b.rows.push(Row::Notice(Notice::Empty));
             }
-            let last = diff.chunks.len().saturating_sub(1);
-            for (i, chunk) in diff.chunks.iter().enumerate() {
-                match chunk {
-                    DiffChunk::Common { lines } => {
-                        for line in lines {
-                            b.common(old, new, line, line);
-                            old += 1;
-                            new += 1;
-                        }
+            let segments = segments(diff);
+            for (i, seg) in segments.iter().enumerate() {
+                match seg {
+                    Segment::Run(run) => {
+                        let before = i.checked_sub(1).map(|j| &segments[j]);
+                        let after = segments.get(i + 1);
+                        b.run(run, Neighbours::of(before, after), expansion);
                     }
-                    DiffChunk::Changed(c) => {
-                        b.changed(c, old, new);
-                        old += len32(&c.a);
-                        new += len32(&c.b);
-                    }
-                    DiffChunk::Skip { lines } => {
-                        b.rows.push(Row::Skip(SkipRow {
-                            lines: *lines,
-                            old_start: old,
-                            new_start: new,
-                            at_start: i == 0,
-                            at_end: i == last,
-                        }));
-                        old += lines;
-                        new += lines;
-                    }
+                    Segment::Changed(c, o, n) => b.changed(c, *o, *n),
+                    Segment::Hidden(h) => b.rows.push(Row::Hidden(h.clone())),
                 }
+                old = seg.old_start() + seg.old_len();
+                new = seg.new_start() + seg.new_len();
             }
         }
         Self {
@@ -302,6 +400,132 @@ fn len32<T>(v: &[T]) -> u32 {
     u32::try_from(v.len()).unwrap_or(u32::MAX)
 }
 
+/// A line on both sides: the old and the new text (they differ only for
+/// lines of a whitespace-only change).
+type PairedLine<'a> = (&'a str, &'a str);
+
+/// Consecutive unchanged lines.
+struct Run<'a> {
+    old: u32,
+    new: u32,
+    lines: Vec<PairedLine<'a>>,
+}
+
+enum Segment<'a> {
+    Run(Run<'a>),
+    Changed(&'a model::ChangedChunk, u32, u32),
+    Hidden(HiddenRow),
+}
+
+impl Segment<'_> {
+    fn old_start(&self) -> u32 {
+        match self {
+            Self::Run(r) => r.old,
+            Self::Changed(_, old, _) => *old,
+            Self::Hidden(h) => h.old_start,
+        }
+    }
+
+    fn new_start(&self) -> u32 {
+        match self {
+            Self::Run(r) => r.new,
+            Self::Changed(_, _, new) => *new,
+            Self::Hidden(h) => h.new_start,
+        }
+    }
+
+    fn old_len(&self) -> u32 {
+        match self {
+            Self::Run(r) => len32(&r.lines),
+            Self::Changed(c, ..) => len32(&c.a),
+            Self::Hidden(h) => h.lines,
+        }
+    }
+
+    fn new_len(&self) -> u32 {
+        match self {
+            Self::Run(r) => len32(&r.lines),
+            Self::Changed(c, ..) => len32(&c.b),
+            Self::Hidden(h) => h.lines,
+        }
+    }
+}
+
+/// The diff as runs of unchanged lines between changes. Adjacent common
+/// chunks and whitespace-only changes are merged into one run.
+fn segments(diff: &Diff) -> Vec<Segment<'_>> {
+    let mut out: Vec<Segment<'_>> = Vec::new();
+    let (mut old, mut new) = (1_u32, 1_u32);
+    fn push_lines<'a>(out: &mut Vec<Segment<'a>>, lines: Vec<PairedLine<'a>>, old: u32, new: u32) {
+        if let Some(Segment::Run(r)) = out.last_mut() {
+            r.lines.extend(lines);
+        } else {
+            out.push(Segment::Run(Run { old, new, lines }));
+        }
+    }
+    for chunk in &diff.chunks {
+        match chunk {
+            DiffChunk::Common { lines } => {
+                let n = len32(lines);
+                let paired = lines.iter().map(|l| (l.as_str(), l.as_str())).collect();
+                push_lines(&mut out, paired, old, new);
+                old += n;
+                new += n;
+            }
+            DiffChunk::Changed(c) if c.common && c.a.len() == c.b.len() => {
+                let paired = c.a.iter().zip(&c.b);
+                let paired = paired.map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                push_lines(&mut out, paired, old, new);
+                old += len32(&c.a);
+                new += len32(&c.b);
+            }
+            DiffChunk::Changed(c) => {
+                out.push(Segment::Changed(c, old, new));
+                old += len32(&c.a);
+                new += len32(&c.b);
+            }
+            DiffChunk::Skip { lines } => {
+                out.push(Segment::Hidden(HiddenRow {
+                    lines: *lines,
+                    old_start: old,
+                    new_start: new,
+                }));
+                old += lines;
+                new += lines;
+            }
+        }
+    }
+    out
+}
+
+/// What a run of unchanged lines borders on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    FileBoundary,
+    Change,
+    /// Lines the server did not send.
+    Hidden,
+}
+
+struct Neighbours {
+    before: Edge,
+    after: Edge,
+}
+
+impl Neighbours {
+    fn of(before: Option<&Segment<'_>>, after: Option<&Segment<'_>>) -> Self {
+        let edge = |s: Option<&Segment<'_>>| match s {
+            None => Edge::FileBoundary,
+            Some(Segment::Hidden(_)) => Edge::Hidden,
+            Some(_) => Edge::Change,
+        };
+        Self {
+            before: edge(before),
+            after: edge(after),
+        }
+    }
+}
+
 struct Builder {
     opts: LayoutOptions,
     rows: Vec<Row>,
@@ -335,6 +559,54 @@ impl Builder {
         }
     }
 
+    /// A run of unchanged lines, folded as far as the context and the
+    /// user's reveals allow.
+    fn run(&mut self, run: &Run<'_>, edges: Neighbours, expansion: &Expansion) {
+        let total = len32(&run.lines);
+        let shown_all = |this: &mut Self| {
+            for (i, (a, b)) in (0_u32..).zip(&run.lines) {
+                this.common(run.old + i, run.new + i, a, b);
+            }
+        };
+        let DiffContext::Lines(n) = self.opts.context else {
+            return shown_all(self);
+        };
+        if expansion.all || edges.before == Edge::Hidden || edges.after == Edge::Hidden {
+            return shown_all(self);
+        }
+        let (keep_top, keep_bottom) = match (edges.before, edges.after) {
+            (Edge::Change, Edge::Change) => (n, n),
+            (Edge::Change, _) => (n, 0),
+            (_, Edge::Change) => (0, n),
+            // No change in the whole file: show how it starts.
+            _ => (n, 0),
+        };
+        let reveal = expansion.get(run.old);
+        let top = keep_top.saturating_add(reveal.top);
+        let bottom = keep_bottom.saturating_add(reveal.bottom);
+        let hidden = total.saturating_sub(top.saturating_add(bottom));
+        if hidden < MIN_FOLD || top.saturating_add(bottom) >= total {
+            return shown_all(self);
+        }
+        let (head, rest) = run.lines.split_at(top as usize);
+        let (_, tail) = rest.split_at(rest.len() - bottom as usize);
+        for (i, (a, b)) in (0_u32..).zip(head) {
+            self.common(run.old + i, run.new + i, a, b);
+        }
+        self.rows.push(Row::Fold(FoldRow {
+            lines: hidden,
+            old_start: run.old + top,
+            new_start: run.new + top,
+            run: run.old,
+            above: keep_top > 0 || edges.before == Edge::Change,
+            below: edges.after == Edge::Change,
+        }));
+        let tail_start = total - len32(tail);
+        for (i, (a, b)) in (tail_start..).zip(tail) {
+            self.common(run.old + i, run.new + i, a, b);
+        }
+    }
+
     /// A line on both sides. `a` and `b` differ only for whitespace-only
     /// changes; otherwise they are the same text.
     fn common(&mut self, old: u32, new: u32, a: &str, b: &str) {
@@ -363,12 +635,6 @@ impl Builder {
     }
 
     fn changed(&mut self, c: &model::ChangedChunk, old: u32, new: u32) {
-        if c.common && c.a.len() == c.b.len() {
-            for (i, (a, b)) in (0_u32..).zip(c.a.iter().zip(&c.b)) {
-                self.common(old + i, new + i, a, b);
-            }
-            return;
-        }
         let empty = |n: usize| vec![Vec::new(); n];
         let (marks_a, marks_b) = if self.opts.intraline {
             (c.marks_a(), c.marks_b())
@@ -540,6 +806,7 @@ mod tests {
             tab_size: 4,
             show_tabs: false,
             intraline: true,
+            context: DiffContext::All,
         }
     }
 
@@ -552,6 +819,10 @@ mod tests {
             common(&["c"]),
             DiffChunk::Skip { lines: 5 },
         ])
+    }
+
+    fn build(diff: &Diff, opts: &LayoutOptions) -> Layout {
+        Layout::build(diff, opts, &Expansion::default())
     }
 
     type Half<'a> = Option<(u32, &'a str)>;
@@ -567,20 +838,18 @@ mod tests {
     }
 
     #[test]
-    fn side_by_side_numbers_survive_skips() {
-        let l = Layout::build(&sample(), &opts(DiffViewMode::SideBySide));
+    fn server_skips_keep_the_line_numbers_going() {
+        let l = build(&sample(), &opts(DiffViewMode::SideBySide));
         let r = l.rows();
         assert_eq!(r.len(), 2 + 1 + 2 + 1 + 1);
         assert_eq!(side(&r[0]), (Some((1, "a")), Some((1, "a"))));
         assert_eq!(side(&r[1]), (Some((2, "b")), Some((2, "b"))));
         assert_eq!(
             r[2],
-            Row::Skip(SkipRow {
+            Row::Hidden(HiddenRow {
                 lines: 10,
                 old_start: 3,
                 new_start: 3,
-                at_start: false,
-                at_end: false
             })
         );
         // The change begins after the 10 hidden lines, at line 13 on both sides.
@@ -591,12 +860,10 @@ mod tests {
         assert_eq!(side(&r[5]), (Some((14, "c")), Some((15, "c"))));
         assert_eq!(
             r[6],
-            Row::Skip(SkipRow {
+            Row::Hidden(HiddenRow {
                 lines: 5,
                 old_start: 15,
                 new_start: 16,
-                at_start: false,
-                at_end: true
             })
         );
         assert_eq!(l.max_numbers(), (19, 20));
@@ -604,7 +871,7 @@ mod tests {
 
     #[test]
     fn unified_puts_deletions_before_insertions() {
-        let l = Layout::build(&sample(), &opts(DiffViewMode::Unified));
+        let l = build(&sample(), &opts(DiffViewMode::Unified));
         let r = l.rows();
         assert_eq!(r.len(), 2 + 1 + 3 + 1 + 1);
         let unified = |row: &Row| match row {
@@ -633,23 +900,313 @@ mod tests {
         );
     }
 
+    // --- folding ---------------------------------------------------------
+
+    fn numbered(from: usize, to: usize) -> Vec<String> {
+        (from..=to).map(|i| format!("l{i}")).collect()
+    }
+
+    fn common_n(from: usize, to: usize) -> DiffChunk {
+        DiffChunk::Common {
+            lines: numbered(from, to),
+        }
+    }
+
+    fn fold_opts(mode: DiffViewMode, n: u32) -> LayoutOptions {
+        LayoutOptions {
+            context: DiffContext::Lines(n),
+            ..opts(mode)
+        }
+    }
+
+    /// Unified rows as `text`, `-text`, `+text` or `~N` for a fold.
+    fn shape(l: &Layout) -> Vec<String> {
+        l.rows()
+            .iter()
+            .map(|r| match r {
+                Row::Unified { cell, .. } => match cell.kind {
+                    LineKind::Common => cell.text.to_string(),
+                    LineKind::Removed => format!("-{}", cell.text),
+                    LineKind::Added => format!("+{}", cell.text),
+                },
+                Row::Fold(f) => format!("~{}", f.lines),
+                Row::Hidden(h) => format!("?{}", h.lines),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn folded(chunks: Vec<DiffChunk>, n: u32) -> Vec<String> {
+        shape(&build(&diff(chunks), &fold_opts(DiffViewMode::Unified, n)))
+    }
+
     #[test]
-    fn skip_at_start_and_end_are_flagged() {
-        let d = diff(vec![
-            DiffChunk::Skip { lines: 3 },
+    fn a_run_between_changes_keeps_context_on_both_sides() {
+        let d = vec![
             changed(&["x"], &["y"]),
-            DiffChunk::Skip { lines: 4 },
+            common_n(1, 30),
+            changed(&["p"], &["q"]),
+        ];
+        assert_eq!(
+            folded(d, 3),
+            [
+                "-x", "+y", "l1", "l2", "l3", "~24", "l28", "l29", "l30", "-p", "+q"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_start_keeps_context_only_before_the_first_change() {
+        let d = vec![common_n(1, 20), changed(&["x"], &["y"])];
+        assert_eq!(folded(d, 3), ["~17", "l18", "l19", "l20", "-x", "+y"]);
+    }
+
+    #[test]
+    fn the_end_keeps_context_only_after_the_last_change() {
+        let d = vec![changed(&["x"], &["y"]), common_n(1, 20)];
+        assert_eq!(folded(d, 3), ["-x", "+y", "l1", "l2", "l3", "~17"]);
+    }
+
+    #[test]
+    fn small_gaps_are_not_folded() {
+        let run = |len| {
+            vec![
+                changed(&["x"], &["y"]),
+                common_n(1, len),
+                changed(&["p"], &["q"]),
+            ]
+        };
+        // 8 lines with 3 of context on each side would hide 2: shown.
+        assert_eq!(folded(run(8), 3).len(), 2 + 8 + 2);
+        // 9 lines would hide 3 (MIN_FOLD): folded.
+        let rows = folded(run(9), 3);
+        assert_eq!(rows.len(), 2 + 3 + 1 + 3 + 2);
+        assert!(rows.contains(&"~3".to_owned()));
+        // Changes closer than twice the context merge their contexts.
+        assert_eq!(folded(run(5), 3).len(), 2 + 5 + 2);
+    }
+
+    #[test]
+    fn zero_context_folds_everything_unchanged() {
+        let d = vec![
+            common_n(1, 5),
+            changed(&["x"], &["y"]),
+            common_n(6, 9),
+            changed(&["p"], &["q"]),
+        ];
+        assert_eq!(folded(d, 0), ["~5", "-x", "+y", "~4", "-p", "+q"]);
+    }
+
+    #[test]
+    fn whole_file_context_folds_nothing() {
+        let d = diff(vec![common_n(1, 50), changed(&["x"], &["y"])]);
+        let l = build(&d, &opts(DiffViewMode::Unified));
+        assert_eq!(l.len(), 52);
+    }
+
+    #[test]
+    fn a_file_without_changes_shows_how_it_starts() {
+        let d = vec![common_n(1, 20)];
+        assert_eq!(folded(d, 3), ["l1", "l2", "l3", "~17"]);
+        // And all of it when the context says so, or when it is short.
+        assert_eq!(folded(vec![common_n(1, 5)], 3).len(), 5);
+    }
+
+    #[test]
+    fn fold_rows_know_their_lines_and_edges() {
+        let d = diff(vec![
+            common_n(1, 20),
+            changed(&["x"], &["y", "z"]),
+            common_n(21, 60),
+            changed(&["p"], &["q"]),
+            common_n(61, 80),
         ]);
-        let l = Layout::build(&d, &opts(DiffViewMode::SideBySide));
-        let flags: Vec<_> = l
+        let l = build(&d, &fold_opts(DiffViewMode::SideBySide, 3));
+        let folds: Vec<_> = l
             .rows()
             .iter()
             .filter_map(|r| match r {
-                Row::Skip(s) => Some((s.at_start, s.at_end, s.old_start)),
+                Row::Fold(f) => Some(f.clone()),
                 _ => None,
             })
             .collect();
-        assert_eq!(flags, [(true, false, 1), (false, true, 5)]);
+        let want = |lines, old_start, new_start, run, above, below| FoldRow {
+            lines,
+            old_start,
+            new_start,
+            run,
+            above,
+            below,
+        };
+        assert_eq!(
+            folds,
+            [
+                want(17, 1, 1, 1, false, true),
+                // One old line became two: the new side is one ahead.
+                want(34, 25, 26, 22, true, true),
+                want(17, 66, 67, 63, true, false),
+            ]
+        );
+        // The numbers continue correctly after a fold.
+        let Row::Side { left, right } = &l.rows()[1] else {
+            panic!()
+        };
+        assert_eq!(left.as_ref().map(|c| c.number), Some(18));
+        assert_eq!(right.as_ref().map(|c| c.number), Some(18));
+        assert_eq!(l.max_numbers(), (82, 83));
+    }
+
+    #[test]
+    fn whitespace_only_chunks_count_as_unchanged() {
+        let ws = DiffChunk::Changed(ChangedChunk {
+            a: lines(&["a  b"]),
+            b: lines(&["a b"]),
+            common: true,
+            ..Default::default()
+        });
+        let d = vec![
+            common_n(1, 10),
+            ws,
+            common_n(12, 21),
+            changed(&["x"], &["y"]),
+        ];
+        let l = build(&diff(d), &fold_opts(DiffViewMode::Unified, 2));
+        // 21 unchanged lines in one run, folded as one: 19 hidden.
+        assert_eq!(shape(&l), ["~19", "l20", "l21", "-x", "+y"]);
+        assert_eq!(l.chunks().len(), 1);
+    }
+
+    #[test]
+    fn server_skips_stay_hidden_and_stop_folding_next_to_them() {
+        let d = vec![
+            common_n(1, 30),
+            DiffChunk::Skip { lines: 40 },
+            common_n(71, 100),
+            changed(&["x"], &["y"]),
+        ];
+        let rows = folded(d, 3);
+        assert_eq!(rows.iter().filter(|r| r.starts_with('?')).count(), 1);
+        assert!(rows.contains(&"?40".to_owned()));
+        // The run before the skip is shown in full; the one after it is
+        // next to a skip as well.
+        assert_eq!(rows.len(), 30 + 1 + 30 + 2);
+        let l = build(
+            &diff(vec![DiffChunk::Skip { lines: 4 }]),
+            &opts(DiffViewMode::Unified),
+        );
+        assert_eq!(l.first_selectable(), None);
+    }
+
+    fn big() -> Diff {
+        diff(vec![
+            changed(&["x"], &["y"]),
+            common_n(1, 100),
+            changed(&["p"], &["q"]),
+        ])
+    }
+
+    fn with(ex: &Expansion, mode: DiffViewMode) -> Layout {
+        Layout::build(&big(), &fold_opts(mode, 3), ex)
+    }
+
+    #[test]
+    fn partial_reveals_shrink_the_fold_from_either_edge() {
+        let mut ex = Expansion::default();
+        let first = |l: &Layout| {
+            l.rows()
+                .iter()
+                .find_map(|r| match r {
+                    Row::Fold(f) => Some(f.clone()),
+                    _ => None,
+                })
+                .expect("a fold")
+        };
+        let l = with(&ex, DiffViewMode::Unified);
+        assert_eq!(first(&l).lines, 94);
+
+        ex.reveal_top(2, 10);
+        let f = first(&with(&ex, DiffViewMode::Unified));
+        assert_eq!((f.lines, f.old_start), (84, 15));
+
+        ex.reveal_bottom(2, 10);
+        let l = with(&ex, DiffViewMode::Unified);
+        assert_eq!(first(&l).lines, 74);
+        // 3 + 10 lines above, 10 + 3 below.
+        assert_eq!(l.len(), 2 + 13 + 1 + 13 + 2);
+
+        // The side-by-side layout folds the same lines.
+        let sbs = with(&ex, DiffViewMode::SideBySide);
+        assert!(
+            sbs.rows()
+                .iter()
+                .any(|r| matches!(r, Row::Fold(f) if f.lines == 74))
+        );
+    }
+
+    #[test]
+    fn revealing_nearly_everything_shows_the_rest_instead_of_a_tiny_fold() {
+        let mut ex = Expansion::default();
+        ex.reveal_top(2, 89); // 94 - 89 = 5 left: still folded
+        assert!(
+            with(&ex, DiffViewMode::Unified)
+                .rows()
+                .iter()
+                .any(|r| matches!(r, Row::Fold(f) if f.lines == 5))
+        );
+        ex.reveal_top(2, 4); // 1 left: shown
+        let l = with(&ex, DiffViewMode::Unified);
+        assert!(!l.rows().iter().any(|r| matches!(r, Row::Fold(_))));
+        assert_eq!(l.len(), 2 + 100 + 2);
+    }
+
+    #[test]
+    fn revealing_a_run_or_everything_removes_the_folds() {
+        let mut ex = Expansion::default();
+        ex.reveal_run(2);
+        assert_eq!(with(&ex, DiffViewMode::Unified).len(), 2 + 100 + 2);
+
+        let mut all = Expansion::default();
+        all.reveal_everything();
+        assert!(all.is_everything());
+        assert_eq!(with(&all, DiffViewMode::SideBySide).len(), 100 + 2);
+        all.clear();
+        assert!(!all.is_everything());
+        assert!(
+            with(&all, DiffViewMode::SideBySide)
+                .rows()
+                .iter()
+                .any(|r| matches!(r, Row::Fold(_)))
+        );
+    }
+
+    #[test]
+    fn reveals_apply_on_top_of_any_context() {
+        let mut ex = Expansion::default();
+        ex.reveal_top(2, 10);
+        let l = Layout::build(&big(), &fold_opts(DiffViewMode::Unified, 10), &ex);
+        // 10 + 10 above, 10 below, 70 hidden.
+        assert!(
+            l.rows()
+                .iter()
+                .any(|r| matches!(r, Row::Fold(f) if f.lines == 70))
+        );
+    }
+
+    #[test]
+    fn anchors_find_folded_lines_at_the_fold_and_revealed_ones_directly() {
+        let ex = Expansion::default();
+        let l = with(&ex, DiffViewMode::Unified);
+        let anchor = Anchor {
+            old: Some(50),
+            new: Some(50),
+        };
+        let at = l.find(anchor).expect("fold");
+        assert!(matches!(l.rows()[at], Row::Fold(_)));
+        let mut all = Expansion::default();
+        all.reveal_everything();
+        let l = with(&all, DiffViewMode::Unified);
+        let at = l.find(anchor).expect("line");
+        assert_eq!(l.anchor(at), anchor);
     }
 
     #[test]
@@ -662,7 +1219,7 @@ mod tests {
             changed(&["gone"], &[]),
             common(&["c"]),
         ]);
-        let l = Layout::build(&d, &opts(DiffViewMode::SideBySide));
+        let l = build(&d, &opts(DiffViewMode::SideBySide));
         // rows: a | 1/3, 2/- | b | -/new | gone/- | c
         assert_eq!(l.len(), 7);
         assert_eq!(l.chunk_starts(), [1, 4, 5]);
@@ -679,7 +1236,7 @@ mod tests {
         assert_eq!(l.prev_chunk(5), Some(4));
         assert_eq!(l.prev_chunk(6), Some(5));
 
-        let u = Layout::build(&d, &opts(DiffViewMode::Unified));
+        let u = build(&d, &opts(DiffViewMode::Unified));
         assert_eq!(u.chunk_starts(), [1, 5, 6]);
     }
 
@@ -691,7 +1248,7 @@ mod tests {
             due_to_rebase: true,
             ..Default::default()
         })]);
-        let l = Layout::build(&d, &opts(DiffViewMode::SideBySide));
+        let l = build(&d, &opts(DiffViewMode::SideBySide));
         let Row::Side { left, right } = &l.rows()[0] else {
             panic!()
         };
@@ -707,7 +1264,7 @@ mod tests {
             common: true,
             ..Default::default()
         })]);
-        let l = Layout::build(&d, &opts(DiffViewMode::SideBySide));
+        let l = build(&d, &opts(DiffViewMode::SideBySide));
         let Row::Side { left, right } = &l.rows()[0] else {
             panic!()
         };
@@ -791,7 +1348,7 @@ mod tests {
             edits_b: vec![IntralineEdit { skip: 1, mark: 3 }],
             ..Default::default()
         })]);
-        let l = Layout::build(&d, &opts(DiffViewMode::SideBySide));
+        let l = build(&d, &opts(DiffViewMode::SideBySide));
         let Row::Side { right: Some(c), .. } = &l.rows()[0] else {
             panic!()
         };
@@ -802,7 +1359,7 @@ mod tests {
             intraline: false,
             ..opts(DiffViewMode::SideBySide)
         };
-        let l = Layout::build(&d, &off);
+        let l = build(&d, &off);
         let Row::Side { right: Some(c), .. } = &l.rows()[0] else {
             panic!()
         };
@@ -813,12 +1370,12 @@ mod tests {
     fn binary_empty_and_rename_notices() {
         let mut d = diff(Vec::new());
         d.binary = true;
-        let l = Layout::build(&d, &opts(DiffViewMode::SideBySide));
+        let l = build(&d, &opts(DiffViewMode::SideBySide));
         assert_eq!(l.rows(), [Row::Notice(Notice::Binary)]);
         assert_eq!(l.first_selectable(), None);
         assert!(l.chunks().is_empty());
 
-        let l = Layout::build(&diff(Vec::new()), &opts(DiffViewMode::Unified));
+        let l = build(&diff(Vec::new()), &opts(DiffViewMode::Unified));
         assert_eq!(l.rows(), [Row::Notice(Notice::Empty)]);
 
         let meta = |name: &str| {
@@ -832,7 +1389,7 @@ mod tests {
         d.change_type = Some(DiffChangeType::Renamed);
         d.meta_a = meta("old.rs");
         d.meta_b = meta("new.rs");
-        let l = Layout::build(&d, &opts(DiffViewMode::SideBySide));
+        let l = build(&d, &opts(DiffViewMode::SideBySide));
         assert_eq!(
             l.rows()[0],
             Row::Notice(Notice::RenamedFrom("old.rs".into()))
@@ -840,13 +1397,13 @@ mod tests {
         assert_eq!(l.first_selectable(), Some(1));
         // Same name on both sides: no notice.
         d.meta_b = meta("old.rs");
-        assert_eq!(Layout::build(&d, &opts(DiffViewMode::SideBySide)).len(), 1);
+        assert_eq!(build(&d, &opts(DiffViewMode::SideBySide)).len(), 1);
     }
 
     #[test]
     fn anchors_map_between_modes() {
-        let side = Layout::build(&sample(), &opts(DiffViewMode::SideBySide));
-        let uni = Layout::build(&sample(), &opts(DiffViewMode::Unified));
+        let side = build(&sample(), &opts(DiffViewMode::SideBySide));
+        let uni = build(&sample(), &opts(DiffViewMode::Unified));
         // Every side-by-side row finds a unified row showing one of its lines.
         for i in 0..side.len() {
             let a = side.anchor(i);
@@ -865,7 +1422,7 @@ mod tests {
             })
             .expect("old line");
         assert_eq!(side.anchor(del).old, Some(13));
-        // A line hidden by a skip is found at the skip row.
+        // A line the server left out is found at its hidden row.
         assert_eq!(
             side.find(Anchor {
                 old: Some(7),

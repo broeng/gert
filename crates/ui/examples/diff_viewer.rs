@@ -98,7 +98,7 @@ fn main() {
                 v
             });
             cx.subscribe(&view, |_, ev: &DiffEvent, _| match ev {
-                DiffEvent::ExpandRequested(e) => eprintln!("expand requested: {e:?}"),
+                DiffEvent::RowsChanged => eprintln!("rows changed"),
                 DiffEvent::ModeChanged(m) => eprintln!("mode: {m:?}"),
             })
             .detach();

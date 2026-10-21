@@ -83,3 +83,21 @@ pub fn file(path: &str, status: FileStatus) -> FileEntry {
         binary: false,
     }
 }
+
+/// A whole-file response like the server's: 80 lines with one changed
+/// line in the middle and nothing folded.
+pub fn whole_file() -> Vec<u8> {
+    let lines =
+        |from: u32, to: u32| -> Vec<String> { (from..=to).map(|n| format!("l{n}")).collect() };
+    let body = serde_json::json!({
+        "meta_a": {"name": "src/a.rs", "content_type": "text/x-rust", "lines": 80},
+        "meta_b": {"name": "src/a.rs", "content_type": "text/x-rust", "lines": 80},
+        "change_type": "MODIFIED",
+        "content": [
+            {"ab": lines(1, 40)},
+            {"a": ["old"], "b": ["new"]},
+            {"ab": lines(42, 80)},
+        ],
+    });
+    format!(")]}}'\n{body}").into_bytes()
+}

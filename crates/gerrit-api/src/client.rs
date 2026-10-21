@@ -804,13 +804,11 @@ mod tests {
         get(DiffParams::default());
         get(DiffParams {
             base: Some(PatchSetNumber(3)),
-            context: model::DiffContext::All,
             intraline: true,
             whitespace: model::Whitespace::IgnoreAll,
         });
         get(DiffParams {
             base: None,
-            context: model::DiffContext::Lines(0),
             intraline: false,
             whitespace: model::Whitespace::Unknown("X".into()),
         });
@@ -822,9 +820,9 @@ mod tests {
         assert_eq!(
             queries,
             [
-                "context=10&intraline&whitespace=IGNORE_NONE",
-                "base=3&context=ALL&intraline&whitespace=IGNORE_ALL",
-                "context=0&whitespace=X",
+                "intraline&whitespace=IGNORE_NONE",
+                "base=3&intraline&whitespace=IGNORE_ALL",
+                "whitespace=X",
             ]
         );
     }
@@ -843,12 +841,10 @@ mod tests {
             },
             path: "f".into(),
             whitespace: model::Whitespace::IgnoreTrailing,
-            context: model::DiffContext::Lines(25),
         };
         let p = DiffParams::for_key(&key);
         assert_eq!(p.base, Some(PatchSetNumber(1)));
         assert!(p.intraline);
-        assert_eq!(p.context, model::DiffContext::Lines(25));
         assert_eq!(p.whitespace, model::Whitespace::IgnoreTrailing);
     }
 

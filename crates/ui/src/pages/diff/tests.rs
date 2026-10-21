@@ -20,7 +20,7 @@ use crate::{
     session::{SavedQuery, Startup},
     settings::DiffSettings,
     shell::Shell,
-    testing::{detail, file, summary},
+    testing::{detail, file, summary, whole_file},
     tests::{URL, env_with, open, setup},
 };
 
@@ -80,13 +80,6 @@ fn http_with(body: Vec<u8>) -> RouteHttpClient {
 
 fn http() -> RouteHttpClient {
     http_with(diff_body())
-}
-
-/// The fixture whose diff has a hidden run of common lines.
-fn diff_with_skip() -> Vec<u8> {
-    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/diff.response.json");
-    std::fs::read(path).expect("fixture")
 }
 
 fn route(path: &str) -> DiffRoute {
@@ -180,7 +173,6 @@ fn a_cached_diff_is_shown_without_a_request(cx: &mut TestAppContext) {
         target: ps(3),
         path: "src/a.rs".into(),
         whitespace: Whitespace::IgnoreNone,
-        context: DiffContext::Lines(10),
     };
     store.save_diff(server, &key, &diff, now()).expect("diff");
     let p = diff_page(cx, store, "src/a.rs");
@@ -256,52 +248,82 @@ fn brackets_ask_for_the_neighbouring_files_and_stop_at_the_ends(cx: &mut TestApp
     assert!(first.events.lock().expect("log").is_empty());
 }
 
-#[gpui_kit::test]
-fn showing_the_whole_file_refetches_with_all_context_and_keeps_the_cursor(cx: &mut TestAppContext) {
-    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(diff_with_skip()));
+fn folds(cx: &mut TestAppContext, p: &Page) -> Vec<u32> {
     cx.update(|cx| {
         let v = p.page.read(cx).view_for_test().expect("view");
-        v.update(cx, |v, cx| v.set_cursor(3, cx));
+        v.read(cx)
+            .layout()
+            .rows()
+            .iter()
+            .filter_map(|r| match r {
+                crate::diff::layout::Row::Fold(f) => Some(f.lines),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn the_server_diff_is_folded_by_the_preferred_context(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(whole_file()));
+    // Default context 10: 40 lines before the change, 39 after it.
+    assert_eq!(folds(cx, &p), [30, 29]);
+    // The request carries no context, the server would ignore it.
+    assert_eq!(requests(&p.http, "context"), 0, "{:?}", p.http.requested());
+}
+
+#[gpui_kit::test]
+fn shift_x_opens_the_folds_locally_and_keeps_the_cursor(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(whole_file()));
+    cx.update(|cx| {
+        let v = p.page.read(cx).view_for_test().expect("view");
+        v.update(cx, |v, cx| v.set_cursor(14, cx));
     });
     let before = cx.update(|cx| {
         let v = p.page.read(cx).view_for_test().expect("view");
         v.read(cx).cursor_anchor()
     });
+    let n = p.http.requested().len();
     press(cx, p.window, &["shift-x"]);
-    assert!(
-        requests(&p.http, "context=ALL") >= 1,
-        "{:?}",
-        p.http.requested()
-    );
+    assert!(folds(cx, &p).is_empty());
+    assert_eq!(p.http.requested().len(), n, "{:?}", p.http.requested());
     cx.update(|cx| {
         let page = p.page.read(cx);
-        assert_eq!(
-            page.key_for_test().map(|k| k.context),
-            Some(DiffContext::All)
-        );
         let v = page.view_for_test().expect("view");
         assert_eq!(v.read(cx).cursor_anchor(), before);
+        assert_eq!(v.read(cx).status(), None);
     });
+    press(cx, p.window, &["shift-x"]);
+    assert_eq!(folds(cx, &p), [30, 29]);
+}
+
+#[gpui_kit::test]
+fn enter_on_a_fold_opens_it_without_a_request(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(whole_file()));
+    let n = p.http.requested().len();
+    press(cx, p.window, &["enter"]); // the cursor starts on the first fold
+    assert_eq!(folds(cx, &p), [29]);
+    assert_eq!(p.http.requested().len(), n);
 }
 
 /// The header says what is on screen, and a refetch that fails shows up on
 /// the view (it used to be swallowed: the old diff stayed, with no sign).
 #[gpui_kit::test]
-fn a_failed_whole_file_request_is_reported_and_the_header_stays_truthful(cx: &mut TestAppContext) {
-    let http = http_with(diff_with_skip());
-    http.route("context=ALL", 400, "bad request");
+fn a_failed_whitespace_refetch_is_reported_and_the_header_stays_truthful(cx: &mut TestAppContext) {
+    let http = http_with(whole_file());
+    http.route("whitespace=IGNORE_TRAILING", 400, "bad request");
     let p = diff_page_with(cx, seeded(), "src/a.rs", http);
-    press(cx, p.window, &["shift-x"]);
+    press(cx, p.window, &[",", "w"]);
     cx.update(|cx| {
         let page = p.page.read(cx);
         assert_eq!(
-            page.shown_for_test().map(|k| k.context),
-            Some(DiffContext::Lines(10)),
+            page.shown_for_test().map(|k| k.whitespace.clone()),
+            Some(Whitespace::IgnoreNone),
             "still showing the old diff"
         );
         assert_eq!(
-            page.key_for_test().map(|k| k.context),
-            Some(DiffContext::Lines(10))
+            page.key_for_test().map(|k| k.whitespace.clone()),
+            Some(Whitespace::IgnoreNone)
         );
         let v = page.view_for_test().expect("view");
         match v.read(cx).status() {
@@ -311,78 +333,39 @@ fn a_failed_whole_file_request_is_reported_and_the_header_stays_truthful(cx: &mu
             other => panic!("expected an error status, got {other:?}"),
         }
     });
-    // Asking again retries the same request.
-    press(cx, p.window, &["shift-x"]);
-    assert_eq!(
-        requests(&p.http, "context=ALL"),
-        2,
-        "{:?}",
-        p.http.requested()
-    );
 }
 
 #[gpui_kit::test]
-fn a_successful_whole_file_request_updates_the_shown_context(cx: &mut TestAppContext) {
-    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(diff_with_skip()));
-    press(cx, p.window, &["shift-x"]);
-    cx.update(|cx| {
-        let page = p.page.read(cx);
-        assert_eq!(
-            page.shown_for_test().map(|k| k.context),
-            Some(DiffContext::All)
-        );
-        let v = page.view_for_test().expect("view");
-        assert_eq!(v.read(cx).status(), None);
-    });
-}
-
-#[gpui_kit::test]
-fn enter_on_a_skip_row_requests_more_context_than_before(cx: &mut TestAppContext) {
-    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(diff_with_skip()));
-    // Put the cursor on the skip row of the fixture and expand it.
-    let skip_row = cx.update(|cx| {
-        let v = p.page.read(cx).view_for_test().expect("view");
-        let rows = v.read(cx).layout().rows().to_vec();
-        rows.iter()
-            .position(|r| matches!(r, crate::diff::layout::Row::Skip(_)))
-    });
-    let row = skip_row.expect("the fixture hides some lines");
-    cx.update(|cx| {
-        let v = p.page.read(cx).view_for_test().expect("view");
-        v.update(cx, |v, cx| v.set_cursor(row, cx));
-    });
+fn a_whitespace_refetch_keeps_the_folds_the_user_opened(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(whole_file()));
     press(cx, p.window, &["enter"]);
-    cx.update(|cx| {
-        let ctx = p.page.read(cx).key_for_test().map(|k| k.context);
-        assert!(
-            matches!(ctx, Some(DiffContext::Lines(n)) if n > 10) || ctx == Some(DiffContext::All)
-        );
-    });
+    assert_eq!(folds(cx, &p), [29]);
+    press(cx, p.window, &[",", "w", "escape"]);
+    assert_eq!(
+        requests(&p.http, "a.rs/diff?intraline&whitespace=IGNORE_TRAILING"),
+        1
+    );
+    assert_eq!(folds(cx, &p), [29]);
 }
 
 #[gpui_kit::test]
 fn the_preferences_panel_changes_session_settings_and_refetches(cx: &mut TestAppContext) {
-    let p = diff_page(cx, seeded(), "src/a.rs");
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(whole_file()));
     press(cx, p.window, &[","]);
     cx.update(|cx| assert!(p.page.read(cx).prefs_open_for_test()));
 
     press(cx, p.window, &["w"]); // whitespace: trailing
     assert_eq!(
-        requests(
-            &p.http,
-            "a.rs/diff?context=10&intraline&whitespace=IGNORE_TRAILING"
-        ),
+        requests(&p.http, "a.rs/diff?intraline&whitespace=IGNORE_TRAILING"),
         1,
         "{:?}",
         p.http.requested()
     );
+    // Context only folds differently: 40 lines, 25 of them kept.
+    let n = p.http.requested().len();
     press(cx, p.window, &["c"]); // context 10 -> 25
-    assert_eq!(
-        requests(&p.http, "a.rs/diff?context=25"),
-        1,
-        "{:?}",
-        p.http.requested()
-    );
+    assert_eq!(p.http.requested().len(), n, "{:?}", p.http.requested());
+    assert_eq!(folds(cx, &p), [15, 14]);
     press(cx, p.window, &["m"]);
     cx.update(|cx| {
         let r = p.settings.read(cx).resolved();
