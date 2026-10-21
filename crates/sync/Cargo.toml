@@ -9,6 +9,16 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+futures.workspace = true
+gerrit-api.workspace = true
+jiff.workspace = true
+model.workspace = true
+store.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+gerrit-api = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true
