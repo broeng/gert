@@ -1,5 +1,6 @@
 //! A standalone diff widget: layout model ([`layout`], pure) and a
-//! virtualized GPUI view ([`DiffView`]) on top of it.
+//! virtualized GPUI view ([`DiffView`]) on top of it. The view is a
+//! variable-height `list`, so rows other than code lines can sit between lines.
 //!
 //! The owner creates a [`DiffView`] with a [`model::Diff`] and resolved
 //! preferences and subscribes to [`DiffEvent`]. Unchanged lines are folded

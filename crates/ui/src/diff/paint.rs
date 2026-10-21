@@ -8,7 +8,9 @@ use gpui_kit::*;
 
 use super::layout::{Cell, LineKind};
 
-/// Row height for a font size: uniform, so the list can virtualize.
+/// Height of a code row for a font size. Other rows (comment threads) have
+/// their own, measured height; this is also the hint for rows not yet
+/// measured.
 pub fn row_height(font_size: Pixels) -> Pixels {
     (font_size * 1.55).round()
 }
