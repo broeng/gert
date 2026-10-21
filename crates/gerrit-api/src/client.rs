@@ -180,7 +180,7 @@ fn snippet(body: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use futures::executor::block_on;
-    use model::{AccountId, ChangeStatus};
+    use model::{AccountId, ChangeStatus, PatchSetNumber};
 
     use super::*;
     use crate::fake::FakeHttpClient;
@@ -377,7 +377,7 @@ mod tests {
         fake.push_response(200, xssi(json));
         let c = client(&fake, "https://h", Auth::Anonymous);
         let d = block_on(c.get_change(ChangeNumber(5))).unwrap();
-        assert_eq!(d.current_patch_set, Some(2));
+        assert_eq!(d.current_patch_set, Some(PatchSetNumber(2)));
         assert_eq!(d.commit_message.as_deref(), Some("msg"));
         assert_eq!(d.summary.status, ChangeStatus::New);
     }
@@ -423,8 +423,8 @@ mod tests {
         fake.push_response(200, xssi(&json));
         let c = client(&fake, "https://h", Auth::Anonymous);
         let d = block_on(c.get_change(ChangeNumber(5))).unwrap();
-        assert_eq!(d.current_revision.as_deref(), Some("abc"));
-        assert_eq!(d.current_patch_set, Some(2));
+        assert_eq!(d.current_revision, Some("abc".into()));
+        assert_eq!(d.current_patch_set, Some(PatchSetNumber(2)));
         assert_eq!(d.commit_message.as_deref(), Some("subj\n\nbody\n"));
         assert_eq!(d.reviewers[0].id, AccountId(4));
         assert_eq!(d.cc[0].display(), "C");

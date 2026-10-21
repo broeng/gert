@@ -163,10 +163,14 @@ fn change_detail_round_trip_updates_summary() {
     let detail = ChangeDetail {
         summary: change(5, T2),
         current_revision: Some("abc".into()),
-        current_patch_set: Some(3),
+        current_patch_set: Some(model::PatchSetNumber(3)),
         commit_message: Some("msg".into()),
         reviewers: vec![],
         cc: vec![],
+        revisions: vec![],
+        messages: vec![],
+        submit_requirements: vec![],
+        votes: Default::default(),
     };
     s.save_change_detail(id, &detail, ts(T2)).unwrap();
     let got = s.load_change_detail(id, ChangeNumber(5)).unwrap().unwrap();

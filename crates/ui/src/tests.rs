@@ -125,10 +125,14 @@ fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) 
     let detail = ChangeDetail {
         summary: summary(8),
         current_revision: Some("abc123".into()),
-        current_patch_set: Some(2),
+        current_patch_set: Some(model::PatchSetNumber(2)),
         commit_message: Some("Subject\n\nBody".into()),
         reviewers: vec![],
         cc: vec![],
+        revisions: vec![],
+        messages: vec![],
+        submit_requirements: vec![],
+        votes: Default::default(),
     };
     store
         .save_change_detail(
@@ -186,10 +190,14 @@ fn change_page_shows_cached_detail(cx: &mut TestAppContext) {
     let detail = ChangeDetail {
         summary: summary(5),
         current_revision: None,
-        current_patch_set: Some(1),
+        current_patch_set: Some(model::PatchSetNumber(1)),
         commit_message: Some("Fix things".into()),
         reviewers: vec![],
         cc: vec![],
+        revisions: vec![],
+        messages: vec![],
+        submit_requirements: vec![],
+        votes: Default::default(),
     };
     store
         .save_change_detail(
