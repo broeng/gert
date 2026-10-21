@@ -1,0 +1,15 @@
+{
+  "atom_explanations": {
+    "key": "atom_explanations-value"
+  },
+  "error_message": "error_message-value",
+  "expression": "expression-value",
+  "failing_atoms": [
+    "failing_atoms-value"
+  ],
+  "fulfilled": true,
+  "passing_atoms": [
+    "passing_atoms-value"
+  ],
+  "status": "TIMEOUT"
+}

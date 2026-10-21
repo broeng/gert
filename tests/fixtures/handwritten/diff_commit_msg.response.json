@@ -1,0 +1,48 @@
+)]}'
+{
+  "meta_a": {
+    "name": "/COMMIT_MSG",
+    "content_type": "text/x-gerrit-commit-message",
+    "lines": 9
+  },
+  "meta_b": {
+    "name": "/COMMIT_MSG",
+    "content_type": "text/x-gerrit-commit-message",
+    "lines": 9
+  },
+  "change_type": "MODIFIED",
+  "intraline_status": "OK",
+  "content": [
+    {
+      "ab": [
+        "Parent:     0123456 (Previous commit subject)",
+        "Author:     Jane Doe <jane.doe@example.com>",
+        "AuthorDate: 2013-02-01 09:59:32 +0000",
+        "Commit:     Jane Doe <jane.doe@example.com>",
+        "CommitDate: 2013-02-01 09:59:32 +0000",
+        ""
+      ]
+    },
+    {
+      "a": [
+        "Fix the frobnicator"
+      ],
+      "b": [
+        "Fix the frobnicator properly"
+      ],
+      "edit_a": [],
+      "edit_b": [
+        [
+          19,
+          9
+        ]
+      ]
+    },
+    {
+      "ab": [
+        "",
+        "Change-Id: I8473b95934b5732ac55d26311a706c9c2bde9940"
+      ]
+    }
+  ]
+}

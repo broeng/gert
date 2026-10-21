@@ -139,6 +139,39 @@ pub fn minimal_fields(schema: &str) -> &'static [&'static str] {
         "CommitInfo" => &["commit", "subject", "message", "author", "committer"],
         "GitPerson" => &["name", "email", "date", "tz"],
         "AttentionSetInfo" => &["account", "last_update", "reason"],
+        // The file list always has these (a modified file has no `status`).
+        "CommonFileInfo" => &["lines_inserted", "lines_deleted", "size_delta", "size"],
+        "FileMeta" => &["name", "content_type", "lines"],
+        "ContentEntry" => &["ab"],
+        "DiffInfo" => &[
+            "meta_a",
+            "meta_b",
+            "intraline_status",
+            "change_type",
+            "content",
+        ],
+        "RelatedChangesInfo" => &["changes"],
+        "RelatedChangeAndCommitInfo" => &[
+            "project",
+            "change_id",
+            "commit",
+            "_change_number",
+            "_revision_number",
+            "_current_revision_number",
+            "status",
+        ],
+        "ChangeMessageInfo" => &["id", "author", "date", "message", "_revision_number"],
+        "SubmitRequirementResultInfo" => &["name", "status", "is_legacy"],
+        "SubmitRequirementExpressionInfo" => &["expression", "fulfilled", "status"],
+        "DiffPreferencesInfo" => &[
+            "context",
+            "tab_size",
+            "line_length",
+            "ignore_whitespace",
+            "intraline_difference",
+            "show_tabs",
+        ],
+        "GeneralPreferencesInfo" => &["diff_view"],
         _ => &[],
     }
 }
@@ -172,6 +205,12 @@ fn int_for(owner: &str, hint: &str) -> i64 {
         (_, "insertions") => 12,
         (_, "deletions") => 3,
         (_, "tz") => 60,
+        ("DiffPreferencesInfo", "context") => 10,
+        ("DiffPreferencesInfo", "tab_size") => 8,
+        ("DiffPreferencesInfo", "line_length") => 100,
+        ("RelatedChangeAndCommitInfo", "_change_number") => 12346,
+        ("ContentEntry", "skip") => 25,
+        ("FileMeta", "lines") => 42,
         _ => 1,
     }
 }

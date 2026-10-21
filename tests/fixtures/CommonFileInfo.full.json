@@ -1,0 +1,14 @@
+{
+  "binary": true,
+  "diffs_too_expensive_to_compute": true,
+  "lines_deleted": 1,
+  "lines_inserted": 1,
+  "new_mode": 1,
+  "new_sha": "new_sha-value",
+  "old_mode": 1,
+  "old_path": "old_path-value",
+  "old_sha": "old_sha-value",
+  "size": 1,
+  "size_delta": 1,
+  "status": "status-value"
+}

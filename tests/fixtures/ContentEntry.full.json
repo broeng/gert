@@ -1,0 +1,26 @@
+{
+  "a": [
+    "a-value"
+  ],
+  "ab": [
+    "ab-value"
+  ],
+  "b": [
+    "b-value"
+  ],
+  "common": true,
+  "due_to_rebase": true,
+  "edit_a": [
+    [
+      1,
+      2
+    ]
+  ],
+  "edit_b": [
+    [
+      1,
+      2
+    ]
+  ],
+  "skip": 25
+}

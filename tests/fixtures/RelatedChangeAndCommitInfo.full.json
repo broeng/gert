@@ -1,0 +1,79 @@
+{
+  "_change_number": 12346,
+  "_current_revision_number": 1,
+  "_revision_number": 1,
+  "change_id": "I8473b95934b5732ac55d26311a706c9c2bde9940",
+  "commit": {
+    "author": {
+      "date": "2013-02-01 09:59:32.126000000",
+      "email": "jane.doe@example.com",
+      "name": "Jane Doe",
+      "tz": 60
+    },
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "committer": {
+      "date": "2013-02-01 09:59:32.126000000",
+      "email": "jane.doe@example.com",
+      "name": "Jane Doe",
+      "tz": 60
+    },
+    "message": "Fix the frobnicator\n\nLonger description.\n\nChange-Id: I8473b95934b5732ac55d26311a706c9c2bde9940\n",
+    "parents": [
+      {
+        "author": {
+          "date": "2013-02-01 09:59:32.126000000",
+          "email": "jane.doe@example.com",
+          "name": "Jane Doe",
+          "tz": 60
+        },
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "committer": {
+          "date": "2013-02-01 09:59:32.126000000",
+          "email": "jane.doe@example.com",
+          "name": "Jane Doe",
+          "tz": 60
+        },
+        "message": "Fix the frobnicator\n\nLonger description.\n\nChange-Id: I8473b95934b5732ac55d26311a706c9c2bde9940\n",
+        "parents": [],
+        "resolve_conflicts_web_links": [
+          {
+            "image_url": "image_url-value",
+            "name": "Jane Doe",
+            "tooltip": "tooltip-value",
+            "url": "https://gerrit.example.com/"
+          }
+        ],
+        "subject": "Fix the frobnicator",
+        "web_links": [
+          {
+            "image_url": "image_url-value",
+            "name": "Jane Doe",
+            "tooltip": "tooltip-value",
+            "url": "https://gerrit.example.com/"
+          }
+        ]
+      }
+    ],
+    "resolve_conflicts_web_links": [
+      {
+        "image_url": "image_url-value",
+        "name": "Jane Doe",
+        "tooltip": "tooltip-value",
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "subject": "Fix the frobnicator",
+    "web_links": [
+      {
+        "image_url": "image_url-value",
+        "name": "Jane Doe",
+        "tooltip": "tooltip-value",
+        "url": "https://gerrit.example.com/"
+      }
+    ]
+  },
+  "project": "my/project",
+  "status": "status-value",
+  "submittable": true,
+  "work_in_progress": true
+}

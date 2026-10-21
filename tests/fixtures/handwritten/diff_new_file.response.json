@@ -1,0 +1,24 @@
+)]}'
+{
+  "meta_b": {
+    "name": "src/added.rs",
+    "content_type": "text/x-rust",
+    "lines": 3
+  },
+  "change_type": "ADDED",
+  "intraline_status": "OK",
+  "diff_header": [
+    "diff --git a/src/added.rs b/src/added.rs",
+    "new file mode 100644",
+    "index 0000000..7c9d2e1"
+  ],
+  "content": [
+    {
+      "b": [
+        "// A new file.",
+        "pub fn added() {}",
+        ""
+      ]
+    }
+  ]
+}

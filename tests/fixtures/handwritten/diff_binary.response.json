@@ -1,0 +1,20 @@
+)]}'
+{
+  "meta_a": {
+    "name": "assets/logo.png",
+    "content_type": "image/png",
+    "lines": 0
+  },
+  "meta_b": {
+    "name": "assets/logo.png",
+    "content_type": "image/png",
+    "lines": 0
+  },
+  "change_type": "MODIFIED",
+  "diff_header": [
+    "diff --git a/assets/logo.png b/assets/logo.png",
+    "index 5d4a1c2..9e8b7f3 100644",
+    "Binary files differ"
+  ],
+  "binary": true
+}

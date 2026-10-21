@@ -132,7 +132,7 @@ fn revision(sha: &str, r: &RevisionInfo) -> Result<Revision, ConversionError> {
     })
 }
 
-fn message(m: &ChangeMessageInfo) -> Result<ChangeMessage, ConversionError> {
+pub(crate) fn message(m: &ChangeMessageInfo) -> Result<ChangeMessage, ConversionError> {
     Ok(ChangeMessage {
         id: required(m.id.clone(), "messages.id")?,
         author: m.author.as_ref().map(account).transpose()?,

@@ -1,6 +1,7 @@
 //! Dev tooling: `cargo xtask <command>`.
 
 mod fixtures;
+mod large_diff;
 mod schema;
 mod spec;
 

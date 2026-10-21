@@ -1,0 +1,28 @@
+)]}'
+{
+  "meta_a": {
+    "name": "src/indent.c",
+    "content_type": "text/x-csrc",
+    "lines": 3
+  },
+  "meta_b": {
+    "name": "src/indent.c",
+    "content_type": "text/x-csrc",
+    "lines": 3
+  },
+  "change_type": "MODIFIED",
+  "intraline_status": "OK",
+  "diff_header": [
+    "diff --git a/src/indent.c b/src/indent.c",
+    "index 1a2b3c4..5d6e7f8 100644"
+  ],
+  "content": [
+    {
+      "ab": [
+        "void f(void) {",
+        "    foo();",
+        "}"
+      ]
+    }
+  ]
+}

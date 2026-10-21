@@ -1,0 +1,21 @@
+{
+  "change_type": "COPIED",
+  "content": [
+    {
+      "ab": [
+        "ab-value"
+      ]
+    }
+  ],
+  "intraline_status": "TIMEOUT",
+  "meta_a": {
+    "content_type": "content_type-value",
+    "lines": 42,
+    "name": "Jane Doe"
+  },
+  "meta_b": {
+    "content_type": "content_type-value",
+    "lines": 42,
+    "name": "Jane Doe"
+  }
+}

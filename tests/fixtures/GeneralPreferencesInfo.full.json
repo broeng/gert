@@ -1,0 +1,38 @@
+{
+  "ai_chat_selected_model": "ai_chat_selected_model-value",
+  "allow_autocompleting_comments": true,
+  "allow_browser_notifications": true,
+  "allow_suggest_code_while_commenting": true,
+  "change_table": [
+    "change_table-value"
+  ],
+  "changes_per_page": 1,
+  "date_format": "UK",
+  "default_base_for_merges": "AUTO_MERGE",
+  "diff_page_sidebar": "diff_page_sidebar-value",
+  "diff_view": "SIDE_BY_SIDE",
+  "disable_keyboard_shortcuts": true,
+  "disable_token_highlighting": true,
+  "download_scheme": "download_scheme-value",
+  "email_format": "HTML_PLAINTEXT",
+  "email_strategy": "DISABLED",
+  "expand_inline_diffs": true,
+  "label_filter": "label_filter-value",
+  "legacycid_in_change_table": true,
+  "mute_common_path_prefixes": true,
+  "my": [
+    {
+      "id": "my%2Fproject~12345",
+      "name": "Jane Doe",
+      "target": "target-value",
+      "url": "https://gerrit.example.com/"
+    }
+  ],
+  "publish_comments_on_push": true,
+  "relative_date_in_change_table": true,
+  "signed_off_by": true,
+  "size_bar_in_change_table": true,
+  "theme": "DARK",
+  "time_format": "HHMM_12",
+  "work_in_progress_by_default": true
+}

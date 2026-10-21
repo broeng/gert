@@ -1,0 +1,13 @@
+{
+  "content_type": "content_type-value",
+  "lines": 42,
+  "name": "Jane Doe",
+  "web_links": [
+    {
+      "image_url": "image_url-value",
+      "name": "Jane Doe",
+      "tooltip": "tooltip-value",
+      "url": "https://gerrit.example.com/"
+    }
+  ]
+}
