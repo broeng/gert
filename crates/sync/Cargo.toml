@@ -12,6 +12,7 @@ rust-version.workspace = true
 futures.workspace = true
 gerrit-api.workspace = true
 jiff.workspace = true
+log.workspace = true
 model.workspace = true
 store.workspace = true
 thiserror.workspace = true

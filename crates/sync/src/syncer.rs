@@ -1,10 +1,16 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::future::{BoxFuture, FutureExt};
-use gerrit_api::{ChangeQuery, GerritClient};
+use gerrit_api::{ChangeQuery, DiffParams, GerritClient};
 use jiff::Timestamp;
-use model::{ChangeDetail, ChangeNumber, ChangeSummary};
-use store::{CachedChange, CachedQuery, ServerId, Store};
+use model::{
+    ChangeDetail, ChangeNumber, ChangeSummary, Diff, DiffKey, DiffPreferences, FileEntry, FilesKey,
+    RelatedChange, RevisionId,
+};
+use store::{
+    CachedChange, CachedDiff, CachedDiffPreferences, CachedFileList, CachedQuery, CachedRelated,
+    PrunePolicy, ServerId, Store,
+};
 
 use crate::Error;
 
@@ -137,6 +143,148 @@ impl Syncer {
         let now = Timestamp::now();
         self.store().save_change_detail(self.server, &detail, now)?;
         Ok(detail)
+    }
+
+    /// The cached file list of a comparison.
+    pub fn cached_files(&self, key: &FilesKey) -> Result<Option<CachedFileList>, Error> {
+        Ok(self.store().load_file_list(self.server, key)?)
+    }
+
+    /// Fetches the file list of `key` (and, for signed-in users, which
+    /// files are marked reviewed) and caches it. The reviewed marks are
+    /// extra: if only that request fails, the list is still stored and the
+    /// previously cached marks stay.
+    pub async fn refresh_files(&self, key: &FilesKey) -> Result<CachedFileList, Error> {
+        let files = self
+            .client
+            .get_files(
+                key.change,
+                &key.target.sha,
+                key.base.as_ref().map(|b| b.number),
+            )
+            .await?;
+        let reviewed = if self.client.is_authenticated() {
+            match self
+                .client
+                .get_reviewed_files(key.change, &key.target.sha)
+                .await
+            {
+                Ok(paths) => Some(paths),
+                Err(e) => {
+                    log::warn!("reviewed marks of change {} unavailable: {e}", key.change);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let now = Timestamp::now();
+
+        let mut store = self.store();
+        store.save_file_list(self.server, key, &files, reviewed.as_deref(), now)?;
+        Ok(CachedFileList {
+            files,
+            reviewed: match reviewed {
+                Some(r) => Some(r),
+                None => store
+                    .load_file_list(self.server, key)?
+                    .and_then(|c| c.reviewed),
+            },
+            fetched_at: now,
+        })
+    }
+
+    /// The cached diff of a file.
+    pub fn cached_diff(&self, key: &DiffKey) -> Result<Option<CachedDiff>, Error> {
+        Ok(self.store().load_diff(self.server, key)?)
+    }
+
+    /// Fetches the diff of one file and caches it. Afterwards stale cache
+    /// rows are pruned (see [`PrunePolicy`]); a failure to prune is logged,
+    /// not returned, because the diff itself was stored.
+    pub async fn refresh_diff(&self, key: &DiffKey) -> Result<Diff, Error> {
+        let diff = self
+            .client
+            .get_diff(
+                key.change,
+                &key.target.sha,
+                &key.path,
+                &DiffParams::for_key(key),
+            )
+            .await?;
+        let now = Timestamp::now();
+
+        let mut store = self.store();
+        store.save_diff(self.server, key, &diff, now)?;
+        if let Err(e) = store.prune(&PrunePolicy::default(), now) {
+            log::warn!("pruning the diff cache failed: {e}");
+        }
+        Ok(diff)
+    }
+
+    /// Fetches the diff of the file after `current.path` in `files` unless
+    /// it is cached already, so that moving to the next file is instant.
+    /// Returns the key that was fetched, or `None` if there was nothing to
+    /// do: `current` is the last file or not in the list, or the next diff
+    /// is cached. Errors are those of the fetch.
+    pub async fn prefetch_next_diff(
+        &self,
+        current: &DiffKey,
+        files: &[FileEntry],
+    ) -> Result<Option<DiffKey>, Error> {
+        let Some(position) = files.iter().position(|f| f.path == current.path) else {
+            return Ok(None);
+        };
+        let Some(next) = files.get(position + 1) else {
+            return Ok(None);
+        };
+        let key = current.with_path(&next.path);
+        if self.store().has_diff(self.server, &key)? {
+            return Ok(None);
+        }
+        self.refresh_diff(&key).await?;
+        Ok(Some(key))
+    }
+
+    /// The cached related changes of a revision.
+    pub fn cached_related(
+        &self,
+        change: ChangeNumber,
+        revision: &RevisionId,
+    ) -> Result<Option<CachedRelated>, Error> {
+        Ok(self.store().load_related(self.server, change, revision)?)
+    }
+
+    /// Fetches the changes related to a revision and caches them.
+    pub async fn refresh_related(
+        &self,
+        change: ChangeNumber,
+        revision: &RevisionId,
+    ) -> Result<Vec<RelatedChange>, Error> {
+        let related = self.client.get_related(change, revision).await?;
+        let now = Timestamp::now();
+        self.store()
+            .save_related(self.server, change, revision, &related, now)?;
+        Ok(related)
+    }
+
+    /// The cached diff preferences of the signed-in user.
+    pub fn cached_diff_preferences(&self) -> Result<Option<CachedDiffPreferences>, Error> {
+        Ok(self.store().load_diff_preferences(self.server)?)
+    }
+
+    /// Fetches the user's diff preferences from the server and caches
+    /// them. Anonymous sessions have none: this returns `None` without a
+    /// request and leaves the cache alone.
+    pub async fn refresh_diff_preferences(&self) -> Result<Option<DiffPreferences>, Error> {
+        if !self.client.is_authenticated() {
+            return Ok(None);
+        }
+        let prefs = self.client.get_diff_preferences().await?;
+        let now = Timestamp::now();
+        self.store()
+            .save_diff_preferences(self.server, &prefs, now)?;
+        Ok(Some(prefs))
     }
 }
 
