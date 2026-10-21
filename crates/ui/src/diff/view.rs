@@ -342,7 +342,19 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) {
         let (shown, slots) = self.compute_slots();
-        let unchanged = slots == self.slots;
+        // In a file the threads keep their places; a threads-only view orders
+        // them by age, so a reply can move a thread, and the rows (and the
+        // cursor, which follows its thread) have to be rebuilt.
+        let reordered = self.threads_only && {
+            let ids = |threads: &[Thread], shown: &[usize]| -> Vec<ThreadId> {
+                shown
+                    .iter()
+                    .filter_map(|&i| threads.get(i).map(|t| t.id.clone()))
+                    .collect()
+            };
+            ids(&old_threads, &old_shown) != ids(&self.threads, &shown)
+        };
+        let unchanged = slots == self.slots && !reordered;
         self.shown = shown;
         self.slots = slots;
         // An editor whose thread is gone (the draft was deleted
