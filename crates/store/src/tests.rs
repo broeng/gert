@@ -207,6 +207,34 @@ fn migrates_from_every_previous_version() {
 }
 
 #[test]
+fn v3_drops_cached_diffs_and_rekeys_them_without_context() {
+    let mut conn = db_at_version(2);
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO diffs (server_id, change_number, base_sha, target_sha, path, whitespace,
+                            context, json, size, fetched_ms)
+         VALUES (1, 5, '', 'bbb', 'f', 'IGNORE_NONE', '10', '{}', 2, 0)",
+        [],
+    )
+    .unwrap();
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    // A cache: the old rows are gone, the server and the rest stay.
+    assert_eq!(count("SELECT COUNT(*) FROM diffs"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM servers"), 1);
+    assert!(conn.prepare("SELECT context FROM diffs").is_err());
+    // One row per comparison and whitespace option now.
+    let insert = "INSERT INTO diffs (server_id, change_number, base_sha, target_sha, path,
+                      whitespace, json, size, fetched_ms) VALUES (1, 5, '', 'bbb', 'f', 'W', '{}', 2, 0)";
+    conn.execute(insert, []).unwrap();
+    assert!(conn.execute(insert, []).is_err());
+}
+
+#[test]
 fn migration_preserves_existing_data() {
     // Data written at the latest-but-one version survives a further step.
     let mut conn = db_at_version(MIGRATIONS.len());

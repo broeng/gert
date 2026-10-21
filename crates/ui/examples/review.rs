@@ -71,10 +71,11 @@ fn many_files(n: usize) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// `src/sched/queue.rs`: a 120-line file with changes at lines 40 and 90, so
-/// that the default context leaves hidden runs and `context=N` / `ALL`
-/// visibly change what is shown. Everything else is answered by `inner`.
-struct ContextAware {
+/// `src/sched/queue.rs`: a 120-line file with changes at lines 40 and 90,
+/// so that the default context folds three runs. Like the real Gerrit 3.x it
+/// answers with the whole file whatever `context` says. Everything else is
+/// answered by `inner`.
+struct WholeFileDiffs {
     inner: RouteHttpClient,
 }
 
@@ -82,48 +83,21 @@ const QUEUE_DIFF: &str = "src%2Fsched%2Fqueue.rs/diff";
 const QUEUE_LINES: usize = 120;
 const QUEUE_CHANGES: [usize; 2] = [40, 90];
 
-fn queue_diff(context: Option<usize>) -> Vec<u8> {
+fn queue_diff() -> Vec<u8> {
     use serde_json::{Value, json};
     let line = |n: usize| format!("    let value_{n} = compute({n});");
     let run = |from: usize, to: usize| (from..=to).map(line).collect::<Vec<_>>();
     let mut content: Vec<Value> = Vec::new();
     let mut next = 1;
-    for (i, change) in QUEUE_CHANGES
-        .iter()
-        .copied()
-        .chain([QUEUE_LINES + 1])
-        .enumerate()
-    {
-        // Unchanged lines `next..change`, with `context` lines kept next
-        // to the changes.
-        let len = change - next;
-        let first = i == 0;
-        let last = change > QUEUE_LINES;
-        let (head, tail) = match context {
-            None => (len, 0),
-            Some(c) if first => (0, c.min(len)),
-            Some(c) if last => (c.min(len), 0),
-            Some(c) if len > 2 * c => (c, c),
-            Some(_) => (len, 0),
-        };
-        if head > 0 {
-            content.push(json!({"ab": run(next, next + head - 1)}));
-        }
-        let hidden = len - head - tail;
-        if hidden > 0 {
-            content.push(json!({"skip": hidden}));
-        }
-        if tail > 0 {
-            content.push(json!({"ab": run(change - tail, change - 1)}));
-        }
-        if !last {
-            content.push(json!({
-                "a": [line(change)],
-                "b": [format!("    let value_{change} = compute_fast({change});")],
-            }));
-        }
+    for change in QUEUE_CHANGES {
+        content.push(json!({"ab": run(next, change - 1)}));
+        content.push(json!({
+            "a": [line(change)],
+            "b": [format!("    let value_{change} = compute_fast({change});")],
+        }));
         next = change + 1;
     }
+    content.push(json!({"ab": run(next, QUEUE_LINES)}));
     let meta =
         json!({"name": "src/sched/queue.rs", "content_type": "text/x-rust", "lines": QUEUE_LINES});
     let body =
@@ -131,21 +105,15 @@ fn queue_diff(context: Option<usize>) -> Vec<u8> {
     format!(")]}}'\n{body}").into_bytes()
 }
 
-impl HttpClient for ContextAware {
+impl HttpClient for WholeFileDiffs {
     fn send(
         &self,
         req: http::Request<Vec<u8>>,
     ) -> BoxFuture<'static, Result<http::Response<Vec<u8>>, HttpError>> {
-        let uri = req.uri().to_string();
-        if let Some(at) = uri.find(QUEUE_DIFF) {
-            let query = uri[at..].split_once('?').map_or("", |(_, q)| q);
-            let context = query
-                .split('&')
-                .find_map(|p| p.strip_prefix("context="))
-                .and_then(|c| c.parse::<usize>().ok());
+        if req.uri().to_string().contains(QUEUE_DIFF) {
             let resp = http::Response::builder()
                 .status(200)
-                .body(queue_diff(context))
+                .body(queue_diff())
                 .unwrap_or_default();
             return async move { Ok(resp) }.boxed();
         }
@@ -269,7 +237,7 @@ fn main() {
     });
     let startup = Startup {
         env: Env {
-            http: Arc::new(ContextAware { inner: http }),
+            http: Arc::new(WholeFileDiffs { inner: http }),
             store: Arc::new(Mutex::new(store)),
             backend: Arc::new(Demo),
         },

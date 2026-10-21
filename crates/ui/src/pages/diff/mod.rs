@@ -8,10 +8,11 @@
 //! placeholder until it arrives. Once a diff is shown, the next file's diff
 //! is prefetched in the background.
 //!
-//! Skip expansion: `Expand::All` re-requests with `context=ALL`;
-//! `Expand::Skip` with just enough more context to reveal that run (see
-//! [`crate::diff_load::expanded_context`]). The new diff goes in through
-//! `DiffView::set_diff`, which keeps the cursor on its line.
+//! Diffs are always requested as whole files (the server ignores `context`).
+//! Folding unchanged lines and opening folds happen in the view, so a
+//! changed context preference never refetches; only whitespace does. The
+//! new diff goes in through `DiffView::set_diff`, which keeps the cursor on
+//! its line and the folds the user opened.
 //!
 //! Focus: the diff view owns the keyboard (`j`/`k`, `n`/`p`, ...); the page
 //! forwards its focus to it as soon as it exists. `,` opens the preferences
@@ -25,18 +26,16 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::{
-    ChangeDetail, DiffContext, DiffKey, DiffViewMode, FileEntry, FilesKey, ResolvedDiffPreferences,
-};
+use model::{ChangeDetail, DiffKey, DiffViewMode, FileEntry, FilesKey, ResolvedDiffPreferences};
 use sync::Syncer;
 
 use crate::{
     actions::*,
     diff::{
-        DiffEvent, DiffSizing, DiffStatus, DiffView, Expand,
+        DiffEvent, DiffSizing, DiffStatus, DiffView,
         actions::{NextFile, PrevFile},
     },
-    diff_load::{LoadError, context_label, expanded_context, load_diff},
+    diff_load::{LoadError, context_label, load_diff},
     nav::DiffRoute,
     session::{Session, is_unauthorized},
     settings::DiffSettings,
@@ -69,8 +68,6 @@ pub struct DiffPage {
     /// The key of the diff that is on screen (`key` runs ahead of it while a
     /// refetch is in flight or after one failed).
     shown: Option<DiffKey>,
-    /// Set by an expansion request: replaces the preferred context.
-    ctx_override: Option<DiffContext>,
     view: Option<Entity<DiffView>>,
     view_sub: Option<Subscription>,
     loading: bool,
@@ -110,7 +107,6 @@ impl DiffPage {
             files: Vec::new(),
             key: None,
             shown: None,
-            ctx_override: None,
             view: None,
             view_sub: None,
             loading: true,
@@ -163,7 +159,7 @@ impl DiffPage {
         self.settings.read(cx).resolved()
     }
 
-    fn make_key(&self, files: &FilesKey, ctx: Option<DiffContext>, cx: &App) -> DiffKey {
+    fn make_key(&self, files: &FilesKey, cx: &App) -> DiffKey {
         let prefs = self.prefs(cx);
         DiffKey {
             change: files.change,
@@ -171,7 +167,6 @@ impl DiffPage {
             target: files.target.clone(),
             path: self.route.path.clone(),
             whitespace: prefs.ignore_whitespace,
-            context: ctx.unwrap_or(prefs.context),
         }
     }
 
@@ -215,13 +210,13 @@ impl DiffPage {
         cx.notify();
     }
 
-    /// Fetches the diff for the current preferences (after they or the
-    /// context changed). The shown diff stays until the new one is there.
+    /// Fetches the diff for the current preferences (after the whitespace
+    /// option changed). The shown diff stays until the new one is there.
     fn fetch(&mut self, cx: &mut Context<Self>) {
         let Some(files) = self.files_key.clone() else {
             return;
         };
-        let key = self.make_key(&files, self.ctx_override, cx);
+        let key = self.make_key(&files, cx);
         if self.key.as_ref() == Some(&key) {
             return;
         }
@@ -231,8 +226,7 @@ impl DiffPage {
         self.loading = self.view.is_none();
         if let Some(view) = &self.view {
             let msg = format!(
-                "Loading\u{2026} (context: {}, whitespace: {})",
-                context_label(key.context),
+                "Loading\u{2026} (whitespace: {})",
                 whitespace_label(&key.whitespace)
             );
             view.update(cx, |v, cx| {
@@ -291,7 +285,6 @@ impl DiffPage {
                 // truth and the same request can be tried again.
                 if self.shown.is_some() {
                     self.key = self.shown.clone();
-                    self.ctx_override = None;
                 }
             }
         }
@@ -315,13 +308,13 @@ impl DiffPage {
                     s.update_session(|p| p.view_mode = Some(mode), cx)
                 });
             }
-            DiffEvent::ExpandRequested(expand) => this.expand(expand, cx),
+            DiffEvent::RowsChanged => {}
         }));
         self.view = Some(view);
     }
 
     /// Fetches the next file's diff in the background so that `]` is
-    /// instant. Uses the preferred context, not an expansion of this file.
+    /// instant.
     fn prefetch_next(&mut self, shown: &DiffKey, cx: &mut Context<Self>) {
         if !self.session.can_sync() || self.files.is_empty() {
             return;
@@ -329,7 +322,7 @@ impl DiffPage {
         let syncer: Syncer = self.session.syncer().clone();
         let files = self.files.clone();
         let key = match &self.files_key {
-            Some(fk) => self.make_key(fk, None, cx),
+            Some(fk) => self.make_key(fk, cx),
             None => shown.clone(),
         };
         self.prefetch = Some(cx.background_spawn(async move {
@@ -339,16 +332,8 @@ impl DiffPage {
         }));
     }
 
-    fn expand(&mut self, expand: &Expand, cx: &mut Context<Self>) {
-        let Some(current) = self.key.as_ref().map(|k| k.context) else {
-            return;
-        };
-        self.ctx_override = Some(expanded_context(current, expand));
-        self.fetch(cx);
-    }
-
     /// Preferences changed (here or by another page): restyle, and refetch
-    /// if whitespace or context changed.
+    /// if the whitespace option changed.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         let (prefs, font) = {
             let s = self.settings.read(cx);
@@ -419,9 +404,6 @@ impl DiffPage {
         cx: &mut Context<Self>,
     ) {
         let resolved = self.prefs(cx);
-        // A changed context starts over from the preference, not from an
-        // expansion of this file.
-        self.ctx_override = None;
         self.settings
             .update(cx, |s, cx| s.update_session(|p| change(p, &resolved), cx));
     }
@@ -498,6 +480,7 @@ impl DiffPage {
         // request must not pass for the current state.
         let key = self.shown.as_ref().or(self.key.as_ref());
         let pending = self.key != self.shown && self.shown.is_some();
+        let context = self.prefs(cx).context;
         v_flex()
             .px_3()
             .py_2()
@@ -532,7 +515,7 @@ impl DiffPage {
                     .when_some(key, |d, k| {
                         d.child(div().text_xs().text_color(muted).child(format!(
                             "context: {}  whitespace: {}{}",
-                            context_label(k.context),
+                            context_label(context),
                             whitespace_label(&k.whitespace),
                             if pending { "  (updating\u{2026})" } else { "" }
                         )))
@@ -738,7 +721,6 @@ async fn load_everything(
         target: files_key.target.clone(),
         path: route.path.clone(),
         whitespace: prefs.ignore_whitespace,
-        context: prefs.context,
     };
     let diff = load_diff(syncer, key.clone(), can_sync).await;
     Loaded {

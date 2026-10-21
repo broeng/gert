@@ -97,6 +97,25 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         fetched_ms INTEGER NOT NULL
     );
     ",
+    // v2 -> v3: diffs are no longer keyed by `context`. The server ignores
+    // that parameter and always sends the whole file, so unchanged lines are
+    // folded on the client. Cached diffs are only a cache: drop them.
+    "
+    DROP TABLE diffs;
+    CREATE TABLE diffs (
+        server_id     INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        change_number INTEGER NOT NULL,
+        base_sha      TEXT NOT NULL,
+        target_sha    TEXT NOT NULL,
+        path          TEXT NOT NULL,
+        whitespace    TEXT NOT NULL,
+        json          TEXT NOT NULL,
+        size          INTEGER NOT NULL,
+        fetched_ms    INTEGER NOT NULL,
+        PRIMARY KEY (server_id, change_number, base_sha, target_sha, path, whitespace)
+    );
+    CREATE INDEX diffs_fetched ON diffs (fetched_ms);
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

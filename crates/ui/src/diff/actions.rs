@@ -20,9 +20,13 @@ actions!(
         CursorTop,
         CursorBottom,
         ToggleMode,
-        /// Enter on a skip row: ask for the hidden lines.
-        ExpandSkip,
-        /// Ask for the whole file.
+        /// Enter / x on a fold row: show all of its lines.
+        ExpandFold,
+        /// Show 10 more lines at the top edge of the fold under the cursor.
+        ExpandAbove,
+        /// Show 10 more lines at the bottom edge of the fold under the cursor.
+        ExpandBelow,
+        /// Open every fold of the file; again, fold them again.
         ShowFullFile,
         // Declared for the diff page and for the comment work (M3); the
         // widget does not handle them and no key is bound yet.
@@ -80,13 +84,27 @@ pub fn entries() -> Vec<Entry> {
         e("m", "m", ToggleMode, "Toggle side-by-side / unified"),
         e("", "shift-m", ToggleMode, ""),
         e(
-            "Enter",
+            "Enter / X",
             "enter",
-            ExpandSkip,
-            "Show hidden lines (on a skip row)",
+            ExpandFold,
+            "Show all lines of the folded range under the cursor",
         ),
-        // PolyGerrit's "expand all diff context" key; not sure of it.
-        e("Shift-X", "shift-x", ShowFullFile, "Show the whole file"),
+        e("", "x", ExpandFold, ""),
+        // alt-left / alt-right are history; alt-up / alt-down reveal
+        // lines above / below a fold, like PolyGerrit's "+10 above/below".
+        e(
+            "Alt-Up / Alt-Down",
+            "alt-up",
+            ExpandAbove,
+            "Show 10 more lines above / below a folded range",
+        ),
+        e("", "alt-down", ExpandBelow, ""),
+        e(
+            "Shift-X",
+            "shift-x",
+            ShowFullFile,
+            "Show the whole file; again: fold unchanged lines",
+        ),
     ]
 }
 

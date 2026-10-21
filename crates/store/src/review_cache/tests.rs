@@ -43,7 +43,6 @@ fn diff_key() -> DiffKey {
         target: ps(2, "bbb"),
         path: "src/main.rs".into(),
         whitespace: Whitespace::IgnoreNone,
-        context: DiffContext::Lines(10),
     }
 }
 
@@ -202,14 +201,6 @@ fn every_part_of_the_diff_key_matters() {
         },
         DiffKey {
             whitespace: Whitespace::IgnoreAll,
-            ..key.clone()
-        },
-        DiffKey {
-            context: DiffContext::All,
-            ..key.clone()
-        },
-        DiffKey {
-            context: DiffContext::Lines(3),
             ..key.clone()
         },
         DiffKey {
