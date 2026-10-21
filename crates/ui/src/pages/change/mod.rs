@@ -65,6 +65,8 @@ pub enum ChangeEvent {
     OpenChange(ChangeNumber),
     /// A file's diff page was chosen.
     OpenDiff(DiffRoute),
+    /// A refresh succeeded: the server is reachable.
+    Refreshed,
 }
 
 /// The file list of the current patch set pair.
@@ -352,6 +354,7 @@ impl ChangePage {
                 let now = Timestamp::now();
                 match result {
                     Ok(detail) => {
+                        cx.emit(ChangeEvent::Refreshed);
                         this.track.success(now);
                         // A change that moved may have new comments.
                         let moved = this

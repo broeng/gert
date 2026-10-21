@@ -36,7 +36,7 @@ use model::{
     ChangeDetail, ChangeNumber, Comment, Draft, DraftHandling, DraftInput, DraftSync, LocalDraftId,
     PatchSetRef, ReviewInput, ReviewResult, RevisionId, Thread, Timestamp, build_threads,
 };
-use store::{DeleteOutcome, DraftFailure};
+use store::{DeleteOutcome, DraftCounts, DraftFailure};
 
 use super::Syncer;
 use crate::{Error, PendingDraft};
@@ -275,6 +275,13 @@ impl Syncer {
         Ok(outcome)
     }
 
+    /// How many drafts are not on the server, over all changes: pending
+    /// (retried by [`Self::retry_pending_drafts`]) and failed (only a
+    /// manual retry or an edit moves them). No network.
+    pub fn draft_counts(&self) -> Result<DraftCounts, Error> {
+        Ok(self.store().draft_counts(self.server)?)
+    }
+
     /// Tries to bring one draft up to date on the server. `Ok(None)` if the
     /// draft is gone (deleted). Does nothing for `Synced` and `Failed`
     /// drafts.
@@ -313,6 +320,28 @@ impl Syncer {
             }
         }
         Ok(report)
+    }
+
+    /// Puts every failed draft that may work on a second try (a 500, an
+    /// unreadable answer) back to pending, then uploads everything pending
+    /// like [`Self::retry_pending_drafts`]. Drafts the server refused for
+    /// good (403, 409, 400) stay failed: they have to be edited or deleted.
+    pub async fn retry_failed_drafts(&self) -> Result<RetryReport, Error> {
+        {
+            let mut store = self.store();
+            for d in store.failed_drafts(self.server)? {
+                if matches!(
+                    d.sync,
+                    DraftSync::Failed {
+                        retryable: true,
+                        ..
+                    }
+                ) {
+                    store.retry_failed_draft(self.server, d.local_id)?;
+                }
+            }
+        }
+        self.retry_pending_drafts().await
     }
 
     /// One upload attempt; the caller holds `drafts_lock`.

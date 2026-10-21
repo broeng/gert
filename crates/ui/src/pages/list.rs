@@ -29,6 +29,8 @@ use crate::{
 pub enum ListEvent {
     Open(ChangeNumber),
     Unauthorized,
+    /// A refresh succeeded: the server is reachable.
+    Refreshed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,6 +284,7 @@ impl ChangeListPage {
         let s = &mut self.sections[i];
         match result {
             Ok((update, cached)) => {
+                cx.emit(ListEvent::Refreshed);
                 s.track.success(now);
                 s.status = Status::Idle;
                 let before = s.rows.len();

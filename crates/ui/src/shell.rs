@@ -81,7 +81,7 @@ pub struct Shell {
     session: Option<Session>,
     /// The drafts of the current session; present exactly when `session` is.
     outbox: Option<Entity<DraftOutbox>>,
-    outbox_sub: Option<Subscription>,
+    outbox_subs: Vec<Subscription>,
     queries: Vec<SavedQuery>,
     nav: NavState,
     page: Page,
@@ -146,7 +146,7 @@ impl Shell {
             env,
             session: None,
             outbox: None,
-            outbox_sub: None,
+            outbox_subs: Vec::new(),
             queries,
             nav: NavState::new(Route::Login),
             page: Page::Login(login),
@@ -241,27 +241,41 @@ impl Shell {
         }));
     }
 
-    /// Replaces the session, and with it the outbox of drafts.
+    /// Replaces the session, and with it the outbox of drafts. A new
+    /// session counts its drafts and uploads those that waited.
     fn set_session(
         &mut self,
         session: Option<Session>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.outbox_sub = None;
+        self.outbox_subs.clear();
         self.outbox = session.as_ref().map(|s| {
             let outbox = cx.new(|_| DraftOutbox::new(s.clone()));
-            self.outbox_sub =
-                Some(
-                    cx.subscribe_in(&outbox, window, |this, _, ev: &OutboxEvent, window, cx| {
-                        if matches!(ev, OutboxEvent::Unauthorized) {
-                            this.unauthorized(window, cx);
-                        }
-                    }),
-                );
+            self.outbox_subs.push(cx.subscribe_in(
+                &outbox,
+                window,
+                |this, _, ev: &OutboxEvent, window, cx| {
+                    if matches!(ev, OutboxEvent::Unauthorized) {
+                        this.unauthorized(window, cx);
+                    }
+                },
+            ));
+            // The title bar shows the counts.
+            self.outbox_subs
+                .push(cx.observe(&outbox, |_, _, cx| cx.notify()));
+            outbox.update(cx, |o, cx| o.resume(cx));
             outbox
         });
         self.session = session;
+    }
+
+    /// A refresh worked, so the server is reachable: upload the drafts that
+    /// waited.
+    fn server_reachable(&mut self, cx: &mut Context<Self>) {
+        if let Some(outbox) = &self.outbox {
+            outbox.update(cx, |o, cx| o.retry_all(cx));
+        }
     }
 
     /// The outbox of the current session.
@@ -342,6 +356,24 @@ impl Shell {
             Page::Diff(p) => Some(p.clone()),
             _ => None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outbox_for_test(&self) -> Option<Entity<DraftOutbox>> {
+        self.outbox.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn list_page_for_test(&self) -> Option<Entity<ChangeListPage>> {
+        match &self.page {
+            Page::List(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_drafts_for_test(&mut self, cx: &mut Context<Self>) {
+        self.retry_drafts(cx);
     }
 
     #[cfg(test)]
@@ -426,6 +458,7 @@ impl Shell {
                     this.navigate(Route::Change(*n), window, cx);
                 }
                 ListEvent::Unauthorized => this.unauthorized(window, cx),
+                ListEvent::Refreshed => this.server_reachable(cx),
             },
         ));
         Page::List(page)
@@ -449,6 +482,7 @@ impl Shell {
             window,
             |this, _, ev: &ChangeEvent, window, cx| match ev {
                 ChangeEvent::Unauthorized => this.unauthorized(window, cx),
+                ChangeEvent::Refreshed => this.server_reachable(cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 ChangeEvent::OpenDiff(route) => {
                     this.navigate(Route::Diff(route.clone()), window, cx)
@@ -688,6 +722,7 @@ impl Shell {
                             .text_color(theme.muted_foreground)
                             .child(who),
                     )
+                    .children(self.render_draft_indicator(cx))
                     // The free space between the cluster and the search box.
                     .child(div().flex_1().h_full())
                     .child(no_drag(
@@ -707,6 +742,43 @@ impl Shell {
             }
         };
         TitleBar::new().child(content)
+    }
+
+    /// The drafts that are not on the server, as the title bar says it;
+    /// nothing when there are none.
+    fn render_draft_indicator(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let counts = self.outbox.as_ref()?.read(cx).counts();
+        let label = draft_label(counts)?;
+        let theme = cx.theme().clone();
+        let color = if counts.failed > 0 {
+            theme.danger
+        } else {
+            theme.muted_foreground
+        };
+        Some(
+            div()
+                .id("drafts-indicator")
+                .flex_none()
+                .px_1p5()
+                .rounded_sm()
+                .text_xs()
+                .text_color(color)
+                .border_1()
+                .border_color(color.opacity(0.5))
+                .cursor_pointer()
+                .hover(|d| d.bg(color.opacity(0.12)))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, cx| this.retry_drafts(cx)))
+                .child(label),
+        )
+    }
+
+    /// The indicator's click: try the drafts that are not on the server
+    /// again.
+    fn retry_drafts(&mut self, cx: &mut Context<Self>) {
+        if let Some(outbox) = &self.outbox {
+            outbox.update(cx, |o, cx| o.retry_everything(cx));
+        }
     }
 
     fn render_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -812,6 +884,19 @@ impl Shell {
     }
 }
 
+/// "2 drafts not uploaded", "1 failed" or both.
+fn draft_label(counts: sync::DraftCounts) -> Option<String> {
+    let mut parts = Vec::new();
+    if counts.pending > 0 {
+        let plural = if counts.pending == 1 { "" } else { "s" };
+        parts.push(format!("{} draft{plural} not uploaded", counts.pending));
+    }
+    if counts.failed > 0 {
+        parts.push(format!("{} failed", counts.failed));
+    }
+    (!parts.is_empty()).then(|| parts.join(" \u{00B7} "))
+}
+
 fn prefill_from(setup: &ServerSetup, notice: String) -> LoginPrefill {
     LoginPrefill {
         base_url: setup.base_url.clone(),
@@ -846,5 +931,24 @@ impl Render for Shell {
                 .child(div().flex_1().min_h_0().child(self.page.element()))
                 .when(self.help, |d| d.child(self.render_help(cx))),
         )
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::draft_label;
+    use sync::DraftCounts;
+
+    #[test]
+    fn the_indicator_says_nothing_when_all_drafts_are_on_the_server() {
+        let label = |pending, failed| draft_label(DraftCounts { pending, failed });
+        assert_eq!(label(0, 0), None);
+        assert_eq!(label(1, 0).as_deref(), Some("1 draft not uploaded"));
+        assert_eq!(label(3, 0).as_deref(), Some("3 drafts not uploaded"));
+        assert_eq!(label(0, 2).as_deref(), Some("2 failed"));
+        assert_eq!(
+            label(1, 2).as_deref(),
+            Some("1 draft not uploaded \u{00B7} 2 failed")
+        );
     }
 }

@@ -73,6 +73,22 @@ pub enum DeleteOutcome {
     Pending,
 }
 
+/// How many drafts of a server are not on it, for an indicator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DraftCounts {
+    /// Waiting for an upload (or a deletion) that is retried
+    /// automatically; includes drafts being deleted.
+    pub pending: usize,
+    /// Refused by the server; only a manual retry or an edit moves them.
+    pub failed: usize,
+}
+
+impl DraftCounts {
+    pub fn is_empty(&self) -> bool {
+        self.pending + self.failed == 0
+    }
+}
+
 /// How a failed upload is recorded, see [`Store::record_draft_failure`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DraftFailure {
@@ -415,6 +431,15 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The drafts the server refused, oldest first.
+    pub fn failed_drafts(&self, server: ServerId) -> Result<Vec<Draft>, Error> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM drafts WHERE server_id = ?1 AND state = 'failed' ORDER BY id"
+        ))?;
+        let rows = stmt.query_map([server.0], draft_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Drafts the automatic upload works on (pending create, update or
     /// delete), oldest first. `Failed` ones are not included.
     pub fn pending_drafts(&self, server: ServerId) -> Result<Vec<Draft>, Error> {
@@ -425,6 +450,29 @@ impl Store {
         ))?;
         let rows = stmt.query_map([server.0], draft_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Counts the drafts of the server that are not on it, pending and
+    /// failed, over all changes.
+    pub fn draft_counts(&self, server: ServerId) -> Result<DraftCounts, Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT state = 'failed', COUNT(*) FROM drafts
+             WHERE server_id = ?1 AND state != 'synced' GROUP BY state = 'failed'",
+        )?;
+        let rows = stmt.query_map([server.0], |r| {
+            Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut counts = DraftCounts::default();
+        for row in rows {
+            let (failed, n) = row?;
+            let n = usize::try_from(n).unwrap_or(0);
+            if failed {
+                counts.failed = n;
+            } else {
+                counts.pending = n;
+            }
+        }
+        Ok(counts)
     }
 
     /// The drafts of a change that the server does not have in their

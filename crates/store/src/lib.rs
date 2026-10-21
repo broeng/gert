@@ -20,7 +20,7 @@ use std::{path::Path, time::Duration};
 use model::{ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-pub use drafts::{CachedComments, DeleteOutcome, DraftFailure, MergeReport};
+pub use drafts::{CachedComments, DeleteOutcome, DraftCounts, DraftFailure, MergeReport};
 pub use error::Error;
 pub use review_cache::{
     CachedDiff, CachedDiffPreferences, CachedFileList, CachedRelated, PrunePolicy, PruneReport,
