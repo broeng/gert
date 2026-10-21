@@ -94,11 +94,11 @@ fn sha(r: &Option<PatchSetRef>) -> &str {
     r.as_ref().map_or("", |r| r.sha.as_str())
 }
 
-fn millis(t: Timestamp) -> i64 {
+pub(crate) fn millis(t: Timestamp) -> i64 {
     t.as_millisecond()
 }
 
-fn from_millis(ms: i64) -> Result<Timestamp, Error> {
+pub(crate) fn from_millis(ms: i64) -> Result<Timestamp, Error> {
     Timestamp::from_millisecond(ms).map_err(|_| Error::BadTimestamp(ms.to_string()))
 }
 

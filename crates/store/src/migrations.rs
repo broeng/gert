@@ -116,6 +116,64 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX diffs_fetched ON diffs (fetched_ms);
     ",
+    // v3 -> v4: comments and the user's drafts. See `drafts.rs`.
+    //
+    // `comments` holds the published comments of one change as one JSON
+    // list: they are always fetched and read whole (the server has no
+    // incremental endpoint worth using) and threads are built in memory, so
+    // columns would only add schema churn.
+    //
+    // `drafts` has a column per field because the sync code queries and
+    // updates drafts one by one and by state (what is pending?). `id` is the
+    // local id; `server_draft_id` is NULL until the server knows the draft.
+    // `state` is one of synced, pending_create, pending_update,
+    // pending_delete, failed; `failed_op`, `error` and `retryable` describe
+    // a failed one. `version` counts local edits. Timestamps are Unix
+    // milliseconds.
+    "
+    CREATE TABLE comments (
+        server_id     INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        change_number INTEGER NOT NULL,
+        json          TEXT NOT NULL,
+        fetched_ms    INTEGER NOT NULL,
+        PRIMARY KEY (server_id, change_number)
+    );
+
+    CREATE TABLE drafts (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id       INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        change_number   INTEGER NOT NULL,
+        patch_set       INTEGER NOT NULL,
+        revision_sha    TEXT NOT NULL,
+        server_draft_id TEXT,
+        path            TEXT NOT NULL,
+        side            TEXT NOT NULL,
+        parent          INTEGER,
+        line            INTEGER,
+        start_line      INTEGER,
+        start_character INTEGER,
+        end_line        INTEGER,
+        end_character   INTEGER,
+        in_reply_to     TEXT,
+        message         TEXT NOT NULL,
+        unresolved      INTEGER NOT NULL,
+        updated_ms      INTEGER NOT NULL,
+        state           TEXT NOT NULL,
+        failed_op       TEXT,
+        error           TEXT,
+        retryable       INTEGER,
+        attempts        INTEGER NOT NULL DEFAULT 0,
+        last_error      TEXT,
+        last_attempt_ms INTEGER,
+        synced_ms       INTEGER,
+        version         INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE UNIQUE INDEX drafts_server_draft
+        ON drafts (server_id, change_number, server_draft_id)
+        WHERE server_draft_id IS NOT NULL;
+    CREATE INDEX drafts_by_change ON drafts (server_id, change_number);
+    CREATE INDEX drafts_by_state ON drafts (server_id, state);
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

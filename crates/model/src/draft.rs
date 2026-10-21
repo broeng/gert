@@ -112,6 +112,10 @@ pub struct Draft {
     /// The error of the last failed attempt, kept while the draft stays
     /// pending (for example "offline").
     pub last_error: Option<String>,
+    /// Counts local edits. An upload remembers the version it sent, so
+    /// that it can tell whether the draft was edited while it was in
+    /// flight and must stay pending.
+    pub version: u32,
 }
 
 impl Draft {

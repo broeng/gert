@@ -50,6 +50,7 @@ fn draft(local: i64, reply_to: Option<&str>, minute: u32) -> Draft {
         sync: DraftSync::PendingCreate,
         attempts: 0,
         last_error: None,
+        version: 0,
     }
 }
 

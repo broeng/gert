@@ -311,3 +311,38 @@ fn file_database_uses_wal_and_reopens() {
     assert_eq!(s.load_query(id, "q").unwrap().unwrap().changes.len(), 1);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn v4_adds_comments_and_drafts_and_keeps_existing_data() {
+    let mut conn = db_at_version(3);
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO file_lists (server_id, change_number, base_sha, target_sha, files_json,
+                                 reviewed_json, fetched_ms)
+         VALUES (1, 5, '', 'bbb', '[]', '[\"f\"]', 0)",
+        [],
+    )
+    .unwrap();
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT COUNT(*) FROM file_lists"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM comments"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM drafts"), 0);
+    // Drafts get local ids, defaults for the bookkeeping columns, and a
+    // server draft id is unique within a change but may be NULL repeatedly.
+    let insert = "INSERT INTO drafts (server_id, change_number, patch_set, revision_sha,
+                      server_draft_id, path, side, message, unresolved, updated_ms, state)
+                  VALUES (1, 5, 1, 'aaa', ?1, 'f', 'REVISION', 'm', 1, 0, 'synced')";
+    conn.execute(insert, [None::<String>]).unwrap();
+    conn.execute(insert, [None::<String>]).unwrap();
+    conn.execute(insert, ["srv1"]).unwrap();
+    assert!(conn.execute(insert, ["srv1"]).is_err());
+    assert_eq!(count("SELECT MAX(attempts) + MAX(version) FROM drafts"), 0);
+    // Removing the server removes its drafts and comments.
+    conn.execute("DELETE FROM servers", []).unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM drafts"), 0);
+}
