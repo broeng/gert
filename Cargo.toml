@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+authors = ["Simon Broeng Jensen <sbj@cwconsult.dk>"]
+repository = "https://github.com/broeng/gert"
+rust-version = "1.99"
+
+[workspace.dependencies]
+model = { path = "crates/model" }
+gerrit-api = { path = "crates/gerrit-api" }
+store = { path = "crates/store" }
+sync = { path = "crates/sync" }
+ui = { path = "crates/ui" }
+
+# GPUI comes only through gpui-kit's re-exports; see CLAUDE.md "GPUI pinning".
+gpui-kit = { git = "https://github.com/longbridge/gpui-component", rev = "1676826d9d49b90f4d7b6808b69924f58796f6f1" } # v0.8.0
+# Must equal the gpui-pre version gpui-component pins at the rev above.
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
+gerrit_client = { git = "https://github.com/davido/gerrit-sdk-rust", package = "gerrit-sdk", tag = "v3.15.0-SNAPSHOT" }
+
+anyhow = "1"
+log = "0.4"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
