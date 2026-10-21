@@ -22,6 +22,8 @@ mod prefs;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
+
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -37,8 +39,10 @@ use crate::{
         actions::{NextFile, PrevFile},
     },
     diff_load::{LoadError, context_label, load_diff},
+    hint::Hint,
     nav::DiffRoute,
     outbox::DraftOutbox,
+    reviewed,
     session::{Session, is_unauthorized},
     settings::DiffSettings,
 };
@@ -53,7 +57,7 @@ pub enum DiffPageEvent {
 /// What the first background task brings back.
 struct Loaded {
     detail: Option<ChangeDetail>,
-    files: Option<(FilesKey, Vec<FileEntry>)>,
+    files: Option<(FilesKey, Vec<FileEntry>, HashSet<String>)>,
     diff: Option<(DiffKey, Result<model::Diff, LoadError>)>,
     error: Option<String>,
 }
@@ -65,6 +69,10 @@ pub struct DiffPage {
     detail: Option<ChangeDetail>,
     files_key: Option<FilesKey>,
     files: Vec<FileEntry>,
+    /// The files of this patch set the user marked reviewed.
+    reviewed: HashSet<String>,
+    /// A note for the user (why a key did nothing, a failed request).
+    hint: Hint,
     /// The key of the diff shown or being fetched.
     key: Option<DiffKey>,
     /// The key of the diff that is on screen (`key` runs ahead of it while a
@@ -115,6 +123,8 @@ impl DiffPage {
             detail: None,
             files_key: None,
             files: Vec::new(),
+            reviewed: HashSet::new(),
+            hint: Hint::default(),
             key: None,
             shown: None,
             view: None,
@@ -205,9 +215,10 @@ impl DiffPage {
 
     fn loaded(&mut self, l: Loaded, cx: &mut Context<Self>) {
         self.detail = l.detail;
-        if let Some((key, files)) = l.files {
+        if let Some((key, files, reviewed)) = l.files {
             self.files_key = Some(key);
             self.files = files;
+            self.reviewed = reviewed;
         }
         if let Some(e) = l.error {
             self.loading = false;
@@ -409,6 +420,81 @@ impl DiffPage {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_reviewed_for_test(&self) -> bool {
+        self.reviewed.contains(&self.route.path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hint_for_test(&self) -> Option<(String, bool)> {
+        self.hint.current().map(|(t, e)| (t.to_owned(), e))
+    }
+
+    // ---- reviewed mark ----
+
+    /// `r`: marks the shown file reviewed, or clears the mark. The mark
+    /// changes on screen at once; if the request fails it goes back and a
+    /// note says why.
+    fn toggle_reviewed(&mut self, _: &ToggleReviewed, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = reviewed::unavailable(&self.session) {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        let Some(key) = self.files_key.clone() else {
+            return;
+        };
+        let path = self.route.path.clone();
+        let reviewed = !self.reviewed.contains(&path);
+        self.mark_reviewed(&path, reviewed);
+        cx.notify();
+        let syncer = self.session.syncer().clone();
+        let (change, sha, sent) = (self.route.change, key.target.sha.clone(), path.clone());
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(reviewed::send(syncer, change, sha, sent, reviewed))
+                .await;
+            this.update(cx, |this, cx| {
+                this.reviewed_result(&key, &path, reviewed, outcome, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn mark_reviewed(&mut self, path: &str, reviewed: bool) {
+        if reviewed {
+            self.reviewed.insert(path.to_owned());
+        } else {
+            self.reviewed.remove(path);
+        }
+    }
+
+    fn reviewed_result(
+        &mut self,
+        key: &FilesKey,
+        path: &str,
+        reviewed: bool,
+        outcome: reviewed::Outcome,
+        cx: &mut Context<Self>,
+    ) {
+        let (error, login) = match outcome {
+            reviewed::Outcome::Done => return,
+            reviewed::Outcome::Unauthorized => (None, true),
+            reviewed::Outcome::Failed(e) => (Some(e), false),
+        };
+        if self.files_key.as_ref() == Some(key) && self.reviewed.contains(path) == reviewed {
+            self.mark_reviewed(path, !reviewed);
+        }
+        if let Some(e) = error {
+            let note = reviewed::failure_note(path, reviewed, &e);
+            self.hint.say(note, true, cx, |p| &mut p.hint);
+        }
+        if login {
+            cx.emit(DiffPageEvent::Unauthorized);
+        }
+        cx.notify();
+    }
+
     // ---- navigation between files ----
 
     fn position(&self) -> Option<usize> {
@@ -570,8 +656,26 @@ impl DiffPage {
                             .font_family(theme.mono_font_family.clone())
                             .child(self.path_label()),
                     )
+                    .when(self.reviewed.contains(&self.route.path), |d| {
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.success)
+                                .child("\u{2713} reviewed"),
+                        )
+                    })
                     .child(div().text_color(muted).child(pair))
                     .children(position.map(|p| div().text_color(muted).child(p)))
+                    .children(self.hint.current().map(|(text, error)| {
+                        div()
+                            .text_xs()
+                            .text_color(if error {
+                                theme.danger
+                            } else {
+                                theme.foreground
+                            })
+                            .child(text.to_owned())
+                    }))
                     .child(div().flex_1())
                     .when_some(key, |d, k| {
                         d.child(div().text_xs().text_color(muted).child(format!(
@@ -767,11 +871,11 @@ async fn load_everything(
         target,
     };
     let files = match syncer.cached_files(&files_key) {
-        Ok(Some(c)) => Some(c.files),
+        Ok(Some(c)) => Some((c.files, c.reviewed)),
         _ if can_sync => syncer
             .refresh_files(&files_key)
             .await
-            .map(|c| c.files)
+            .map(|c| (c.files, c.reviewed))
             .map_err(|e| log::warn!("fetching files of change {}: {e}", route.change))
             .ok(),
         _ => None,
@@ -786,7 +890,7 @@ async fn load_everything(
     let diff = load_diff(syncer, key.clone(), can_sync).await;
     Loaded {
         detail: Some(d),
-        files: files.map(|f| (files_key, f)),
+        files: files.map(|(f, r)| (files_key, f, r.unwrap_or_default().into_iter().collect())),
         diff: Some((key, diff)),
         error: None,
     }
@@ -828,6 +932,7 @@ impl Render for DiffPage {
             .on_action(cx.listener(Self::next_file))
             .on_action(cx.listener(Self::prev_file))
             .on_action(cx.listener(Self::toggle_prefs))
+            .on_action(cx.listener(Self::toggle_reviewed))
             .relative()
             .size_full()
             .child(self.render_header(cx))

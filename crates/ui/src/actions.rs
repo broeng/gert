@@ -49,6 +49,9 @@ actions!(
         NewPatchSetComment,
         ScrollPageDown,
         ScrollPageUp,
+        /// `r`: mark the file under the cursor (change page) or shown (diff
+        /// page) as reviewed, or take the mark off again.
+        ToggleReviewed,
         // Diff page.
         /// Show or hide the diff preferences panel.
         TogglePrefs,
@@ -189,6 +192,11 @@ pub fn change_entries() -> Vec<Entry> {
             "New patch-set level comment",
         ),
         e(
+            "R",
+            KeyBinding::new("r", ToggleReviewed, Some(k)),
+            "Mark the file under the cursor reviewed / not reviewed",
+        ),
+        e(
             "Shift-J / Shift-K",
             KeyBinding::new("shift-j", NextRelated, Some(k)),
             "Next / previous related change",
@@ -231,6 +239,11 @@ pub fn diff_page_entries() -> Vec<Entry> {
             "Next / previous file",
         ),
         e("", KeyBinding::new("[", PrevFile, Some(k)), ""),
+        e(
+            "R",
+            KeyBinding::new("r", ToggleReviewed, Some(k)),
+            "Mark the file reviewed / not reviewed",
+        ),
         e(
             ",",
             KeyBinding::new(",", TogglePrefs, Some(k)),
