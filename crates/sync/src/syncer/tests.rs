@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 use gerrit_api::{Auth, GerritClient, fake::FakeHttpClient};
+use model::{DiffContext, PatchSetNumber, PatchSetRef, Whitespace};
 use serde_json::{Value, json};
 
 use super::*;
@@ -42,8 +43,12 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with(Auth::Anonymous)
+}
+
+fn fixture_with(auth: Auth) -> Fixture {
     let http = FakeHttpClient::new();
-    let client = GerritClient::new(Arc::new(http.clone()), BASE, Auth::Anonymous).unwrap();
+    let client = GerritClient::new(Arc::new(http.clone()), BASE, auth).unwrap();
     let mut store = Store::open_in_memory().unwrap();
     let server = store.server_id(BASE).unwrap();
     Fixture {
@@ -223,4 +228,344 @@ fn usable_as_a_refresh_source() {
     f.http.push_response(200, page(&[(1, U1)], false));
     let source: &dyn RefreshSource = &f.syncer;
     assert!(block_on(source.refresh_query("q", 25)).unwrap().changed);
+}
+
+fn signed_in() -> Auth {
+    Auth::Basic {
+        username: "u".into(),
+        password: "p".into(),
+    }
+}
+
+fn xssi(body: &Value) -> String {
+    format!(")]}}'\n{body}")
+}
+
+fn ps(n: u32, sha: &str) -> PatchSetRef {
+    PatchSetRef {
+        number: PatchSetNumber(n),
+        sha: sha.into(),
+    }
+}
+
+fn files_key() -> FilesKey {
+    FilesKey {
+        change: ChangeNumber(7),
+        base: Some(ps(1, "aaa")),
+        target: ps(2, "bbb"),
+    }
+}
+
+fn diff_key(path: &str) -> DiffKey {
+    DiffKey {
+        change: ChangeNumber(7),
+        base: Some(ps(1, "aaa")),
+        target: ps(2, "bbb"),
+        path: path.into(),
+        whitespace: Whitespace::IgnoreAll,
+        context: DiffContext::Lines(5),
+    }
+}
+
+fn diff_body(line: &str) -> String {
+    xssi(&json!({
+        "meta_b": {"name": "f", "lines": 1},
+        "change_type": "MODIFIED",
+        "content": [{"a": ["old"], "b": [line]}]
+    }))
+}
+
+fn file_list() -> Vec<FileEntry> {
+    ["/COMMIT_MSG", "a.rs", "b.rs"]
+        .into_iter()
+        .map(|p| FileEntry {
+            path: p.into(),
+            status: model::FileStatus::Modified,
+            old_path: None,
+            lines_inserted: 1,
+            lines_deleted: 0,
+            size_delta: 1,
+            size: 1,
+            binary: false,
+        })
+        .collect()
+}
+
+#[test]
+fn refresh_files_caches_the_list_anonymously() {
+    let f = fixture();
+    let key = files_key();
+    assert!(f.syncer.cached_files(&key).unwrap().is_none());
+    f.http.push_response(
+        200,
+        xssi(&json!({"b.rs": {"lines_inserted": 2}, "/COMMIT_MSG": {}, "a.rs": {"status": "A"}})),
+    );
+    let got = block_on(f.syncer.refresh_files(&key)).unwrap();
+    let paths: Vec<_> = got.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["/COMMIT_MSG", "a.rs", "b.rs"]);
+    assert_eq!(got.reviewed, None);
+    assert_eq!(
+        f.syncer.cached_files(&key).unwrap().unwrap().files,
+        got.files
+    );
+    // Anonymous: just the one request, with the base patch set number.
+    let reqs = f.http.requests();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        reqs[0].uri().to_string(),
+        format!("{BASE}/changes/7/revisions/bbb/files?base=1")
+    );
+}
+
+#[test]
+fn refresh_files_fetches_reviewed_marks_when_signed_in() {
+    let f = fixture_with(signed_in());
+    let key = files_key();
+    f.http
+        .push_response(200, xssi(&json!({"a.rs": {}, "b.rs": {}})));
+    f.http.push_response(200, xssi(&json!(["a.rs"])));
+    let got = block_on(f.syncer.refresh_files(&key)).unwrap();
+    assert_eq!(got.reviewed, Some(vec!["a.rs".to_owned()]));
+    let cached = f.syncer.cached_files(&key).unwrap().unwrap();
+    assert_eq!(cached.reviewed, got.reviewed);
+    assert!(
+        f.http.requests()[1]
+            .uri()
+            .to_string()
+            .ends_with("/files?reviewed")
+    );
+}
+
+#[test]
+fn a_failing_reviewed_request_keeps_the_list_and_the_known_marks() {
+    let f = fixture_with(signed_in());
+    let key = files_key();
+    f.http.push_response(200, xssi(&json!({"a.rs": {}})));
+    f.http.push_response(200, xssi(&json!(["a.rs"])));
+    block_on(f.syncer.refresh_files(&key)).unwrap();
+
+    f.http
+        .push_response(200, xssi(&json!({"a.rs": {}, "b.rs": {}})));
+    f.http.push_response(500, "boom");
+    let got = block_on(f.syncer.refresh_files(&key)).unwrap();
+    assert_eq!(got.files.len(), 2);
+    assert_eq!(got.reviewed, Some(vec!["a.rs".to_owned()]));
+    assert_eq!(f.syncer.cached_files(&key).unwrap().unwrap().files.len(), 2);
+
+    // The file list request failing is an error and changes nothing.
+    f.http.push_response(500, "boom");
+    assert!(block_on(f.syncer.refresh_files(&key)).is_err());
+    assert_eq!(f.syncer.cached_files(&key).unwrap().unwrap().files.len(), 2);
+}
+
+#[test]
+fn refresh_diff_round_trip_and_request() {
+    let f = fixture();
+    let key = diff_key("dir/my file.rs");
+    assert!(f.syncer.cached_diff(&key).unwrap().is_none());
+    f.http.push_response(200, diff_body("new"));
+    let diff = block_on(f.syncer.refresh_diff(&key)).unwrap();
+    assert_eq!(f.syncer.cached_diff(&key).unwrap().unwrap().diff, diff);
+    assert_eq!(
+        f.http.requests()[0].uri().to_string(),
+        format!(
+            "{BASE}/changes/7/revisions/bbb/files/dir%2Fmy%20file.rs/diff\
+             ?base=1&context=5&intraline&whitespace=IGNORE_ALL"
+        )
+    );
+    // Another whitespace mode is a different cache entry.
+    let other = DiffKey {
+        whitespace: Whitespace::IgnoreNone,
+        ..key
+    };
+    assert!(f.syncer.cached_diff(&other).unwrap().is_none());
+}
+
+#[test]
+fn failed_diff_refresh_keeps_the_cached_diff() {
+    let f = fixture();
+    let key = diff_key("a.rs");
+    f.http.push_response(200, diff_body("v1"));
+    let first = block_on(f.syncer.refresh_diff(&key)).unwrap();
+    f.http.push_response(500, "boom");
+    assert!(block_on(f.syncer.refresh_diff(&key)).is_err());
+    f.http.push_response(404, "");
+    assert!(matches!(
+        block_on(f.syncer.refresh_diff(&key)),
+        Err(Error::Api(gerrit_api::Error::NotFound))
+    ));
+    assert_eq!(f.syncer.cached_diff(&key).unwrap().unwrap().diff, first);
+}
+
+#[test]
+fn prefetch_fetches_the_next_file_once() {
+    let f = fixture();
+    let files = file_list();
+    let current = diff_key("a.rs");
+
+    f.http.push_response(200, diff_body("b"));
+    let fetched = block_on(f.syncer.prefetch_next_diff(&current, &files)).unwrap();
+    assert_eq!(fetched, Some(diff_key("b.rs")));
+    assert!(f.syncer.cached_diff(&diff_key("b.rs")).unwrap().is_some());
+    assert!(f.syncer.cached_diff(&current).unwrap().is_none());
+    assert!(
+        f.http.requests()[0]
+            .uri()
+            .to_string()
+            .contains("/files/b.rs/diff?")
+    );
+
+    // Already cached: no further request (the fake would fail one).
+    let again = block_on(f.syncer.prefetch_next_diff(&current, &files)).unwrap();
+    assert_eq!(again, None);
+    assert_eq!(f.http.requests().len(), 1);
+}
+
+#[test]
+fn prefetch_does_nothing_at_the_end_or_for_unknown_files() {
+    let f = fixture();
+    let files = file_list();
+    assert_eq!(
+        block_on(f.syncer.prefetch_next_diff(&diff_key("b.rs"), &files)).unwrap(),
+        None
+    );
+    assert_eq!(
+        block_on(f.syncer.prefetch_next_diff(&diff_key("zzz.rs"), &files)).unwrap(),
+        None
+    );
+    assert_eq!(
+        block_on(f.syncer.prefetch_next_diff(&diff_key("a.rs"), &[])).unwrap(),
+        None
+    );
+    assert!(f.http.requests().is_empty());
+}
+
+#[test]
+fn prefetch_starts_with_the_commit_message() {
+    let f = fixture();
+    f.http.push_response(200, diff_body("m"));
+    let fetched = block_on(
+        f.syncer
+            .prefetch_next_diff(&diff_key("/COMMIT_MSG"), &file_list()),
+    )
+    .unwrap();
+    assert_eq!(fetched, Some(diff_key("a.rs")));
+}
+
+#[test]
+fn prefetch_reports_fetch_errors_and_caches_nothing() {
+    let f = fixture();
+    f.http.push_response(500, "boom");
+    assert!(block_on(f.syncer.prefetch_next_diff(&diff_key("a.rs"), &file_list())).is_err());
+    assert!(f.syncer.cached_diff(&diff_key("b.rs")).unwrap().is_none());
+}
+
+#[test]
+fn refresh_related_round_trip() {
+    let f = fixture();
+    let rev = RevisionId::from("bbb");
+    assert!(
+        f.syncer
+            .cached_related(ChangeNumber(7), &rev)
+            .unwrap()
+            .is_none()
+    );
+    f.http.push_response(
+        200,
+        xssi(&json!({"changes": [
+            {"project": "p", "_change_number": 8, "_revision_number": 1,
+             "_current_revision_number": 2, "status": "NEW"}
+        ]})),
+    );
+    let related = block_on(f.syncer.refresh_related(ChangeNumber(7), &rev)).unwrap();
+    assert_eq!(related.len(), 1);
+    let cached = f
+        .syncer
+        .cached_related(ChangeNumber(7), &rev)
+        .unwrap()
+        .unwrap();
+    assert_eq!(cached.changes, related);
+
+    f.http.push_response(500, "boom");
+    assert!(block_on(f.syncer.refresh_related(ChangeNumber(7), &rev)).is_err());
+    assert_eq!(
+        f.syncer
+            .cached_related(ChangeNumber(7), &rev)
+            .unwrap()
+            .unwrap()
+            .changes,
+        related
+    );
+}
+
+#[test]
+fn diff_preferences_are_skipped_when_anonymous() {
+    let f = fixture();
+    assert_eq!(block_on(f.syncer.refresh_diff_preferences()).unwrap(), None);
+    assert!(f.http.requests().is_empty());
+    assert!(f.syncer.cached_diff_preferences().unwrap().is_none());
+}
+
+#[test]
+fn diff_preferences_round_trip_when_signed_in() {
+    let f = fixture_with(signed_in());
+    assert!(f.syncer.cached_diff_preferences().unwrap().is_none());
+    f.http
+        .push_response(200, xssi(&json!({"context": 3, "tab_size": 2})));
+    f.http
+        .push_response(200, xssi(&json!({"diff_view": "UNIFIED_DIFF"})));
+    let prefs = block_on(f.syncer.refresh_diff_preferences())
+        .unwrap()
+        .unwrap();
+    assert_eq!(prefs.context, Some(DiffContext::Lines(3)));
+    assert_eq!(prefs.view_mode, Some(model::DiffViewMode::Unified));
+    let cached = f.syncer.cached_diff_preferences().unwrap().unwrap();
+    assert_eq!(cached.preferences, prefs);
+
+    // A failed refresh keeps the cached preferences.
+    f.http.push_response(401, "");
+    assert!(matches!(
+        block_on(f.syncer.refresh_diff_preferences()),
+        Err(Error::Api(gerrit_api::Error::Unauthorized))
+    ));
+    assert_eq!(
+        f.syncer
+            .cached_diff_preferences()
+            .unwrap()
+            .unwrap()
+            .preferences,
+        prefs
+    );
+}
+
+#[test]
+fn refreshing_a_diff_prunes_old_cache_rows() {
+    let f = fixture();
+    // An ancient row, as if cached long ago.
+    f.syncer
+        .store()
+        .save_diff(
+            f.syncer.server,
+            &diff_key("old.rs"),
+            &block_on(async {
+                f.http.push_response(200, diff_body("x"));
+                f.syncer
+                    .client
+                    .get_diff(
+                        ChangeNumber(7),
+                        &"bbb".into(),
+                        "old.rs",
+                        &gerrit_api::DiffParams::default(),
+                    )
+                    .await
+                    .unwrap()
+            }),
+            "2020-01-01T00:00:00Z".parse().unwrap(),
+        )
+        .unwrap();
+    assert!(f.syncer.cached_diff(&diff_key("old.rs")).unwrap().is_some());
+    f.http.push_response(200, diff_body("y"));
+    block_on(f.syncer.refresh_diff(&diff_key("new.rs"))).unwrap();
+    assert!(f.syncer.cached_diff(&diff_key("old.rs")).unwrap().is_none());
+    assert!(f.syncer.cached_diff(&diff_key("new.rs")).unwrap().is_some());
 }
