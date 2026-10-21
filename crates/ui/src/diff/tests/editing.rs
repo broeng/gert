@@ -514,3 +514,27 @@ fn focus_thread_opens_it_and_puts_the_cursor_there(cx: &mut TestAppContext) {
         })
     });
 }
+
+#[gpui_kit::test]
+fn the_cursor_follows_its_thread_when_a_threads_only_view_reorders(cx: &mut TestAppContext) {
+    let (_, view, _) = patchset_view(cx);
+    let (first, second) = (patchset_thread("p1", 3), patchset_thread("p2", 3));
+    let give = |cx: &mut TestAppContext, threads: Vec<model::Thread>| {
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.set_patchset_threads(model::PatchSetNumber(3), std::sync::Arc::new(threads), cx)
+            })
+        });
+        cx.run_until_parked();
+    };
+    give(cx, vec![first.clone(), second.clone()]);
+    cx.update(|cx| view.update(cx, |v, cx| v.focus_thread(&first.id, cx)));
+    assert_eq!(cursor(cx, &view), 0);
+    // A reply to the first thread makes it the newest: it moves down.
+    give(cx, vec![second, first.clone()]);
+    assert_eq!(
+        cx.update(|cx| view.read(cx).cursor_thread()),
+        Some(first.id)
+    );
+    assert_eq!(cursor(cx, &view), 1);
+}
