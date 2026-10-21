@@ -3,11 +3,16 @@
 use std::collections::BTreeMap;
 
 use model::{
-    Account, AccountId, ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, LabelSummary,
-    PatchSetNumber, RevisionId, Timestamp, TimestampParseError, parse_gerrit_timestamp,
+    Account, AccountId, ChangeDetail, ChangeMessage, ChangeNumber, ChangeStatus, ChangeSummary,
+    Commit, CommitParent, ExpressionResult, ExpressionStatus, GitPerson, LabelSummary, LabelVote,
+    PatchSetNumber, Revision, RevisionId, RevisionKind, SubmitRequirement, SubmitRequirementStatus,
+    Timestamp, TimestampParseError, parse_gerrit_timestamp,
 };
 
-use crate::wire::{AccountInfo, ChangeInfo, LabelInfo, Status};
+use crate::wire::{
+    self, AccountInfo, ApprovalInfo, ChangeInfo, ChangeMessageInfo, CommitInfo, LabelInfo,
+    RevisionInfo, Status, SubmitRequirementExpressionInfo, SubmitRequirementResultInfo,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConversionError {
@@ -27,6 +32,16 @@ fn required<T>(v: Option<T>, field: &'static str) -> Result<T, ConversionError> 
 fn timestamp(v: Option<&str>, field: &'static str) -> Result<Timestamp, ConversionError> {
     parse_gerrit_timestamp(required(v, field)?)
         .map_err(|source| ConversionError::Timestamp { field, source })
+}
+
+fn opt_timestamp(
+    v: Option<&str>,
+    field: &'static str,
+) -> Result<Option<Timestamp>, ConversionError> {
+    v.map(|v| {
+        parse_gerrit_timestamp(v).map_err(|source| ConversionError::Timestamp { field, source })
+    })
+    .transpose()
 }
 
 pub(crate) fn account(a: &AccountInfo) -> Result<Account, ConversionError> {
@@ -66,6 +81,110 @@ fn label(l: &LabelInfo) -> LabelSummary {
         }
     }
     s
+}
+
+fn git_person(p: &wire::GitPerson) -> Result<GitPerson, ConversionError> {
+    Ok(GitPerson {
+        name: p.name.clone(),
+        email: p.email.clone(),
+        date: opt_timestamp(p.date.as_deref(), "date")?,
+        tz: p.tz,
+    })
+}
+
+pub(crate) fn commit(c: &CommitInfo) -> Result<Commit, ConversionError> {
+    Ok(Commit {
+        sha: c.commit.clone().map(RevisionId::from),
+        // A parent without a SHA cannot be followed; drop it.
+        parents: c
+            .parents
+            .iter()
+            .flatten()
+            .filter_map(|p| {
+                Some(CommitParent {
+                    sha: RevisionId::from(p.commit.clone()?),
+                    subject: p.subject.clone(),
+                })
+            })
+            .collect(),
+        author: c.author.as_ref().map(git_person).transpose()?,
+        committer: c.committer.as_ref().map(git_person).transpose()?,
+        subject: c.subject.clone().unwrap_or_default(),
+        message: c.message.clone(),
+    })
+}
+
+fn revision(sha: &str, r: &RevisionInfo) -> Result<Revision, ConversionError> {
+    Ok(Revision {
+        number: PatchSetNumber(required(r.number, "revisions._number")?),
+        sha: RevisionId::from(sha),
+        kind: r.kind.as_deref().map(RevisionKind::from_wire),
+        created: opt_timestamp(r.created.as_deref(), "revisions.created")?,
+        uploader: r.uploader.as_ref().map(account).transpose()?,
+        ref_name: r.ref_name.clone(),
+        description: r.description.clone().filter(|d| !d.is_empty()),
+        commit: r.commit.as_ref().map(commit).transpose()?,
+    })
+}
+
+fn message(m: &ChangeMessageInfo) -> Result<ChangeMessage, ConversionError> {
+    Ok(ChangeMessage {
+        id: required(m.id.clone(), "messages.id")?,
+        author: m.author.as_ref().map(account).transpose()?,
+        real_author: m.real_author.as_ref().map(account).transpose()?,
+        date: timestamp(m.date.as_deref(), "messages.date")?,
+        message: m.message.clone().unwrap_or_default(),
+        tag: m.tag.clone(),
+        revision: m.revision_number.map(PatchSetNumber),
+    })
+}
+
+fn expression(e: &SubmitRequirementExpressionInfo) -> ExpressionResult {
+    ExpressionResult {
+        expression: e.expression.clone().unwrap_or_default(),
+        fulfilled: e.fulfilled.unwrap_or(false),
+        status: e.status.as_deref().map(ExpressionStatus::from_wire),
+        passing_atoms: e.passing_atoms.clone().unwrap_or_default(),
+        failing_atoms: e.failing_atoms.clone().unwrap_or_default(),
+        atom_explanations: e.atom_explanations.clone().unwrap_or_default(),
+        error_message: e.error_message.clone(),
+    }
+}
+
+fn submit_requirement(
+    r: &SubmitRequirementResultInfo,
+) -> Result<SubmitRequirement, ConversionError> {
+    Ok(SubmitRequirement {
+        name: required(r.name.clone(), "submit_requirements.name")?,
+        description: r.description.clone().filter(|d| !d.is_empty()),
+        status: SubmitRequirementStatus::from_wire(required(
+            r.status.as_deref(),
+            "submit_requirements.status",
+        )?),
+        is_legacy: r.is_legacy.unwrap_or(false),
+        applicability: r.applicability_expression_result.as_ref().map(expression),
+        submittability: r.submittability_expression_result.as_ref().map(expression),
+        override_result: r.override_expression_result.as_ref().map(expression),
+    })
+}
+
+/// A vote needs a voter; entries without an id (which `DETAILED_LABELS`
+/// does not produce) are skipped rather than failing the page.
+fn vote(a: &ApprovalInfo) -> Result<Option<LabelVote>, ConversionError> {
+    let Some(id) = a.account_id else {
+        return Ok(None);
+    };
+    Ok(Some(LabelVote {
+        account: Account {
+            id: AccountId(id),
+            name: a.name.clone(),
+            email: a.email.clone(),
+            username: a.username.clone(),
+            display_name: a.display_name.clone(),
+        },
+        value: a.value.unwrap_or(0),
+        date: opt_timestamp(a.date.as_deref(), "labels.all.date")?,
+    }))
 }
 
 pub(crate) fn change_summary(c: &ChangeInfo) -> Result<ChangeSummary, ConversionError> {
@@ -130,6 +249,26 @@ pub(crate) fn change_detail(c: &ChangeInfo) -> Result<ChangeDetail, ConversionEr
             .map(account)
             .collect()
     };
+    let mut revisions = c
+        .revisions
+        .iter()
+        .flatten()
+        .map(|(sha, r)| revision(sha, r))
+        .collect::<Result<Vec<_>, _>>()?;
+    revisions.sort_by_key(|r| r.number);
+    let mut votes = BTreeMap::new();
+    for (name, l) in c.labels.iter().flatten() {
+        if let Some(all) = &l.all {
+            let list = all
+                .iter()
+                .map(vote)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect();
+            votes.insert(name.clone(), list);
+        }
+    }
     Ok(ChangeDetail {
         summary,
         current_revision: c.current_revision.clone().map(RevisionId::from),
@@ -139,10 +278,20 @@ pub(crate) fn change_detail(c: &ChangeInfo) -> Result<ChangeDetail, ConversionEr
             .and_then(|commit| commit.message.clone()),
         reviewers: accounts("REVIEWER")?,
         cc: accounts("CC")?,
-        revisions: Vec::new(),
-        messages: Vec::new(),
-        submit_requirements: Vec::new(),
-        votes: BTreeMap::new(),
+        revisions,
+        messages: c
+            .messages
+            .iter()
+            .flatten()
+            .map(message)
+            .collect::<Result<_, _>>()?,
+        submit_requirements: c
+            .submit_requirements
+            .iter()
+            .flatten()
+            .map(submit_requirement)
+            .collect::<Result<_, _>>()?,
+        votes,
     })
 }
 

@@ -6,6 +6,10 @@ pub enum ChangeOption {
     DetailedAccounts,
     CurrentRevision,
     CurrentCommit,
+    AllRevisions,
+    AllCommits,
+    Messages,
+    SubmitRequirements,
     Submittable,
 }
 
@@ -17,6 +21,10 @@ impl ChangeOption {
             Self::DetailedAccounts => "DETAILED_ACCOUNTS",
             Self::CurrentRevision => "CURRENT_REVISION",
             Self::CurrentCommit => "CURRENT_COMMIT",
+            Self::AllRevisions => "ALL_REVISIONS",
+            Self::AllCommits => "ALL_COMMITS",
+            Self::Messages => "MESSAGES",
+            Self::SubmitRequirements => "SUBMIT_REQUIREMENTS",
             Self::Submittable => "SUBMITTABLE",
         }
     }
