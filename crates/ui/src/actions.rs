@@ -28,7 +28,6 @@ pub const SHELL: &str = "Shell";
 /// Key context of the dashboard and search result pages.
 pub const CHANGE_LIST: &str = "ChangeList";
 /// Key context of the change page.
-#[allow(dead_code)]
 pub const CHANGE_PAGE: &str = "ChangePage";
 /// Key context around the search box.
 pub const SEARCH_BAR: &str = "SearchBar";

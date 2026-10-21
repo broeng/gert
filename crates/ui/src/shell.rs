@@ -15,6 +15,7 @@ use crate::{
     login::LoginOutcome,
     nav::{NavState, Route},
     pages::{
+        change::{ChangeEvent, ChangePage},
         list::{ChangeListPage, ListEvent, ListKind},
         login::{LoginPage, LoginPrefill},
     },
@@ -25,6 +26,7 @@ use crate::{
 enum Page {
     Login(Entity<LoginPage>),
     List(Entity<ChangeListPage>),
+    Change(Entity<ChangePage>),
 }
 
 impl Page {
@@ -32,6 +34,7 @@ impl Page {
         match self {
             Page::Login(p) => p.focus_handle(cx),
             Page::List(p) => p.focus_handle(cx),
+            Page::Change(p) => p.focus_handle(cx),
         }
     }
 
@@ -39,6 +42,7 @@ impl Page {
         match self {
             Page::Login(p) => p.clone().into_any_element(),
             Page::List(p) => p.clone().into_any_element(),
+            Page::Change(p) => p.clone().into_any_element(),
         }
     }
 
@@ -46,6 +50,7 @@ impl Page {
         match self {
             Page::Login(_) => {}
             Page::List(p) => p.update(cx, |p, cx| p.set_window_active(active, cx)),
+            Page::Change(p) => p.update(cx, |p, cx| p.set_window_active(active, cx)),
         }
     }
 }
@@ -236,6 +241,7 @@ impl Shell {
                 }];
                 self.list_page(session, ListKind::Search, spec, restore, active, window, cx)
             }
+            (Route::Change(n), Some(session)) => self.change_page(session, n, active, window, cx),
             _ => {
                 let prefill = self.prefill.take().unwrap_or_default();
                 let env = self.env.clone();
@@ -273,12 +279,31 @@ impl Shell {
             |this, page, ev: &ListEvent, window, cx| match ev {
                 ListEvent::Open(n) => {
                     this.nav.set_selected(page.read(cx).selected_number());
-                    log::info!("opening change {n} is not implemented yet");
+                    this.navigate(Route::Change(*n), window, cx);
                 }
                 ListEvent::Unauthorized => this.unauthorized(window, cx),
             },
         ));
         Page::List(page)
+    }
+
+    fn change_page(
+        &mut self,
+        session: Session,
+        number: ChangeNumber,
+        active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Page {
+        let page = cx.new(|cx| ChangePage::new(session, number, active, cx));
+        self.page_subs.push(cx.subscribe_in(
+            &page,
+            window,
+            |this, _, ev: &ChangeEvent, window, cx| match ev {
+                ChangeEvent::Unauthorized => this.unauthorized(window, cx),
+            },
+        ));
+        Page::Change(page)
     }
 
     /// Remembers what is selected on the page we are about to leave.
