@@ -4,7 +4,7 @@
 //! memory. Sign-in is pre-arranged as the user `alice`.
 //!
 //! ```text
-//! cargo run -p ui --example review [--dark|--light] [--unified] [--font NAME]
+//! cargo run -p ui --example review [--dark|--light] [--unified] [--font NAME] [--files N]
 //! ```
 //!
 //! Open the first change with `j`, `Enter`. Requests that no route matches
@@ -55,7 +55,22 @@ fn read(rel: &str) -> Vec<u8> {
 
 /// Routes: the longest matching fragment wins, so the per-file and
 /// per-comparison routes sit on top of the general ones.
-fn server() -> RouteHttpClient {
+/// `n` generated files for the stress test (`--files N`): the example's
+/// file list plus `n` modified files, every diff the same small fixture.
+fn many_files(n: usize) -> Vec<u8> {
+    let mut out = String::from(
+        ")]}'\n{\n\"/COMMIT_MSG\": {\"lines_inserted\": 3, \"size\": 100, \"size_delta\": 10}",
+    );
+    for i in 0..n {
+        out.push_str(&format!(
+            ",\n\"src/generated/file_{i:05}.rs\": {{\"lines_inserted\": 5, \"lines_deleted\": 2, \"size\": 900, \"size_delta\": 30}}"
+        ));
+    }
+    out.push_str("\n}\n");
+    out.into_bytes()
+}
+
+fn server(files: Option<usize>) -> RouteHttpClient {
     let http = RouteHttpClient::new();
     let ex = |name: &str| read(&format!("example/{name}"));
     let hw = |name: &str| read(&format!("handwritten/{name}"));
@@ -77,7 +92,7 @@ fn server() -> RouteHttpClient {
     http.route(
         &format!("revisions/{sha3}/files"),
         200,
-        ex("files_base_3.json"),
+        files.map_or_else(|| ex("files_base_3.json"), many_files),
     );
     http.route(
         &format!("revisions/{sha3}/files?base=1"),
@@ -141,12 +156,14 @@ fn main() {
     let mut mode = None;
     let mut local = DiffPreferences::default();
     let mut font = None;
+    let mut files = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dark" => mode = Some(ThemeMode::Dark),
             "--light" => mode = Some(ThemeMode::Light),
             "--unified" => local.view_mode = Some(DiffViewMode::Unified),
             "--font" => font = args.next(),
+            "--files" => files = args.next().and_then(|n| n.parse().ok()),
             other => {
                 eprintln!("review: unknown argument {other:?}");
                 std::process::exit(2);
@@ -154,7 +171,7 @@ fn main() {
         }
     }
 
-    let http = server();
+    let http = server(files);
     let mut store = Store::open_in_memory().unwrap_or_else(|e| {
         eprintln!("review: {e}");
         std::process::exit(2);
