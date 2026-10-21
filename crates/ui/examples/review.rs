@@ -4,7 +4,7 @@
 //! memory. Sign-in is pre-arranged as the user `alice`.
 //!
 //! ```text
-//! cargo run -p ui --example review [--dark|--light] [--unified] [--font NAME] [--files N]
+//! cargo run -p ui --example review [--dark|--light] [--unified] [--font NAME] [--files N] [--csd]
 //! ```
 //!
 //! Open the first change with `j`, `Enter`. Requests that no route matches
@@ -240,12 +240,16 @@ fn main() {
     let mut local = DiffPreferences::default();
     let mut font = None;
     let mut files = None;
+    let mut csd = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dark" => mode = Some(ThemeMode::Dark),
             "--light" => mode = Some(ThemeMode::Light),
             "--unified" => local.view_mode = Some(DiffViewMode::Unified),
             "--font" => font = args.next(),
+            // Dev: ask for client-side decorations to see the title bar
+            // buttons and the window frame on a compositor that draws its own.
+            "--csd" => csd = true,
             "--files" => files = args.next().and_then(|n| n.parse().ok()),
             other => {
                 eprintln!("review: unknown argument {other:?}");
@@ -284,25 +288,22 @@ fn main() {
         },
     };
 
-    gpui_kit::application().run(move |cx| {
+    ui::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
         if let Some(m) = mode {
             Theme::change(m, None, cx);
         }
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("review demo".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let mut options =
+            ui::window_options("review demo", "review-demo", size(px(1200.), px(800.)), cx);
+        if csd {
+            options.window_decorations = Some(WindowDecorations::Client);
+        }
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             if mode.is_none() {
                 Theme::sync_system_appearance(Some(window), cx);
             }
-            cx.new(|cx| Shell::new(startup, window, cx))
+            cx.new(|cx| Shell::new(startup, window, cx).with_app_name("review demo"))
         });
         match opened {
             Ok(_) => {
