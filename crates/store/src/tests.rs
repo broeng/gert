@@ -171,6 +171,9 @@ fn change_detail_round_trip_updates_summary() {
         messages: vec![],
         submit_requirements: vec![],
         votes: Default::default(),
+        attention: vec![],
+        permitted_labels: Default::default(),
+        label_values: Default::default(),
     };
     s.save_change_detail(id, &detail, ts(T2)).unwrap();
     let got = s.load_change_detail(id, ChangeNumber(5)).unwrap().unwrap();

@@ -3,12 +3,13 @@
 use std::collections::BTreeMap;
 
 use model::{
-    Account, AccountId, ChangeDetail, ChangeMessage, ChangeNumber, ChangeStatus, ChangeSummary,
-    ChangedChunk, Commit, CommitParent, Diff, DiffChangeType, DiffChunk, DiffContext, DiffFileMeta,
-    DiffPreferences, DiffViewMode, ExpressionResult, ExpressionStatus, FileEntry, FileStatus,
-    GitPerson, IntralineEdit, IntralineStatus, LabelSummary, LabelVote, PatchSetNumber,
-    RelatedChange, Revision, RevisionId, RevisionKind, SubmitRequirement, SubmitRequirementStatus,
-    Timestamp, TimestampParseError, Whitespace, file_order, parse_gerrit_timestamp,
+    Account, AccountId, AttentionEntry, ChangeDetail, ChangeMessage, ChangeNumber, ChangeStatus,
+    ChangeSummary, ChangedChunk, Commit, CommitParent, Diff, DiffChangeType, DiffChunk,
+    DiffContext, DiffFileMeta, DiffPreferences, DiffViewMode, ExpressionResult, ExpressionStatus,
+    FileEntry, FileStatus, GitPerson, IntralineEdit, IntralineStatus, LabelSummary, LabelValue,
+    LabelVote, PatchSetNumber, RelatedChange, Revision, RevisionId, RevisionKind,
+    SubmitRequirement, SubmitRequirementStatus, Timestamp, TimestampParseError, Whitespace,
+    file_order, parse_gerrit_timestamp,
 };
 
 use crate::wire::{
@@ -274,6 +275,60 @@ pub(crate) fn change_detail(c: &ChangeInfo) -> Result<ChangeDetail, ConversionEr
             votes.insert(name.clone(), list);
         }
     }
+    let mut attention = Vec::new();
+    for (key, entry) in c.attention_set.iter().flatten() {
+        // `DETAILED_ACCOUNTS` fills the account; without it the key is
+        // still the id.
+        let acct = match &entry.account {
+            Some(a) if a.account_id.is_some() => account(a)?,
+            _ => match key.parse::<u64>() {
+                Ok(id) => Account {
+                    id: AccountId(id),
+                    name: None,
+                    email: None,
+                    username: None,
+                    display_name: None,
+                },
+                Err(_) => continue,
+            },
+        };
+        attention.push(AttentionEntry {
+            account: acct,
+            reason: entry.reason.clone().filter(|r| !r.is_empty()),
+            last_update: opt_timestamp(entry.last_update.as_deref(), "attention_set.last_update")?,
+        });
+    }
+    attention.sort_by_key(|a| a.account.id);
+    let permitted_labels = c
+        .permitted_labels
+        .iter()
+        .flatten()
+        .map(|(name, values)| {
+            let mut v: Vec<i32> = values.iter().filter_map(|s| label_value(s)).collect();
+            v.sort_unstable();
+            v.dedup();
+            (name.clone(), v)
+        })
+        .collect();
+    let label_values = c
+        .labels
+        .iter()
+        .flatten()
+        .filter_map(|(name, l)| {
+            let values = l.values.as_ref()?;
+            let mut v: Vec<LabelValue> = values
+                .iter()
+                .filter_map(|(k, d)| {
+                    Some(LabelValue {
+                        value: label_value(k)?,
+                        description: d.clone(),
+                    })
+                })
+                .collect();
+            v.sort_by_key(|v| v.value);
+            Some((name.clone(), v))
+        })
+        .collect();
     Ok(ChangeDetail {
         summary,
         current_revision: c.current_revision.clone().map(RevisionId::from),
@@ -297,7 +352,15 @@ pub(crate) fn change_detail(c: &ChangeInfo) -> Result<ChangeDetail, ConversionEr
             .map(submit_requirement)
             .collect::<Result<_, _>>()?,
         votes,
+        attention,
+        permitted_labels,
+        label_values,
     })
+}
+
+/// Parses a label value as Gerrit writes it: `"-1"`, `" 0"`, `"+2"`.
+fn label_value(s: &str) -> Option<i32> {
+    s.trim().trim_start_matches('+').parse().ok()
 }
 
 /// The `files` map as a list in the server's display order.

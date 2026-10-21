@@ -215,6 +215,9 @@ mod tests {
             messages: vec![],
             submit_requirements: vec![],
             votes: Default::default(),
+            attention: Default::default(),
+            permitted_labels: Default::default(),
+            label_values: Default::default(),
         }
     }
 

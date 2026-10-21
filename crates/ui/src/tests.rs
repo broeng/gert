@@ -133,6 +133,9 @@ fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) 
         messages: vec![],
         submit_requirements: vec![],
         votes: Default::default(),
+        attention: Default::default(),
+        permitted_labels: Default::default(),
+        label_values: Default::default(),
     };
     store
         .save_change_detail(
