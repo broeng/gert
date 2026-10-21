@@ -2,6 +2,7 @@
 //! work runs on the background executor.
 
 mod actions;
+pub mod diff;
 mod labels;
 mod list_model;
 mod login;
