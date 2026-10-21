@@ -116,6 +116,20 @@ fn append_without_cache_saves() {
 }
 
 #[test]
+fn touch_only_moves_fetched_at() {
+    let (mut s, id) = store();
+    s.touch_query(id, "q", ts(T2)).unwrap();
+    assert_eq!(s.load_query(id, "q").unwrap(), None);
+    s.save_query_page(id, "q", &[change(1, T1)], true, ts(T1))
+        .unwrap();
+    s.touch_query(id, "q", ts(T2)).unwrap();
+    let got = s.load_query(id, "q").unwrap().unwrap();
+    assert_eq!(got.changes, [change(1, T1)]);
+    assert!(got.more_changes);
+    assert_eq!(got.fetched_at, ts(T2));
+}
+
+#[test]
 fn queries_and_servers_are_independent() {
     let (mut s, a) = store();
     let b = s.server_id("https://b.example").unwrap();
