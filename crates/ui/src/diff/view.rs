@@ -69,7 +69,8 @@ pub struct DiffView {
     /// Set by the owner.
     status: Option<DiffStatus>,
     /// The view's own message ("nothing is hidden"); goes away when the
-    /// cursor moves or the diff changes. The owner's status wins.
+    /// cursor moves or the diff changes. Shown over an `Info` status, but
+    /// not over `Busy` or `Error`.
     hint: Option<SharedString>,
 }
 
@@ -543,7 +544,12 @@ impl Render for DiffView {
             let t = cx.theme();
             let strip = match (&self.status, &self.hint) {
                 (Some(DiffStatus::Busy(m)), _) => Some((m.clone(), t.muted_foreground, t.muted)),
-                (Some(DiffStatus::Info(m)), _) => Some((m.clone(), t.muted_foreground, t.muted)),
+                // A transient hint (the key was pressed with nothing to do)
+                // beats the standing context label.
+                (Some(DiffStatus::Info(_)), Some(m)) => {
+                    Some((m.clone(), t.muted_foreground, t.muted))
+                }
+                (Some(DiffStatus::Info(m)), None) => Some((m.clone(), t.muted_foreground, t.muted)),
                 (Some(DiffStatus::Error(m)), _) => {
                     Some((m.clone(), t.danger, t.danger.opacity(0.1)))
                 }
