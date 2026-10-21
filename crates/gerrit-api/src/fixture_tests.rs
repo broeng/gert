@@ -607,6 +607,7 @@ fn drafts_response_joins_the_published_threads() {
             sync: DraftSync::Synced,
             attempts: 0,
             last_error: None,
+            version: 0,
         })
         .collect();
     let threads = build_threads(&comments, &drafts);

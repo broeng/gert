@@ -10,6 +10,7 @@
 //! caches (file lists, diffs, related changes, diff preferences) live in
 //! `review_cache.rs`, including the pruning policy.
 
+mod drafts;
 mod error;
 mod migrations;
 mod review_cache;
@@ -19,6 +20,7 @@ use std::{path::Path, time::Duration};
 use model::{ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+pub use drafts::{CachedComments, DeleteOutcome, DraftFailure, MergeReport};
 pub use error::Error;
 pub use review_cache::{
     CachedDiff, CachedDiffPreferences, CachedFileList, CachedRelated, PrunePolicy, PruneReport,
