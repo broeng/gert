@@ -1,0 +1,128 @@
+)]}'
+{
+  "/COMMIT_MSG": [
+    {
+      "author": {
+        "_account_id": 1000002,
+        "name": "Bob"
+      },
+      "commit_id": "0123456789abcdef0123456789abcdef01234567",
+      "id": "cm01",
+      "line": 7,
+      "message": "Mention the issue.",
+      "patch_set": 1,
+      "unresolved": true,
+      "updated": "2024-03-01 09:00:00.000000000"
+    }
+  ],
+  "/PATCHSET_LEVEL": [
+    {
+      "author": {
+        "_account_id": 1000002,
+        "name": "Bob"
+      },
+      "change_message_id": "msg0001",
+      "id": "pl01",
+      "message": "Nice cleanup overall.",
+      "patch_set": 2,
+      "unresolved": false,
+      "updated": "2024-03-03 09:00:00.000000000"
+    }
+  ],
+  "src/Main.java": [
+    {
+      "author": {
+        "_account_id": 1000002,
+        "name": "Bob"
+      },
+      "commit_id": "0123456789abcdef0123456789abcdef01234567",
+      "id": "ln01",
+      "line": 12,
+      "message": "Why a new thread here?",
+      "patch_set": 1,
+      "unresolved": true,
+      "updated": "2024-03-01 10:00:00.000000000"
+    },
+    {
+      "author": {
+        "_account_id": 1000001,
+        "name": "Alice"
+      },
+      "id": "ln02",
+      "in_reply_to": "ln01",
+      "line": 12,
+      "message": "Needed for the retry.",
+      "patch_set": 1,
+      "unresolved": true,
+      "updated": "2024-03-01 11:00:00.000000000"
+    },
+    {
+      "author": {
+        "_account_id": 1000002,
+        "name": "Bob"
+      },
+      "id": "ln03",
+      "in_reply_to": "ln02",
+      "line": 12,
+      "message": "Ok, makes sense. Done?",
+      "patch_set": 1,
+      "unresolved": false,
+      "updated": "2024-03-01 12:00:00.000000000"
+    },
+    {
+      "author": {
+        "_account_id": 1000002,
+        "name": "Bob"
+      },
+      "id": "rg01",
+      "line": 21,
+      "message": "This loop can overflow.",
+      "patch_set": 2,
+      "range": {
+        "end_character": 18,
+        "end_line": 21,
+        "start_character": 4,
+        "start_line": 20
+      },
+      "unresolved": true,
+      "updated": "2024-03-02 10:00:00.000000000"
+    },
+    {
+      "author": {
+        "_account_id": 1000001,
+        "name": "Alice"
+      },
+      "id": "fl01",
+      "message": "Whole file needs a rewrite.",
+      "patch_set": 2,
+      "unresolved": false,
+      "updated": "2024-03-02 11:00:00.000000000"
+    },
+    {
+      "author": {
+        "_account_id": 1000001,
+        "name": "Alice"
+      },
+      "id": "pa01",
+      "line": 3,
+      "message": "This was wrong before too.",
+      "patch_set": 2,
+      "side": "PARENT",
+      "unresolved": false,
+      "updated": "2024-03-02 12:00:00.000000000"
+    },
+    {
+      "author": {
+        "_account_id": 1000002,
+        "name": "Bob"
+      },
+      "id": "or01",
+      "in_reply_to": "deleted-comment",
+      "line": 30,
+      "message": "Reply to something that is gone.",
+      "patch_set": 2,
+      "unresolved": true,
+      "updated": "2024-03-02 13:00:00.000000000"
+    }
+  ]
+}

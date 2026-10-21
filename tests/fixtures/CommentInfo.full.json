@@ -1,0 +1,70 @@
+{
+  "author": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  },
+  "change_message_id": "change_message_id-value",
+  "commit_id": "commit_id-value",
+  "context_lines": [
+    {
+      "context_line": "context_line-value",
+      "line_number": 1
+    }
+  ],
+  "fix_suggestions": [
+    {
+      "description": "description-value",
+      "fix_id": "fix_id-value",
+      "replacements": [
+        {
+          "path": "path-value",
+          "range": {
+            "end_character": 1,
+            "end_line": 1,
+            "start_character": 1,
+            "start_line": 1
+          },
+          "replacement": "replacement-value"
+        }
+      ]
+    }
+  ],
+  "id": "my%2Fproject~12345",
+  "in_reply_to": "in_reply_to-value",
+  "is_ai": true,
+  "line": 1,
+  "message": "Fix the frobnicator\n\nLonger description.\n\nChange-Id: I8473b95934b5732ac55d26311a706c9c2bde9940\n",
+  "parent": 1,
+  "patch_set": 1,
+  "path": "path-value",
+  "range": {
+    "end_character": 1,
+    "end_line": 1,
+    "start_character": 1,
+    "start_line": 1
+  },
+  "side": "REVISION",
+  "source_content_type": "source_content_type-value",
+  "tag": "tag-value",
+  "unresolved": true,
+  "updated": "2013-02-01 09:59:32.126000000"
+}
