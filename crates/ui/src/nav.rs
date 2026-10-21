@@ -11,7 +11,6 @@ pub enum Route {
     Search(String),
     Change(ChangeNumber),
     /// One file's diff, like PolyGerrit's `/c/proj/+/123/2..5/path`.
-    #[allow(dead_code)] // opened by the diff page, which follows
     Diff(DiffRoute),
 }
 
@@ -39,7 +38,6 @@ pub struct ChangeView {
 
 impl DiffRoute {
     /// The change page state that matches this diff.
-    #[allow(dead_code)] // used by the diff page, which follows
     pub fn change_view(&self) -> ChangeView {
         ChangeView {
             base: self.base,

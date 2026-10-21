@@ -8,8 +8,6 @@ use model::{DiffPreferences, ResolvedDiffPreferences, resolve_diff_preferences};
 
 use crate::session::LocalDiff;
 
-// Read by the diff views, which the following commits add.
-#[allow(dead_code)]
 pub struct DiffSettings {
     server: Option<DiffPreferences>,
     local: DiffPreferences,
@@ -17,7 +15,6 @@ pub struct DiffSettings {
     font_family: Option<SharedString>,
 }
 
-#[allow(dead_code)]
 impl DiffSettings {
     pub fn new(local: LocalDiff) -> Self {
         Self {

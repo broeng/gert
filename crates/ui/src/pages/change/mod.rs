@@ -63,7 +63,6 @@ pub enum ChangeEvent {
     /// A related change was chosen.
     OpenChange(ChangeNumber),
     /// A file's diff page was chosen.
-    #[allow(dead_code)] // the shell opens it once the diff page exists
     OpenDiff(DiffRoute),
 }
 
