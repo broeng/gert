@@ -1,3 +1,5 @@
+use model::{DiffContext, DiffKey, PatchSetNumber, Whitespace};
+
 /// Optional extra data for change queries (`o=` parameters).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeOption {
@@ -68,8 +70,58 @@ impl ChangeQuery {
     }
 }
 
-/// Percent-encodes a query-string component (everything but RFC 3986
-/// unreserved characters).
+/// Query parameters of the file diff endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffParams {
+    /// Compare against this patch set; `None` compares against the parent
+    /// commit.
+    pub base: Option<PatchSetNumber>,
+    pub context: DiffContext,
+    /// Ask for intraline edits.
+    pub intraline: bool,
+    pub whitespace: Whitespace,
+}
+
+impl Default for DiffParams {
+    fn default() -> Self {
+        Self {
+            base: None,
+            context: DiffContext::Lines(10),
+            intraline: true,
+            whitespace: Whitespace::IgnoreNone,
+        }
+    }
+}
+
+impl DiffParams {
+    /// The parameters for a cached comparison, always with intraline edits.
+    pub fn for_key(key: &DiffKey) -> Self {
+        Self {
+            base: key.base.as_ref().map(|b| b.number),
+            context: key.context,
+            intraline: true,
+            whitespace: key.whitespace.clone(),
+        }
+    }
+
+    /// As query pairs; a flag is a key with an empty value.
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut q = Vec::new();
+        if let Some(base) = self.base {
+            q.push(("base", base.to_string()));
+        }
+        q.push(("context", self.context.to_wire()));
+        if self.intraline {
+            q.push(("intraline", String::new()));
+        }
+        q.push(("whitespace", self.whitespace.as_wire().to_owned()));
+        q
+    }
+}
+
+/// Percent-encodes a query-string component or path segment (everything
+/// but RFC 3986 unreserved characters). Gerrit requires `/` inside a file
+/// path to be encoded as `%2F`, which this does.
 pub(crate) fn encode_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {

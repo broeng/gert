@@ -22,4 +22,4 @@ pub use client::{GerritClient, QueryPage};
 pub use convert::ConversionError;
 pub use error::Error;
 pub use http_client::{HttpClient, HttpError};
-pub use query::{ChangeOption, ChangeQuery};
+pub use query::{ChangeOption, ChangeQuery, DiffParams};

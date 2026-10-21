@@ -1,11 +1,15 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use base64::Engine as _;
-use model::{Account, ChangeDetail, ChangeNumber, ChangeSummary};
+use model::{
+    Account, ChangeDetail, ChangeNumber, ChangeSummary, Diff, DiffPreferences, FileEntry,
+    PatchSetNumber, RelatedChange, RevisionId,
+};
 use serde_json::Value;
 
 use crate::{
-    Auth, ChangeOption, ChangeQuery, Error, HttpClient, convert, query::encode_component, wire,
+    Auth, ChangeOption, ChangeQuery, DiffParams, Error, HttpClient, convert,
+    query::encode_component, wire,
 };
 
 /// One page of search results.
@@ -61,8 +65,11 @@ impl GerritClient {
         for (i, (k, v)) in query.iter().enumerate() {
             url.push(if i == 0 { '?' } else { '&' });
             url.push_str(&encode_component(k));
-            url.push('=');
-            url.push_str(&encode_component(v));
+            // A flag parameter (`?reviewed`) has no value.
+            if !v.is_empty() {
+                url.push('=');
+                url.push_str(&encode_component(v));
+            }
         }
         url
     }
@@ -94,6 +101,11 @@ impl GerritClient {
                 body: snippet(&body),
             }),
         }
+    }
+
+    /// Whether requests carry credentials.
+    pub fn is_authenticated(&self) -> bool {
+        self.auth.is_authenticated()
     }
 
     /// `GET /config/server/version`, e.g. `"3.9.1"`.
@@ -163,6 +175,99 @@ impl GerritClient {
         let info: wire::ChangeInfo = serde_json::from_value(v)?;
         Ok(convert::change_detail(&info)?)
     }
+
+    /// `GET /changes/{n}/revisions/{rev}/files[?base=]`: the files changed
+    /// in `target`, compared with patch set `base` (or the parent commit).
+    /// Sorted for display: `/COMMIT_MSG`, `/MERGE_LIST`, then by path.
+    pub async fn get_files(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        base: Option<PatchSetNumber>,
+    ) -> Result<Vec<FileEntry>, Error> {
+        let params: Vec<_> = base.map(|b| ("base", b.to_string())).into_iter().collect();
+        let v = self
+            .get_json(&revision_path(change, target, "/files"), &params)
+            .await?;
+        let files: BTreeMap<String, wire::CommonFileInfo> = serde_json::from_value(v)?;
+        Ok(convert::file_list(files))
+    }
+
+    /// `GET /changes/{n}/revisions/{rev}/files?reviewed`: paths the current
+    /// user marked as reviewed. Anonymous sessions have none, and the
+    /// server would answer 401, so no request is made.
+    pub async fn get_reviewed_files(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+    ) -> Result<Vec<String>, Error> {
+        if !self.is_authenticated() {
+            return Ok(Vec::new());
+        }
+        let v = self
+            .get_json(
+                &revision_path(change, target, "/files"),
+                &[("reviewed", String::new())],
+            )
+            .await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// `GET /changes/{n}/revisions/{rev}/files/{file}/diff`.
+    pub async fn get_diff(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        path: &str,
+        params: &DiffParams,
+    ) -> Result<Diff, Error> {
+        let path = revision_path(
+            change,
+            target,
+            &format!("/files/{}/diff", encode_component(path)),
+        );
+        let v = self.get_json(&path, &params.to_query()).await?;
+        let info: wire::DiffInfo = serde_json::from_value(v)?;
+        Ok(convert::diff(&info)?)
+    }
+
+    /// `GET /changes/{n}/revisions/{rev}/related`, in server order.
+    pub async fn get_related(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+    ) -> Result<Vec<RelatedChange>, Error> {
+        let v = self
+            .get_json(&revision_path(change, target, "/related"), &[])
+            .await?;
+        let info: wire::RelatedChangesInfo = serde_json::from_value(v)?;
+        Ok(convert::related(&info)?)
+    }
+
+    /// The signed-in user's diff settings: `GET /accounts/self/preferences.diff`,
+    /// plus the diff view mode, which Gerrit keeps in
+    /// `GET /accounts/self/preferences`. Anonymous access yields
+    /// [`Error::Unauthorized`].
+    pub async fn get_diff_preferences(&self) -> Result<DiffPreferences, Error> {
+        let v = self
+            .get_json("/accounts/self/preferences.diff", &[])
+            .await?;
+        let diff: wire::DiffPreferencesInfo = serde_json::from_value(v)?;
+        let general = match self.get_json("/accounts/self/preferences", &[]).await {
+            Ok(v) => Some(serde_json::from_value::<wire::GeneralPreferencesInfo>(v)?),
+            Err(Error::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        Ok(convert::diff_preferences(&diff, general.as_ref()))
+    }
+}
+
+/// `/changes/{n}/revisions/{sha}{suffix}`.
+fn revision_path(change: ChangeNumber, rev: &RevisionId, suffix: &str) -> String {
+    format!(
+        "/changes/{change}/revisions/{}{suffix}",
+        encode_component(rev.as_str())
+    )
 }
 
 /// Removes Gerrit's `)]}'` XSSI guard line.
@@ -565,6 +670,425 @@ mod tests {
         assert!(matches!(
             block_on(c.get_change(ChangeNumber(9))),
             Err(Error::NotFound)
+        ));
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn sha() -> RevisionId {
+        RevisionId::from(SHA)
+    }
+
+    #[test]
+    fn files_are_sorted_and_mapped() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{
+                "src/z.rs": {"lines_inserted": 3, "size_delta": 40, "size": 400},
+                "/COMMIT_MSG": {"lines_inserted": 7, "size_delta": 120, "size": 120},
+                "new name.rs": {"status": "R", "old_path": "old/name.rs"},
+                "assets/logo.png": {"status": "A", "binary": true, "size": 10, "size_delta": 10},
+                "gone.rs": {"status": "D", "lines_deleted": 9, "size_delta": -90},
+                "odd.rs": {"status": "Q", "future": 1},
+                "/MERGE_LIST": {"lines_inserted": 2},
+                ".gitignore": {}
+            }"#,
+            ),
+        );
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let files =
+            block_on(c.get_files(ChangeNumber(5), &sha(), Some(PatchSetNumber(2)))).unwrap();
+        let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/COMMIT_MSG",
+                "/MERGE_LIST",
+                ".gitignore",
+                "assets/logo.png",
+                "gone.rs",
+                "new name.rs",
+                "odd.rs",
+                "src/z.rs"
+            ]
+        );
+        let by = |p: &str| files.iter().find(|f| f.path == p).unwrap();
+        assert!(by("/COMMIT_MSG").is_special());
+        assert_eq!(by("src/z.rs").status, model::FileStatus::Modified);
+        assert_eq!(by("src/z.rs").lines_inserted, 3);
+        assert_eq!(by("new name.rs").old_path.as_deref(), Some("old/name.rs"));
+        assert_eq!(by("new name.rs").status, model::FileStatus::Renamed);
+        assert!(by("assets/logo.png").binary);
+        assert_eq!(by("gone.rs").size_delta, -90);
+        assert_eq!(by("odd.rs").status, model::FileStatus::Unknown("Q".into()));
+        assert_eq!(by(".gitignore").lines_deleted, 0);
+        assert_eq!(
+            fake.requests()[0].uri().to_string(),
+            format!("https://h/changes/5/revisions/{SHA}/files?base=2")
+        );
+    }
+
+    #[test]
+    fn files_without_base_has_no_query() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi("{}"));
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        assert!(
+            block_on(c.get_files(ChangeNumber(5), &sha(), None))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fake.requests()[0].uri().to_string(),
+            format!("https://h/changes/5/revisions/{SHA}/files")
+        );
+    }
+
+    #[test]
+    fn reviewed_files_use_a_bare_flag_and_skip_anonymous_sessions() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi(r#"["/COMMIT_MSG", "src/a b.rs"]"#));
+        let c = client(&fake, "https://h", basic());
+        let paths = block_on(c.get_reviewed_files(ChangeNumber(5), &sha())).unwrap();
+        assert_eq!(paths, ["/COMMIT_MSG", "src/a b.rs"]);
+        assert_eq!(
+            fake.requests()[0].uri().to_string(),
+            format!("https://h/a/changes/5/revisions/{SHA}/files?reviewed")
+        );
+
+        let anon = FakeHttpClient::new();
+        let c = client(&anon, "https://h", Auth::Anonymous);
+        assert!(
+            block_on(c.get_reviewed_files(ChangeNumber(5), &sha()))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(anon.requests().is_empty());
+    }
+
+    #[test]
+    fn diff_paths_are_percent_encoded() {
+        for (path, enc) in [
+            ("/COMMIT_MSG", "%2FCOMMIT_MSG"),
+            ("src/main/Foo.java", "src%2Fmain%2FFoo.java"),
+            ("docs/my file (1).md", "docs%2Fmy%20file%20%281%29.md"),
+            ("ü/日本.txt", "%C3%BC%2F%E6%97%A5%E6%9C%AC.txt"),
+            ("a+b#c?d%e.txt", "a%2Bb%23c%3Fd%25e.txt"),
+        ] {
+            let fake = FakeHttpClient::new();
+            fake.push_response(200, xssi("{}"));
+            let c = client(&fake, "https://h", Auth::Anonymous);
+            block_on(c.get_diff(ChangeNumber(5), &sha(), path, &DiffParams::default())).unwrap();
+            let uri = fake.requests()[0].uri().to_string();
+            assert!(
+                uri.starts_with(&format!(
+                    "https://h/changes/5/revisions/{SHA}/files/{enc}/diff?"
+                )),
+                "{path}: {uri}"
+            );
+            // The encoded path is a single path segment.
+            assert_eq!(fake.requests()[0].uri().path().matches('/').count(), 7);
+        }
+    }
+
+    #[test]
+    fn diff_parameters() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi("{}"));
+        fake.push_response(200, xssi("{}"));
+        fake.push_response(200, xssi("{}"));
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let get = |p: DiffParams| block_on(c.get_diff(ChangeNumber(5), &sha(), "f", &p)).unwrap();
+        get(DiffParams::default());
+        get(DiffParams {
+            base: Some(PatchSetNumber(3)),
+            context: model::DiffContext::All,
+            intraline: true,
+            whitespace: model::Whitespace::IgnoreAll,
+        });
+        get(DiffParams {
+            base: None,
+            context: model::DiffContext::Lines(0),
+            intraline: false,
+            whitespace: model::Whitespace::Unknown("X".into()),
+        });
+        let queries: Vec<_> = fake
+            .requests()
+            .iter()
+            .map(|r| r.uri().query().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(
+            queries,
+            [
+                "context=10&intraline&whitespace=IGNORE_NONE",
+                "base=3&context=ALL&intraline&whitespace=IGNORE_ALL",
+                "context=0&whitespace=X",
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_params_follow_the_cache_key() {
+        let key = model::DiffKey {
+            change: ChangeNumber(5),
+            base: Some(model::PatchSetRef {
+                number: PatchSetNumber(1),
+                sha: "aaa".into(),
+            }),
+            target: model::PatchSetRef {
+                number: PatchSetNumber(2),
+                sha: "bbb".into(),
+            },
+            path: "f".into(),
+            whitespace: model::Whitespace::IgnoreTrailing,
+            context: model::DiffContext::Lines(25),
+        };
+        let p = DiffParams::for_key(&key);
+        assert_eq!(p.base, Some(PatchSetNumber(1)));
+        assert!(p.intraline);
+        assert_eq!(p.context, model::DiffContext::Lines(25));
+        assert_eq!(p.whitespace, model::Whitespace::IgnoreTrailing);
+    }
+
+    #[test]
+    fn diff_converts_chunks_and_edits() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{
+                "meta_a": {"name": "old.rs", "content_type": "text/x-rust", "lines": 5},
+                "meta_b": {"name": "new.rs", "content_type": "text/x-rust", "lines": 6},
+                "change_type": "RENAMED", "intraline_status": "OK",
+                "diff_header": ["diff --git a/old.rs b/new.rs", "rename from old.rs"],
+                "content": [
+                    {"ab": ["fn main() {"]},
+                    {"a": ["    let x = 1;"], "b": ["    let y = 2;", "    z();"],
+                     "edit_a": [[8, 1], [4, 1]], "edit_b": [[8, 1], [4, 1]],
+                     "due_to_rebase": true},
+                    {"b": ["added"]},
+                    {"skip": 40},
+                    {"ab": ["}"]}
+                ],
+                "web_links": [{"name": "x", "url": "y"}]
+            }"#,
+            ),
+        );
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let d = block_on(c.get_diff(ChangeNumber(5), &sha(), "new.rs", &DiffParams::default()))
+            .unwrap();
+        assert_eq!(d.change_type, Some(model::DiffChangeType::Renamed));
+        assert_eq!(d.intraline_status, Some(model::IntralineStatus::Ok));
+        assert_eq!(d.meta_a.as_ref().unwrap().name, "old.rs");
+        assert_eq!(d.meta_b.as_ref().unwrap().lines, 6);
+        assert_eq!(d.diff_header.len(), 2);
+        assert!(!d.binary);
+        assert_eq!(d.chunks.len(), 5);
+        assert!(matches!(&d.chunks[0], model::DiffChunk::Common { lines } if lines.len() == 1));
+        let model::DiffChunk::Changed(ch) = &d.chunks[1] else {
+            panic!("{:?}", d.chunks[1]);
+        };
+        assert!(ch.due_to_rebase && !ch.common);
+        assert_eq!(ch.a.len(), 1);
+        assert_eq!(ch.b.len(), 2);
+        assert_eq!(
+            ch.edits_a,
+            [
+                model::IntralineEdit { skip: 8, mark: 1 },
+                model::IntralineEdit { skip: 4, mark: 1 }
+            ]
+        );
+        // "    let x = 1;": the marks are x (offset 8) and 1 (offset 12).
+        assert_eq!(ch.marks_a(), vec![vec![8..9, 13..14]]);
+        let model::DiffChunk::Changed(only_b) = &d.chunks[2] else {
+            panic!();
+        };
+        assert!(only_b.a.is_empty() && only_b.b == ["added"]);
+        assert_eq!(d.chunks[3], model::DiffChunk::Skip { lines: 40 });
+        // 1 + 1 + 0 + 40 + 1 lines old side, 1 + 2 + 1 + 40 + 1 new side.
+        assert_eq!((d.a_len(), d.b_len()), (43, 45));
+    }
+
+    #[test]
+    fn diff_with_unknown_enums_and_binary_files() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{"meta_b": {"name": "logo.png", "content_type": "image/png", "lines": 0},
+                "change_type": "TELEPORTED", "intraline_status": "MAYBE", "binary": true}"#,
+            ),
+        );
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let d = block_on(c.get_diff(ChangeNumber(5), &sha(), "logo.png", &DiffParams::default()))
+            .unwrap();
+        assert!(d.binary && d.chunks.is_empty() && d.meta_a.is_none());
+        assert_eq!(
+            d.change_type,
+            Some(model::DiffChangeType::Unknown("TELEPORTED".into()))
+        );
+        assert_eq!(
+            d.intraline_status,
+            Some(model::IntralineStatus::Unknown("MAYBE".into()))
+        );
+    }
+
+    #[test]
+    fn malformed_edit_pair_is_a_conversion_error() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(r#"{"content": [{"a": ["x"], "b": ["y"], "edit_a": [[1, 2, 3]]}]}"#),
+        );
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let err =
+            block_on(c.get_diff(ChangeNumber(5), &sha(), "f", &DiffParams::default())).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Conversion(convert::ConversionError::Invalid("content.edit_a"))
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn diff_of_a_missing_file_is_not_found() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(404, "Not found: nope");
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        assert!(matches!(
+            block_on(c.get_diff(ChangeNumber(5), &sha(), "nope", &DiffParams::default())),
+            Err(Error::NotFound)
+        ));
+    }
+
+    #[test]
+    fn related_changes() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{"changes": [
+                {"project": "p", "change_id": "I2", "_change_number": 8, "_revision_number": 1,
+                 "_current_revision_number": 3, "status": "NEW", "submittable": true,
+                 "commit": {"commit": "ccc", "subject": "child", "parents": [{"commit": "bbb"}]}},
+                {"project": "p", "_change_number": 5, "_revision_number": 2,
+                 "_current_revision_number": 2, "status": "WEIRD", "work_in_progress": true}
+            ]}"#,
+            ),
+        );
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        let r = block_on(c.get_related(ChangeNumber(5), &sha())).unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].number, ChangeNumber(8));
+        assert!(r[0].is_outdated() && !r[1].is_outdated());
+        assert_eq!(r[0].status, Some(ChangeStatus::New));
+        assert_eq!(r[0].submittable, Some(true));
+        let commit = r[0].commit.as_ref().unwrap();
+        assert_eq!(commit.sha.as_ref().map(|s| s.as_str()), Some("ccc"));
+        assert_eq!(commit.subject, "child");
+        assert_eq!(commit.parents[0].sha.as_str(), "bbb");
+        assert!(r[1].work_in_progress && r[1].commit.is_none());
+        assert_eq!(r[1].status, Some(ChangeStatus::Unknown("WEIRD".into())));
+        assert_eq!(
+            fake.requests()[0].uri().to_string(),
+            format!("https://h/changes/5/revisions/{SHA}/related")
+        );
+
+        fake.push_response(200, xssi("{}"));
+        assert!(
+            block_on(c.get_related(ChangeNumber(5), &sha()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn related_without_change_number_is_a_conversion_error() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi(r#"{"changes": [{"project": "p"}]}"#));
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        assert!(matches!(
+            block_on(c.get_related(ChangeNumber(5), &sha())),
+            Err(Error::Conversion(_))
+        ));
+    }
+
+    #[test]
+    fn diff_preferences_combine_diff_and_general_preferences() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{"context": -1, "tab_size": 4, "line_length": 80, "show_tabs": false,
+                "ignore_whitespace": "IGNORE_LEADING_AND_TRAILING", "intraline_difference": true,
+                "syntax_highlighting": true, "font_size": 12, "theme": "DEFAULT"}"#,
+            ),
+        );
+        fake.push_response(
+            200,
+            xssi(r#"{"diff_view": "UNIFIED_DIFF", "theme": "DARK"}"#),
+        );
+        let c = client(&fake, "https://h", basic());
+        let p = block_on(c.get_diff_preferences()).unwrap();
+        assert_eq!(p.context, Some(model::DiffContext::All));
+        assert_eq!(p.tab_size, Some(4));
+        assert_eq!(p.line_length, Some(80));
+        assert_eq!(p.show_tabs, Some(false));
+        assert_eq!(
+            p.ignore_whitespace,
+            Some(model::Whitespace::IgnoreLeadingAndTrailing)
+        );
+        assert_eq!(p.view_mode, Some(model::DiffViewMode::Unified));
+        assert_eq!(p.line_wrapping, None);
+        let uris: Vec<_> = fake
+            .requests()
+            .iter()
+            .map(|r| r.uri().to_string())
+            .collect();
+        assert_eq!(
+            uris,
+            [
+                "https://h/a/accounts/self/preferences.diff",
+                "https://h/a/accounts/self/preferences"
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_preferences_tolerate_missing_general_preferences_and_odd_values() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(r#"{"context": 5, "ignore_whitespace": "IGNORE_SOME"}"#),
+        );
+        fake.push_response(404, "");
+        let c = client(&fake, "https://h", basic());
+        let p = block_on(c.get_diff_preferences()).unwrap();
+        assert_eq!(p.context, Some(model::DiffContext::Lines(5)));
+        assert_eq!(
+            p.ignore_whitespace,
+            Some(model::Whitespace::Unknown("IGNORE_SOME".into()))
+        );
+        assert_eq!(p.view_mode, None);
+
+        // An unknown diff view is not an error either.
+        fake.push_response(200, xssi("{}"));
+        fake.push_response(200, xssi(r#"{"diff_view": "HOLOGRAM"}"#));
+        assert_eq!(block_on(c.get_diff_preferences()).unwrap().view_mode, None);
+    }
+
+    #[test]
+    fn diff_preferences_anonymous_is_unauthorized() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(403, "");
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        assert!(matches!(
+            block_on(c.get_diff_preferences()),
+            Err(Error::Unauthorized)
         ));
     }
 }
