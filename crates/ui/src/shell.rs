@@ -58,6 +58,7 @@ impl Page {
 /// Registers key bindings. Call once after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
     actions::bind_keys(cx);
+    crate::diff::bind_keys(cx);
 }
 
 pub struct Shell {
