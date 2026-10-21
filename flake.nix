@@ -59,11 +59,43 @@
               --suffix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}
           '';
         });
+
+        # Local development Gerrit (dev/README.md). Kept out of
+        # `packages.default` and the devShell: the JDK and the Gerrit war are
+        # large and only needed when working on write features.
+        mkDevGerrit = name: subcommand: pkgs.writeShellApplication {
+          inherit name;
+          runtimeInputs = with pkgs; [
+            jdk21_headless # Gerrit 3.14 needs Java 21
+            openssh # `gerrit init` shells out to ssh-keygen
+            git
+            curl
+            jq
+            coreutils
+            findutils
+            gawk
+            gnugrep
+            gnused
+          ];
+          # The scripts are plain bash, also runnable from a checkout.
+          checkPhase = "";
+          text = ''
+            export GERT_GERRIT_WAR=${pkgs.gerrit}/webapps/gerrit-${pkgs.gerrit.version}.war
+            exec bash ${./dev}/dev-gerrit.sh ${subcommand} "$@"
+          '';
+        };
+        devGerrit = mkDevGerrit "dev-gerrit" "run";
       in
       {
-        packages.default = gert;
+        packages = {
+          default = gert;
+          dev-gerrit = devGerrit;
+        };
 
-        apps.default = flake-utils.lib.mkApp { drv = gert; };
+        apps = {
+          default = flake-utils.lib.mkApp { drv = gert; };
+          dev-gerrit = flake-utils.lib.mkApp { drv = devGerrit; };
+        };
 
         devShells.default = craneLib.devShell {
           packages = with pkgs; [ pkg-config ] ++ runtimeLibs;
