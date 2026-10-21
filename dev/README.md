@@ -85,12 +85,19 @@ Log in with URL `http://127.0.0.1:8080`, user `alice` and password
 
 ```
 GERT_TEST_GERRIT=http://127.0.0.1:8080 \
-  cargo test -p gerrit-api --test dev_gerrit -- --ignored --nocapture
+  cargo test -p gerrit-api -p sync --test dev_gerrit -- --ignored --nocapture
 ```
 
-`GERT_TEST_USER` / `GERT_TEST_PASSWORD` default to alice. The tests
-read only, so they can be repeated. Without the variable they are not run
-(`cargo test --workspace` never touches the network).
+`GERT_TEST_USER` / `GERT_TEST_PASSWORD` (gerrit-api only) default to
+alice. Without the variable they are not run (`cargo test --workspace` never
+touches the network). They refuse any URL but `http://127.0.0.1:PORT` or
+`http://localhost:PORT`, because some of them write.
+
+The read tests leave the data alone. The write tests (drafts, reviews, votes,
+reviewed marks, the sync layer's offline flow) each create a throwaway change
+`Dev test ...` (number 10 and up) as alice, and bob votes on it, so the seeded
+changes 1-9 stay as the read tests expect. Running them repeatedly only adds
+changes; `--reset` clears them.
 
 ## Facts learned from the server
 
@@ -98,6 +105,23 @@ read only, so they can be repeated. Without the variable they are not run
   the `context` parameter altogether: the diff always holds the whole file and
   never a `skip` chunk. The client has to collapse unchanged runs itself.
 - Voting on a change you were CC'd on makes you a reviewer.
+- An anonymous `GET /accounts/self` is answered with 403, not 401; with a wrong
+  password the answer is 401.
+- `PUT .../drafts` answers 201 with only `id`, `path`, `line`, `message`,
+  `updated`, `commit_id`, `unresolved`: no `patch_set`, no author. It accepts a
+  path that is not in the patch set and any line number; an empty message is
+  400 `message must be non-empty`. A revision that does not exist is 404.
+- A review that votes for an unknown label or a value the label does not allow
+  is answered with 200 and a result without that label (the vote is dropped
+  silently). Votes on a merged change are accepted.
+- Comments made in one batch share a timestamp that is only exact to the
+  second (also a reply and its parent), so thread order cannot rely on time
+  alone.
+- A hashtag list comes back in varying order.
+- `GET /changes/{n}/robotcomments` is 404 on 3.14 (no endpoint).
+- `GET /changes/{n}/drafts` includes `commit_id` for every draft.
+- Setting a reviewed mark twice, and clearing one that is not set, are both
+  fine (no error).
 
 ## Troubleshooting
 
