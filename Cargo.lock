@@ -2233,6 +2233,7 @@ name = "gert"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "directories",
  "env_logger",
  "futures",
@@ -2244,6 +2245,7 @@ dependencies = [
  "log",
  "model",
  "serde",
+ "serde_json",
  "store",
  "sync",
  "thiserror 2.0.21",

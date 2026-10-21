@@ -590,10 +590,12 @@ fn wire_range(r: CommentRange) -> wire::Range {
 }
 
 pub(crate) fn draft_input(d: &DraftInput) -> wire::DraftInput {
+    // The server refuses a side on a patch-set level comment.
+    let patch_set_level = d.path == model::PATCHSET_LEVEL_PATH;
     wire::DraftInput {
         path: Some(d.path.clone()),
-        side: Some(d.side.as_wire().to_owned()),
-        parent: d.parent,
+        side: (!patch_set_level).then(|| d.side.as_wire().to_owned()),
+        parent: if patch_set_level { None } else { d.parent },
         // The server wants `line` to equal the range's end line.
         line: d.location.line(),
         range: d.location.range().map(wire_range),
