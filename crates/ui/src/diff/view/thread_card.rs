@@ -6,7 +6,7 @@ use gpui_kit::component::{Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
-use model::{DiffSide, DiffViewMode, DraftSync, Entry, Location, Thread};
+use model::{DiffSide, DiffViewMode, DraftSync, Entry, Location, PATCHSET_LEVEL_PATH, Thread};
 
 use super::{
     DiffEvent, DiffView, Reveal,
@@ -41,6 +41,9 @@ pub(super) fn thread_row(
             .when(style.hide_numbers, |d| d.hidden())
     };
     let slot = |card: AnyElement| div().flex_1().min_w_0().child(card);
+    if view.threads_only {
+        return div().w_full().child(card).into_any_element();
+    }
     match view.prefs.view_mode {
         DiffViewMode::SideBySide => {
             let half = |card: Option<AnyElement>, width: Pixels| {
@@ -79,6 +82,9 @@ pub(super) fn thread_row(
 /// file instead of next to its line.
 fn location_label(thread: &Thread, tr: &ThreadRow) -> Option<String> {
     match (thread.location, tr.detached) {
+        _ if thread.path == PATCHSET_LEVEL_PATH => {
+            Some(format!("Patchset {} comment", thread.patch_set))
+        }
         (Location::File, _) => Some("File comment".to_owned()),
         (loc, true) => loc
             .line()

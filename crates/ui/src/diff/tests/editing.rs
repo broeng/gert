@@ -421,3 +421,96 @@ fn the_editor_keeps_its_focus_when_scrolled_out_of_view(cx: &mut TestAppContext)
     typed(cx, window, "!");
     assert_eq!(text(cx, &view).as_deref(), Some("still here!"));
 }
+
+// --- patch-set level threads ---------------------------------------------
+
+fn patchset_view(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<DiffView>, Events) {
+    let (window, view, events) = super::open_made(cx, |cx| {
+        DiffView::threads_only(super::prefs(DiffViewMode::SideBySide), cx)
+    });
+    cx.update(|cx| view.update(cx, |v, cx| v.set_can_comment(true, cx)));
+    (window, view, events)
+}
+
+/// A thread of one comment on `/PATCHSET_LEVEL` of the given patch set.
+fn patchset_thread(id: &str, patch_set: u32) -> model::Thread {
+    let mut t = super::threads::thread(id, Location::File, "overall", true);
+    t.path = model::PATCHSET_LEVEL_PATH.into();
+    t.patch_set = model::PatchSetNumber(patch_set);
+    t
+}
+
+#[gpui_kit::test]
+fn a_threads_only_view_shows_patchset_threads_of_every_patch_set(cx: &mut TestAppContext) {
+    let (_, view, _) = patchset_view(cx);
+    let mut elsewhere = super::threads::thread("f", Location::Line(3), "on a file", true);
+    elsewhere.path = "src/a.rs".into();
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_patchset_threads(
+                model::PatchSetNumber(3),
+                std::sync::Arc::new(vec![
+                    patchset_thread("p1", 1),
+                    patchset_thread("p3", 3),
+                    elsewhere,
+                ]),
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    // No "no changes" notice: the thread rows are all there is.
+    assert_eq!(thread_rows(cx, &view), [0, 1]);
+    assert_eq!(rows(cx, &view), 2);
+}
+
+#[gpui_kit::test]
+fn c_in_a_threads_only_view_starts_a_patchset_level_draft_on_the_current_patch_set(
+    cx: &mut TestAppContext,
+) {
+    let (window, view, events) = patchset_view(cx);
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_patchset_threads(model::PatchSetNumber(3), std::sync::Arc::default(), cx)
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(rows(cx, &view), 0);
+    press(cx, window, "c");
+    assert_eq!(text(cx, &view).as_deref(), Some(""));
+    typed(cx, window, "looks good overall");
+    clear(&events);
+    save_key(cx, window);
+    assert_eq!(
+        drafts(&events),
+        [
+            "draft Create { patch_set: PatchSetNumber(3), input: DraftInput { \
+             path: \"/PATCHSET_LEVEL\", side: Revision, parent: None, location: File, \
+             in_reply_to: None, message: \"looks good overall\", unresolved: true } }"
+        ]
+    );
+    assert_eq!(text(cx, &view), None);
+}
+
+#[gpui_kit::test]
+fn focus_thread_opens_it_and_puts_the_cursor_there(cx: &mut TestAppContext) {
+    let (_, view, _) = patchset_view(cx);
+    let mut resolved = patchset_thread("p1", 1);
+    if let Some(model::Entry::Published(c)) = resolved.entries.first_mut() {
+        c.unresolved = false;
+    }
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_patchset_threads(
+                model::PatchSetNumber(3),
+                std::sync::Arc::new(vec![resolved.clone(), patchset_thread("p3", 3)]),
+                cx,
+            );
+            assert!(!v.is_thread_open(&resolved.id));
+            assert!(v.focus_thread(&resolved.id, cx));
+            assert!(v.is_thread_open(&resolved.id));
+            assert_eq!(v.cursor_thread(), Some(resolved.id.clone()));
+            assert!(!v.focus_thread(&model::ThreadId::Comment("nope".into()), cx));
+        })
+    });
+}

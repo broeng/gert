@@ -13,7 +13,10 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::{Diff, DiffPair, DiffViewMode, ResolvedDiffPreferences, Thread, ThreadId};
+use model::{
+    Diff, DiffPair, DiffSide, DiffViewMode, PATCHSET_LEVEL_PATH, PatchSetNumber,
+    ResolvedDiffPreferences, Thread, ThreadId,
+};
 
 use super::{
     actions::*,
@@ -122,6 +125,9 @@ pub struct DiffView {
     new_thread: Option<Thread>,
     /// The draft whose "delete?" question is on screen.
     confirm_delete: Option<model::LocalDraftId>,
+    /// The view carries the patch-set level threads of a change and no
+    /// file: see [`DiffView::threads_only`].
+    threads_only: bool,
 }
 
 impl EventEmitter<DiffEvent> for DiffView {}
@@ -193,7 +199,68 @@ impl DiffView {
             unsaved: HashMap::new(),
             new_thread: None,
             confirm_delete: None,
+            threads_only: false,
         }
+    }
+
+    /// A view without a file that shows the change's patch-set level
+    /// threads (and only those) as cards, full width, whatever patch set
+    /// they are on; the change page uses it for its "Patchset comments".
+    /// Give it threads with [`Self::set_patchset_threads`]. `c` (or
+    /// [`Self::new_patchset_comment`]) starts a new thread.
+    pub fn threads_only(prefs: ResolvedDiffPreferences, cx: &mut Context<Self>) -> Self {
+        // A diff without chunks; the layout leaves out the "no changes"
+        // notice for it, so that only the threads remain.
+        let carrier = Diff {
+            meta_a: None,
+            meta_b: None,
+            change_type: None,
+            intraline_status: None,
+            diff_header: Vec::new(),
+            chunks: Vec::new(),
+            binary: false,
+        };
+        let mut this = Self::new(carrier, prefs, cx);
+        this.threads_only = true;
+        this.rebuild_with(this.keep_position(), None);
+        this
+    }
+
+    /// Gives a [`Self::threads_only`] view the change's threads. New
+    /// comments go to `current`, the change's current patch set.
+    pub fn set_patchset_threads(
+        &mut self,
+        current: PatchSetNumber,
+        threads: Arc<Vec<Thread>>,
+        cx: &mut Context<Self>,
+    ) {
+        let context = ThreadContext {
+            pair: DiffPair {
+                base: None,
+                target: current,
+            },
+            path: PATCHSET_LEVEL_PATH.to_owned(),
+            old_path: None,
+        };
+        self.set_threads(context, threads, cx);
+    }
+
+    /// Opens the thread (its messages), puts the cursor on it and brings
+    /// it into view. `false` if the view does not show that thread.
+    pub fn focus_thread(&mut self, id: &ThreadId, cx: &mut Context<Self>) -> bool {
+        let Some(row) = self.thread_row_of(id) else {
+            return false;
+        };
+        self.thread_open.insert(id.clone(), true);
+        self.list.remeasure_items(row..row + 1);
+        self.move_to(row, Reveal::Center, cx);
+        cx.emit(DiffEvent::RowsChanged);
+        true
+    }
+
+    /// The thread the cursor is on, if it is on a thread row.
+    pub fn cursor_thread(&self) -> Option<ThreadId> {
+        self.thread_id_at(self.cursor)
     }
 
     /// Whether some unchanged lines are folded.
@@ -238,9 +305,12 @@ impl DiffView {
         let (mut shown, mut slots) = (Vec::new(), Vec::new());
         if let Some(context) = &self.thread_context {
             for (i, t) in self.threads.iter().enumerate() {
-                if let Some(side) =
+                let side = if self.threads_only {
+                    (t.path == PATCHSET_LEVEL_PATH).then_some(DiffSide::Right)
+                } else {
                     t.side_in(context.pair, &context.path, context.old_path.as_deref())
-                {
+                };
+                if let Some(side) = side {
                     shown.push(i);
                     slots.push(ThreadSlot {
                         side,
@@ -470,7 +540,10 @@ impl DiffView {
     fn rebuild_with(&mut self, (anchor, rel, thread): Keep, follow: Option<u32>) {
         self.layout = Arc::new(Layout::build_with_threads(
             &self.diff,
-            &LayoutOptions::from_prefs(&self.prefs),
+            &LayoutOptions {
+                threads_only: self.threads_only,
+                ..LayoutOptions::from_prefs(&self.prefs)
+            },
             &self.expansion,
             &self.slots,
         ));
