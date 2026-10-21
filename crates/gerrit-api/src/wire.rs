@@ -103,6 +103,8 @@ pub(crate) struct LabelInfo {
 #[cfg_attr(test, derive(Serialize))]
 pub(crate) struct AttentionSetInfo {
     pub account: Option<AccountInfo>,
+    pub last_update: Option<String>,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -305,6 +307,9 @@ pub(crate) struct ChangeInfo {
     /// Keyed by account id.
     pub attention_set: Option<BTreeMap<String, AttentionSetInfo>>,
     pub submittable: Option<bool>,
+    /// Label name to the vote values the user may set, as strings like
+    /// `"-1"`, `" 0"` and `"+2"` (`DETAILED_LABELS`, authenticated only).
+    pub permitted_labels: Option<BTreeMap<String, Vec<String>>>,
     /// Keyed by reviewer state (`REVIEWER`, `CC`, ...).
     pub reviewers: Option<BTreeMap<String, Vec<AccountInfo>>>,
     pub current_revision: Option<String>,

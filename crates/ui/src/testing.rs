@@ -68,6 +68,9 @@ pub fn detail(number: u64, n: u32, current: u32) -> ChangeDetail {
         messages: vec![],
         submit_requirements: vec![],
         votes: Default::default(),
+        attention: Default::default(),
+        permitted_labels: Default::default(),
+        label_values: Default::default(),
     }
 }
 

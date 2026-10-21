@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, fmt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Account, AccountId, ChangeMessage, ChangeNumber, PatchSetNumber, Revision, RevisionId,
-    SubmitRequirement, Timestamp,
+    Account, AccountId, ChangeMessage, ChangeNumber, LabelValue, PatchSetNumber, Revision,
+    RevisionId, SubmitRequirement, Timestamp,
 };
 
 /// Lifecycle state of a change. Values this client does not know are kept
@@ -118,6 +118,27 @@ pub struct ChangeDetail {
     /// have an empty list.
     #[serde(default)]
     pub votes: BTreeMap<String, Vec<LabelVote>>,
+    /// Who is in the attention set and why (`DETAILED_ACCOUNTS`). The
+    /// summary lists the same accounts by id only.
+    #[serde(default)]
+    pub attention: Vec<AttentionEntry>,
+    /// The vote values the signed-in user may set per label, ascending
+    /// (`permitted_labels`, `DETAILED_LABELS`). Empty for anonymous
+    /// sessions and for labels the user may not vote on.
+    #[serde(default)]
+    pub permitted_labels: BTreeMap<String, Vec<i32>>,
+    /// What each value of a label means, ascending by value
+    /// (`labels[].values`), for the reply dialog.
+    #[serde(default)]
+    pub label_values: BTreeMap<String, Vec<LabelValue>>,
+}
+
+/// One account in a change's attention set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionEntry {
+    pub account: Account,
+    pub reason: Option<String>,
+    pub last_update: Option<Timestamp>,
 }
 
 impl ChangeDetail {
@@ -189,6 +210,9 @@ mod tests {
             messages: vec![],
             submit_requirements: vec![],
             votes: BTreeMap::new(),
+            attention: vec![],
+            permitted_labels: BTreeMap::new(),
+            label_values: BTreeMap::new(),
         }
     }
 
@@ -197,12 +221,21 @@ mod tests {
         let mut v = serde_json::to_value(detail()).unwrap();
         v["current_patch_set"] = 2.into();
         let obj = v.as_object_mut().unwrap();
-        for key in ["revisions", "messages", "submit_requirements", "votes"] {
+        for key in [
+            "revisions",
+            "messages",
+            "submit_requirements",
+            "votes",
+            "attention",
+            "permitted_labels",
+            "label_values",
+        ] {
             obj.remove(key);
         }
         let d: ChangeDetail = serde_json::from_value(v).unwrap();
         assert_eq!(d.current_patch_set, Some(PatchSetNumber(2)));
         assert!(d.revisions.is_empty() && d.messages.is_empty() && d.votes.is_empty());
+        assert!(d.attention.is_empty() && d.permitted_labels.is_empty());
     }
 
     #[test]

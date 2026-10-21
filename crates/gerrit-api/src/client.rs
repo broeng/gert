@@ -669,6 +669,52 @@ mod tests {
     }
 
     #[test]
+    fn get_change_reads_permitted_labels_label_values_and_attention_set() {
+        let fake = FakeHttpClient::new();
+        let json = CHANGE.replacen(
+            '{',
+            r#"{"permitted_labels": {"Code-Review": ["-1"," 0","+1","+2","bogus"], "Verified": []},"#,
+            1,
+        );
+        let json = json.replace(
+            r#""attention_set": {"3": {"account": {"_account_id": 3}}, "2": {}}"#,
+            r#""attention_set": {
+                "3": {"account": {"_account_id": 3, "name": "Three"},
+                      "last_update": "2020-01-03 03:04:05.000000000",
+                      "reason": "Added by Owner using the hovercard menu"},
+                "2": {}}"#,
+        );
+        let json = json.replace(
+            r#""labels": {"Code-Review": {"approved": {"_account_id": 2}}}"#,
+            r#""labels": {"Code-Review": {"approved": {"_account_id": 2},
+                "values": {"-1": "Needs work", " 0": "No score", "+2": "Looks good", "x": "?"}}}"#,
+        );
+        fake.push_response(200, xssi(&json));
+        let c = client(&fake, "https://h", basic());
+        let d = block_on(c.get_change(ChangeNumber(5))).unwrap();
+        assert_eq!(d.permitted_labels["Code-Review"], [-1, 0, 1, 2]);
+        assert!(d.permitted_labels["Verified"].is_empty());
+        let values: Vec<_> = d.label_values["Code-Review"]
+            .iter()
+            .map(|v| (v.value, v.description.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            [(-1, "Needs work"), (0, "No score"), (2, "Looks good")]
+        );
+        // Sorted by account; the id comes from the key when the entry is empty.
+        assert_eq!(d.attention.len(), 2);
+        assert_eq!(d.attention[0].account.id, AccountId(2));
+        assert_eq!(d.attention[0].reason, None);
+        assert_eq!(d.attention[1].account.name.as_deref(), Some("Three"));
+        assert_eq!(
+            d.attention[1].reason.as_deref(),
+            Some("Added by Owner using the hovercard menu")
+        );
+        assert!(d.attention[1].last_update.is_some());
+    }
+
+    #[test]
     fn get_change_extracts_revision_and_reviewers() {
         let fake = FakeHttpClient::new();
         let json = CHANGE.replacen(
