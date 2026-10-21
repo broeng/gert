@@ -81,6 +81,19 @@ all registered users may vote on both). Changes on a fresh site:
 Log in with URL `http://127.0.0.1:8080`, user `alice` and password
 `alice-dev-password`.
 
+Where there is no keyring (a headless session, a VM), a debug build of the
+app takes the HTTP password from the environment instead:
+
+```
+GERT_DEV_PASSWORD=alice-dev-password cargo run -p gert
+```
+
+with a config that names the dev server and user (`[server]` with `url =
+"http://127.0.0.1:8080"` and `username = "alice"` in the app's `config.toml`).
+The variable is read only by debug builds (`cfg(debug_assertions)`), only for a
+server at `http://127.0.0.1:` or `http://localhost:`, and the password is
+never logged or stored.
+
 ## Integration tests
 
 ```
