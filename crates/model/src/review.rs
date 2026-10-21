@@ -78,6 +78,19 @@ pub struct ReviewInput {
 }
 
 impl ReviewInput {
+    /// The votes of this review that the server did not apply: those
+    /// missing from `result.labels` or with another value. Gerrit
+    /// (3.14) answers 200 and silently drops a label it does not know or a
+    /// value the label does not have, so this is the only way to notice.
+    /// Sorted by label name.
+    pub fn unapplied_labels(&self, result: &ReviewResult) -> Vec<(String, i32)> {
+        self.labels
+            .iter()
+            .filter(|(name, value)| result.labels.get(*name) != Some(*value))
+            .map(|(name, value)| (name.clone(), *value))
+            .collect()
+    }
+
     /// A review with only a message, publishing all drafts.
     pub fn with_message(message: impl Into<String>) -> Self {
         Self {
@@ -119,5 +132,22 @@ mod tests {
         assert_eq!(r.message.as_deref(), Some("LGTM"));
         assert!(r.labels.is_empty());
         assert_eq!(NotifyHandling::OwnerReviewers.as_wire(), "OWNER_REVIEWERS");
+    }
+
+    #[test]
+    fn labels_the_server_dropped_are_reported() {
+        let mut r = ReviewInput::default();
+        r.labels.insert("Code-Review".into(), 2);
+        r.labels.insert("Verified".into(), 1);
+        r.labels.insert("Nope".into(), 1);
+        let result = ReviewResult {
+            labels: [("Code-Review".to_owned(), 2), ("Verified".to_owned(), 0)].into(),
+            ..ReviewResult::default()
+        };
+        assert_eq!(
+            r.unapplied_labels(&result),
+            [("Nope".to_owned(), 1), ("Verified".to_owned(), 1)]
+        );
+        assert!(ReviewInput::default().unapplied_labels(&result).is_empty());
     }
 }

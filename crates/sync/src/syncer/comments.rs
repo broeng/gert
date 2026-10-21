@@ -99,6 +99,11 @@ pub struct PublishOutcome {
     pub detail: Option<ChangeDetail>,
     /// The comments as they are now, or `None` if refreshing failed.
     pub comments: Option<CommentsView>,
+    /// Votes the server ignored (a label it does not have, a value the
+    /// label does not allow): Gerrit answers 200 for those. The review
+    /// itself was posted. Check [`ReviewInput`]'s permitted values before
+    /// sending to avoid it.
+    pub unapplied_labels: Vec<(String, i32)>,
 }
 
 /// What an upload attempt of one draft concluded.
@@ -469,6 +474,7 @@ impl Syncer {
             }
         };
         Ok(PublishOutcome {
+            unapplied_labels: review.unapplied_labels(&result),
             result,
             detail,
             comments,
