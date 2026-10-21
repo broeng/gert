@@ -1,6 +1,8 @@
 //! Read-only, anonymous sanity checks against a public Gerrit server.
-//! Ignored by default (needs network and `curl`):
-//! `cargo test -p gerrit-api --test live -- --ignored --nocapture`
+//! Ignored by default (needs network and `curl`), and skipped even under
+//! `--ignored` unless explicitly requested, so that running the dev Gerrit
+//! tests with `--ignored` never reaches a public server:
+//! `GERT_LIVE_TESTS=1 cargo test -p gerrit-api --test live -- --ignored --nocapture`
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -58,6 +60,10 @@ fn client() -> GerritClient {
 #[test]
 #[ignore = "network"]
 fn live_version_query_and_detail() {
+    if std::env::var_os("GERT_LIVE_TESTS").is_none() {
+        eprintln!("skipped: set GERT_LIVE_TESTS=1 to query a public server");
+        return;
+    }
     let c = client();
     println!("version {}", block_on(c.server_version()).expect("version"));
     let page =
