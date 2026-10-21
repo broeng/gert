@@ -19,7 +19,7 @@ use crate::{actions::*, pages::list::Status, row::chips, theme::chip_colors, tim
 
 const LABEL_ORDER: [&str; 2] = ["Code-Review", "Verified"];
 
-fn pill(text: impl Into<SharedString>, fg: Hsla) -> Div {
+pub(super) fn pill(text: impl Into<SharedString>, fg: Hsla) -> Div {
     div()
         .flex_none()
         .px_1()
@@ -88,6 +88,10 @@ impl ChangePage {
             Block::PatchSets => self.patch_sets(cx),
             Block::FilesNotice => self.files_notice(cx),
             Block::File(i) => self.file(i, cx),
+            Block::ThreadsHeader => self.threads_header(cx),
+            Block::ThreadsNotice => self.threads_notice(cx),
+            Block::Thread(i) => self.thread_row(i, cx),
+            Block::PatchSetComments => self.patchset_comments(cx),
             Block::Related => self.related_block(cx),
             Block::LogHeader => self.log_header(cx),
             Block::Message(i) => self.message(i, cx),
@@ -575,6 +579,10 @@ impl ChangePage {
             )
             .child(file_path(&f, cx))
             .child(div().flex_1())
+            .child(super::thread_list::counts_cell(
+                self.counts.get(&f.path).copied(),
+                cx,
+            ))
             .when(reviewed, |d| {
                 d.child(
                     div()
@@ -733,7 +741,7 @@ fn message_lines(m: &ChangeMessage) -> Vec<Div> {
     lines_of(&m.message, true)
 }
 
-fn section_title(text: &str, cx: &App) -> Div {
+pub(super) fn section_title(text: &str, cx: &App) -> Div {
     div()
         .text_sm()
         .font_semibold()
@@ -886,6 +894,13 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::prev_related))
             .on_action(cx.listener(Self::open_related))
             .on_action(cx.listener(Self::focus_files))
+            .on_action(cx.listener(Self::next_thread))
+            .on_action(cx.listener(Self::prev_thread))
+            .on_action(cx.listener(Self::open_thread_action))
+            .on_action(cx.listener(Self::threads_unresolved))
+            .on_action(cx.listener(Self::threads_drafts))
+            .on_action(cx.listener(Self::threads_all))
+            .on_action(cx.listener(Self::new_patchset_comment_action))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::page_up))
             .relative()

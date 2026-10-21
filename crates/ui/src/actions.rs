@@ -3,6 +3,8 @@
 
 use gpui_kit::*;
 
+use crate::diff::actions::{NextThread, PrevThread};
+
 actions!(
     ui,
     [
@@ -35,6 +37,16 @@ actions!(
         OpenRelated,
         /// Esc on the change page: give the focus back to the file list.
         FocusFiles,
+        /// `x`: open the comment thread under the thread cursor (its diff,
+        /// or for a patch-set level thread its card on the page).
+        OpenThread,
+        /// `shift-u` / `shift-d` / `shift-a`: list only unresolved threads,
+        /// only threads with a draft of yours, or all threads.
+        ThreadsUnresolved,
+        ThreadsDrafts,
+        ThreadsAll,
+        /// `c` on the change page: a new patch-set level comment.
+        NewPatchSetComment,
         ScrollPageDown,
         ScrollPageUp,
         // Diff page.
@@ -147,6 +159,33 @@ pub fn change_entries() -> Vec<Entry> {
             "z",
             KeyBinding::new("z", ToggleCommit, Some(k)),
             "Fold / unfold the commit message",
+        ),
+        // The comment thread list. `shift-n` / `shift-p` are the diff's
+        // next / previous thread keys (PolyGerrit's `N` / `P`); `x` opens a
+        // thread like it does in the diff. `Enter` stays with the files
+        // (as `shift-enter` does with the related changes).
+        e(
+            "Shift-N / Shift-P",
+            KeyBinding::new("shift-n", NextThread, Some(k)),
+            "Next / previous comment thread in the list",
+        ),
+        e("", KeyBinding::new("shift-p", PrevThread, Some(k)), ""),
+        e(
+            "X",
+            KeyBinding::new("x", OpenThread, Some(k)),
+            "Open the selected thread (in its diff)",
+        ),
+        e(
+            "Shift-U / Shift-D / Shift-A",
+            KeyBinding::new("shift-u", ThreadsUnresolved, Some(k)),
+            "List unresolved threads / threads with your drafts / all threads",
+        ),
+        e("", KeyBinding::new("shift-d", ThreadsDrafts, Some(k)), ""),
+        e("", KeyBinding::new("shift-a", ThreadsAll, Some(k)), ""),
+        e(
+            "C",
+            KeyBinding::new("c", NewPatchSetComment, Some(k)),
+            "New patch-set level comment",
         ),
         e(
             "Shift-J / Shift-K",

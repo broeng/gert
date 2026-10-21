@@ -120,6 +120,14 @@ pub enum Block {
     /// "Loading files", an error or "no files" in place of the rows.
     FilesNotice,
     File(usize),
+    /// "Comments" heading with the filter.
+    ThreadsHeader,
+    /// "No unresolved comments" and the like, in place of the rows.
+    ThreadsNotice,
+    /// A row of the thread list: an index into the filtered threads.
+    Thread(usize),
+    /// The patch-set level threads, as cards, and the button for a new one.
+    PatchSetComments,
     Related,
     LogHeader,
     Message(usize),
@@ -132,6 +140,8 @@ pub struct Content {
     pub requirements: usize,
     pub labels: usize,
     pub files: usize,
+    /// Threads the list shows (after the filter).
+    pub threads: usize,
     pub related: usize,
     pub messages: usize,
 }
@@ -154,6 +164,12 @@ pub fn blocks(c: Content) -> Vec<Block> {
         v.push(Block::FilesNotice);
     }
     v.extend((0..c.files).map(Block::File));
+    v.push(Block::ThreadsHeader);
+    if c.threads == 0 {
+        v.push(Block::ThreadsNotice);
+    }
+    v.extend((0..c.threads).map(Block::Thread));
+    v.push(Block::PatchSetComments);
     if c.related > 1 {
         v.push(Block::Related);
     }
@@ -316,6 +332,7 @@ mod tests {
             requirements: 2,
             labels: 1,
             files: 2,
+            threads: 1,
             related: 3,
             messages: 2,
         });
@@ -330,6 +347,9 @@ mod tests {
                 Block::PatchSets,
                 Block::File(0),
                 Block::File(1),
+                Block::ThreadsHeader,
+                Block::Thread(0),
+                Block::PatchSetComments,
                 Block::Related,
                 Block::LogHeader,
                 Block::Message(0),
@@ -350,7 +370,10 @@ mod tests {
                 Block::People,
                 Block::Commit,
                 Block::PatchSets,
-                Block::FilesNotice
+                Block::FilesNotice,
+                Block::ThreadsHeader,
+                Block::ThreadsNotice,
+                Block::PatchSetComments,
             ]
         );
     }

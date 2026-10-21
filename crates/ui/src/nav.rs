@@ -1,7 +1,7 @@
 //! PolyGerrit-style page navigation: a history stack of routes with
 //! back/forward and "up". Plain data, no GPUI.
 
-use model::{ChangeNumber, PatchSetNumber};
+use model::{ChangeNumber, PatchSetNumber, ThreadId};
 
 /// A page the user can be on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +24,9 @@ pub struct DiffRoute {
     pub base: Option<PatchSetNumber>,
     pub target: PatchSetNumber,
     pub path: String,
+    /// Put the cursor on this comment thread (opened) once the comments are
+    /// there; the thread list of the change page sets it.
+    pub thread: Option<ThreadId>,
 }
 
 /// What the change page restores when the user comes back to it: the
@@ -267,6 +270,7 @@ mod tests {
             base: None,
             target: PatchSetNumber(2),
             path: path.into(),
+            thread: None,
         })
     }
 
