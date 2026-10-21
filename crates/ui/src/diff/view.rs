@@ -118,6 +118,9 @@ impl Focusable for DiffView {
     }
 }
 
+/// What a rebuild keeps: see [`DiffView::keep_position`].
+type Keep = (Anchor, usize, Option<ThreadId>);
+
 const DEFAULT_PAGE_ROWS: usize = 20;
 
 /// Unresolved threads and those with a draft of the user's start open.
@@ -214,6 +217,7 @@ impl DiffView {
                 });
             }
         }
+        let keep = self.keep_position();
         let old_threads = std::mem::replace(&mut self.threads, threads);
         let old_shown = std::mem::replace(&mut self.shown, shown);
         self.thread_context = Some(context);
@@ -235,12 +239,10 @@ impl DiffView {
             }
             return;
         }
-        let on_thread = self.thread_id_at(self.cursor);
         let at_top = {
             let top = self.list.logical_scroll_top();
             top.item_ix == 0 && top.offset_in_item == px(0.)
         };
-        let keep = self.keep_position();
         self.slots = slots;
         self.rebuild_with(keep, None);
         if at_top {
@@ -250,9 +252,6 @@ impl DiffView {
                 item_ix: 0,
                 offset_in_item: px(0.),
             });
-        }
-        if let Some(row) = on_thread.and_then(|id| self.thread_row_of(&id)) {
-            self.cursor = row;
         }
         cx.emit(DiffEvent::RowsChanged);
         cx.notify();
@@ -386,22 +385,24 @@ impl DiffView {
 
     // --- internals -------------------------------------------------------
 
-    /// Where the cursor is, in file lines and relative to the viewport top.
-    fn keep_position(&self) -> (Anchor, usize) {
+    /// Where the cursor is, in file lines and relative to the viewport top,
+    /// and the thread it is on, if it is on a thread row.
+    fn keep_position(&self) -> Keep {
         let top = self.top_row();
         (
             self.layout.anchor(self.cursor),
             self.cursor.saturating_sub(top),
+            self.thread_id_at(self.cursor),
         )
     }
 
-    fn rebuild(&mut self, keep: (Anchor, usize), cx: &mut Context<Self>) {
+    fn rebuild(&mut self, keep: Keep, cx: &mut Context<Self>) {
         self.rebuild_with(keep, None);
         cx.emit(DiffEvent::RowsChanged);
         cx.notify();
     }
 
-    fn rebuild_with(&mut self, (anchor, rel): (Anchor, usize), follow: Option<u32>) {
+    fn rebuild_with(&mut self, (anchor, rel, thread): Keep, follow: Option<u32>) {
         self.layout = Arc::new(Layout::build_with_threads(
             &self.diff,
             &LayoutOptions::from_prefs(&self.prefs),
@@ -418,6 +419,11 @@ impl DiffView {
             .or_else(|| self.layout.find(anchor))
             .unwrap_or_else(|| self.cursor.min(self.layout.len().saturating_sub(1)));
         self.cursor = self.snap(row);
+        if fold.is_none()
+            && let Some(row) = thread.and_then(|id| self.thread_row_of(&id))
+        {
+            self.cursor = row;
+        }
         self.reset_list();
         let rel = rel.min(self.page_rows().saturating_sub(1));
         self.list.scroll_to(ListOffset {
@@ -673,8 +679,72 @@ impl DiffView {
         self.toggle_mode(cx);
     }
 
+    /// Enter / `x`: opens the fold under the cursor, or opens / closes the
+    /// thread under it.
     fn expand_fold_action(&mut self, _: &ExpandFold, _: &mut Window, cx: &mut Context<Self>) {
-        self.expand_fold(self.cursor, cx);
+        if matches!(self.layout.rows().get(self.cursor), Some(Row::Thread(_))) {
+            self.toggle_thread(self.cursor, cx);
+        } else {
+            self.expand_fold(self.cursor, cx);
+        }
+    }
+
+    fn next_thread(&mut self, _: &NextThread, _: &mut Window, cx: &mut Context<Self>) {
+        match self.layout.next_thread(self.cursor) {
+            Some(row) => self.move_to(row, Reveal::Center, cx),
+            None => self.say("No next comment thread", cx),
+        }
+    }
+
+    fn prev_thread(&mut self, _: &PrevThread, _: &mut Window, cx: &mut Context<Self>) {
+        match self.layout.prev_thread(self.cursor) {
+            Some(row) => self.move_to(row, Reveal::Center, cx),
+            None => self.say("No previous comment thread", cx),
+        }
+    }
+
+    fn expand_threads(&mut self, _: &ExpandThreads, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_all_threads_open(true, cx);
+    }
+
+    fn collapse_threads(&mut self, _: &CollapseThreads, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_all_threads_open(false, cx);
+    }
+
+    fn say(&mut self, message: &'static str, cx: &mut Context<Self>) {
+        self.hint = Some(message.into());
+        cx.notify();
+    }
+
+    /// Opens or closes the thread on `row`; its height changes.
+    fn toggle_thread(&mut self, row: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.thread_id_at(row) else {
+            return;
+        };
+        let open = !self.is_thread_open(&id);
+        self.thread_open.insert(id, open);
+        self.list.remeasure_items(row..row + 1);
+        self.hint = None;
+        cx.emit(DiffEvent::RowsChanged);
+        cx.notify();
+    }
+
+    /// Opens (or closes) every thread shown in the file.
+    pub fn set_all_threads_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        let ids: Vec<ThreadId> = self.shown_threads().map(|t| t.id.clone()).collect();
+        if ids.is_empty() {
+            self.say("No comment threads in this file", cx);
+            return;
+        }
+        for id in ids {
+            self.thread_open.insert(id, open);
+        }
+        for ix in self.layout.thread_rows().to_vec() {
+            self.list.remeasure_items(ix..ix + 1);
+        }
+        self.hint = None;
+        cx.emit(DiffEvent::RowsChanged);
+        cx.notify();
     }
 
     fn expand_above(&mut self, _: &ExpandAbove, _: &mut Window, cx: &mut Context<Self>) {
@@ -1026,6 +1096,10 @@ impl Render for DiffView {
             .on_action(cx.listener(Self::expand_above))
             .on_action(cx.listener(Self::expand_below))
             .on_action(cx.listener(Self::toggle_all_folds))
+            .on_action(cx.listener(Self::next_thread))
+            .on_action(cx.listener(Self::prev_thread))
+            .on_action(cx.listener(Self::expand_threads))
+            .on_action(cx.listener(Self::collapse_threads))
             .when(self.sizing == DiffSizing::Fill, |d| d.size_full())
             .when(self.sizing != DiffSizing::Fill, |d| d.w_full())
             .bg(bg)

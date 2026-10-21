@@ -835,7 +835,7 @@ fn only_threads_of_this_file_and_pair_are_shown(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn threads_open_by_default_unless_resolved(cx: &mut TestAppContext) {
+fn threads_open_by_default_unless_resolved_and_the_choice_is_kept(cx: &mut TestAppContext) {
     let (_, view, _) = open(cx, sample(), DiffViewMode::Unified);
     let open_of = |cx: &mut TestAppContext, id: &str| {
         cx.update(|cx| view.read(cx).is_thread_open(&ThreadId::Comment(id.into())))
@@ -857,6 +857,15 @@ fn threads_open_by_default_unless_resolved(cx: &mut TestAppContext) {
     assert!(!open_of(cx, "done"));
     // A resolved thread with a draft of the user's stays open.
     assert!(open_of(cx, "d"));
+    // A user's choice survives new data for the same thread.
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_all_threads_open(true, cx);
+        })
+    });
+    assert!(open_of(cx, "done"));
+    give_threads(cx, &view, all);
+    assert!(open_of(cx, "done"));
 }
 
 #[gpui_kit::test]
@@ -893,4 +902,195 @@ fn draft_states_render_in_both_modes(cx: &mut TestAppContext) {
     let row = thread_rows(cx, &view)[0];
     let h = cx.update(|cx| view.read(cx).row_height_for_test(row));
     assert!(h.is_some_and(|h| h > px(60.)), "{h:?}");
+}
+
+// --- thread navigation and collapsing ------------------------------------
+
+/// Threads at the new line 13 (open: unresolved), the old line 14 (closed:
+/// resolved) and the new line 41, the last. With the sample's rows the
+/// thread rows are 5, 7 and 19.
+fn three_threads() -> Vec<Thread> {
+    let mut left = thread("b", Location::Line(14), "on the base", false);
+    left.side = Side::Parent;
+    vec![
+        at13("a", "first"),
+        left,
+        thread("c", Location::Line(41), "last", true),
+    ]
+}
+
+fn hint(cx: &mut TestAppContext, view: &Entity<DiffView>) -> Option<String> {
+    cx.update(|cx| view.read(cx).hint().map(str::to_owned))
+}
+
+fn is_open(cx: &mut TestAppContext, view: &Entity<DiffView>, id: &str) -> bool {
+    cx.update(|cx| view.read(cx).is_thread_open(&ThreadId::Comment(id.into())))
+}
+
+#[gpui_kit::test]
+fn shift_n_and_shift_p_visit_the_thread_rows(cx: &mut TestAppContext) {
+    let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    give_threads(cx, &view, three_threads());
+    assert_eq!(thread_rows(cx, &view), [5, 7, 19]);
+    assert_eq!(cursor(cx, &view), 0);
+    press(cx, window, "shift-n");
+    assert_eq!(cursor(cx, &view), 5);
+    press(cx, window, "shift-n");
+    assert_eq!(cursor(cx, &view), 7);
+    press(cx, window, "shift-n");
+    assert_eq!(cursor(cx, &view), 19);
+    // The end: stay, and say so.
+    press(cx, window, "shift-n");
+    assert_eq!(cursor(cx, &view), 19);
+    assert_eq!(hint(cx, &view).as_deref(), Some("No next comment thread"));
+    press(cx, window, "shift-p");
+    assert_eq!(cursor(cx, &view), 7);
+    assert_eq!(hint(cx, &view), None);
+    press(cx, window, "shift-p");
+    press(cx, window, "shift-p");
+    assert_eq!(cursor(cx, &view), 5);
+    assert_eq!(
+        hint(cx, &view).as_deref(),
+        Some("No previous comment thread")
+    );
+    // From a thread row j and k go to the lines around it.
+    press(cx, window, "j");
+    assert_eq!(cursor(cx, &view), 6);
+    press(cx, window, "shift-p");
+    assert_eq!(cursor(cx, &view), 5);
+    press(cx, window, "k");
+    assert_eq!(cursor(cx, &view), 4);
+    // From a code row the next thread is the one below it.
+    press(cx, window, "j");
+    assert_eq!(cursor(cx, &view), 6);
+    press(cx, window, "shift-n");
+    assert_eq!(cursor(cx, &view), 7);
+    // Both modes, and the cursor on a thread survives a mode change.
+    press(cx, window, "m");
+    cx.update(|cx| {
+        let v = view.read(cx);
+        assert!(matches!(v.layout().rows()[v.cursor()], Row::Thread(_)));
+    });
+}
+
+#[gpui_kit::test]
+fn thread_keys_without_threads_say_so(cx: &mut TestAppContext) {
+    let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    press(cx, window, "shift-n");
+    assert_eq!(hint(cx, &view).as_deref(), Some("No next comment thread"));
+    press(cx, window, "e");
+    assert_eq!(
+        hint(cx, &view).as_deref(),
+        Some("No comment threads in this file")
+    );
+    assert_eq!(cursor(cx, &view), 0);
+}
+
+#[gpui_kit::test]
+fn e_and_shift_e_open_and_close_every_thread(cx: &mut TestAppContext) {
+    let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
+    give_threads(cx, &view, three_threads());
+    assert!(is_open(cx, &view, "a"));
+    assert!(!is_open(cx, &view, "b"));
+    assert!(is_open(cx, &view, "c"));
+    events.lock().expect("log").clear();
+    press(cx, window, "shift-e");
+    for id in ["a", "b", "c"] {
+        assert!(!is_open(cx, &view, id), "{id}");
+    }
+    assert_eq!(*events.lock().expect("log"), ["rows"]);
+    press(cx, window, "e");
+    for id in ["a", "b", "c"] {
+        assert!(is_open(cx, &view, id), "{id}");
+    }
+    // The choice survives new data for the same threads.
+    press(cx, window, "shift-e");
+    give_threads(cx, &view, three_threads());
+    assert!(!is_open(cx, &view, "a"));
+}
+
+#[gpui_kit::test]
+fn enter_and_x_toggle_the_thread_under_the_cursor(cx: &mut TestAppContext) {
+    let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
+    give_threads(cx, &view, three_threads());
+    press(cx, window, "shift-n");
+    assert_eq!(cursor(cx, &view), 5);
+    events.lock().expect("log").clear();
+    press(cx, window, "enter");
+    assert!(!is_open(cx, &view, "a"));
+    press(cx, window, "x");
+    assert!(is_open(cx, &view, "a"));
+    assert_eq!(*events.lock().expect("log"), ["rows", "rows"]);
+    // The cursor stays on the thread, and the other threads are untouched.
+    assert_eq!(cursor(cx, &view), 5);
+    assert!(!is_open(cx, &view, "b"));
+    // On a fold Enter still opens the fold; on a plain line it does nothing.
+    press(cx, window, "home");
+    press(cx, window, "enter");
+    assert_eq!(fold_lines(cx, &view), [18]);
+    press(cx, window, "j");
+    press(cx, window, "enter");
+    assert_eq!(fold_lines(cx, &view), [18]);
+}
+
+#[gpui_kit::test]
+fn toggling_a_thread_changes_the_height_of_its_row(cx: &mut TestAppContext) {
+    let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    give_threads(
+        cx,
+        &view,
+        vec![at13("a", "a long comment\n\nthat has\nseveral lines")],
+    );
+    let row = thread_rows(cx, &view)[0];
+    let height = |cx: &mut TestAppContext| {
+        cx.update(|cx| view.read(cx).row_height_for_test(row))
+            .expect("measured")
+    };
+    let open = height(cx);
+    press(cx, window, "shift-n");
+    press(cx, window, "enter");
+    let closed = height(cx);
+    assert!(closed < open, "{closed:?} vs {open:?}");
+    press(cx, window, "enter");
+    assert_eq!(height(cx), open);
+}
+
+#[gpui_kit::test]
+fn clicking_a_thread_header_toggles_it_and_retry_asks_the_owner(cx: &mut TestAppContext) {
+    let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
+    let mut t = at13("a", "text");
+    t.entries.push(Entry::Draft(draft(
+        2,
+        Location::Line(13),
+        "mine",
+        DraftSync::Failed {
+            op: model::DraftOp::Create,
+            error: "HTTP 500".into(),
+            retryable: true,
+        },
+    )));
+    give_threads(cx, &view, vec![t]);
+    let row = thread_rows(cx, &view)[0];
+    cx.update_window(window, |_, window, cx| {
+        window.click(("retry-draft", row * 1000 + 1), cx);
+    })
+    .expect("click retry");
+    assert_eq!(
+        events
+            .lock()
+            .expect("log")
+            .iter()
+            .filter(|e| e.starts_with("retry"))
+            .count(),
+        1
+    );
+    // The thread stayed open; the header click closes it and moves the
+    // cursor there.
+    assert!(is_open(cx, &view, "a"));
+    cx.update_window(window, |_, window, cx| {
+        window.click(("thread-header", row), cx);
+    })
+    .expect("click header");
+    assert!(!is_open(cx, &view, "a"));
+    assert_eq!(cursor(cx, &view), row);
 }
