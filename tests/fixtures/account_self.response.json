@@ -1,0 +1,24 @@
+)]}'
+{
+  "_account_id": 1000001,
+  "_more_accounts": true,
+  "avatars": [
+    {
+      "height": 1,
+      "url": "https://gerrit.example.com/"
+    }
+  ],
+  "deleted": true,
+  "display_name": "Jane Doe",
+  "email": "jane.doe@example.com",
+  "inactive": true,
+  "name": "Jane Doe",
+  "secondary_emails": [
+    "secondary_emails-value"
+  ],
+  "status": "status-value",
+  "tags": [
+    "tags-value"
+  ],
+  "username": "jdoe"
+}
