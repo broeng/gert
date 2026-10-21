@@ -37,6 +37,16 @@ actions!(
         FocusFiles,
         ScrollPageDown,
         ScrollPageUp,
+        // Diff page.
+        /// Show or hide the diff preferences panel.
+        TogglePrefs,
+        ClosePrefs,
+        PrefsMode,
+        PrefsContext,
+        PrefsWhitespace,
+        PrefsTabSize,
+        PrefsShowTabs,
+        PrefsIntraline,
     ]
 );
 
@@ -46,6 +56,10 @@ pub const SHELL: &str = "Shell";
 pub const CHANGE_LIST: &str = "ChangeList";
 /// Key context of the change page.
 pub const CHANGE_PAGE: &str = "ChangePage";
+/// Key context of the diff page (around the diff view).
+pub const DIFF_PAGE: &str = "DiffPage";
+/// Key context of the diff preferences panel.
+pub const DIFF_PREFS: &str = "DiffPrefs";
 /// Key context around the search box.
 pub const SEARCH_BAR: &str = "SearchBar";
 
@@ -54,6 +68,14 @@ pub const SEARCH_BAR: &str = "SearchBar";
 const SHELL_KEYS: &str = "Shell && !Input";
 const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
+const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
+const DIFF_PREFS_KEYS: &str = "DiffPrefs && !Input";
+
+/// All shell-level and list entries (what the help overlay called
+/// "everything" before the pages grew their own).
+pub fn entries() -> Vec<Entry> {
+    list_entries().into_iter().chain(global_entries()).collect()
+}
 
 /// Entries of the change page (file cursor, inline diffs, patch sets).
 pub fn change_entries() -> Vec<Entry> {
@@ -138,6 +160,69 @@ pub fn change_entries() -> Vec<Entry> {
     ]
 }
 
+/// Entries of the diff page itself; the keys inside the diff are in
+/// [`crate::diff::actions::entries`].
+pub fn diff_page_entries() -> Vec<Entry> {
+    use crate::diff::actions::{NextFile, PrevFile};
+    let k = DIFF_PAGE_KEYS;
+    vec![
+        e(
+            "] / [",
+            KeyBinding::new("]", NextFile, Some(k)),
+            "Next / previous file",
+        ),
+        e("", KeyBinding::new("[", PrevFile, Some(k)), ""),
+        e(
+            ",",
+            KeyBinding::new(",", TogglePrefs, Some(k)),
+            "Diff preferences",
+        ),
+    ]
+}
+
+/// Entries of the diff preferences panel.
+pub fn diff_prefs_entries() -> Vec<Entry> {
+    let k = DIFF_PREFS_KEYS;
+    vec![
+        e(
+            "m",
+            KeyBinding::new("m", PrefsMode, Some(k)),
+            "Side-by-side / unified",
+        ),
+        e(
+            "c",
+            KeyBinding::new("c", PrefsContext, Some(k)),
+            "Context lines",
+        ),
+        e(
+            "w",
+            KeyBinding::new("w", PrefsWhitespace, Some(k)),
+            "Whitespace handling",
+        ),
+        e(
+            "t",
+            KeyBinding::new("t", PrefsTabSize, Some(k)),
+            "Tab width",
+        ),
+        e(
+            "s",
+            KeyBinding::new("s", PrefsShowTabs, Some(k)),
+            "Show tab characters",
+        ),
+        e(
+            "i",
+            KeyBinding::new("i", PrefsIntraline, Some(k)),
+            "Highlight changes within a line",
+        ),
+        e(
+            "Esc or ,",
+            KeyBinding::new("escape", ClosePrefs, Some(k)),
+            "Close the panel",
+        ),
+        e("", KeyBinding::new(",", ClosePrefs, Some(k)), ""),
+    ]
+}
+
 /// A binding and how it appears in the help overlay.
 pub struct Entry {
     pub binding: KeyBinding,
@@ -154,7 +239,9 @@ fn e(keys: &'static str, binding: KeyBinding, description: &'static str) -> Entr
     }
 }
 
-pub fn entries() -> Vec<Entry> {
+/// Entries of the change lists (dashboard and search), plus the refresh
+/// and browser keys the change page shares.
+pub fn list_entries() -> Vec<Entry> {
     vec![
         e(
             "j / k",
@@ -200,10 +287,16 @@ pub fn entries() -> Vec<Entry> {
             KeyBinding::new("shift-o", OpenInBrowser, Some(CHANGE_KEYS)),
             "",
         ),
+    ]
+}
+
+/// Entries that work on every page.
+pub fn global_entries() -> Vec<Entry> {
+    vec![
         e(
             "u",
             KeyBinding::new("u", GoUp, Some(SHELL_KEYS)),
-            "Up to the list (or dashboard)",
+            "Up: to the list, or from a diff to its change",
         ),
         e(
             "Alt-Left / Alt-Right",
@@ -249,6 +342,8 @@ pub fn bind_keys(cx: &mut App) {
         entries()
             .into_iter()
             .chain(change_entries())
+            .chain(diff_page_entries())
+            .chain(diff_prefs_entries())
             .map(|e| e.binding),
     );
 }

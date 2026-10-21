@@ -13,9 +13,10 @@ use model::ChangeNumber;
 use crate::{
     actions::{self, *},
     login::LoginOutcome,
-    nav::{ChangeView, NavState, Route},
+    nav::{ChangeView, DiffRoute, NavState, Route},
     pages::{
         change::{ChangeEvent, ChangePage},
+        diff::{DiffPage, DiffPageEvent},
         list::{ChangeListPage, ListEvent, ListKind},
         login::{LoginPage, LoginPrefill},
     },
@@ -28,6 +29,7 @@ enum Page {
     Login(Entity<LoginPage>),
     List(Entity<ChangeListPage>),
     Change(Entity<ChangePage>),
+    Diff(Entity<DiffPage>),
 }
 
 impl Page {
@@ -36,6 +38,7 @@ impl Page {
             Page::Login(p) => p.focus_handle(cx),
             Page::List(p) => p.focus_handle(cx),
             Page::Change(p) => p.focus_handle(cx),
+            Page::Diff(p) => p.focus_handle(cx),
         }
     }
 
@@ -44,6 +47,7 @@ impl Page {
             Page::Login(p) => p.clone().into_any_element(),
             Page::List(p) => p.clone().into_any_element(),
             Page::Change(p) => p.clone().into_any_element(),
+            Page::Diff(p) => p.clone().into_any_element(),
         }
     }
 
@@ -52,6 +56,7 @@ impl Page {
             Page::Login(_) => {}
             Page::List(p) => p.update(cx, |p, cx| p.set_window_active(active, cx)),
             Page::Change(p) => p.update(cx, |p, cx| p.set_window_active(active, cx)),
+            Page::Diff(_) => {}
         }
     }
 }
@@ -257,6 +262,22 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn change_page_for_test(&self) -> Option<Entity<ChangePage>> {
+        match &self.page {
+            Page::Change(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diff_page_for_test(&self) -> Option<Entity<DiffPage>> {
+        match &self.page {
+            Page::Diff(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn settings(&self) -> &Entity<DiffSettings> {
         &self.settings
     }
@@ -293,6 +314,7 @@ impl Shell {
                 }];
                 self.list_page(session, ListKind::Search, spec, restore, active, window, cx)
             }
+            (Route::Diff(route), Some(session)) => self.diff_page(session, route, window, cx),
             (Route::Change(n), Some(session)) => {
                 let view = self.nav.change_view().unwrap_or_default();
                 self.change_page(session, n, view, active, window, cx)
@@ -359,11 +381,35 @@ impl Shell {
             |this, _, ev: &ChangeEvent, window, cx| match ev {
                 ChangeEvent::Unauthorized => this.unauthorized(window, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
-                // The diff page arrives in the next commit.
-                ChangeEvent::OpenDiff(_) => {}
+                ChangeEvent::OpenDiff(route) => {
+                    this.navigate(Route::Diff(route.clone()), window, cx)
+                }
             },
         ));
         Page::Change(page)
+    }
+
+    fn diff_page(
+        &mut self,
+        session: Session,
+        route: DiffRoute,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Page {
+        let settings = self.settings.clone();
+        let page = cx.new(|cx| DiffPage::new(session, settings, route, cx));
+        self.page_subs.push(cx.subscribe_in(
+            &page,
+            window,
+            |this, _, ev: &DiffPageEvent, window, cx| match ev {
+                DiffPageEvent::Unauthorized => this.unauthorized(window, cx),
+                // Like PolyGerrit, every file is its own history entry.
+                DiffPageEvent::OpenFile(route) => {
+                    this.navigate(Route::Diff(route.clone()), window, cx)
+                }
+            },
+        ));
+        Page::Diff(page)
     }
 
     /// Remembers what is selected on the page we are about to leave.
@@ -449,7 +495,17 @@ impl Shell {
 
     fn go_up(&mut self, _: &GoUp, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_selection(cx);
+        // Up from a diff lands on its change with the cursor on that file
+        // and the same patch sets, whether the change page is behind us in
+        // the history or has to be opened.
+        let from_diff = match &self.page {
+            Page::Diff(p) => Some(p.read(cx).route().change_view()),
+            _ => None,
+        };
         if self.nav.up() {
+            if from_diff.is_some() {
+                self.nav.set_change_view(from_diff);
+            }
             self.show(window, cx);
         }
     }

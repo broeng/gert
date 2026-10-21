@@ -187,6 +187,9 @@ fn main() {
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
+        if let Some(m) = mode {
+            Theme::change(m, None, cx);
+        }
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
             titlebar: Some(TitlebarOptions {
@@ -196,14 +199,26 @@ fn main() {
             ..Default::default()
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
-            match mode {
-                Some(m) => Theme::change(m, Some(window), cx),
-                None => Theme::sync_system_appearance(Some(window), cx),
+            if mode.is_none() {
+                Theme::sync_system_appearance(Some(window), cx);
             }
             cx.new(|cx| Shell::new(startup, window, cx))
         });
         match opened {
             Ok(_) => {
+                if let Some(m) = mode {
+                    // The shell follows the system appearance as soon as the
+                    // platform reports it; pin the requested one after that.
+                    cx.spawn(async move |cx| {
+                        for _ in 0..8 {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(400))
+                                .await;
+                            cx.update(|cx| Theme::change(m, None, cx));
+                        }
+                    })
+                    .detach();
+                }
                 cx.on_window_closed(|cx, _| {
                     if cx.windows().is_empty() {
                         cx.quit();

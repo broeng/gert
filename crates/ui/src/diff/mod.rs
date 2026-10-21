@@ -12,7 +12,7 @@ mod paint;
 mod view;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use actions::{DIFF_VIEW, bind_keys};
 pub use layout::{Anchor, Layout, LayoutOptions, SkipRow};
