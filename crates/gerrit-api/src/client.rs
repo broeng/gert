@@ -1615,6 +1615,26 @@ mod tests {
     }
 
     #[test]
+    fn patch_set_level_drafts_send_no_side() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            201,
+            xssi(r#"{"id": "d1", "updated": "2024-03-01 10:00:00.000000000"}"#),
+        );
+        let c = client(&fake, "https://h", basic());
+        let mut d = draft_input();
+        d.path = "/PATCHSET_LEVEL".into();
+        d.location = model::Location::File;
+        d.parent = Some(1);
+        block_on(c.create_draft(ChangeNumber(5), &sha_rev(), &d)).unwrap();
+        assert_eq!(
+            body_json(&fake.requests()[0]),
+            json!({"path": "/PATCHSET_LEVEL", "in_reply_to": "c1",
+                   "message": "Fix \"this\"\nüñí", "unresolved": true})
+        );
+    }
+
+    #[test]
     fn update_and_delete_draft_address_the_draft_id() {
         let fake = FakeHttpClient::new();
         fake.push_response(

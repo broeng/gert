@@ -590,8 +590,15 @@ fn draft_create_update_delete() {
 
     // The server's list has what we sent, with the patch set and commit
     // the answer to the PUT leaves out.
+    // A patch-set level draft (no side, no line).
+    let mut psl = line_draft("overall");
+    psl.path = "/PATCHSET_LEVEL".into();
+    psl.location = model::Location::File;
+    psl.unresolved = false;
+    let psl = block_on(c.create_draft(n, &rev, &psl)).expect("patch-set level draft");
+
     let listed = block_on(c.get_drafts(n)).unwrap();
-    assert_eq!(listed.len(), 3);
+    assert_eq!(listed.len(), 4);
     assert!(listed.iter().all(|d| d.commit_id.as_ref() == Some(&rev)));
     assert!(
         listed
@@ -627,11 +634,13 @@ fn draft_create_update_delete() {
         block_on(c.update_draft(n, &rev, &created.id, &changed)),
         Err(Error::NotFound)
     ));
-    assert_eq!(block_on(c.get_drafts(n)).unwrap().len(), 2);
+    assert_eq!(block_on(c.get_drafts(n)).unwrap().len(), 3);
     // Other users do not see the drafts.
     assert!(block_on(user("bob").get_drafts(n)).unwrap().is_empty());
     block_on(c.delete_draft(n, &rev, &ranged.id)).unwrap();
     block_on(c.delete_draft(n, &rev, &file_level.id)).unwrap();
+    block_on(c.delete_draft(n, &rev, &psl.id)).unwrap();
+    assert!(block_on(c.get_drafts(n)).unwrap().is_empty());
 }
 
 #[test]
