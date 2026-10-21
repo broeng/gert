@@ -183,6 +183,21 @@ impl Store {
         Ok(())
     }
 
+    /// Records a successful fetch that changed nothing: only `fetched_at`
+    /// moves. Does nothing if the query is not cached.
+    pub fn touch_query(
+        &mut self,
+        server: ServerId,
+        query: &str,
+        fetched_at: Timestamp,
+    ) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE query_results SET fetched_at = ?3 WHERE server_id = ?1 AND query = ?2",
+            params![server.0, query, fetched_at.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// The cached result of `query`, or `None` if it was never fetched.
     pub fn load_query(&self, server: ServerId, query: &str) -> Result<Option<CachedQuery>, Error> {
         let head: Option<(bool, String)> = self
