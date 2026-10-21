@@ -4,9 +4,11 @@ use std::collections::BTreeMap;
 
 use model::{
     Account, AccountId, ChangeDetail, ChangeMessage, ChangeNumber, ChangeStatus, ChangeSummary,
-    Commit, CommitParent, ExpressionResult, ExpressionStatus, GitPerson, LabelSummary, LabelVote,
-    PatchSetNumber, Revision, RevisionId, RevisionKind, SubmitRequirement, SubmitRequirementStatus,
-    Timestamp, TimestampParseError, parse_gerrit_timestamp,
+    ChangedChunk, Commit, CommitParent, Diff, DiffChangeType, DiffChunk, DiffContext, DiffFileMeta,
+    DiffPreferences, DiffViewMode, ExpressionResult, ExpressionStatus, FileEntry, FileStatus,
+    GitPerson, IntralineEdit, IntralineStatus, LabelSummary, LabelVote, PatchSetNumber,
+    RelatedChange, Revision, RevisionId, RevisionKind, SubmitRequirement, SubmitRequirementStatus,
+    Timestamp, TimestampParseError, Whitespace, file_order, parse_gerrit_timestamp,
 };
 
 use crate::wire::{
@@ -18,6 +20,9 @@ use crate::wire::{
 pub enum ConversionError {
     #[error("missing required field `{0}`")]
     MissingField(&'static str),
+    /// A field is present but not shaped as documented.
+    #[error("invalid field `{0}`")]
+    Invalid(&'static str),
     #[error("field `{field}`: {source}")]
     Timestamp {
         field: &'static str,
@@ -293,6 +298,133 @@ pub(crate) fn change_detail(c: &ChangeInfo) -> Result<ChangeDetail, ConversionEr
             .collect::<Result<_, _>>()?,
         votes,
     })
+}
+
+/// The `files` map as a list in the server's display order.
+pub(crate) fn file_list(files: BTreeMap<String, wire::CommonFileInfo>) -> Vec<FileEntry> {
+    let mut list: Vec<_> = files
+        .into_iter()
+        .map(|(path, f)| FileEntry {
+            path,
+            status: FileStatus::from_wire(f.status.as_deref()),
+            old_path: f.old_path,
+            lines_inserted: f.lines_inserted.unwrap_or(0),
+            lines_deleted: f.lines_deleted.unwrap_or(0),
+            size_delta: f.size_delta.unwrap_or(0),
+            size: f.size.unwrap_or(0),
+            binary: f.binary.unwrap_or(false),
+        })
+        .collect();
+    list.sort_by(|a, b| file_order(&a.path, &b.path));
+    list
+}
+
+fn file_meta(m: &wire::FileMeta) -> Result<DiffFileMeta, ConversionError> {
+    Ok(DiffFileMeta {
+        name: required(m.name.clone(), "meta.name")?,
+        content_type: m.content_type.clone(),
+        lines: m.lines.unwrap_or(0),
+    })
+}
+
+fn edits(
+    pairs: &Option<Vec<Vec<u32>>>,
+    field: &'static str,
+) -> Result<Vec<IntralineEdit>, ConversionError> {
+    pairs
+        .iter()
+        .flatten()
+        .map(|p| match p.as_slice() {
+            [skip, mark] => Ok(IntralineEdit {
+                skip: *skip,
+                mark: *mark,
+            }),
+            _ => Err(ConversionError::Invalid(field)),
+        })
+        .collect()
+}
+
+/// An entry is `ab` (common), else `skip`, else a changed region with
+/// `a` and/or `b`. Gerrit never mixes them in one entry.
+fn chunk(e: &wire::ContentEntry) -> Result<DiffChunk, ConversionError> {
+    if let Some(lines) = &e.ab {
+        return Ok(DiffChunk::Common {
+            lines: lines.clone(),
+        });
+    }
+    if let Some(lines) = e.skip {
+        return Ok(DiffChunk::Skip { lines });
+    }
+    Ok(DiffChunk::Changed(ChangedChunk {
+        a: e.a.clone().unwrap_or_default(),
+        b: e.b.clone().unwrap_or_default(),
+        edits_a: edits(&e.edit_a, "content.edit_a")?,
+        edits_b: edits(&e.edit_b, "content.edit_b")?,
+        due_to_rebase: e.due_to_rebase.unwrap_or(false),
+        common: e.common.unwrap_or(false),
+    }))
+}
+
+pub(crate) fn diff(d: &wire::DiffInfo) -> Result<Diff, ConversionError> {
+    Ok(Diff {
+        meta_a: d.meta_a.as_ref().map(file_meta).transpose()?,
+        meta_b: d.meta_b.as_ref().map(file_meta).transpose()?,
+        change_type: d.change_type.as_deref().map(DiffChangeType::from_wire),
+        intraline_status: d
+            .intraline_status
+            .as_deref()
+            .map(IntralineStatus::from_wire),
+        diff_header: d.diff_header.clone().unwrap_or_default(),
+        chunks: d
+            .content
+            .iter()
+            .flatten()
+            .map(chunk)
+            .collect::<Result<_, _>>()?,
+        binary: d.binary.unwrap_or(false),
+    })
+}
+
+pub(crate) fn related(r: &wire::RelatedChangesInfo) -> Result<Vec<RelatedChange>, ConversionError> {
+    r.changes
+        .iter()
+        .flatten()
+        .map(|c| {
+            Ok(RelatedChange {
+                project: required(c.project.clone(), "related.project")?,
+                change_id: c.change_id.clone(),
+                number: ChangeNumber(required(c.change_number, "_change_number")?),
+                patch_set: PatchSetNumber(required(c.revision_number, "_revision_number")?),
+                current_patch_set: c.current_revision_number.map(PatchSetNumber),
+                status: c.status.as_deref().map(ChangeStatus::from_wire),
+                submittable: c.submittable,
+                work_in_progress: c.work_in_progress.unwrap_or(false),
+                commit: c.commit.as_ref().map(commit).transpose()?,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn diff_preferences(
+    p: &wire::DiffPreferencesInfo,
+    general: Option<&wire::GeneralPreferencesInfo>,
+) -> DiffPreferences {
+    DiffPreferences {
+        context: p.context.map(DiffContext::from_pref),
+        ignore_whitespace: p.ignore_whitespace.as_deref().map(Whitespace::from_wire),
+        line_length: p.line_length,
+        tab_size: p.tab_size,
+        show_tabs: p.show_tabs,
+        intraline_difference: p.intraline_difference,
+        line_wrapping: p.line_wrapping,
+        show_whitespace_errors: p.show_whitespace_errors,
+        hide_line_numbers: p.hide_line_numbers,
+        syntax_highlighting: p.syntax_highlighting,
+        expand_all_comments: p.expand_all_comments,
+        view_mode: general
+            .and_then(|g| g.diff_view.as_deref())
+            .and_then(DiffViewMode::from_wire),
+    }
 }
 
 #[cfg(test)]

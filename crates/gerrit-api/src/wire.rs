@@ -180,6 +180,106 @@ pub(crate) struct SubmitRequirementResultInfo {
     pub override_expression_result: Option<SubmitRequirementExpressionInfo>,
 }
 
+/// One value of the `files` map; the path is the map key.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct CommonFileInfo {
+    /// `A`, `D`, `R`, `C`, `W`; absent for a modified file.
+    pub status: Option<String>,
+    pub binary: Option<bool>,
+    pub old_path: Option<String>,
+    pub lines_inserted: Option<u32>,
+    pub lines_deleted: Option<u32>,
+    pub size_delta: Option<i64>,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct FileMeta {
+    pub name: Option<String>,
+    pub content_type: Option<String>,
+    pub lines: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ContentEntry {
+    pub ab: Option<Vec<String>>,
+    pub a: Option<Vec<String>>,
+    pub b: Option<Vec<String>>,
+    /// `[skip, mark]` pairs.
+    pub edit_a: Option<Vec<Vec<u32>>>,
+    pub edit_b: Option<Vec<Vec<u32>>>,
+    pub due_to_rebase: Option<bool>,
+    pub common: Option<bool>,
+    pub skip: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct DiffInfo {
+    pub meta_a: Option<FileMeta>,
+    pub meta_b: Option<FileMeta>,
+    /// `OK`, `TIMEOUT`, `FAILURE`; a string so unknown values are kept.
+    pub intraline_status: Option<String>,
+    /// `ADDED`, `MODIFIED`, ...; a string so unknown values are kept.
+    pub change_type: Option<String>,
+    pub diff_header: Option<Vec<String>>,
+    pub content: Option<Vec<ContentEntry>>,
+    pub binary: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct RelatedChangeAndCommitInfo {
+    pub project: Option<String>,
+    pub change_id: Option<String>,
+    pub commit: Option<CommitInfo>,
+    #[serde(rename = "_change_number")]
+    pub change_number: Option<u64>,
+    #[serde(rename = "_revision_number")]
+    pub revision_number: Option<u32>,
+    #[serde(rename = "_current_revision_number")]
+    pub current_revision_number: Option<u32>,
+    pub status: Option<String>,
+    pub submittable: Option<bool>,
+    pub work_in_progress: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct RelatedChangesInfo {
+    pub changes: Option<Vec<RelatedChangeAndCommitInfo>>,
+}
+
+/// The subset of `DiffPreferencesInfo` a diff view uses.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct DiffPreferencesInfo {
+    /// Number of context lines; negative means the entire file.
+    pub context: Option<i64>,
+    pub tab_size: Option<u32>,
+    pub line_length: Option<u32>,
+    pub expand_all_comments: Option<bool>,
+    pub intraline_difference: Option<bool>,
+    pub show_tabs: Option<bool>,
+    pub show_whitespace_errors: Option<bool>,
+    pub syntax_highlighting: Option<bool>,
+    pub hide_line_numbers: Option<bool>,
+    pub line_wrapping: Option<bool>,
+    /// A `Whitespace`; a string so unknown values are kept.
+    pub ignore_whitespace: Option<String>,
+}
+
+/// The subset of `GeneralPreferencesInfo` we read.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct GeneralPreferencesInfo {
+    /// `SIDE_BY_SIDE` or `UNIFIED_DIFF`.
+    pub diff_view: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 pub(crate) struct ChangeInfo {
@@ -264,6 +364,14 @@ mod tests {
         conforms::<SubmitRequirementExpressionInfo>(&spec, "SubmitRequirementExpressionInfo");
         conforms::<SubmitRequirementResultInfo>(&spec, "SubmitRequirementResultInfo");
         conforms::<ChangeInfo>(&spec, "ChangeInfo");
+        conforms::<CommonFileInfo>(&spec, "CommonFileInfo");
+        conforms::<FileMeta>(&spec, "FileMeta");
+        conforms::<ContentEntry>(&spec, "ContentEntry");
+        conforms::<DiffInfo>(&spec, "DiffInfo");
+        conforms::<RelatedChangeAndCommitInfo>(&spec, "RelatedChangeAndCommitInfo");
+        conforms::<RelatedChangesInfo>(&spec, "RelatedChangesInfo");
+        conforms::<DiffPreferencesInfo>(&spec, "DiffPreferencesInfo");
+        conforms::<GeneralPreferencesInfo>(&spec, "GeneralPreferencesInfo");
     }
 
     #[test]
