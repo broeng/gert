@@ -33,15 +33,15 @@ use sync::Syncer;
 use crate::{
     actions::*,
     diff::{
-        DiffEvent, DiffSizing, DiffView, Expand,
+        DiffEvent, DiffSizing, DiffStatus, DiffView, Expand,
         actions::{NextFile, PrevFile},
     },
-    diff_load::{LoadError, expanded_context, load_diff},
+    diff_load::{LoadError, context_label, expanded_context, load_diff},
     nav::DiffRoute,
     session::{Session, is_unauthorized},
     settings::DiffSettings,
 };
-use prefs::{context_label, next_context, next_tab_size, next_whitespace, whitespace_label};
+use prefs::{next_context, next_tab_size, next_whitespace, whitespace_label};
 
 pub enum DiffPageEvent {
     Unauthorized,
@@ -66,6 +66,9 @@ pub struct DiffPage {
     files: Vec<FileEntry>,
     /// The key of the diff shown or being fetched.
     key: Option<DiffKey>,
+    /// The key of the diff that is on screen (`key` runs ahead of it while a
+    /// refetch is in flight or after one failed).
+    shown: Option<DiffKey>,
     /// Set by an expansion request: replaces the preferred context.
     ctx_override: Option<DiffContext>,
     view: Option<Entity<DiffView>>,
@@ -106,6 +109,7 @@ impl DiffPage {
             files_key: None,
             files: Vec::new(),
             key: None,
+            shown: None,
             ctx_override: None,
             view: None,
             view_sub: None,
@@ -131,6 +135,11 @@ impl DiffPage {
     #[cfg(test)]
     pub(crate) fn view_for_test(&self) -> Option<Entity<DiffView>> {
         self.view.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shown_for_test(&self) -> Option<&DiffKey> {
+        self.shown.as_ref()
     }
 
     #[cfg(test)]
@@ -220,6 +229,16 @@ impl DiffPage {
         let syncer = self.session.syncer().clone();
         let can_sync = self.session.can_sync();
         self.loading = self.view.is_none();
+        if let Some(view) = &self.view {
+            let msg = format!(
+                "Loading\u{2026} (context: {}, whitespace: {})",
+                context_label(key.context),
+                whitespace_label(&key.whitespace)
+            );
+            view.update(cx, |v, cx| {
+                v.set_status(Some(DiffStatus::Busy(msg.into())), cx)
+            });
+        }
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(load_diff(syncer, key.clone(), can_sync))
@@ -247,14 +266,34 @@ impl DiffPage {
             Ok(diff) => {
                 self.error = None;
                 self.key = Some(key.clone());
+                self.shown = Some(key.clone());
                 match &self.view {
-                    Some(view) => view.update(cx, |v, cx| v.set_diff(diff, cx)),
+                    Some(view) => view.update(cx, |v, cx| {
+                        v.set_diff(diff, cx);
+                        v.set_status(None, cx);
+                    }),
                     None => self.create_view(diff, cx),
                 }
                 self.prefetch_next(&key, cx);
             }
             Err(LoadError::Unauthorized) => cx.emit(DiffPageEvent::Unauthorized),
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => {
+                // With a diff on screen the page keeps it, so the failure
+                // has to show on the view or it passes unseen.
+                if let Some(view) = &self.view {
+                    let msg = format!("Could not load the diff: {e}");
+                    view.update(cx, |v, cx| {
+                        v.set_status(Some(DiffStatus::Error(msg.into())), cx)
+                    });
+                }
+                self.error = Some(e.to_string());
+                // Back to what is on screen, so that the header tells the
+                // truth and the same request can be tried again.
+                if self.shown.is_some() {
+                    self.key = self.shown.clone();
+                    self.ctx_override = None;
+                }
+            }
         }
     }
 
@@ -455,7 +494,10 @@ impl DiffPage {
             DiffViewMode::SideBySide => "side-by-side",
             DiffViewMode::Unified => "unified",
         };
-        let key = self.key.as_ref();
+        // What is on screen, not what was asked for: a failed or pending
+        // request must not pass for the current state.
+        let key = self.shown.as_ref().or(self.key.as_ref());
+        let pending = self.key != self.shown && self.shown.is_some();
         v_flex()
             .px_3()
             .py_2()
@@ -489,9 +531,10 @@ impl DiffPage {
                     .child(div().flex_1())
                     .when_some(key, |d, k| {
                         d.child(div().text_xs().text_color(muted).child(format!(
-                            "context: {}  whitespace: {}",
+                            "context: {}  whitespace: {}{}",
                             context_label(k.context),
-                            whitespace_label(&k.whitespace)
+                            whitespace_label(&k.whitespace),
+                            if pending { "  (updating\u{2026})" } else { "" }
                         )))
                     })
                     .child(

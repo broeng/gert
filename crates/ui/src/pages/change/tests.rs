@@ -85,9 +85,26 @@ fn diff_body() -> Vec<u8> {
     std::fs::read(path).expect("fixture")
 }
 
+fn diff_with_skip() -> Vec<u8> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/diff.response.json");
+    std::fs::read(path).expect("fixture")
+}
+
 fn page(cx: &mut TestAppContext, online: bool, view: ChangeView) -> Fixture {
+    page_with(cx, online, view, |_| {})
+}
+
+/// Like [`page`]; `routes` can add to or override the fake server's routes.
+fn page_with(
+    cx: &mut TestAppContext,
+    online: bool,
+    view: ChangeView,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fixture {
     let http = RouteHttpClient::new();
     http.route("/diff", 200, diff_body());
+    routes(&http);
     let env = env_with(seeded(), &http);
     let auth = online.then_some(Auth::Anonymous);
     let session = Session::new(&env, &setup(), auth).expect("session");
@@ -276,6 +293,32 @@ fn i_toggles_the_inline_diff_of_the_current_file(cx: &mut TestAppContext) {
     cx.update(|cx| assert!(f.page.read(cx).expanded_paths().is_empty()));
 }
 
+/// A failed refetch used to vanish: the old diff stayed with no sign of it.
+#[gpui_kit::test]
+fn a_failed_whole_file_request_shows_an_error_on_the_inline_diff(cx: &mut TestAppContext) {
+    let f = page_with(cx, true, ChangeView::default(), |http| {
+        http.route("%2FCOMMIT_MSG/diff", 200, diff_with_skip());
+        http.route("%2FCOMMIT_MSG/diff?context=ALL", 500, "boom");
+    });
+    press(cx, &f, &["i"]);
+    cx.update_window(f.window, |_, window, cx| {
+        let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
+        let focus = view.read(cx).focus_for_test();
+        window.focus(&focus, cx);
+    })
+    .expect("focus");
+    press(cx, &f, &["shift-x"]);
+    cx.update(|cx| {
+        let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
+        match view.read(cx).status() {
+            Some(crate::diff::DiffStatus::Error(m)) => {
+                assert!(m.contains("Could not load more lines"), "{m}")
+            }
+            other => panic!("expected an error status, got {other:?}"),
+        }
+    });
+}
+
 #[gpui_kit::test]
 fn shift_i_expands_every_file_and_again_collapses_them(cx: &mut TestAppContext) {
     let f = page(cx, true, ChangeView::default());
@@ -294,7 +337,9 @@ fn shift_i_expands_every_file_and_again_collapses_them(cx: &mut TestAppContext) 
 
 #[gpui_kit::test]
 fn showing_the_whole_file_in_an_inline_diff_refetches_with_all_context(cx: &mut TestAppContext) {
-    let f = page(cx, true, ChangeView::default());
+    let f = page_with(cx, true, ChangeView::default(), |http| {
+        http.route("%2FCOMMIT_MSG/diff", 200, diff_with_skip());
+    });
     press(cx, &f, &["i"]);
     cx.update(|cx| {
         assert_eq!(
@@ -317,6 +362,14 @@ fn showing_the_whole_file_in_an_inline_diff_refetches_with_all_context(cx: &mut 
         );
     });
     assert!(f.http.requested().iter().any(|r| r.contains("context=ALL")));
+    // The view says which context it shows now.
+    cx.update(|cx| {
+        let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
+        assert_eq!(
+            view.read(cx).status(),
+            Some(&crate::diff::DiffStatus::Info("Context: whole file".into()))
+        );
+    });
     // Esc hands the focus back to the file list: j moves the page cursor.
     press(cx, &f, &["escape", "j"]);
     assert_eq!(cursor(cx, &f).as_deref(), Some("src/a.rs"));

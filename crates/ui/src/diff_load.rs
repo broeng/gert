@@ -56,6 +56,14 @@ pub async fn load_diff(syncer: Syncer, key: DiffKey, can_sync: bool) -> Result<D
         .map_err(|e| LoadError::from_sync(&e))
 }
 
+/// How a context reads in the UI.
+pub fn context_label(c: DiffContext) -> String {
+    match c {
+        DiffContext::Lines(n) => format!("{n} lines"),
+        DiffContext::All => "whole file".to_owned(),
+    }
+}
+
 /// The `context` to request for an expansion request, given what is shown.
 ///
 /// The server only sends `context=N` windows around the changes. The

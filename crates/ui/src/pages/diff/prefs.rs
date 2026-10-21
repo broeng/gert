@@ -37,13 +37,6 @@ pub fn whitespace_label(w: &Whitespace) -> &'static str {
     }
 }
 
-pub fn context_label(c: DiffContext) -> String {
-    match c {
-        DiffContext::Lines(n) => format!("{n} lines"),
-        DiffContext::All => "whole file".to_owned(),
-    }
-}
-
 /// The next tab width: 2, 4, 8, then 2 again.
 pub fn next_tab_size(n: u32) -> u32 {
     match n {

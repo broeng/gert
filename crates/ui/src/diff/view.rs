@@ -39,6 +39,15 @@ pub enum Expand {
     All,
 }
 
+/// A one-line message the owner can show above the rows (loading more
+/// lines, a failed refetch, which context is shown).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiffStatus {
+    Busy(SharedString),
+    Info(SharedString),
+    Error(SharedString),
+}
+
 pub enum DiffEvent {
     ExpandRequested(Expand),
     /// The view mode was toggled; the owner may want to remember it.
@@ -56,6 +65,11 @@ pub struct DiffView {
     scroll: UniformListScrollHandle,
     /// Row height at the last render; also what the page size derives from.
     row_height: Pixels,
+    /// Set by the owner.
+    status: Option<DiffStatus>,
+    /// The view's own message ("nothing is hidden"); goes away when the
+    /// cursor moves or the diff changes. The owner's status wins.
+    hint: Option<SharedString>,
 }
 
 impl EventEmitter<DiffEvent> for DiffView {}
@@ -82,7 +96,31 @@ impl DiffView {
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             row_height: px(20.),
+            status: None,
+            hint: None,
         }
+    }
+
+    /// Whether the diff has skipped runs of common lines that could be shown.
+    pub fn has_hidden_lines(&self) -> bool {
+        self.layout.rows().iter().any(|r| matches!(r, Row::Skip(_)))
+    }
+
+    /// Shows or clears the owner's status line.
+    pub fn set_status(&mut self, status: Option<DiffStatus>, cx: &mut Context<Self>) {
+        if self.status != status {
+            self.status = status;
+            cx.notify();
+        }
+    }
+
+    pub fn status(&self) -> Option<&DiffStatus> {
+        self.status.as_ref()
+    }
+
+    /// The message the view itself shows, if any.
+    pub fn hint(&self) -> Option<&str> {
+        self.hint.as_deref()
     }
 
     pub fn layout(&self) -> &Layout {
@@ -108,6 +146,7 @@ impl DiffView {
     pub fn set_diff(&mut self, diff: Diff, cx: &mut Context<Self>) {
         let keep = self.keep_position();
         self.diff = Arc::new(diff);
+        self.hint = None;
         self.rebuild(keep, cx);
     }
 
@@ -229,6 +268,7 @@ impl DiffView {
             return;
         }
         self.cursor = self.snap(row);
+        self.hint = None;
         self.scroll.scroll_to_item(self.cursor, strategy);
         cx.notify();
     }
@@ -315,7 +355,15 @@ impl DiffView {
     }
 
     fn show_full_file(&mut self, _: &ShowFullFile, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(DiffEvent::ExpandRequested(Expand::All));
+        // Without skipped runs a refetch would change nothing, which looks
+        // like a dead key: say so instead.
+        if self.has_hidden_lines() {
+            self.hint = None;
+            cx.emit(DiffEvent::ExpandRequested(Expand::All));
+        } else {
+            self.hint = Some("The whole file is already shown".into());
+            cx.notify();
+        }
     }
 
     fn click_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -490,8 +538,17 @@ fn skip_element(skip: &SkipRow, style: &Style) -> AnyElement {
 
 impl Render for DiffView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (family, size, row_height, bg, fg) = {
+        let (family, size, row_height, bg, fg, strip) = {
             let t = cx.theme();
+            let strip = match (&self.status, &self.hint) {
+                (Some(DiffStatus::Busy(m)), _) => Some((m.clone(), t.muted_foreground, t.muted)),
+                (Some(DiffStatus::Info(m)), _) => Some((m.clone(), t.muted_foreground, t.muted)),
+                (Some(DiffStatus::Error(m)), _) => {
+                    Some((m.clone(), t.danger, t.danger.opacity(0.1)))
+                }
+                (None, Some(m)) => Some((m.clone(), t.muted_foreground, t.muted)),
+                (None, None) => None,
+            };
             let family = self
                 .font_family
                 .clone()
@@ -502,6 +559,7 @@ impl Render for DiffView {
                 super::paint::row_height(t.mono_font_size),
                 t.background,
                 t.foreground,
+                strip,
             )
         };
         self.row_height = row_height;
@@ -515,7 +573,7 @@ impl Render for DiffView {
         )
         .track_scroll(&self.scroll);
         let list = match self.sizing {
-            DiffSizing::Fill => list.size_full(),
+            DiffSizing::Fill => list.w_full().flex_1().min_h_0(),
             DiffSizing::Inline { max_rows } => list
                 .with_sizing_behavior(ListSizingBehavior::Infer)
                 .w_full()
@@ -545,6 +603,16 @@ impl Render for DiffView {
             .font_family(family)
             .text_size(size)
             .line_height(row_height)
+            .children(strip.map(|(text, fg, bg)| {
+                div()
+                    .id("diff-status")
+                    .flex_none()
+                    .px_2()
+                    .text_xs()
+                    .bg(bg)
+                    .text_color(fg)
+                    .child(text)
+            }))
             .child(list)
     }
 }
