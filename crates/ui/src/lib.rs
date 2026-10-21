@@ -22,20 +22,3 @@ mod tests;
 pub use login::{LoginError, LoginOutcome, LoginRequest};
 pub use session::{Backend, BackendError, Env, SavedQuery, ServerSetup, Startup};
 pub use shell::{Shell, init};
-
-use gpui_kit::component::*;
-use gpui_kit::*;
-
-/// Placeholder root view until `app` switches to [`Shell`].
-pub struct RootView;
-
-impl Render for RootView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .child("Gert")
-    }
-}
