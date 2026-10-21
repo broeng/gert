@@ -86,6 +86,14 @@ pub struct DraftInput {
     pub unresolved: bool,
 }
 
+/// What the server answers when a draft is created or updated.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftReceipt {
+    /// The server's id of the draft.
+    pub id: String,
+    pub updated: Timestamp,
+}
+
 /// A draft comment of the signed-in user, kept in the local database and
 /// mirrored to the server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

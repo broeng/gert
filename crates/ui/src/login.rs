@@ -81,7 +81,7 @@ pub async fn login(env: &Env, req: LoginRequest) -> Result<LoginOutcome, LoginEr
     };
     match checked {
         Ok(()) => {}
-        Err(ApiError::Unauthorized | ApiError::Forbidden { .. }) if anonymous => {
+        Err(ApiError::Unauthorized) if anonymous => {
             return Err(LoginError::AnonymousDenied);
         }
         Err(ApiError::Unauthorized) => return Err(LoginError::Unauthorized),

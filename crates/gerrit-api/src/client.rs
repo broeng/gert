@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use base64::Engine as _;
 use model::{
     Account, ChangeDetail, ChangeNumber, ChangeSummary, Comment, Diff, DiffPreferences, DraftInput,
-    FileEntry, PatchSetNumber, RelatedChange, ReviewInput, ReviewResult, RevisionId,
+    DraftReceipt, FileEntry, PatchSetNumber, RelatedChange, ReviewInput, ReviewResult, RevisionId,
 };
 use serde_json::Value;
 
@@ -108,6 +108,10 @@ impl GerritClient {
         let body = resp.into_body();
         match code {
             200..=299 => Ok(body),
+            // Without credentials the server has no better word than 403
+            // (a real Gerrit answers 403 to an anonymous `/accounts/self`),
+            // and what it means is "log in".
+            403 if !self.is_authenticated() => Err(Error::Unauthorized),
             _ => Err(error_for_status(code, &body)),
         }
     }
@@ -315,7 +319,9 @@ impl GerritClient {
     }
 
     /// `GET /changes/{n}/robotcomments`: comments of automated reviewers,
-    /// with [`Comment::robot_id`] set.
+    /// with [`Comment::robot_id`] set. Gerrit 3.14 answers 404 to this
+    /// request ([`Error::NotFound`]), so callers must not treat that as a
+    /// missing change.
     pub async fn get_robot_comments(&self, change: ChangeNumber) -> Result<Vec<Comment>, Error> {
         let v = self
             .get_json(&format!("/changes/{change}/robotcomments"), &[])
@@ -324,16 +330,18 @@ impl GerritClient {
         Ok(convert::comments_by_path(map, convert::robot_comment)?)
     }
 
-    /// `PUT /changes/{n}/revisions/{rev}/drafts`: creates a draft. Returns
-    /// it as the server stored it (with its id). A patch set that does not
-    /// exist (any more) or a closed change is [`Error::Conflict`] or
-    /// [`Error::BadRequest`] with the server's message.
+    /// `PUT /changes/{n}/revisions/{rev}/drafts`: creates a draft and
+    /// returns its server id. The server's answer leaves out the patch
+    /// set, so it is not a full [`Comment`]. A patch set that does not
+    /// exist is [`Error::NotFound`]; an empty message is
+    /// [`Error::BadRequest`] with the server's text. (The server accepts a
+    /// path that is not in the patch set and any line number.)
     pub async fn create_draft(
         &self,
         change: ChangeNumber,
         target: &RevisionId,
         draft: &DraftInput,
-    ) -> Result<Comment, Error> {
+    ) -> Result<DraftReceipt, Error> {
         let v = self
             .write_json(
                 http::Method::PUT,
@@ -342,7 +350,7 @@ impl GerritClient {
             )
             .await?;
         let info: wire::CommentInfo = serde_json::from_value(v)?;
-        Ok(convert::comment(&info, Some(&draft.path))?)
+        Ok(convert::draft_receipt(&info)?)
     }
 
     /// `PUT /changes/{n}/revisions/{rev}/drafts/{id}`: replaces a draft.
@@ -354,7 +362,7 @@ impl GerritClient {
         target: &RevisionId,
         draft_id: &str,
         draft: &DraftInput,
-    ) -> Result<Comment, Error> {
+    ) -> Result<DraftReceipt, Error> {
         let v = self
             .write_json(
                 http::Method::PUT,
@@ -367,7 +375,7 @@ impl GerritClient {
             )
             .await?;
         let info: wire::CommentInfo = serde_json::from_value(v)?;
-        Ok(convert::comment(&info, Some(&draft.path))?)
+        Ok(convert::draft_receipt(&info)?)
     }
 
     /// `DELETE /changes/{n}/revisions/{rev}/drafts/{id}`. [`Error::NotFound`]
@@ -606,7 +614,6 @@ mod tests {
         for (code, check) in [
             (400, "badrequest"),
             (401, "unauthorized"),
-            (403, "forbidden"),
             (404, "notfound"),
             (409, "conflict"),
             (500, "status"),
@@ -614,8 +621,7 @@ mod tests {
             fake.push_response(code, "oops\n");
             match (block_on(c.server_version()), check) {
                 (Err(Error::Unauthorized), "unauthorized") => {}
-                (Err(Error::Forbidden { message }), "forbidden")
-                | (Err(Error::BadRequest { message }), "badrequest")
+                (Err(Error::BadRequest { message }), "badrequest")
                 | (Err(Error::Conflict { message }), "conflict") => assert_eq!(message, "oops"),
                 (Err(Error::NotFound), "notfound") => {}
                 (Err(Error::Status { code: c2, body }), "status") => {
@@ -623,6 +629,19 @@ mod tests {
                 }
                 (other, _) => panic!("{code}: {other:?}"),
             }
+        }
+        // Without credentials a 403 means "log in"; with them it is a
+        // refusal that logging in again cannot fix.
+        fake.push_response(403, "denied\n");
+        assert!(matches!(
+            block_on(c.server_version()),
+            Err(Error::Unauthorized)
+        ));
+        let signed_in = client(&fake, "https://h", basic());
+        fake.push_response(403, "denied\n");
+        match block_on(signed_in.server_version()) {
+            Err(Error::Forbidden { message }) => assert_eq!(message, "denied"),
+            other => panic!("{other:?}"),
         }
         fake.push_error("connection reset");
         assert!(matches!(block_on(c.server_version()), Err(Error::Http(_))));
@@ -1533,7 +1552,8 @@ mod tests {
         fake.push_response(
             201,
             xssi(
-                r#"{"id": "d9", "patch_set": 2, "path": "src/a b.rs", "line": 7,
+                // As the real server answers: no patch set, no author.
+                r#"{"id": "d9", "path": "src/a b.rs", "line": 7, "commit_id": "0123abcd",
                     "updated": "2024-03-01 10:00:00.000000000", "message": "m",
                     "in_reply_to": "c1", "unresolved": true}"#,
             ),
@@ -1574,9 +1594,8 @@ mod tests {
             end_line: 5,
             end_character: 4,
         });
-        // The answer has no path: the request's is used.
         let got = block_on(c.create_draft(ChangeNumber(5), &sha_rev(), &d)).unwrap();
-        assert_eq!(got.path, "src/a b.rs");
+        assert_eq!(got.id, "d1");
         assert_eq!(
             body_json(&fake.requests()[0]),
             json!({"path": "src/a b.rs", "side": "PARENT", "parent": 2, "line": 5,
