@@ -9,7 +9,6 @@ pub enum Route {
     Login,
     Dashboard,
     Search(String),
-    #[allow(dead_code)]
     Change(ChangeNumber),
 }
 

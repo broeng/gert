@@ -6,13 +6,16 @@ use std::sync::{Arc, Mutex};
 use gerrit_api::fake::FakeHttpClient;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowOptions, px, size};
-use model::ChangeNumber;
+use model::{ChangeDetail, ChangeNumber};
 use store::{ServerId, Store};
 
 use crate::{
     login::tests::FakeBackend,
     nav::Route,
-    pages::list::{ChangeListPage, ListKind},
+    pages::{
+        change::ChangePage,
+        list::{ChangeListPage, ListKind},
+    },
     session::{Env, SavedQuery, ServerSetup, Session, Startup},
     shell::Shell,
     testing::summary,
@@ -117,6 +120,50 @@ fn dashboard_shows_cached_rows_and_j_k_cross_sections(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) {
+    let mut store = seeded(&[("status:open", &[7, 8])]);
+    let detail = ChangeDetail {
+        summary: summary(8),
+        current_revision: Some("abc123".into()),
+        current_patch_set: Some(2),
+        commit_message: Some("Subject\n\nBody".into()),
+        reviewers: vec![],
+        cc: vec![],
+    };
+    store
+        .save_change_detail(
+            ServerId(1),
+            &detail,
+            "2024-06-15T10:05:00Z".parse().expect("ts"),
+        )
+        .expect("save detail");
+    let env = env_with(store, &FakeHttpClient::new());
+    let startup = Startup {
+        env,
+        server: Some(setup()),
+        queries: vec![spec("Open", "status:open")],
+    };
+    let (window, shell) = open(cx, |window, cx| {
+        cx.new(|cx| Shell::new(startup, window, cx))
+    });
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(shell.read(cx).route(), &Route::Dashboard));
+
+    let press = |cx: &mut TestAppContext, key: &'static str| {
+        cx.update_window(window, |_, window, cx| window.press(key, cx))
+            .expect("press");
+    };
+    press(cx, "j");
+    press(cx, "enter");
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(shell.read(cx).route(), &Route::Change(ChangeNumber(8))));
+
+    press(cx, "u");
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(shell.read(cx).route(), &Route::Dashboard));
+}
+
+#[gpui_kit::test]
 fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
     let http = FakeHttpClient::new();
     http.push_response(401, "denied");
@@ -131,6 +178,36 @@ fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(shell.read(cx).route(), &Route::Login));
+}
+
+#[gpui_kit::test]
+fn change_page_shows_cached_detail(cx: &mut TestAppContext) {
+    let mut store = seeded(&[]);
+    let detail = ChangeDetail {
+        summary: summary(5),
+        current_revision: None,
+        current_patch_set: Some(1),
+        commit_message: Some("Fix things".into()),
+        reviewers: vec![],
+        cc: vec![],
+    };
+    store
+        .save_change_detail(
+            ServerId(1),
+            &detail,
+            "2024-06-15T10:05:00Z".parse().expect("ts"),
+        )
+        .expect("save detail");
+    let env = env_with(store, &FakeHttpClient::new());
+    let session = Session::new(&env, &setup(), None).expect("session");
+    let (_w, page) = open(cx, |_, cx| {
+        cx.new(|cx| ChangePage::new(session, ChangeNumber(5), true, cx))
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let d = page.read(cx).detail().expect("cached detail");
+        assert_eq!(d.summary.number, ChangeNumber(5));
+    });
 }
 
 #[gpui_kit::test]
