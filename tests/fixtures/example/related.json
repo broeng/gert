@@ -1,0 +1,53 @@
+)]}'
+{
+  "changes": [
+    {
+      "project": "platform/scheduler",
+      "change_id": "I1234812348123481234812348123481234812348",
+      "commit": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "subject": "Add scheduler metrics"
+      },
+      "_change_number": 12348,
+      "_revision_number": 2,
+      "_current_revision_number": 2,
+      "status": "NEW"
+    },
+    {
+      "project": "platform/scheduler",
+      "change_id": "I1234712347123471234712347123471234712347",
+      "commit": {
+        "commit": "cccccccccccccccccccccccccccccccccccccccc",
+        "subject": "Expose queue depth in the status page"
+      },
+      "_change_number": 12347,
+      "_revision_number": 1,
+      "_current_revision_number": 3,
+      "status": "NEW"
+    },
+    {
+      "project": "platform/scheduler",
+      "change_id": "I1234512345123451234512345123451234512345",
+      "commit": {
+        "commit": "3333333333333333333333333333333333333333",
+        "subject": "Rework the scheduler queue"
+      },
+      "_change_number": 12345,
+      "_revision_number": 3,
+      "_current_revision_number": 3,
+      "status": "NEW"
+    },
+    {
+      "project": "platform/scheduler",
+      "change_id": "I1234012340123401234012340123401234012340",
+      "commit": {
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "subject": "Split the scheduler into modules"
+      },
+      "_change_number": 12340,
+      "_revision_number": 4,
+      "_current_revision_number": 4,
+      "status": "MERGED"
+    }
+  ]
+}

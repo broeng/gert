@@ -13,7 +13,7 @@ use model::ChangeNumber;
 use crate::{
     actions::{self, *},
     login::LoginOutcome,
-    nav::{NavState, Route},
+    nav::{ChangeView, NavState, Route},
     pages::{
         change::{ChangeEvent, ChangePage},
         list::{ChangeListPage, ListEvent, ListKind},
@@ -293,7 +293,10 @@ impl Shell {
                 }];
                 self.list_page(session, ListKind::Search, spec, restore, active, window, cx)
             }
-            (Route::Change(n), Some(session)) => self.change_page(session, n, active, window, cx),
+            (Route::Change(n), Some(session)) => {
+                let view = self.nav.change_view().unwrap_or_default();
+                self.change_page(session, n, view, active, window, cx)
+            }
             _ => {
                 let prefill = self.prefill.take().unwrap_or_default();
                 let env = self.env.clone();
@@ -343,16 +346,21 @@ impl Shell {
         &mut self,
         session: Session,
         number: ChangeNumber,
+        view: ChangeView,
         active: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Page {
-        let page = cx.new(|cx| ChangePage::new(session, number, active, cx));
+        let settings = self.settings.clone();
+        let page = cx.new(|cx| ChangePage::new(session, settings, number, view, active, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
             |this, _, ev: &ChangeEvent, window, cx| match ev {
                 ChangeEvent::Unauthorized => this.unauthorized(window, cx),
+                ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
+                // The diff page arrives in the next commit.
+                ChangeEvent::OpenDiff(_) => {}
             },
         ));
         Page::Change(page)
@@ -360,8 +368,10 @@ impl Shell {
 
     /// Remembers what is selected on the page we are about to leave.
     fn remember_selection(&mut self, cx: &App) {
-        if let Page::List(p) = &self.page {
-            self.nav.set_selected(p.read(cx).selected_number());
+        match &self.page {
+            Page::List(p) => self.nav.set_selected(p.read(cx).selected_number()),
+            Page::Change(p) => self.nav.set_change_view(Some(p.read(cx).view_state())),
+            _ => {}
         }
     }
 

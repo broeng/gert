@@ -1,7 +1,7 @@
 //! PolyGerrit-style page navigation: a history stack of routes with
 //! back/forward and "up". Plain data, no GPUI.
 
-use model::ChangeNumber;
+use model::{ChangeNumber, PatchSetNumber};
 
 /// A page the user can be on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10,6 +10,43 @@ pub enum Route {
     Dashboard,
     Search(String),
     Change(ChangeNumber),
+    /// One file's diff, like PolyGerrit's `/c/proj/+/123/2..5/path`.
+    #[allow(dead_code)] // opened by the diff page, which follows
+    Diff(DiffRoute),
+}
+
+/// Which diff the diff page shows. The patch sets are numbers (the SHAs are
+/// looked up in the change); `target` is always concrete so that history
+/// entries keep meaning the same thing after a new patch set arrives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffRoute {
+    pub change: ChangeNumber,
+    /// `None` compares with the parent commit.
+    pub base: Option<PatchSetNumber>,
+    pub target: PatchSetNumber,
+    pub path: String,
+}
+
+/// What the change page restores when the user comes back to it: the
+/// patch set pair and the file under the cursor.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChangeView {
+    pub base: Option<PatchSetNumber>,
+    /// `None` is the current patch set.
+    pub target: Option<PatchSetNumber>,
+    pub file: Option<String>,
+}
+
+impl DiffRoute {
+    /// The change page state that matches this diff.
+    #[allow(dead_code)] // used by the diff page, which follows
+    pub fn change_view(&self) -> ChangeView {
+        ChangeView {
+            base: self.base,
+            target: Some(self.target),
+            file: Some(self.path.clone()),
+        }
+    }
 }
 
 impl Route {
@@ -24,6 +61,8 @@ struct Entry {
     route: Route,
     /// The change that was selected when the user left this page.
     selected: Option<ChangeNumber>,
+    /// The state of a change page that was left.
+    change_view: Option<ChangeView>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +77,7 @@ impl NavState {
             entries: vec![Entry {
                 route: initial,
                 selected: None,
+                change_view: None,
             }],
             index: 0,
         }
@@ -65,6 +105,14 @@ impl NavState {
         self.entries[self.index].selected
     }
 
+    pub fn set_change_view(&mut self, view: Option<ChangeView>) {
+        self.entries[self.index].change_view = view;
+    }
+
+    pub fn change_view(&self) -> Option<ChangeView> {
+        self.entries[self.index].change_view.clone()
+    }
+
     /// Navigates to a new page, dropping the forward history. Pushing the
     /// current route again does nothing.
     pub fn push(&mut self, route: Route) {
@@ -75,6 +123,7 @@ impl NavState {
         self.entries.push(Entry {
             route,
             selected: None,
+            change_view: None,
         });
         self.index += 1;
     }
@@ -102,12 +151,14 @@ impl NavState {
         }
     }
 
-    /// Where "up" leads from the current page: a change goes to the list it
-    /// was opened from (else the dashboard), a search to the dashboard.
+    /// Where "up" leads from the current page: a diff goes to its change, a
+    /// change to the list it was opened from (else the dashboard), a search
+    /// to the dashboard.
     pub fn up_target(&self) -> Option<Route> {
         match self.current() {
             Route::Login | Route::Dashboard => None,
             Route::Search(_) => Some(Route::Dashboard),
+            Route::Diff(d) => Some(Route::Change(d.change)),
             Route::Change(_) => Some(
                 self.entries[..self.index]
                     .iter()
@@ -210,6 +261,54 @@ mod tests {
         assert!(nav.up());
         assert_eq!(nav.current(), &Route::Dashboard);
         assert_eq!(nav.selected(), Some(ChangeNumber(5)));
+    }
+
+    fn d(change: u64, path: &str) -> Route {
+        Route::Diff(DiffRoute {
+            change: ChangeNumber(change),
+            base: None,
+            target: PatchSetNumber(2),
+            path: path.into(),
+        })
+    }
+
+    #[test]
+    fn up_from_a_diff_returns_to_the_change_behind_it() {
+        let mut nav = NavState::new(Route::Dashboard);
+        nav.push(c(7));
+        nav.set_change_view(Some(ChangeView {
+            file: Some("a.rs".into()),
+            ..Default::default()
+        }));
+        nav.push(d(7, "a.rs"));
+        nav.push(d(7, "b.rs"));
+        assert_eq!(nav.up_target(), Some(c(7)));
+        assert!(nav.up());
+        assert_eq!(nav.current(), &c(7));
+        // The view saved on that entry is still there.
+        assert_eq!(
+            nav.change_view().and_then(|v| v.file).as_deref(),
+            Some("a.rs")
+        );
+        assert!(nav.can_go_forward());
+    }
+
+    #[test]
+    fn up_from_a_diff_without_the_change_behind_it_pushes_it() {
+        let mut nav = NavState::new(d(7, "a.rs"));
+        assert!(nav.up());
+        assert_eq!(nav.current(), &c(7));
+        assert!(nav.can_go_back());
+    }
+
+    #[test]
+    fn change_up_skips_diff_entries() {
+        let mut nav = NavState::new(Route::Dashboard);
+        nav.push(s("q"));
+        nav.push(c(7));
+        nav.push(d(7, "a.rs"));
+        nav.push(c(8));
+        assert_eq!(nav.up_target(), Some(s("q")));
     }
 
     #[test]

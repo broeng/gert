@@ -3,6 +3,7 @@
 
 mod actions;
 pub mod diff;
+mod diff_load;
 mod labels;
 mod list_model;
 mod login;

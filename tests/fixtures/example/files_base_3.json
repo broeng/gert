@@ -1,0 +1,64 @@
+)]}'
+{
+  "/COMMIT_MSG": {
+    "lines_inserted": 12,
+    "lines_deleted": 6,
+    "size": 520,
+    "size_delta": 130
+  },
+  "src/sched/heap.rs": {
+    "lines_inserted": 180,
+    "lines_deleted": 0,
+    "size": 5400,
+    "size_delta": 5400,
+    "status": "A"
+  },
+  "src/sched/queue.rs": {
+    "lines_inserted": 60,
+    "lines_deleted": 50,
+    "size": 3800,
+    "size_delta": 400
+  },
+  "src/sched/list.rs": {
+    "lines_inserted": 0,
+    "lines_deleted": 40,
+    "size": 0,
+    "size_delta": -1900,
+    "status": "D"
+  },
+  "src/sched/tasks.rs": {
+    "lines_inserted": 4,
+    "lines_deleted": 3,
+    "size": 2900,
+    "size_delta": 60,
+    "status": "R",
+    "old_path": "src/sched/task.rs"
+  },
+  "src/lib.rs": {
+    "lines_inserted": 3,
+    "lines_deleted": 1,
+    "size": 800,
+    "size_delta": 40
+  },
+  "tests/ordering.rs": {
+    "lines_inserted": 95,
+    "lines_deleted": 0,
+    "size": 2800,
+    "size_delta": 2800,
+    "status": "A"
+  },
+  "docs/queue.png": {
+    "lines_inserted": 0,
+    "lines_deleted": 0,
+    "size": 48210,
+    "size_delta": 48210,
+    "status": "A",
+    "binary": true
+  },
+  "Cargo.toml": {
+    "lines_inserted": 2,
+    "lines_deleted": 0,
+    "size": 440,
+    "size_delta": 30
+  }
+}

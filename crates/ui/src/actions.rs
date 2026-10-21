@@ -20,6 +20,23 @@ actions!(
         BlurSearch,
         ToggleHelp,
         Dismiss,
+        // Change page.
+        /// Show or hide the inline diff of the file under the cursor.
+        ToggleInline,
+        /// Show the inline diff of every file, or hide them all.
+        ToggleAllInline,
+        NextTarget,
+        PrevTarget,
+        NextBase,
+        PrevBase,
+        ToggleCommit,
+        NextRelated,
+        PrevRelated,
+        OpenRelated,
+        /// Esc on the change page: give the focus back to the file list.
+        FocusFiles,
+        ScrollPageDown,
+        ScrollPageUp,
     ]
 );
 
@@ -37,6 +54,89 @@ pub const SEARCH_BAR: &str = "SearchBar";
 const SHELL_KEYS: &str = "Shell && !Input";
 const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
+
+/// Entries of the change page (file cursor, inline diffs, patch sets).
+pub fn change_entries() -> Vec<Entry> {
+    use crate::diff::actions::{NextFile, PrevFile};
+    let k = CHANGE_KEYS;
+    vec![
+        e(
+            "j / k",
+            KeyBinding::new("j", SelectNext, Some(k)),
+            "Next / previous file",
+        ),
+        e("", KeyBinding::new("k", SelectPrev, Some(k)), ""),
+        e("", KeyBinding::new("down", SelectNext, Some(k)), ""),
+        e("", KeyBinding::new("up", SelectPrev, Some(k)), ""),
+        e(
+            "[ / ]",
+            KeyBinding::new("]", NextFile, Some(k)),
+            "Next / previous file",
+        ),
+        e("", KeyBinding::new("[", PrevFile, Some(k)), ""),
+        e(
+            "o / Enter",
+            KeyBinding::new("o", OpenSelected, Some(k)),
+            "Open the file's diff",
+        ),
+        e("", KeyBinding::new("enter", OpenSelected, Some(k)), ""),
+        e(
+            "i",
+            KeyBinding::new("i", ToggleInline, Some(k)),
+            "Show / hide the inline diff of the file",
+        ),
+        e(
+            "Shift-I",
+            KeyBinding::new("shift-i", ToggleAllInline, Some(k)),
+            "Show / hide all inline diffs",
+        ),
+        e(
+            "t / Shift-T",
+            KeyBinding::new("t", NextTarget, Some(k)),
+            "Next / previous patch set to show",
+        ),
+        e("", KeyBinding::new("shift-t", PrevTarget, Some(k)), ""),
+        e(
+            "b / Shift-B",
+            KeyBinding::new("b", NextBase, Some(k)),
+            "Next / previous patch set to compare with",
+        ),
+        e("", KeyBinding::new("shift-b", PrevBase, Some(k)), ""),
+        e(
+            "z",
+            KeyBinding::new("z", ToggleCommit, Some(k)),
+            "Fold / unfold the commit message",
+        ),
+        e(
+            "Shift-J / Shift-K",
+            KeyBinding::new("shift-j", NextRelated, Some(k)),
+            "Next / previous related change",
+        ),
+        e("", KeyBinding::new("shift-k", PrevRelated, Some(k)), ""),
+        e(
+            "Shift-Enter",
+            KeyBinding::new("shift-enter", OpenRelated, Some(k)),
+            "Open the selected related change",
+        ),
+        e(
+            "Space / Shift-Space",
+            KeyBinding::new("space", ScrollPageDown, Some(k)),
+            "Scroll a page down / up",
+        ),
+        e(
+            "",
+            KeyBinding::new("shift-space", ScrollPageUp, Some(k)),
+            "",
+        ),
+        e("", KeyBinding::new("pagedown", ScrollPageDown, Some(k)), ""),
+        e("", KeyBinding::new("pageup", ScrollPageUp, Some(k)), ""),
+        e(
+            "Esc",
+            KeyBinding::new("escape", FocusFiles, Some(k)),
+            "Back to the file list (from an inline diff)",
+        ),
+    ]
+}
 
 /// A binding and how it appears in the help overlay.
 pub struct Entry {
@@ -145,5 +245,10 @@ pub fn entries() -> Vec<Entry> {
 
 /// Registers all bindings. Call once at startup.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys(entries().into_iter().map(|e| e.binding));
+    cx.bind_keys(
+        entries()
+            .into_iter()
+            .chain(change_entries())
+            .map(|e| e.binding),
+    );
 }

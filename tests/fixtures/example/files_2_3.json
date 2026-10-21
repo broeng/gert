@@ -1,0 +1,15 @@
+)]}'
+{
+  "/COMMIT_MSG": {
+    "lines_inserted": 12,
+    "lines_deleted": 6,
+    "size": 520,
+    "size_delta": 130
+  },
+  "src/sched/queue.rs": {
+    "lines_inserted": 60,
+    "lines_deleted": 50,
+    "size": 3800,
+    "size_delta": 400
+  }
+}
