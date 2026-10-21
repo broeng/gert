@@ -717,3 +717,36 @@ fn reviewed_marks_of_a_list_without_marks_start_empty() {
         0
     );
 }
+
+#[test]
+fn publishing_forgets_synced_drafts_only() {
+    let (mut s, id) = setup();
+    let synced1 = synced(&mut s, id, "srv1", "a", T0);
+    let pending = synced(&mut s, id, "srv2", "b", T0);
+    s.edit_draft(id, pending, "b2", true, ts(T1)).unwrap();
+    let fresh = s
+        .create_draft(id, CHANGE, &ps(2), &input("c"), ts(T1))
+        .unwrap();
+    let other_ps = s
+        .create_draft(id, CHANGE, &ps(1), &input("d"), ts(T1))
+        .unwrap();
+    s.record_draft_uploaded(id, other_ps.local_id, 0, "srv4", ts(T1))
+        .unwrap();
+
+    // One patch set only (PUBLISH).
+    assert_eq!(
+        s.remove_synced_drafts(id, CHANGE, Some(&ps(1).sha))
+            .unwrap(),
+        1
+    );
+    assert!(s.load_draft(id, other_ps.local_id).unwrap().is_none());
+    // All of them (PUBLISH_ALL_REVISIONS).
+    assert_eq!(s.remove_synced_drafts(id, CHANGE, None).unwrap(), 1);
+    assert!(s.load_draft(id, synced1).unwrap().is_none());
+    assert!(s.load_draft(id, pending).unwrap().is_some());
+    assert!(s.load_draft(id, fresh.local_id).unwrap().is_some());
+    assert_eq!(
+        s.remove_synced_drafts(id, ChangeNumber(77), None).unwrap(),
+        0
+    );
+}

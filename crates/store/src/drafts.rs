@@ -569,6 +569,23 @@ impl Store {
         self.load_draft(server, id)
     }
 
+    /// Forgets the `Synced` drafts of a change after the server published
+    /// them (a review with `PUBLISH` or `PUBLISH_ALL_REVISIONS`): they are
+    /// comments now. `revision` limits it to one patch set (`PUBLISH`).
+    /// Drafts with pending work are kept. Returns how many were removed.
+    pub fn remove_synced_drafts(
+        &mut self,
+        server: ServerId,
+        change: ChangeNumber,
+        revision: Option<&RevisionId>,
+    ) -> Result<usize, Error> {
+        Ok(self.conn.execute(
+            "DELETE FROM drafts WHERE server_id = ?1 AND change_number = ?2
+               AND state = 'synced' AND (?3 IS NULL OR revision_sha = ?3)",
+            params![server.0, number(change), revision.map(RevisionId::as_str)],
+        )?)
+    }
+
     // ---- drafts: merging the server's list ----
 
     /// Folds `GET /drafts` of one change into the table, see the module
