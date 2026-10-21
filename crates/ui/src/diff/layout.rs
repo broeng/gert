@@ -84,6 +84,9 @@ pub struct LayoutOptions {
     pub intraline: bool,
     /// How many unchanged lines to keep around changes.
     pub context: DiffContext,
+    /// The diff is no file but the carrier of threads that belong to none
+    /// (`DiffView::threads_only`): no "no changes" notice.
+    pub threads_only: bool,
 }
 
 impl LayoutOptions {
@@ -94,6 +97,7 @@ impl LayoutOptions {
             show_tabs: prefs.show_tabs,
             intraline: prefs.intraline_difference,
             context: prefs.context,
+            threads_only: false,
         }
     }
 }
@@ -377,7 +381,7 @@ impl Layout {
             b.rows.push(Row::Notice(Notice::Binary));
         } else {
             b.rename_notice(diff);
-            if diff.chunks.is_empty() {
+            if diff.chunks.is_empty() && !opts.threads_only {
                 b.rows.push(Row::Notice(Notice::Empty));
             }
         }
@@ -1172,6 +1176,7 @@ mod tests {
             show_tabs: false,
             intraline: true,
             context: DiffContext::All,
+            threads_only: false,
         }
     }
 

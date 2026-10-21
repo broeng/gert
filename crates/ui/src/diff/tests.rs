@@ -99,6 +99,13 @@ fn open_with(
     diff: Diff,
     prefs: ResolvedDiffPreferences,
 ) -> (AnyWindowHandle, Entity<DiffView>, Events) {
+    open_made(cx, move |cx| DiffView::new(diff, prefs, cx))
+}
+
+fn open_made(
+    cx: &mut TestAppContext,
+    make: impl FnOnce(&mut gpui_kit::Context<DiffView>) -> DiffView,
+) -> (AnyWindowHandle, Entity<DiffView>, Events) {
     let events: Events = Arc::default();
     let log = events.clone();
     let (window, view) = cx.update(|cx| {
@@ -114,7 +121,7 @@ fn open_with(
             },
             cx,
             |window, cx| {
-                let view = cx.new(|cx| DiffView::new(diff, prefs, cx));
+                let view = cx.new(make);
                 let focus = view.read(cx).focus_for_test();
                 window.focus(&focus, cx);
                 view
@@ -550,6 +557,7 @@ fn fixtures_lay_out_in_both_modes() {
                     show_tabs: true,
                     intraline: true,
                     context: DiffContext::Lines(3),
+                    threads_only: false,
                 },
                 &Expansion::default(),
             );

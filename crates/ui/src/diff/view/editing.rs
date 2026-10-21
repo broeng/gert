@@ -224,6 +224,10 @@ impl DiffView {
         if !self.can_comment {
             return self.say("Sign in to comment", cx);
         }
+        if self.threads_only && !matches!(self.layout.rows().get(self.cursor), Some(Row::Thread(_)))
+        {
+            return self.new_patchset_comment(window, cx);
+        }
         match self.layout.rows().get(self.cursor) {
             Some(Row::Thread(tr)) => {
                 let Some(thread) = self.thread_at(tr.slot) else {
@@ -246,6 +250,22 @@ impl DiffView {
                 None => self.say("Move to a code line to comment", cx),
             },
             None => {}
+        }
+    }
+
+    /// A new patch-set level thread on the current patch set, in a
+    /// [`DiffView::threads_only`] view.
+    pub fn new_patchset_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_comment {
+            return self.say("Sign in to comment", cx);
+        }
+        if self.threads_only {
+            self.open_editor(
+                EditKey::New(DiffSide::Right, Location::File),
+                None,
+                window,
+                cx,
+            );
         }
     }
 
