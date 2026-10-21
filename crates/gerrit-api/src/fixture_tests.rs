@@ -107,6 +107,10 @@ fn other_schema_fixtures_deserialize_into_wire_types() {
     );
     check!(wire::DiffPreferencesInfo, "DiffPreferencesInfo.");
     check!(wire::GeneralPreferencesInfo, "GeneralPreferencesInfo.");
+    check!(wire::RobotCommentInfo, "RobotCommentInfo.");
+    check!(wire::Range, "Range.");
+    check!(wire::ContextLineInfo, "ContextLineInfo.");
+    check!(wire::ReviewResult, "ReviewResult.");
 }
 
 #[test]
@@ -499,4 +503,167 @@ mod handwritten {
         let d = diff("diff_whitespace_ignored");
         assert!(matches!(d.chunks.as_slice(), [DiffChunk::Common { lines }] if lines.len() == 3));
     }
+}
+
+#[test]
+fn every_comment_info_fixture_converts() {
+    let files = names("CommentInfo.");
+    assert_eq!(files.len(), 3, "{files:?}");
+    for f in files {
+        let w: wire::CommentInfo =
+            serde_json::from_str(&read(&f)).unwrap_or_else(|e| panic!("{f}: {e}"));
+        let c = convert::comment(&w, Some("fallback/path")).unwrap_or_else(|e| panic!("{f}: {e}"));
+        assert!(!c.id.is_empty(), "{f}");
+    }
+    let w: wire::CommentInfo =
+        serde_json::from_str(&read("CommentInfo.unknown_enum.json")).unwrap();
+    let c = convert::comment(&w, Some("p")).unwrap();
+    assert_eq!(c.side, model::Side::Revision);
+}
+
+#[test]
+fn robot_comment_fixtures_convert() {
+    for f in names("RobotCommentInfo.") {
+        let w: wire::RobotCommentInfo = serde_json::from_str(&read(&f)).unwrap();
+        let c = convert::robot_comment(&w, Some("p")).unwrap_or_else(|e| panic!("{f}: {e}"));
+        assert!(c.is_robot(), "{f}");
+    }
+}
+
+#[test]
+fn comments_response_builds_the_expected_threads() {
+    use model::{Location, ThreadId, build_threads};
+    let (c, fake) = client_with("comments.response.json");
+    let comments = block_on(c.get_comments(ChangeNumber(12345))).unwrap();
+    assert_eq!(comments.len(), 9);
+    assert_eq!(fake.requests()[0].uri(), "https://h/changes/12345/comments");
+
+    let threads = build_threads(&comments, &[]);
+    let summary: Vec<_> = threads
+        .iter()
+        .map(|t| {
+            (
+                t.path.as_str(),
+                t.patch_set.0,
+                t.entries.len(),
+                t.is_unresolved(),
+                t.orphaned,
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("/COMMIT_MSG", 1, 1, true, false),
+            ("/PATCHSET_LEVEL", 2, 1, false, false),
+            // ps 1 line thread: ends with a resolving reply.
+            ("src/Main.java", 1, 3, false, false),
+            // ps 2: the PARENT comment (line 3), the range thread, the
+            // orphan, then the file comment (file level sorts first).
+            ("src/Main.java", 2, 1, false, false),
+            ("src/Main.java", 2, 1, false, false),
+            ("src/Main.java", 2, 1, true, false),
+            ("src/Main.java", 2, 1, true, true),
+        ]
+    );
+    let main2: Vec<_> = threads
+        .iter()
+        .filter(|t| t.path == "src/Main.java" && t.patch_set.0 == 2)
+        .map(|t| (t.id.clone(), t.location))
+        .collect();
+    assert_eq!(main2[0], (ThreadId::Comment("fl01".into()), Location::File));
+    assert_eq!(main2[1].0, ThreadId::Comment("pa01".into()));
+    assert!(matches!(main2[2].1, Location::Range(r) if r.start_line == 20 && r.end_line == 21));
+    assert_eq!(main2[3].0, ThreadId::Comment("or01".into()));
+}
+
+#[test]
+fn drafts_response_joins_the_published_threads() {
+    use model::{DiffPair, Draft, DraftSync, LocalDraftId, build_threads, comment_counts};
+    let (c, _) = client_with("comments.response.json");
+    let comments = block_on(c.get_comments(ChangeNumber(12345))).unwrap();
+    let (c, fake) = client_with_auth("drafts.response.json", basic());
+    let server_drafts = block_on(c.get_drafts(ChangeNumber(12345))).unwrap();
+    assert_eq!(fake.requests()[0].uri(), "https://h/a/changes/12345/drafts");
+    assert_eq!(server_drafts.len(), 2);
+
+    let drafts: Vec<Draft> = server_drafts
+        .iter()
+        .zip(1..)
+        .map(|(d, i)| Draft {
+            local_id: LocalDraftId(i),
+            server_id: Some(d.id.clone()),
+            change: ChangeNumber(12345),
+            patch_set: d.patch_set,
+            revision: sha(),
+            path: d.path.clone(),
+            side: d.side,
+            parent: d.parent,
+            location: d.location,
+            in_reply_to: d.in_reply_to.clone(),
+            message: d.message.clone(),
+            unresolved: d.unresolved,
+            updated: d.updated,
+            sync: DraftSync::Synced,
+            attempts: 0,
+            last_error: None,
+        })
+        .collect();
+    let threads = build_threads(&comments, &drafts);
+    // One new thread (dr02), and dr01 joined the ps 1 line thread.
+    assert_eq!(threads.len(), 8);
+    let line = threads
+        .iter()
+        .find(|t| t.id == model::ThreadId::Comment("ln01".into()))
+        .unwrap();
+    assert_eq!(line.entries.len(), 4);
+    assert_eq!(line.reply_target(), Some("ln03"));
+    assert!(line.has_draft() && !line.is_unresolved());
+
+    // File list numbers for the diff of patch set 2 against its parent.
+    let files = [model::FileEntry {
+        path: "src/Main.java".into(),
+        status: FileStatus::Modified,
+        old_path: None,
+        lines_inserted: 0,
+        lines_deleted: 0,
+        size_delta: 0,
+        size: 0,
+        binary: false,
+    }];
+    let n = comment_counts(
+        &threads,
+        DiffPair {
+            base: None,
+            target: PatchSetNumber(2),
+        },
+        &files,
+    );
+    let n = n["src/Main.java"];
+    // ps 2: range, file, PARENT and orphan comments + dr02; ps 1 is elsewhere.
+    assert_eq!((n.comments, n.drafts, n.unresolved), (4, 1, 3));
+    assert_eq!(n.elsewhere, 4);
+}
+
+#[test]
+fn robot_comments_response() {
+    let (c, _) = client_with("robotcomments.response.json");
+    let cs = block_on(c.get_robot_comments(ChangeNumber(1))).unwrap();
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].robot_id.as_deref(), Some("lint"));
+    assert_eq!(cs[0].path, "src/Main.java");
+}
+
+#[test]
+fn review_result_fixtures() {
+    let (c, _) = client_with_auth("review_result.response.json", basic());
+    let r =
+        block_on(c.post_review(ChangeNumber(1), &sha(), &model::ReviewInput::default())).unwrap();
+    assert_eq!(r.labels["Code-Review"], 1);
+    assert_eq!(r.ready, Some(true));
+    assert!(r.error.is_none());
+    let (c, _) = client_with_auth("review_result_error.response.json", basic());
+    let r =
+        block_on(c.post_review(ChangeNumber(1), &sha(), &model::ReviewInput::default())).unwrap();
+    assert_eq!(r.error.as_deref(), Some("Not Found: unknown-reviewer"));
 }

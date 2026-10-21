@@ -31,6 +31,11 @@ const SCHEMAS: &[&str] = &[
     "SubmitRequirementExpressionInfo",
     "DiffPreferencesInfo",
     "GeneralPreferencesInfo",
+    "CommentInfo",
+    "RobotCommentInfo",
+    "Range",
+    "ContextLineInfo",
+    "ReviewResult",
 ];
 
 /// What every Gerrit HTTP response body starts with.
@@ -322,6 +327,8 @@ pub fn generate(spec_path: &Path, out: &Path) -> Result<()> {
     set(&mut file_unknown, "future_field", json!([1]));
     put("CommonFileInfo.unknown_enum.json", &file_unknown, false)?;
 
+    comment_fixtures(&g, &mut put)?;
+
     files.sort();
     for (name, text) in files {
         fs::write(out.join(&name), text).with_context(|| format!("writing {name}"))?;
@@ -362,4 +369,108 @@ fn set(v: &mut Value, key: &str, value: Value) {
         let obj: &mut Map<String, Value> = obj;
         obj.insert(key.to_owned(), value);
     }
+}
+
+/// Comments, drafts, robot comments and review results.
+fn comment_fixtures(
+    g: &Generator,
+    put: &mut impl FnMut(&str, &Value, bool) -> Result<()>,
+) -> Result<()> {
+    let author = |id: u64, name: &str| json!({ "_account_id": id, "name": name });
+    let alice = author(1000001, "Alice");
+    let bob = author(1000002, "Bob");
+
+    // A side the spec does not list.
+    let mut unknown = g
+        .generate("CommentInfo", Mode::Minimal)
+        .context("CommentInfo missing")?;
+    set(&mut unknown, "side", json!("SIDEWAYS"));
+    set(&mut unknown, "patch_set", json!(1));
+    put("CommentInfo.unknown_enum.json", &unknown, false)?;
+
+    // A realistic `GET /changes/{n}/comments`: keyed by path, no `path` in
+    // the comments themselves. Covers a commit message comment, a file
+    // comment, a line thread with replies that ends resolved, a range
+    // thread that stays unresolved, a PARENT side comment, a comment on an
+    // older patch set, a patch set level comment and a reply to a comment
+    // that is not in the list.
+    let comments = json!({
+        "/COMMIT_MSG": [
+            { "patch_set": 1, "id": "cm01", "line": 7, "author": bob,
+              "updated": "2024-03-01 09:00:00.000000000", "message": "Mention the issue.",
+              "unresolved": true, "commit_id": SHA }
+        ],
+        "/PATCHSET_LEVEL": [
+            { "patch_set": 2, "id": "pl01", "author": bob,
+              "updated": "2024-03-03 09:00:00.000000000", "message": "Nice cleanup overall.",
+              "unresolved": false, "change_message_id": "msg0001" }
+        ],
+        "src/Main.java": [
+            { "patch_set": 1, "id": "ln01", "line": 12, "author": bob,
+              "updated": "2024-03-01 10:00:00.000000000", "message": "Why a new thread here?",
+              "unresolved": true, "commit_id": SHA },
+            { "patch_set": 1, "id": "ln02", "line": 12, "in_reply_to": "ln01", "author": alice,
+              "updated": "2024-03-01 11:00:00.000000000", "message": "Needed for the retry.",
+              "unresolved": true },
+            { "patch_set": 1, "id": "ln03", "line": 12, "in_reply_to": "ln02", "author": bob,
+              "updated": "2024-03-01 12:00:00.000000000", "message": "Ok, makes sense. Done?",
+              "unresolved": false },
+            { "patch_set": 2, "id": "rg01", "line": 21, "author": bob,
+              "range": { "start_line": 20, "start_character": 4, "end_line": 21,
+                         "end_character": 18 },
+              "updated": "2024-03-02 10:00:00.000000000", "message": "This loop can overflow.",
+              "unresolved": true },
+            { "patch_set": 2, "id": "fl01", "author": alice,
+              "updated": "2024-03-02 11:00:00.000000000", "message": "Whole file needs a rewrite.",
+              "unresolved": false },
+            { "patch_set": 2, "id": "pa01", "line": 3, "side": "PARENT", "author": alice,
+              "updated": "2024-03-02 12:00:00.000000000", "message": "This was wrong before too.",
+              "unresolved": false },
+            { "patch_set": 2, "id": "or01", "line": 30, "in_reply_to": "deleted-comment",
+              "author": bob, "updated": "2024-03-02 13:00:00.000000000",
+              "message": "Reply to something that is gone.", "unresolved": true }
+        ]
+    });
+    put("comments.response.json", &comments, true)?;
+    put("comments_empty.response.json", &json!({}), true)?;
+
+    // `GET /changes/{n}/drafts`: the user's own, replying to ln03 and one new.
+    let drafts = json!({
+        "src/Main.java": [
+            { "patch_set": 1, "id": "dr01", "line": 12, "in_reply_to": "ln03",
+              "updated": "2024-03-04 10:00:00.000000000", "message": "Yes, done.",
+              "unresolved": false, "commit_id": SHA },
+            { "patch_set": 2, "id": "dr02", "line": 40,
+              "updated": "2024-03-04 11:00:00.000000000", "message": "Check this too.",
+              "unresolved": true }
+        ]
+    });
+    put("drafts.response.json", &drafts, true)?;
+
+    let robot = json!({
+        "src/Main.java": [
+            { "patch_set": 2, "id": "rb01", "line": 5, "robot_id": "lint",
+              "robot_run_id": "run-42", "url": "https://ci.example.com/run-42",
+              "properties": { "severity": "warning" },
+              "updated": "2024-03-02 09:00:00.000000000", "message": "Unused import.",
+              "fix_suggestions": [ { "fix_id": "fix1", "description": "Remove it",
+                "replacements": [ { "path": "src/Main.java",
+                  "range": { "start_line": 5, "start_character": 0, "end_line": 6,
+                             "end_character": 0 }, "replacement": "" } ] } ] }
+        ]
+    });
+    put("robotcomments.response.json", &robot, true)?;
+
+    // Review results: a plain success, and a partial failure.
+    put(
+        "review_result.response.json",
+        &json!({ "labels": { "Code-Review": 1, "Verified": 0 }, "ready": true }),
+        true,
+    )?;
+    put(
+        "review_result_error.response.json",
+        &json!({ "error": "Not Found: unknown-reviewer", "labels": {} }),
+        true,
+    )?;
+    Ok(())
 }

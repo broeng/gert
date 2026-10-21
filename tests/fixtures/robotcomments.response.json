@@ -1,0 +1,36 @@
+)]}'
+{
+  "src/Main.java": [
+    {
+      "fix_suggestions": [
+        {
+          "description": "Remove it",
+          "fix_id": "fix1",
+          "replacements": [
+            {
+              "path": "src/Main.java",
+              "range": {
+                "end_character": 0,
+                "end_line": 6,
+                "start_character": 0,
+                "start_line": 5
+              },
+              "replacement": ""
+            }
+          ]
+        }
+      ],
+      "id": "rb01",
+      "line": 5,
+      "message": "Unused import.",
+      "patch_set": 2,
+      "properties": {
+        "severity": "warning"
+      },
+      "robot_id": "lint",
+      "robot_run_id": "run-42",
+      "updated": "2024-03-02 09:00:00.000000000",
+      "url": "https://ci.example.com/run-42"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "author": {
+    "_account_id": 1000001
+  },
+  "id": "my%2Fproject~12345",
+  "message": "Fix the frobnicator\n\nLonger description.\n\nChange-Id: I8473b95934b5732ac55d26311a706c9c2bde9940\n",
+  "patch_set": 1,
+  "side": "SIDEWAYS",
+  "updated": "2013-02-01 09:59:32.126000000"
+}

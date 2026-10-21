@@ -134,6 +134,11 @@ pub fn minimal_fields(schema: &str) -> &'static [&'static str] {
             "owner",
         ],
         "AccountInfo" => &["_account_id"],
+        // A published comment: the `path` is only in the by-file map key.
+        "CommentInfo" => &["patch_set", "id", "updated", "message", "author"],
+        "RobotCommentInfo" => &["patch_set", "id", "updated", "message", "robot_id"],
+        "Range" => &["start_line", "start_character", "end_line", "end_character"],
+        "ContextLineInfo" => &["line_number", "context_line"],
         "ApprovalInfo" => &["_account_id", "value"],
         "RevisionInfo" => &["_number", "created", "ref", "commit"],
         "CommitInfo" => &["commit", "subject", "message", "author", "committer"],
