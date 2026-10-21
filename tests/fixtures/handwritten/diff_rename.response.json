@@ -1,0 +1,55 @@
+)]}'
+{
+  "meta_a": {
+    "name": "src/old_name.rs",
+    "content_type": "text/x-rust",
+    "lines": 4
+  },
+  "meta_b": {
+    "name": "src/new_name.rs",
+    "content_type": "text/x-rust",
+    "lines": 4
+  },
+  "change_type": "RENAMED",
+  "intraline_status": "OK",
+  "diff_header": [
+    "diff --git a/src/old_name.rs b/src/new_name.rs",
+    "similarity index 85%",
+    "rename from src/old_name.rs",
+    "rename to src/new_name.rs",
+    "index 3b18e51..a1c0f4d 100644"
+  ],
+  "content": [
+    {
+      "ab": [
+        "use std::fmt;",
+        ""
+      ]
+    },
+    {
+      "a": [
+        "pub fn old_name() {}"
+      ],
+      "b": [
+        "pub fn new_name() {}"
+      ],
+      "edit_a": [
+        [
+          7,
+          3
+        ]
+      ],
+      "edit_b": [
+        [
+          7,
+          3
+        ]
+      ]
+    },
+    {
+      "ab": [
+        "// end"
+      ]
+    }
+  ]
+}

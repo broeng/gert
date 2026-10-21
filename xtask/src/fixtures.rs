@@ -5,7 +5,10 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use crate::schema::{CHANGE_ID, Generator, Mode, SHA};
+use crate::{
+    large_diff::large_diff,
+    schema::{CHANGE_ID, Generator, Mode, SHA},
+};
 
 /// Component schemas gerrit-api's tests consume directly.
 const SCHEMAS: &[&str] = &[
@@ -17,6 +20,17 @@ const SCHEMAS: &[&str] = &[
     "CommitInfo",
     "GitPerson",
     "AttentionSetInfo",
+    "CommonFileInfo",
+    "FileMeta",
+    "ContentEntry",
+    "DiffInfo",
+    "RelatedChangeAndCommitInfo",
+    "RelatedChangesInfo",
+    "ChangeMessageInfo",
+    "SubmitRequirementResultInfo",
+    "SubmitRequirementExpressionInfo",
+    "DiffPreferencesInfo",
+    "GeneralPreferencesInfo",
 ];
 
 /// What every Gerrit HTTP response body starts with.
@@ -47,7 +61,12 @@ pub fn generate(spec_path: &Path, out: &Path) -> Result<()> {
         if xssi {
             text.push_str(XSSI);
         }
-        text.push_str(&serde_json::to_string_pretty(v)?);
+        // Big generated fixtures are compact to keep the repository small.
+        if name.starts_with("large_") {
+            text.push_str(&serde_json::to_string(v)?);
+        } else {
+            text.push_str(&serde_json::to_string_pretty(v)?);
+        }
         text.push('\n');
         files.push((name.to_owned(), text));
         Ok(())
@@ -58,6 +77,7 @@ pub fn generate(spec_path: &Path, out: &Path) -> Result<()> {
             let v = g
                 .generate(name, mode)
                 .with_context(|| format!("schema {name} not found in spec"))?;
+            let v = fix_edit_pairs(v);
             put(&format!("{name}.{suffix}.json"), &v, false)?;
         }
     }
@@ -180,12 +200,156 @@ pub fn generate(spec_path: &Path, out: &Path) -> Result<()> {
         .context("ChangeInfo missing")?;
     put("change_detail_full.response.json", &full, true)?;
 
+    // File list: a map keyed by path. Hand-shaped from CommonFileInfo.
+    let file = |g: &Generator, fields: Value| -> Result<Value> {
+        let mut f = g
+            .generate("CommonFileInfo", Mode::Minimal)
+            .context("CommonFileInfo missing")?;
+        if let Value::Object(extra) = fields {
+            for (k, v) in extra {
+                set(&mut f, &k, v);
+            }
+        }
+        Ok(f)
+    };
+    let files_map = json!({
+        "src/Main.java": file(&g, json!({ "lines_inserted": 12, "lines_deleted": 3,
+            "size_delta": 210, "size": 4096 }))?,
+        "/COMMIT_MSG": file(&g, json!({ "lines_inserted": 7, "size_delta": 180, "size": 180 }))?,
+        "src/New.java": file(&g, json!({ "status": "A", "lines_inserted": 30, "size_delta": 700,
+            "size": 700 }))?,
+        "src/renamed/Name.java": file(&g, json!({ "status": "R", "old_path": "src/Old name.java",
+            "lines_inserted": 1, "lines_deleted": 1, "size_delta": 2, "size": 900 }))?,
+        "src/Gone.java": file(&g, json!({ "status": "D", "lines_inserted": 0, "lines_deleted": 25,
+            "size_delta": -600, "size": 0 }))?,
+        "assets/logo.png": file(&g, json!({ "status": "A", "binary": true, "lines_inserted": 0,
+            "size_delta": 5120, "size": 5120 }))?,
+        "src/Weird.java": file(&g, json!({ "status": "Q" }))?,
+    });
+    put("files.response.json", &files_map, true)?;
+    put(
+        "files_reviewed.response.json",
+        &json!(["/COMMIT_MSG", "src/Main.java"]),
+        true,
+    )?;
+    put("files_empty.response.json", &json!({}), true)?;
+
+    // Diffs.
+    let mut diff = g
+        .generate("DiffInfo", Mode::Minimal)
+        .context("DiffInfo missing")?;
+    set(&mut diff, "change_type", json!("MODIFIED"));
+    set(&mut diff, "intraline_status", json!("OK"));
+    set(
+        &mut diff,
+        "meta_a",
+        json!({ "name": "src/Main.java", "content_type": "text/x-java", "lines": 7 }),
+    );
+    set(
+        &mut diff,
+        "meta_b",
+        json!({ "name": "src/Main.java", "content_type": "text/x-java", "lines": 8 }),
+    );
+    set(
+        &mut diff,
+        "diff_header",
+        json!([
+            "diff --git a/src/Main.java b/src/Main.java",
+            "index 1111111..2222222 100644"
+        ]),
+    );
+    set(
+        &mut diff,
+        "content",
+        json!([
+            { "ab": ["class Main {", "  void run() {"] },
+            { "a": ["    int x = 1;"], "b": ["    int total = 1;", "    log(total);"],
+              "edit_a": [[8, 1]], "edit_b": [[8, 5], [14, 5]] },
+            { "ab": ["  }", "}"] },
+            { "skip": 2 }
+        ]),
+    );
+    put("diff.response.json", &diff, true)?;
+    let mut diff_unknown = diff.clone();
+    set(&mut diff_unknown, "change_type", json!("TELEPORTED"));
+    set(&mut diff_unknown, "intraline_status", json!("MAYBE"));
+    put("diff_unknown_enum.response.json", &diff_unknown, true)?;
+    put("large_diff.response.json", &large_diff(), true)?;
+
+    // Related changes.
+    let mut related = g
+        .generate("RelatedChangesInfo", Mode::Minimal)
+        .context("RelatedChangesInfo missing")?;
+    let mut r1 = g
+        .generate("RelatedChangeAndCommitInfo", Mode::Minimal)
+        .context("RelatedChangeAndCommitInfo missing")?;
+    set(&mut r1, "status", json!("NEW"));
+    set(&mut r1, "_change_number", json!(12346));
+    set(&mut r1, "_revision_number", json!(1));
+    set(&mut r1, "_current_revision_number", json!(3));
+    let mut r2 = r1.clone();
+    set(&mut r2, "status", json!("MERGED"));
+    set(&mut r2, "_change_number", json!(12340));
+    set(&mut r2, "_revision_number", json!(2));
+    set(&mut r2, "_current_revision_number", json!(2));
+    set(&mut r2, "submittable", json!(true));
+    set(&mut related, "changes", json!([r1, r2]));
+    put("related.response.json", &related, true)?;
+    put("related_empty.response.json", &json!({}), true)?;
+
+    // Preferences.
+    let mut prefs = g
+        .generate("DiffPreferencesInfo", Mode::Full)
+        .context("DiffPreferencesInfo missing")?;
+    set(&mut prefs, "ignore_whitespace", json!("IGNORE_TRAILING"));
+    put("diff_preferences.response.json", &prefs, true)?;
+    set(&mut prefs, "ignore_whitespace", json!("IGNORE_SOMETHING"));
+    set(&mut prefs, "context", json!(-1));
+    put("diff_preferences_unknown_enum.response.json", &prefs, true)?;
+    let mut general = g
+        .generate("GeneralPreferencesInfo", Mode::Minimal)
+        .context("GeneralPreferencesInfo missing")?;
+    set(&mut general, "diff_view", json!("UNIFIED_DIFF"));
+    put("general_preferences.response.json", &general, true)?;
+
+    // Unknown enum values in the new schemas.
+    let mut sr = g
+        .generate("SubmitRequirementResultInfo", Mode::Full)
+        .context("SubmitRequirementResultInfo missing")?;
+    set(&mut sr, "status", json!("PAUSED"));
+    put("SubmitRequirementResultInfo.unknown_enum.json", &sr, false)?;
+    let mut file_unknown = file(&g, json!({ "status": "Q" }))?;
+    set(&mut file_unknown, "future_field", json!([1]));
+    put("CommonFileInfo.unknown_enum.json", &file_unknown, false)?;
+
     files.sort();
     for (name, text) in files {
         fs::write(out.join(&name), text).with_context(|| format!("writing {name}"))?;
     }
     println!("fixtures written to {}", out.display());
     Ok(())
+}
+
+/// The schema cannot say that an intraline edit is a `[skip, mark]` pair,
+/// so generated arrays hold one number; make them real pairs.
+fn fix_edit_pairs(mut v: Value) -> Value {
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Object(o) => {
+                for (k, child) in o.iter_mut() {
+                    if k == "edit_a" || k == "edit_b" {
+                        *child = json!([[1, 2]]);
+                    } else {
+                        walk(child);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    walk(&mut v);
+    v
 }
 
 fn minimal_change(g: &Generator) -> Result<Value> {

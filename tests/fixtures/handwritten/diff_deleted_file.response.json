@@ -1,0 +1,23 @@
+)]}'
+{
+  "meta_a": {
+    "name": "src/removed.rs",
+    "content_type": "text/x-rust",
+    "lines": 2
+  },
+  "change_type": "DELETED",
+  "intraline_status": "OK",
+  "diff_header": [
+    "diff --git a/src/removed.rs b/src/removed.rs",
+    "deleted file mode 100644",
+    "index 7c9d2e1..0000000"
+  ],
+  "content": [
+    {
+      "a": [
+        "// Going away.",
+        "pub fn removed() {}"
+      ]
+    }
+  ]
+}

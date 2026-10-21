@@ -4,9 +4,12 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
 use futures::executor::block_on;
-use model::{AccountId, ChangeNumber, ChangeStatus, PatchSetNumber};
+use model::{
+    AccountId, ChangeNumber, ChangeStatus, DiffChangeType, DiffChunk, FileStatus, PatchSetNumber,
+    RevisionId,
+};
 
-use crate::{Auth, ChangeQuery, GerritClient, convert, fake::FakeHttpClient, wire};
+use crate::{Auth, ChangeQuery, DiffParams, GerritClient, convert, fake::FakeHttpClient, wire};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
@@ -28,10 +31,25 @@ fn names(prefix: &str) -> Vec<String> {
 }
 
 fn client_with(name: &str) -> (GerritClient, FakeHttpClient) {
+    client_with_auth(name, Auth::Anonymous)
+}
+
+fn client_with_auth(name: &str, auth: Auth) -> (GerritClient, FakeHttpClient) {
     let fake = FakeHttpClient::new();
     fake.push_response(200, read(name));
-    let c = GerritClient::new(Arc::new(fake.clone()), "https://h", Auth::Anonymous).unwrap();
+    let c = GerritClient::new(Arc::new(fake.clone()), "https://h", auth).unwrap();
     (c, fake)
+}
+
+fn basic() -> Auth {
+    Auth::Basic {
+        username: "jdoe".into(),
+        password: "pw".into(),
+    }
+}
+
+fn sha() -> RevisionId {
+    RevisionId::from("0123456789abcdef0123456789abcdef01234567")
 }
 
 #[test]
@@ -74,6 +92,58 @@ fn other_schema_fixtures_deserialize_into_wire_types() {
     check!(wire::CommitInfo, "CommitInfo.");
     check!(wire::GitPerson, "GitPerson.");
     check!(wire::AttentionSetInfo, "AttentionSetInfo.");
+    check!(wire::FileMeta, "FileMeta.");
+    check!(wire::ContentEntry, "ContentEntry.");
+    check!(wire::DiffInfo, "DiffInfo.");
+    check!(
+        wire::RelatedChangeAndCommitInfo,
+        "RelatedChangeAndCommitInfo."
+    );
+    check!(wire::RelatedChangesInfo, "RelatedChangesInfo.");
+    check!(wire::ChangeMessageInfo, "ChangeMessageInfo.");
+    check!(
+        wire::SubmitRequirementExpressionInfo,
+        "SubmitRequirementExpressionInfo."
+    );
+    check!(wire::DiffPreferencesInfo, "DiffPreferencesInfo.");
+    check!(wire::GeneralPreferencesInfo, "GeneralPreferencesInfo.");
+}
+
+#[test]
+fn schema_fixtures_with_unknown_enum_values_deserialize() {
+    for f in names("CommonFileInfo.") {
+        let info: wire::CommonFileInfo = serde_json::from_str(&read(&f)).unwrap();
+        let files = convert::file_list([("x".to_owned(), info)].into());
+        assert!(files[0].lines_inserted <= 1, "{f}");
+    }
+    let files = names("CommonFileInfo.");
+    assert_eq!(files.len(), 3, "{files:?}");
+
+    let sr: wire::SubmitRequirementResultInfo =
+        serde_json::from_str(&read("SubmitRequirementResultInfo.unknown_enum.json")).unwrap();
+    assert_eq!(sr.status.as_deref(), Some("PAUSED"));
+    for f in names("SubmitRequirementResultInfo.") {
+        serde_json::from_str::<wire::SubmitRequirementResultInfo>(&read(&f))
+            .unwrap_or_else(|e| panic!("{f}: {e}"));
+    }
+}
+
+#[test]
+fn schema_generated_diff_info_converts() {
+    for f in names("DiffInfo.") {
+        let w: wire::DiffInfo = serde_json::from_str(&read(&f)).unwrap();
+        let d = convert::diff(&w).unwrap_or_else(|e| panic!("{f}: {e}"));
+        assert!(!d.chunks.is_empty(), "{f}");
+    }
+}
+
+#[test]
+fn schema_generated_messages_convert() {
+    for f in names("ChangeMessageInfo.") {
+        let w: wire::ChangeMessageInfo = serde_json::from_str(&read(&f)).unwrap();
+        let m = convert::message(&w).unwrap_or_else(|e| panic!("{f}: {e}"));
+        assert!(!m.id.is_empty() && !m.message.is_empty(), "{f}");
+    }
 }
 
 #[test]
@@ -164,4 +234,269 @@ fn change_detail_fixtures() {
     let d = block_on(c.get_change(ChangeNumber(12345))).unwrap();
     assert!(d.commit_message.is_some());
     assert!(!d.reviewers.is_empty() && !d.cc.is_empty());
+    // Every optional collection of the full schema converts.
+    assert!(!d.revisions.is_empty() && !d.messages.is_empty());
+    assert!(!d.submit_requirements.is_empty() && !d.votes.is_empty());
+    assert!(d.current().is_some_and(|r| r.commit.is_some()));
+}
+
+#[test]
+fn change_detail_minimal_fixture_has_the_current_revision() {
+    let (c, _) = client_with("change_detail.response.json");
+    let d = block_on(c.get_change(ChangeNumber(12345))).unwrap();
+    assert!(d.messages.is_empty() && d.submit_requirements.is_empty());
+    assert_eq!(d.revisions.len(), 1);
+    let commit = d.current().and_then(|r| r.commit.as_ref()).unwrap();
+    assert_eq!(commit.subject, "Fix the frobnicator");
+    assert_eq!(commit.sha, Some(sha()));
+}
+
+#[test]
+fn file_list_fixtures() {
+    let (c, _) = client_with("files.response.json");
+    let files = block_on(c.get_files(ChangeNumber(12345), &sha(), None)).unwrap();
+    let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/COMMIT_MSG",
+            "assets/logo.png",
+            "src/Gone.java",
+            "src/Main.java",
+            "src/New.java",
+            "src/Weird.java",
+            "src/renamed/Name.java"
+        ]
+    );
+    let by = |p: &str| files.iter().find(|f| f.path == p).unwrap();
+    assert_eq!(by("src/Main.java").status, FileStatus::Modified);
+    assert_eq!(by("src/New.java").status, FileStatus::Added);
+    assert_eq!(by("src/Gone.java").status, FileStatus::Deleted);
+    assert_eq!(by("src/Weird.java").status, FileStatus::Unknown("Q".into()));
+    assert!(by("assets/logo.png").binary);
+    let renamed = by("src/renamed/Name.java");
+    assert_eq!(renamed.status, FileStatus::Renamed);
+    assert_eq!(renamed.old_path.as_deref(), Some("src/Old name.java"));
+
+    let (c, _) = client_with("files_empty.response.json");
+    assert!(
+        block_on(c.get_files(ChangeNumber(1), &sha(), None))
+            .unwrap()
+            .is_empty()
+    );
+
+    let (c, _) = client_with_auth("files_reviewed.response.json", basic());
+    let reviewed = block_on(c.get_reviewed_files(ChangeNumber(1), &sha())).unwrap();
+    assert_eq!(reviewed, ["/COMMIT_MSG", "src/Main.java"]);
+}
+
+#[test]
+fn diff_response_fixtures() {
+    let (c, _) = client_with("diff.response.json");
+    let d = block_on(c.get_diff(
+        ChangeNumber(1),
+        &sha(),
+        "src/Main.java",
+        &DiffParams::default(),
+    ))
+    .unwrap();
+    assert_eq!(d.change_type, Some(DiffChangeType::Modified));
+    assert_eq!(d.chunks.len(), 4);
+    let DiffChunk::Changed(c) = &d.chunks[1] else {
+        panic!("{:?}", d.chunks[1]);
+    };
+    assert_eq!(c.marks_a(), vec![vec![8..9]]);
+    // "total" in both lines; the second mark starts after the line break.
+    assert_eq!(c.marks_b(), vec![vec![8..13], vec![8..13]]);
+    assert_eq!((d.a_len(), d.b_len()), (7, 8));
+    assert_eq!(d.meta_a.as_ref().unwrap().lines, 7);
+
+    let (c, _) = client_with("diff_unknown_enum.response.json");
+    let d = block_on(c.get_diff(ChangeNumber(1), &sha(), "f", &DiffParams::default())).unwrap();
+    assert_eq!(
+        d.change_type,
+        Some(DiffChangeType::Unknown("TELEPORTED".into()))
+    );
+}
+
+#[test]
+fn large_diff_fixture_is_consistent() {
+    let (c, _) = client_with("large_diff.response.json");
+    let d = block_on(c.get_diff(
+        ChangeNumber(1),
+        &sha(),
+        "src/generated.rs",
+        &DiffParams::default(),
+    ))
+    .unwrap();
+    assert_eq!(d.a_len(), d.meta_a.as_ref().unwrap().lines);
+    assert_eq!(d.b_len(), d.meta_b.as_ref().unwrap().lines);
+    assert!(d.b_len() >= 10_000, "{}", d.b_len());
+
+    let (mut common, mut changed, mut skips, mut rebase) = (0, 0, 0, 0);
+    for chunk in &d.chunks {
+        match chunk {
+            DiffChunk::Common { .. } => common += 1,
+            DiffChunk::Skip { .. } => skips += 1,
+            DiffChunk::Changed(ch) => {
+                changed += 1;
+                rebase += usize::from(ch.due_to_rebase);
+                // Every mark lies inside its line, on a char boundary.
+                for (lines, marks) in [(&ch.a, ch.marks_a()), (&ch.b, ch.marks_b())] {
+                    for (line, ranges) in lines.iter().zip(marks) {
+                        for r in ranges {
+                            assert!(line.get(r.clone()).is_some_and(|m| !m.is_empty()), "{line}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(common > 100 && changed > 100 && skips > 50 && rebase > 10);
+    // Pure insertions, pure deletions, and modified regions with edits.
+    let kinds = |f: fn(&model::ChangedChunk) -> bool| {
+        d.chunks
+            .iter()
+            .filter(|c| matches!(c, DiffChunk::Changed(ch) if f(ch)))
+            .count()
+    };
+    assert!(kinds(|c| c.a.is_empty()) > 50);
+    assert!(kinds(|c| c.b.is_empty()) > 50);
+    assert!(kinds(|c| !c.edits_a.is_empty() && !c.edits_b.is_empty()) > 50);
+}
+
+#[test]
+fn related_response_fixtures() {
+    let (c, _) = client_with("related.response.json");
+    let r = block_on(c.get_related(ChangeNumber(12345), &sha())).unwrap();
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0].number, ChangeNumber(12346));
+    assert!(r[0].is_outdated());
+    assert_eq!(r[1].status, Some(ChangeStatus::Merged));
+    assert!(r[1].commit.is_some());
+
+    let (c, _) = client_with("related_empty.response.json");
+    assert!(
+        block_on(c.get_related(ChangeNumber(12345), &sha()))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn preferences_response_fixtures() {
+    let fake = FakeHttpClient::new();
+    fake.push_response(200, read("diff_preferences.response.json"));
+    fake.push_response(200, read("general_preferences.response.json"));
+    let c = GerritClient::new(Arc::new(fake), "https://h", basic()).unwrap();
+    let p = block_on(c.get_diff_preferences()).unwrap();
+    assert_eq!(p.context, Some(model::DiffContext::Lines(10)));
+    assert_eq!(p.tab_size, Some(8));
+    assert_eq!(p.ignore_whitespace, Some(model::Whitespace::IgnoreTrailing));
+    assert_eq!(p.view_mode, Some(model::DiffViewMode::Unified));
+
+    let fake = FakeHttpClient::new();
+    fake.push_response(200, read("diff_preferences_unknown_enum.response.json"));
+    fake.push_response(404, "");
+    let c = GerritClient::new(Arc::new(fake), "https://h", basic()).unwrap();
+    let p = block_on(c.get_diff_preferences()).unwrap();
+    assert_eq!(p.context, Some(model::DiffContext::All));
+    assert_eq!(
+        p.ignore_whitespace,
+        Some(model::Whitespace::Unknown("IGNORE_SOMETHING".into()))
+    );
+    assert_eq!(p.view_mode, None);
+}
+
+/// The fixtures in `tests/fixtures/handwritten/` are written by hand to
+/// look like real server output (a rename, a binary file, ...). They are
+/// not produced by `cargo xtask gen-fixtures`, which leaves them alone.
+mod handwritten {
+    use super::*;
+
+    fn diff(name: &str) -> model::Diff {
+        let text = read(&format!("handwritten/{name}.response.json"));
+        assert!(text.starts_with(")]}'\n"), "{name}");
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, text);
+        let c = GerritClient::new(Arc::new(fake), "https://h", Auth::Anonymous).unwrap();
+        block_on(c.get_diff(ChangeNumber(1), &sha(), "f", &DiffParams::default()))
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    #[test]
+    fn every_handwritten_fixture_converts_with_consistent_line_counts() {
+        let dir = super::dir().join("handwritten");
+        let mut seen = 0;
+        for entry in fs::read_dir(dir).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            let name = name.strip_suffix(".response.json").unwrap().to_owned();
+            let d = diff(&name);
+            if !d.binary {
+                let lines = |m: &Option<model::DiffFileMeta>| m.as_ref().map_or(0, |m| m.lines);
+                assert_eq!(d.a_len(), lines(&d.meta_a), "{name}");
+                assert_eq!(d.b_len(), lines(&d.meta_b), "{name}");
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 7);
+    }
+
+    #[test]
+    fn rename() {
+        let d = diff("diff_rename");
+        assert_eq!(d.change_type, Some(DiffChangeType::Renamed));
+        assert_ne!(d.meta_a.unwrap().name, d.meta_b.unwrap().name);
+        assert!(d.diff_header.iter().any(|h| h.starts_with("rename from")));
+    }
+
+    #[test]
+    fn binary() {
+        let d = diff("diff_binary");
+        assert!(d.binary && d.chunks.is_empty());
+        assert!(
+            d.meta_b
+                .unwrap()
+                .content_type
+                .unwrap()
+                .starts_with("image/")
+        );
+    }
+
+    #[test]
+    fn added_and_deleted() {
+        let d = diff("diff_new_file");
+        assert_eq!(d.change_type, Some(DiffChangeType::Added));
+        assert!(d.meta_a.is_none() && d.meta_b.is_some());
+        assert_eq!((d.a_len(), d.b_len()), (0, 3));
+        let d = diff("diff_deleted_file");
+        assert_eq!(d.change_type, Some(DiffChangeType::Deleted));
+        assert!(d.meta_a.is_some() && d.meta_b.is_none());
+        assert_eq!((d.a_len(), d.b_len()), (2, 0));
+    }
+
+    #[test]
+    fn commit_message() {
+        let d = diff("diff_commit_msg");
+        assert_eq!(d.meta_a.unwrap().name, "/COMMIT_MSG");
+        assert!(d.diff_header.is_empty());
+        let DiffChunk::Changed(c) = &d.chunks[1] else {
+            panic!();
+        };
+        assert!(c.edits_a.is_empty());
+        assert_eq!(c.marks_b(), vec![vec![19..28]]);
+    }
+
+    #[test]
+    fn whitespace_only() {
+        let d = diff("diff_whitespace_only");
+        let DiffChunk::Changed(c) = &d.chunks[1] else {
+            panic!();
+        };
+        assert_eq!(c.marks_a(), vec![vec![0..1]]);
+        assert_eq!(c.marks_b(), vec![vec![0..4]]);
+        // With the whitespace ignored the lines are common.
+        let d = diff("diff_whitespace_ignored");
+        assert!(matches!(d.chunks.as_slice(), [DiffChunk::Common { lines }] if lines.len() == 3));
+    }
 }

@@ -1,0 +1,52 @@
+)]}'
+{
+  "/COMMIT_MSG": {
+    "lines_deleted": 1,
+    "lines_inserted": 7,
+    "size": 180,
+    "size_delta": 180
+  },
+  "assets/logo.png": {
+    "binary": true,
+    "lines_deleted": 1,
+    "lines_inserted": 0,
+    "size": 5120,
+    "size_delta": 5120,
+    "status": "A"
+  },
+  "src/Gone.java": {
+    "lines_deleted": 25,
+    "lines_inserted": 0,
+    "size": 0,
+    "size_delta": -600,
+    "status": "D"
+  },
+  "src/Main.java": {
+    "lines_deleted": 3,
+    "lines_inserted": 12,
+    "size": 4096,
+    "size_delta": 210
+  },
+  "src/New.java": {
+    "lines_deleted": 1,
+    "lines_inserted": 30,
+    "size": 700,
+    "size_delta": 700,
+    "status": "A"
+  },
+  "src/Weird.java": {
+    "lines_deleted": 1,
+    "lines_inserted": 1,
+    "size": 1,
+    "size_delta": 1,
+    "status": "Q"
+  },
+  "src/renamed/Name.java": {
+    "lines_deleted": 1,
+    "lines_inserted": 1,
+    "old_path": "src/Old name.java",
+    "size": 900,
+    "size_delta": 2,
+    "status": "R"
+  }
+}

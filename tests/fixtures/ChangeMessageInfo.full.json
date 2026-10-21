@@ -1,0 +1,78 @@
+{
+  "_revision_number": 1,
+  "accounts_in_message": [
+    {
+      "_account_id": 1000001,
+      "_more_accounts": true,
+      "avatars": [
+        {
+          "height": 1,
+          "url": "https://gerrit.example.com/"
+        }
+      ],
+      "deleted": true,
+      "display_name": "Jane Doe",
+      "email": "jane.doe@example.com",
+      "inactive": true,
+      "name": "Jane Doe",
+      "secondary_emails": [
+        "secondary_emails-value"
+      ],
+      "status": "status-value",
+      "tags": [
+        "tags-value"
+      ],
+      "username": "jdoe"
+    }
+  ],
+  "author": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  },
+  "date": "2013-02-01 09:59:32.126000000",
+  "id": "my%2Fproject~12345",
+  "message": "Fix the frobnicator\n\nLonger description.\n\nChange-Id: I8473b95934b5732ac55d26311a706c9c2bde9940\n",
+  "real_author": {
+    "_account_id": 1000001,
+    "_more_accounts": true,
+    "avatars": [
+      {
+        "height": 1,
+        "url": "https://gerrit.example.com/"
+      }
+    ],
+    "deleted": true,
+    "display_name": "Jane Doe",
+    "email": "jane.doe@example.com",
+    "inactive": true,
+    "name": "Jane Doe",
+    "secondary_emails": [
+      "secondary_emails-value"
+    ],
+    "status": "status-value",
+    "tags": [
+      "tags-value"
+    ],
+    "username": "jdoe"
+  },
+  "tag": "tag-value"
+}

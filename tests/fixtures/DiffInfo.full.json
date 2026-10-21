@@ -1,0 +1,80 @@
+{
+  "binary": true,
+  "change_type": "COPIED",
+  "content": [
+    {
+      "a": [
+        "a-value"
+      ],
+      "ab": [
+        "ab-value"
+      ],
+      "b": [
+        "b-value"
+      ],
+      "common": true,
+      "due_to_rebase": true,
+      "edit_a": [
+        [
+          1,
+          2
+        ]
+      ],
+      "edit_b": [
+        [
+          1,
+          2
+        ]
+      ],
+      "skip": 25
+    }
+  ],
+  "diff_header": [
+    "diff_header-value"
+  ],
+  "edit_web_links": [
+    {
+      "image_url": "image_url-value",
+      "name": "Jane Doe",
+      "tooltip": "tooltip-value",
+      "url": "https://gerrit.example.com/"
+    }
+  ],
+  "intraline_status": "TIMEOUT",
+  "meta_a": {
+    "content_type": "content_type-value",
+    "lines": 42,
+    "name": "Jane Doe",
+    "web_links": [
+      {
+        "image_url": "image_url-value",
+        "name": "Jane Doe",
+        "tooltip": "tooltip-value",
+        "url": "https://gerrit.example.com/"
+      }
+    ]
+  },
+  "meta_b": {
+    "content_type": "content_type-value",
+    "lines": 42,
+    "name": "Jane Doe",
+    "web_links": [
+      {
+        "image_url": "image_url-value",
+        "name": "Jane Doe",
+        "tooltip": "tooltip-value",
+        "url": "https://gerrit.example.com/"
+      }
+    ]
+  },
+  "web_links": [
+    {
+      "image_url": "image_url-value",
+      "name": "Jane Doe",
+      "show_on_side_by_side_diff_view": true,
+      "show_on_unified_diff_view": true,
+      "tooltip": "tooltip-value",
+      "url": "https://gerrit.example.com/"
+    }
+  ]
+}
