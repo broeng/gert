@@ -14,6 +14,20 @@ name = "gert"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
+directories.workspace = true
+env_logger.workspace = true
+futures.workspace = true
+gerrit-api.workspace = true
+http.workspace = true
+keyring.workspace = true
+log.workspace = true
+reqwest_client.workspace = true
+serde.workspace = true
+store.workspace = true
+sync.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 gpui-kit.workspace = true
 ui.workspace = true
 

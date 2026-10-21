@@ -1,7 +1,5 @@
+use gert::APP_NAME;
 use gpui_kit::*;
-
-/// Single source of the (working) application name.
-pub const APP_NAME: &str = "gert";
 
 fn main() {
     gpui_kit::application().run(|cx| {
