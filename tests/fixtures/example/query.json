@@ -1,0 +1,84 @@
+)]}'
+[
+  {
+    "_number": 12345,
+    "project": "platform/scheduler",
+    "branch": "main",
+    "subject": "Rework the scheduler queue",
+    "status": "NEW",
+    "owner": {
+      "_account_id": 1000001,
+      "name": "Alice Example",
+      "email": "alice@example.com",
+      "username": "alice"
+    },
+    "created": "2024-06-10 09:15:00.000000000",
+    "updated": "2024-06-14 16:20:00.000000000",
+    "insertions": 10,
+    "deletions": 2,
+    "labels": {
+      "Code-Review": {
+        "recommended": {
+          "_account_id": 1000002,
+          "name": "Bob Reviewer",
+          "email": "bob@example.com",
+          "username": "bob"
+        }
+      }
+    }
+  },
+  {
+    "_number": 12348,
+    "project": "platform/scheduler",
+    "branch": "main",
+    "subject": "Add scheduler metrics",
+    "status": "NEW",
+    "owner": {
+      "_account_id": 1000001,
+      "name": "Alice Example",
+      "email": "alice@example.com",
+      "username": "alice"
+    },
+    "created": "2024-06-10 09:15:00.000000000",
+    "updated": "2024-06-14 12:00:00.000000000",
+    "insertions": 10,
+    "deletions": 2,
+    "labels": {
+      "Code-Review": {
+        "recommended": {
+          "_account_id": 1000002,
+          "name": "Bob Reviewer",
+          "email": "bob@example.com",
+          "username": "bob"
+        }
+      }
+    }
+  },
+  {
+    "_number": 12347,
+    "project": "platform/scheduler",
+    "branch": "main",
+    "subject": "Expose queue depth in the status page",
+    "status": "NEW",
+    "owner": {
+      "_account_id": 1000002,
+      "name": "Bob Reviewer",
+      "email": "bob@example.com",
+      "username": "bob"
+    },
+    "created": "2024-06-10 09:15:00.000000000",
+    "updated": "2024-06-13 12:00:00.000000000",
+    "insertions": 10,
+    "deletions": 2,
+    "labels": {
+      "Code-Review": {
+        "recommended": {
+          "_account_id": 1000002,
+          "name": "Bob Reviewer",
+          "email": "bob@example.com",
+          "username": "bob"
+        }
+      }
+    }
+  }
+]

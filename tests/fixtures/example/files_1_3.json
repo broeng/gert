@@ -1,0 +1,28 @@
+)]}'
+{
+  "/COMMIT_MSG": {
+    "lines_inserted": 12,
+    "lines_deleted": 6,
+    "size": 520,
+    "size_delta": 130
+  },
+  "src/sched/queue.rs": {
+    "lines_inserted": 60,
+    "lines_deleted": 50,
+    "size": 3800,
+    "size_delta": 400
+  },
+  "src/lib.rs": {
+    "lines_inserted": 3,
+    "lines_deleted": 1,
+    "size": 800,
+    "size_delta": 40
+  },
+  "tests/ordering.rs": {
+    "lines_inserted": 95,
+    "lines_deleted": 0,
+    "size": 2800,
+    "size_delta": 2800,
+    "status": "A"
+  }
+}

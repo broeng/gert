@@ -12,18 +12,15 @@ use store::{ServerId, Store};
 use crate::{
     login::tests::FakeBackend,
     nav::Route,
-    pages::{
-        change::ChangePage,
-        list::{ChangeListPage, ListKind},
-    },
+    pages::list::{ChangeListPage, ListKind},
     session::{Env, SavedQuery, ServerSetup, Session, Startup},
     shell::Shell,
     testing::summary,
 };
 
-const URL: &str = "https://g.example.com";
+pub(crate) const URL: &str = "https://g.example.com";
 
-fn setup() -> ServerSetup {
+pub(crate) fn setup() -> ServerSetup {
     ServerSetup {
         base_url: URL.into(),
         username: None,
@@ -31,7 +28,10 @@ fn setup() -> ServerSetup {
     }
 }
 
-fn env_with(store: Store, http: &FakeHttpClient) -> Env {
+pub(crate) fn env_with(
+    store: Store,
+    http: &(impl gerrit_api::HttpClient + Clone + 'static),
+) -> Env {
     Env {
         http: Arc::new(http.clone()),
         store: Arc::new(Mutex::new(store)),
@@ -60,7 +60,7 @@ fn spec(name: &str, query: &str) -> SavedQuery {
     }
 }
 
-fn open<V: gpui_kit::Render + 'static>(
+pub(crate) fn open<V: gpui_kit::Render + 'static>(
     cx: &mut TestAppContext,
     build: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::App) -> Entity<V>,
 ) -> (gpui_kit::AnyWindowHandle, Entity<V>) {
@@ -184,40 +184,6 @@ fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     cx.update(|cx| assert_eq!(shell.read(cx).route(), &Route::Login));
-}
-
-#[gpui_kit::test]
-fn change_page_shows_cached_detail(cx: &mut TestAppContext) {
-    let mut store = seeded(&[]);
-    let detail = ChangeDetail {
-        summary: summary(5),
-        current_revision: None,
-        current_patch_set: Some(model::PatchSetNumber(1)),
-        commit_message: Some("Fix things".into()),
-        reviewers: vec![],
-        cc: vec![],
-        revisions: vec![],
-        messages: vec![],
-        submit_requirements: vec![],
-        votes: Default::default(),
-    };
-    store
-        .save_change_detail(
-            ServerId(1),
-            &detail,
-            "2024-06-15T10:05:00Z".parse().expect("ts"),
-        )
-        .expect("save detail");
-    let env = env_with(store, &FakeHttpClient::new());
-    let session = Session::new(&env, &setup(), None).expect("session");
-    let (_w, page) = open(cx, |_, cx| {
-        cx.new(|cx| ChangePage::new(session, ChangeNumber(5), true, cx))
-    });
-    cx.run_until_parked();
-    cx.update(|cx| {
-        let d = page.read(cx).detail().expect("cached detail");
-        assert_eq!(d.summary.number, ChangeNumber(5));
-    });
 }
 
 #[gpui_kit::test]
