@@ -49,6 +49,7 @@ fn startup() -> anyhow::Result<Startup> {
         },
         server,
         queries: queries_to_ui(&config.queries),
+        diff: Default::default(),
     })
 }
 

@@ -10,6 +10,7 @@ mod nav;
 mod pages;
 mod row;
 mod session;
+mod settings;
 mod shell;
 mod theme;
 mod time_fmt;
@@ -21,5 +22,5 @@ mod testing;
 mod tests;
 
 pub use login::{LoginError, LoginOutcome, LoginRequest};
-pub use session::{Backend, BackendError, Env, SavedQuery, ServerSetup, Startup};
+pub use session::{Backend, BackendError, Env, LocalDiff, SavedQuery, ServerSetup, Startup};
 pub use shell::{Shell, init};

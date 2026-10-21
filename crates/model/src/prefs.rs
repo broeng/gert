@@ -107,6 +107,33 @@ pub struct DiffPreferences {
     pub view_mode: Option<DiffViewMode>,
 }
 
+impl DiffPreferences {
+    /// `self` with every unset field taken from `fallback`. Used to stack
+    /// the layers of local overrides (config file, then this session's
+    /// changes).
+    pub fn or(&self, fallback: &DiffPreferences) -> DiffPreferences {
+        macro_rules! f {
+            ($f:ident) => {
+                self.$f.clone().or_else(|| fallback.$f.clone())
+            };
+        }
+        DiffPreferences {
+            context: f!(context),
+            ignore_whitespace: f!(ignore_whitespace),
+            line_length: f!(line_length),
+            tab_size: f!(tab_size),
+            show_tabs: f!(show_tabs),
+            intraline_difference: f!(intraline_difference),
+            line_wrapping: f!(line_wrapping),
+            show_whitespace_errors: f!(show_whitespace_errors),
+            hide_line_numbers: f!(hide_line_numbers),
+            syntax_highlighting: f!(syntax_highlighting),
+            expand_all_comments: f!(expand_all_comments),
+            view_mode: f!(view_mode),
+        }
+    }
+}
+
 /// The settings a diff view actually uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedDiffPreferences {
@@ -219,6 +246,26 @@ mod tests {
         );
         assert_eq!(DiffViewMode::from_wire("SPLIT"), None);
         assert_eq!(DiffViewMode::Unified.toggled(), DiffViewMode::SideBySide);
+    }
+
+    #[test]
+    fn or_prefers_self_and_fills_gaps() {
+        let top = DiffPreferences {
+            tab_size: Some(2),
+            show_tabs: Some(false),
+            ..Default::default()
+        };
+        let below = DiffPreferences {
+            tab_size: Some(8),
+            line_length: Some(80),
+            show_tabs: Some(true),
+            ..Default::default()
+        };
+        let m = top.or(&below);
+        assert_eq!(m.tab_size, Some(2));
+        assert_eq!(m.show_tabs, Some(false));
+        assert_eq!(m.line_length, Some(80));
+        assert_eq!(m.context, None);
     }
 
     #[test]
