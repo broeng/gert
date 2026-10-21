@@ -7,9 +7,15 @@
 mod account;
 mod change;
 mod ids;
+mod message;
+mod revision;
+mod submit;
 mod timestamp;
 
 pub use account::Account;
-pub use change::{ChangeDetail, ChangeStatus, ChangeSummary, LabelSummary};
-pub use ids::{AccountId, ChangeNumber};
+pub use change::{ChangeDetail, ChangeStatus, ChangeSummary, LabelSummary, LabelVote};
+pub use ids::{AccountId, ChangeNumber, PatchSetNumber, RevisionId};
+pub use message::ChangeMessage;
+pub use revision::{Commit, CommitParent, GitPerson, PatchSetRef, Revision, RevisionKind};
+pub use submit::{ExpressionResult, ExpressionStatus, SubmitRequirement, SubmitRequirementStatus};
 pub use timestamp::{Timestamp, TimestampParseError, parse_gerrit_timestamp};

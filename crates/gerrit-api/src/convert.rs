@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use model::{
     Account, AccountId, ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, LabelSummary,
-    Timestamp, TimestampParseError, parse_gerrit_timestamp,
+    PatchSetNumber, RevisionId, Timestamp, TimestampParseError, parse_gerrit_timestamp,
 };
 
 use crate::wire::{AccountInfo, ChangeInfo, LabelInfo, Status};
@@ -132,13 +132,17 @@ pub(crate) fn change_detail(c: &ChangeInfo) -> Result<ChangeDetail, ConversionEr
     };
     Ok(ChangeDetail {
         summary,
-        current_revision: c.current_revision.clone(),
-        current_patch_set,
+        current_revision: c.current_revision.clone().map(RevisionId::from),
+        current_patch_set: current_patch_set.map(PatchSetNumber),
         commit_message: rev
             .and_then(|r| r.commit.as_ref())
             .and_then(|commit| commit.message.clone()),
         reviewers: accounts("REVIEWER")?,
         cc: accounts("CC")?,
+        revisions: Vec::new(),
+        messages: Vec::new(),
+        submit_requirements: Vec::new(),
+        votes: BTreeMap::new(),
     })
 }
 

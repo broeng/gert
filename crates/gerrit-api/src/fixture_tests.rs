@@ -4,7 +4,7 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
 use futures::executor::block_on;
-use model::{AccountId, ChangeNumber, ChangeStatus};
+use model::{AccountId, ChangeNumber, ChangeStatus, PatchSetNumber};
 
 use crate::{Auth, ChangeQuery, GerritClient, convert, fake::FakeHttpClient, wire};
 
@@ -151,7 +151,7 @@ fn unknown_enum_query_response_fixture() {
 fn change_detail_fixtures() {
     let (c, _) = client_with("change_detail.response.json");
     let d = block_on(c.get_change(ChangeNumber(12345))).unwrap();
-    assert_eq!(d.current_patch_set, Some(2));
+    assert_eq!(d.current_patch_set, Some(PatchSetNumber(2)));
     assert!(
         d.commit_message
             .as_deref()

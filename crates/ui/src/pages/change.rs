@@ -286,10 +286,7 @@ impl Render for ChangePage {
             }))
             .into_any_element();
 
-        let sha = d
-            .current_revision
-            .as_deref()
-            .map(|s| s.chars().take(12).collect::<String>());
+        let sha = d.current_revision.as_ref().map(|s| s.short(12).to_owned());
         let patch_set = match (d.current_patch_set, sha) {
             (Some(n), Some(sha)) => format!("{n}  ({sha})"),
             (Some(n), None) => n.to_string(),
