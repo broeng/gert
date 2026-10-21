@@ -8,7 +8,7 @@ use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
 use model::{DiffSide, DiffViewMode, DraftSync, Entry, Location, Thread};
 
-use super::{DiffEvent, DiffView};
+use super::{DiffEvent, DiffView, Reveal};
 use crate::diff::{
     layout::{LineKind, ThreadRow},
     paint::Style,
@@ -125,12 +125,15 @@ fn card(
             .child(label)
     };
     let first = thread.entries.first();
-    let header = h_flex()
+    let header = div()
         .id(("thread-header", ix))
+        .test_support()
+        .flex()
         .gap_2()
         .px_2()
         .py_1()
         .items_center()
+        .cursor_pointer()
         .child(
             div()
                 .flex_none()
@@ -168,7 +171,13 @@ fn card(
             )
         })
         .when(thread.has_draft(), |d| d.child(pill("Draft")))
-        .child(status);
+        .child(status)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            window.focus(&this.focus, cx);
+            this.move_to(ix, Reveal::Nearest, cx);
+            this.toggle_thread(ix, cx);
+        }));
 
     let entries = open.then(|| {
         v_flex().children(

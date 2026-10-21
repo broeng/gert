@@ -28,12 +28,15 @@ actions!(
         ExpandBelow,
         /// Open every fold of the file; again, fold them again.
         ShowFullFile,
-        // Declared for the diff page and for the comment work (M3); the
-        // widget does not handle them and no key is bound yet.
-        PrevFile,
-        NextFile,
+        /// `shift-n` / `shift-p`: the next / previous comment thread.
         NextThread,
         PrevThread,
+        /// `e` / `shift-e`: open / close every comment thread of the file.
+        ExpandThreads,
+        CollapseThreads,
+        // Declared for the diff page (handled there, not by the widget).
+        PrevFile,
+        NextFile,
     ]
 );
 
@@ -87,7 +90,7 @@ pub fn entries() -> Vec<Entry> {
             "Enter / X",
             "enter",
             ExpandFold,
-            "Show all lines of the folded range under the cursor",
+            "Show all lines of the folded range, or open / close the thread, under the cursor",
         ),
         e("", "x", ExpandFold, ""),
         // alt-left / alt-right are history; alt-up / alt-down reveal
@@ -99,6 +102,22 @@ pub fn entries() -> Vec<Entry> {
             "Show 10 more lines above / below a folded range",
         ),
         e("", "alt-down", ExpandBelow, ""),
+        // PolyGerrit: `N` / `P` next / previous thread, `e` expand all
+        // threads. Its `E` collapses them all; so does shift-e here.
+        e(
+            "Shift-N / Shift-P",
+            "shift-n",
+            NextThread,
+            "Next / previous comment thread",
+        ),
+        e("", "shift-p", PrevThread, ""),
+        e(
+            "E / Shift-E",
+            "e",
+            ExpandThreads,
+            "Open / close all comment threads",
+        ),
+        e("", "shift-e", CollapseThreads, ""),
         e(
             "Shift-X",
             "shift-x",
