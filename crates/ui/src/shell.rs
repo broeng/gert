@@ -110,6 +110,17 @@ impl Shell {
                 this.page.set_window_active(this.window_active, cx);
             }),
         ];
+        // The page lists are virtualized: a focused element (an inline diff
+        // after a click) that scrolls out of the list is no longer in the
+        // frame, and GPUI then dispatches keys from the window root, where
+        // none of our bindings match. Hand the focus to the closest ancestor
+        // that is still there, or to the page.
+        subs.push(cx.on_focus_lost(window, |this, window, cx| {
+            let target = window
+                .focus_lost_restore_target(cx)
+                .unwrap_or_else(|| this.page.focus_handle(cx));
+            window.focus(&target, cx);
+        }));
         subs.push(cx.observe_window_appearance(window, |_, window, cx| {
             gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
         }));
@@ -521,18 +532,31 @@ impl Shell {
         window.focus(&handle, cx);
     }
 
-    fn toggle_help(&mut self, _: &ToggleHelp, _: &mut Window, cx: &mut Context<Self>) {
+    /// The overlay is modal: it takes the focus (so that the page's keys,
+    /// including its own Esc, do not fire behind it and Esc reaches
+    /// [`Self::dismiss`]), and the page gets it back when it closes.
+    fn toggle_help(&mut self, _: &ToggleHelp, window: &mut Window, cx: &mut Context<Self>) {
         self.help = !self.help;
+        let target = if self.help {
+            self.focus.clone()
+        } else {
+            self.page.focus_handle(cx)
+        };
+        window.focus(&target, cx);
         cx.notify();
     }
 
-    fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
         if self.help {
-            self.help = false;
-            cx.notify();
+            self.toggle_help(&ToggleHelp, window, cx);
         } else {
             cx.propagate();
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn help_open_for_test(&self) -> bool {
+        self.help
     }
 
     // ---- rendering ----

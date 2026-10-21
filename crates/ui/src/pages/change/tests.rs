@@ -321,3 +321,107 @@ fn showing_the_whole_file_in_an_inline_diff_refetches_with_all_context(cx: &mut 
     press(cx, &f, &["escape", "j"]);
     assert_eq!(cursor(cx, &f).as_deref(), Some("src/a.rs"));
 }
+
+/// The real key path: the shell around a change page with many files. An
+/// inline diff that has the focus (after a click) is scrolled out of the
+/// virtualized list, so it is not in the frame. GPUI then dispatches keys from
+/// the window root, where no binding matches: Esc, j and every other key were
+/// dead until the user clicked something. The shell must give the focus back
+/// to the page when the focused element vanishes.
+#[gpui_kit::test]
+fn esc_works_after_the_focused_inline_diff_scrolled_out_of_the_list(cx: &mut TestAppContext) {
+    let (window, shell, page) = shell_with_many_files(cx);
+    focus_inline(cx, window, &page);
+    // Scroll far away, like the mouse wheel does.
+    cx.update(|cx| page.update(cx, |p, _| p.scroll_to_end_for_test()));
+    cx.run_until_parked();
+    keys(cx, window, &["escape", "j"]);
+    cx.update(|cx| assert_eq!(page.read(cx).cursor_path(), Some("src/f000.rs")));
+    drop(shell);
+}
+
+/// Esc closes the help overlay in one press, also when an inline diff has
+/// the focus (where Esc otherwise hands the focus back to the file list),
+/// and the page keys do nothing while it is open.
+#[gpui_kit::test]
+fn esc_closes_the_help_overlay_from_an_inline_diff(cx: &mut TestAppContext) {
+    let (window, shell, page) = shell_with_many_files(cx);
+    focus_inline(cx, window, &page);
+    keys(cx, window, &["?"]);
+    cx.update(|cx| assert!(shell.read(cx).help_open_for_test()));
+    keys(cx, window, &["j"]);
+    cx.update(|cx| assert_eq!(page.read(cx).cursor_path(), Some("/COMMIT_MSG")));
+    keys(cx, window, &["escape"]);
+    cx.update(|cx| assert!(!shell.read(cx).help_open_for_test()));
+    keys(cx, window, &["escape", "j"]);
+    cx.update(|cx| assert_eq!(page.read(cx).cursor_path(), Some("src/f000.rs")));
+}
+
+fn keys(cx: &mut TestAppContext, window: AnyWindowHandle, keys: &[&'static str]) {
+    for k in keys {
+        cx.update_window(window, |_, window, cx| window.press(k, cx))
+            .expect("press");
+        cx.run_until_parked();
+    }
+}
+
+/// Opens the first change (120 files) in a shell and expands the inline diff
+/// of `/COMMIT_MSG`.
+fn shell_with_many_files(
+    cx: &mut TestAppContext,
+) -> (
+    AnyWindowHandle,
+    Entity<crate::shell::Shell>,
+    Entity<ChangePage>,
+) {
+    let paths: Vec<String> = std::iter::once("/COMMIT_MSG".to_owned())
+        .chain((0..120).map(|i| format!("src/f{i:03}.rs")))
+        .collect();
+    let mut store = seeded();
+    let server = store.server_id(URL).expect("server");
+    let list: Vec<_> = paths
+        .iter()
+        .map(|p| file(p, FileStatus::Modified))
+        .collect();
+    store
+        .save_file_list(server, &key(None, 3), &list, None, ts())
+        .expect("files");
+    store
+        .save_query_page(
+            server,
+            "status:open",
+            &[crate::testing::summary(7)],
+            false,
+            ts(),
+        )
+        .expect("query");
+    let http = RouteHttpClient::new();
+    http.route("/diff", 200, diff_body());
+    let startup = crate::session::Startup {
+        env: env_with(store, &http),
+        server: Some(setup()),
+        queries: vec![crate::session::SavedQuery {
+            name: "Open".into(),
+            query: "status:open".into(),
+        }],
+        diff: LocalDiff::default(),
+    };
+    let (window, shell) = open(cx, |window, cx| {
+        cx.new(|cx| crate::shell::Shell::new(startup, window, cx))
+    });
+    cx.run_until_parked();
+    keys(cx, window, &["j", "enter", "i"]);
+    let page = cx.update(|cx| shell.read(cx).change_page_for_test().expect("change page"));
+    (window, shell, page)
+}
+
+/// Gives the inline diff of `/COMMIT_MSG` the focus, as a click does.
+fn focus_inline(cx: &mut TestAppContext, window: AnyWindowHandle, page: &Entity<ChangePage>) {
+    cx.update_window(window, |_, window, cx| {
+        let view = page.read(cx).inline_view("/COMMIT_MSG").expect("view");
+        let focus = view.read(cx).focus_for_test();
+        window.focus(&focus, cx);
+    })
+    .expect("focus");
+    cx.run_until_parked();
+}

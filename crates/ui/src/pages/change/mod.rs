@@ -236,6 +236,15 @@ impl ChangePage {
         self.focus.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn scroll_to_end_for_test(&mut self) {
+        let last = self.blocks.len().saturating_sub(1);
+        self.list.scroll_to(ListOffset {
+            item_ix: last,
+            offset_in_item: px(0.),
+        });
+    }
+
     /// The path under the file cursor.
     pub fn cursor_path(&self) -> Option<&str> {
         self.files.list.get(self.cursor).map(|f| f.path.as_str())
