@@ -232,6 +232,21 @@ pub fn build_threads(comments: &[Comment], drafts: &[Draft]) -> Vec<Thread> {
         /// of drafts only, the earliest draft.
         root: Option<&'a Comment>,
     }
+    // How many comments precede an entry in its reply chain.
+    let depth = |e: &Entry| -> usize {
+        let (mut next, mut n) = match e {
+            Entry::Published(c) => (c.in_reply_to.as_deref(), 0),
+            Entry::Draft(d) => (d.in_reply_to.as_deref(), 0),
+        };
+        while let Some(parent) = next.and_then(|p| by_id.get(p)) {
+            n += 1;
+            if n > comments.len() {
+                break; // a cycle
+            }
+            next = parent.in_reply_to.as_deref();
+        }
+        n
+    };
     let mut groups: HashMap<ThreadId, Group<'_>> = HashMap::new();
 
     for c in comments {
@@ -283,8 +298,11 @@ pub fn build_threads(comments: &[Comment], drafts: &[Draft]) -> Vec<Thread> {
     let mut threads: Vec<Thread> = groups
         .into_iter()
         .filter_map(|(id, mut g)| {
+            // Time first; the server's timestamps are only exact to the
+            // second for comments made in one go, so a reply must also sort
+            // after the comment it answers when they are equal.
             g.entries
-                .sort_by_key(|e| (e.updated(), e.is_draft(), entry_key(e)));
+                .sort_by_key(|e| (e.updated(), e.is_draft(), depth(e), entry_key(e)));
             let (path, patch_set, side, parent, location) = match (g.root, anchors.get(&id)) {
                 (Some(c), _) => (c.path.clone(), c.patch_set, c.side, c.parent, c.location),
                 (None, Some(d)) => (d.path.clone(), d.patch_set, d.side, d.parent, d.location),

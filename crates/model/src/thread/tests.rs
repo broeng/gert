@@ -360,3 +360,15 @@ fn range_threads_keep_their_range() {
     c.location = Location::Range(r);
     assert_eq!(build_threads(&[c], &[])[0].location, Location::Range(r));
 }
+
+#[test]
+fn a_reply_with_the_same_timestamp_sorts_after_its_parent() {
+    // Seeded and bulk-posted comments only have second resolution.
+    let mut root = comment("zzz-root", None, 5);
+    root.unresolved = true;
+    let reply = comment("aaa-reply", Some("zzz-root"), 5);
+    let reply2 = comment("bbb-reply2", Some("aaa-reply"), 5);
+    let t = &build_threads(&[reply2, reply, root], &[])[0];
+    assert_eq!(ids(t), ["zzz-root", "aaa-reply", "bbb-reply2"]);
+    assert!(!t.is_unresolved());
+}
