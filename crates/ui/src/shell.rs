@@ -21,6 +21,7 @@ use crate::{
     },
     row::server_label,
     session::{Env, SavedQuery, ServerSetup, Session, Startup},
+    settings::DiffSettings,
 };
 
 enum Page {
@@ -74,6 +75,8 @@ pub struct Shell {
     help: bool,
     window_active: bool,
     credentials_task: Option<Task<()>>,
+    settings: Entity<DiffSettings>,
+    prefs_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -83,6 +86,7 @@ impl Shell {
             env,
             server,
             queries,
+            diff,
         } = startup;
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search changes  ( / )"));
         let mut subs = vec![
@@ -120,6 +124,8 @@ impl Shell {
             help: false,
             window_active: window.is_window_active(),
             credentials_task: None,
+            settings: cx.new(|_| DiffSettings::new(diff)),
+            prefs_task: None,
             _subs: subs,
         };
         this.start(server, window, cx);
@@ -150,6 +156,7 @@ impl Shell {
         }
         self.nav.reset(Route::Dashboard);
         self.show(window, cx);
+        self.load_diff_preferences(cx);
         let Some(username) = username else {
             return;
         };
@@ -166,6 +173,7 @@ impl Shell {
                         Ok(session) => {
                             this.session = Some(session);
                             this.show(window, cx);
+                            this.load_diff_preferences(cx);
                         }
                         Err(e) => this.back_to_login(
                             &setup,
@@ -192,6 +200,44 @@ impl Shell {
         }));
     }
 
+    /// Reads the cached diff preferences of the signed-in user right away,
+    /// then refreshes them from the server in the background (a session
+    /// without credentials yet reads the cache only). Anonymous sessions
+    /// have none, so only the local settings apply.
+    fn load_diff_preferences(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let settings = self.settings.clone();
+        self.prefs_task = Some(cx.spawn(async move |_, cx| {
+            let syncer = session.syncer().clone();
+            let cached = {
+                let syncer = syncer.clone();
+                cx.background_spawn(async move { syncer.cached_diff_preferences() })
+                    .await
+            };
+            match cached {
+                Ok(c) => {
+                    settings.update(cx, |s, cx| s.set_server(c.map(|c| c.preferences), cx));
+                }
+                Err(e) => log::warn!("reading cached diff preferences: {e}"),
+            }
+            if !session.can_sync() {
+                return;
+            }
+            match cx
+                .background_spawn(async move { syncer.refresh_diff_preferences().await })
+                .await
+            {
+                Ok(Some(prefs)) => {
+                    settings.update(cx, |s, cx| s.set_server(Some(prefs), cx));
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("refreshing diff preferences: {e}"),
+            }
+        }));
+    }
+
     fn back_to_login(
         &mut self,
         setup: &ServerSetup,
@@ -208,6 +254,11 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn route(&self) -> &Route {
         self.nav.current()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settings(&self) -> &Entity<DiffSettings> {
+        &self.settings
     }
 
     // ---- navigation ----
@@ -345,6 +396,7 @@ impl Shell {
                 self.queries = outcome.queries.clone();
                 self.nav.reset(Route::Dashboard);
                 self.show(window, cx);
+                self.load_diff_preferences(cx);
             }
             Err(e) => {
                 self.prefill = Some(prefill_from(&setup, e.to_string()));

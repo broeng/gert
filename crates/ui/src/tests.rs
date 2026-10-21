@@ -146,6 +146,7 @@ fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) 
         env,
         server: Some(setup()),
         queries: vec![spec("Open", "status:open")],
+        diff: Default::default(),
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -176,6 +177,7 @@ fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
         env,
         server: Some(setup()),
         queries: vec![spec("Open", "status:open")],
+        diff: Default::default(),
     };
     let (_window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -252,4 +254,46 @@ fn search_pages_through_cached_rows_with_n_and_p(cx: &mut TestAppContext) {
     });
     press(cx, "p");
     cx.update(|cx| assert_eq!(page.read(cx).selected_number(), Some(ChangeNumber(1))));
+}
+
+#[gpui_kit::test]
+fn cached_server_diff_preferences_sit_under_the_local_overrides(cx: &mut TestAppContext) {
+    use model::{DiffPreferences, DiffViewMode};
+    let mut store = seeded(&[("status:open", &[1])]);
+    store
+        .save_diff_preferences(
+            ServerId(1),
+            &DiffPreferences {
+                tab_size: Some(4),
+                line_length: Some(120),
+                view_mode: Some(DiffViewMode::Unified),
+                ..Default::default()
+            },
+            "2024-06-15T10:05:00Z".parse().expect("ts"),
+        )
+        .expect("save prefs");
+    let startup = Startup {
+        env: env_with(store, &FakeHttpClient::new()),
+        server: Some(setup()),
+        queries: vec![spec("Open", "status:open")],
+        diff: crate::LocalDiff {
+            preferences: DiffPreferences {
+                tab_size: Some(2),
+                ..Default::default()
+            },
+            font_family: Some("Iosevka".into()),
+        },
+    };
+    let (_window, shell) = open(cx, |window, cx| {
+        cx.new(|cx| Shell::new(startup, window, cx))
+    });
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let settings = shell.read(cx).settings().read(cx);
+        let r = settings.resolved();
+        assert_eq!(r.tab_size, 2, "local override wins");
+        assert_eq!(r.line_length, 120, "server value fills the gap");
+        assert_eq!(r.view_mode, DiffViewMode::Unified);
+        assert_eq!(settings.font_family().as_deref(), Some("Iosevka"));
+    });
 }

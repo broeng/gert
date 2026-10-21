@@ -51,12 +51,23 @@ pub struct ServerSetup {
     pub server: ServerId,
 }
 
+/// The user's local diff settings from the config file.
+#[derive(Clone, Debug, Default)]
+pub struct LocalDiff {
+    /// Overrides of the server's diff preferences (unset fields fall
+    /// through to the server, then to the built-in defaults).
+    pub preferences: model::DiffPreferences,
+    /// Replaces the theme's monospace font in diffs.
+    pub font_family: Option<String>,
+}
+
 /// Everything `app` gives the UI at startup.
 pub struct Startup {
     pub env: Env,
     /// `None` when there is no config yet: start on the login page.
     pub server: Option<ServerSetup>,
     pub queries: Vec<SavedQuery>,
+    pub diff: LocalDiff,
 }
 
 /// A logged-in (or anonymous) connection to one server.
