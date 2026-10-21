@@ -14,6 +14,9 @@ mod http_client;
 mod query;
 mod wire;
 
+#[cfg(test)]
+mod fixture_tests;
+
 pub use auth::Auth;
 pub use client::{GerritClient, QueryPage};
 pub use convert::ConversionError;
