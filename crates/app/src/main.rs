@@ -62,20 +62,13 @@ fn startup() -> anyhow::Result<Startup> {
 
 fn run() -> anyhow::Result<()> {
     let startup = startup()?;
-    gpui_kit::application().run(move |cx| {
+    ui::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1200.), px(760.)), cx)),
-            titlebar: Some(TitlebarOptions {
-                title: Some(APP_NAME.into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let options = ui::window_options(APP_NAME, APP_NAME, size(px(1200.), px(760.)), cx);
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
-            cx.new(|cx| Shell::new(startup, window, cx))
+            cx.new(|cx| Shell::new(startup, window, cx).with_app_name(APP_NAME))
         });
         match opened {
             Ok(_) => {

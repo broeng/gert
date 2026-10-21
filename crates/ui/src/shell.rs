@@ -7,6 +7,7 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{TitleBar, window_border};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use model::ChangeNumber;
@@ -86,6 +87,8 @@ pub struct Shell {
     focus: FocusHandle,
     help: bool,
     help_scroll: ScrollHandle,
+    /// Shown in the title bar when nobody is signed in.
+    app_name: SharedString,
     window_active: bool,
     credentials_task: Option<Task<()>>,
     settings: Entity<DiffSettings>,
@@ -147,6 +150,7 @@ impl Shell {
             focus: cx.focus_handle(),
             help: false,
             help_scroll: ScrollHandle::new(),
+            app_name: SharedString::default(),
             window_active: window.is_window_active(),
             credentials_task: None,
             settings: cx.new(|_| DiffSettings::new(diff)),
@@ -155,6 +159,12 @@ impl Shell {
         };
         this.start(server, window, cx);
         this
+    }
+
+    /// Sets the application name shown in the title bar of the login page.
+    pub fn with_app_name(mut self, name: impl Into<SharedString>) -> Self {
+        self.app_name = name.into();
+        self
     }
 
     /// Opens the dashboard from the cache right away and fetches the
@@ -570,64 +580,92 @@ impl Shell {
 
     // ---- rendering ----
 
-    fn render_top_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let session = self.session.as_ref()?;
-        if *self.nav.current() == Route::Login {
-            return None;
-        }
+    /// The title bar: it holds the navigation, the server and user, the search
+    /// box and the help button, so that no extra row is spent on them, and
+    /// carries the window buttons when the window is client-decorated. What
+    /// is not a control is a drag handle for moving the window.
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let who = session
-            .username
-            .clone()
-            .unwrap_or_else(|| "anonymous".into());
-        Some(
-            h_flex()
-                .px_3()
-                .py_2()
-                .gap_2()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(
-                    Button::new("back")
-                        .label("\u{2190}")
-                        .small()
-                        .disabled(!self.nav.can_go_back())
-                        .on_click(cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx))),
-                )
-                .child(
-                    Button::new("forward")
-                        .label("\u{2192}")
-                        .small()
-                        .disabled(!self.nav.can_go_forward())
-                        .on_click(cx.listener(|this, _, w, cx| this.go_forward(&GoForward, w, cx))),
-                )
-                .child(
-                    Button::new("home")
-                        .label(server_label(&session.base_url))
-                        .small()
-                        .on_click(
-                            cx.listener(|this, _, w, cx| this.navigate(Route::Dashboard, w, cx)),
+        // Controls must not start a window move.
+        let no_drag = |d: Div| d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let signed_in = self
+            .session
+            .as_ref()
+            .filter(|_| *self.nav.current() != Route::Login);
+        let content = match signed_in {
+            None => h_flex()
+                .w_full()
+                .px_2()
+                .text_sm()
+                .font_semibold()
+                .child(self.app_name.clone()),
+            Some(session) => {
+                let who = session
+                    .username
+                    .clone()
+                    .unwrap_or_else(|| "anonymous".into());
+                h_flex()
+                    .w_full()
+                    .h_full()
+                    .px_2()
+                    .gap_2()
+                    .items_center()
+                    .child(no_drag(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                Button::new("back")
+                                    .label("\u{2190}")
+                                    .small()
+                                    .disabled(!self.nav.can_go_back())
+                                    .on_click(
+                                        cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("forward")
+                                    .label("\u{2192}")
+                                    .small()
+                                    .disabled(!self.nav.can_go_forward())
+                                    .on_click(cx.listener(|this, _, w, cx| {
+                                        this.go_forward(&GoForward, w, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("home")
+                                    .label(server_label(&session.base_url))
+                                    .small()
+                                    .on_click(cx.listener(|this, _, w, cx| {
+                                        this.navigate(Route::Dashboard, w, cx)
+                                    })),
+                            ),
+                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(who),
+                    )
+                    // The free space between the cluster and the search box.
+                    .child(div().flex_1().h_full())
+                    .child(no_drag(
+                        div()
+                            .w(px(380.))
+                            .flex_none()
+                            .key_context(SEARCH_BAR)
+                            .on_action(cx.listener(Self::blur_search))
+                            .child(Input::new(&self.search).small()),
+                    ))
+                    .child(div().flex_1().h_full())
+                    .child(no_drag(div().child(
+                        Button::new("help").label("?").small().on_click(
+                            cx.listener(|this, _, w, cx| this.toggle_help(&ToggleHelp, w, cx)),
                         ),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(who),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .key_context(SEARCH_BAR)
-                        .on_action(cx.listener(Self::blur_search))
-                        .child(Input::new(&self.search)),
-                )
-                .child(
-                    Button::new("help").label("?").small().on_click(
-                        cx.listener(|this, _, w, cx| this.toggle_help(&ToggleHelp, w, cx)),
-                    ),
-                ),
-        )
+                    )))
+            }
+        };
+        TitleBar::new().child(content)
     }
 
     fn render_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -744,24 +782,28 @@ fn prefill_from(setup: &ServerSetup, notice: String) -> LoginPrefill {
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        div()
-            .id("shell")
-            .key_context(SHELL)
-            .track_focus(&self.focus)
-            .on_action(cx.listener(Self::go_back))
-            .on_action(cx.listener(Self::go_forward))
-            .on_action(cx.listener(Self::go_up))
-            .on_action(cx.listener(Self::focus_search))
-            .on_action(cx.listener(Self::toggle_help))
-            .on_action(cx.listener(Self::dismiss))
-            .relative()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .children(self.render_top_bar(cx))
-            .child(div().flex_1().min_h_0().child(self.page.element()))
-            .when(self.help, |d| d.child(self.render_help(cx)))
+        // The border draws the frame, shadow and resize edges of a
+        // client-decorated window and is transparent otherwise.
+        window_border().child(
+            div()
+                .id("shell")
+                .key_context(SHELL)
+                .track_focus(&self.focus)
+                .on_action(cx.listener(Self::go_back))
+                .on_action(cx.listener(Self::go_forward))
+                .on_action(cx.listener(Self::go_up))
+                .on_action(cx.listener(Self::focus_search))
+                .on_action(cx.listener(Self::toggle_help))
+                .on_action(cx.listener(Self::dismiss))
+                .relative()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(theme.background)
+                .text_color(theme.foreground)
+                .child(self.render_title_bar(cx))
+                .child(div().flex_1().min_h_0().child(self.page.element()))
+                .when(self.help, |d| d.child(self.render_help(cx))),
+        )
     }
 }
