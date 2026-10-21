@@ -176,7 +176,11 @@ pub fn editor_entries() -> Vec<Entry> {
     }
     vec![
         ed(
-            "Ctrl-Enter / Ctrl-S",
+            if cfg!(target_os = "macos") {
+                "Cmd-Enter / Cmd-S"
+            } else {
+                "Ctrl-Enter / Ctrl-S"
+            },
             "secondary-s",
             SaveDraft,
             "Save the draft being edited",

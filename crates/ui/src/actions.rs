@@ -104,6 +104,7 @@ pub fn help_groups() -> Vec<HelpGroup> {
         g("Change page", change_entries()),
         g("Diff page", diff_page_entries()),
         g("In a diff", crate::diff::actions::entries()),
+        g("Writing a comment", crate::diff::actions::editor_entries()),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
     ]
 }
@@ -173,7 +174,7 @@ pub fn change_entries() -> Vec<Entry> {
         e(
             "X",
             KeyBinding::new("x", OpenThread, Some(k)),
-            "Open the selected thread (in its diff)",
+            "Open the selected thread: its diff, or the card below for a patch-set comment",
         ),
         e(
             "Shift-U / Shift-D / Shift-A",
@@ -404,4 +405,71 @@ pub fn bind_keys(cx: &mut App) {
             .chain(diff_prefs_entries())
             .map(|e| e.binding),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Entry, change_entries, diff_page_entries, diff_prefs_entries, entries, help_groups,
+    };
+
+    /// Every binding the app registers (see `bind_keys` here and in
+    /// `diff::actions`).
+    fn bound() -> Vec<Entry> {
+        entries()
+            .into_iter()
+            .chain(change_entries())
+            .chain(diff_page_entries())
+            .chain(diff_prefs_entries())
+            .chain(crate::diff::actions::entries())
+            .chain(crate::diff::actions::editor_entries())
+            .collect()
+    }
+
+    /// The help overlay lists every action that has a binding. (An entry
+    /// without a key label is the alias of the labelled one before it; the
+    /// next test checks that.)
+    #[test]
+    fn every_bound_action_is_in_the_help_overlay() {
+        let listed: std::collections::HashSet<&str> = help_groups()
+            .iter()
+            .flat_map(|g| &g.entries)
+            .map(|e| e.binding.action().name())
+            .collect();
+        let missing: Vec<&str> = bound()
+            .iter()
+            .map(|e| e.binding.action().name())
+            .filter(|name| !listed.contains(name))
+            .collect();
+        assert!(missing.is_empty(), "no help entry for {missing:?}");
+        // And the overlay lists nothing that is not bound.
+        let bound_names: std::collections::HashSet<&str> =
+            bound().iter().map(|e| e.binding.action().name()).collect();
+        for g in help_groups() {
+            for e in g.entries {
+                assert!(bound_names.contains(e.binding.action().name()));
+            }
+        }
+    }
+
+    /// An entry has either a key label and a description, or neither (an
+    /// alias of the entry before it, so the first of a group has them).
+    #[test]
+    fn aliases_follow_a_labelled_entry() {
+        for g in help_groups() {
+            let first = g.entries.first().expect("a group has entries");
+            assert!(
+                !first.keys.is_empty() && !first.description.is_empty(),
+                "{}",
+                g.title
+            );
+            for e in g.entries {
+                assert!(
+                    !e.keys.is_empty() || e.description.is_empty(),
+                    "{} has a description but no keys",
+                    e.binding.action().name()
+                );
+            }
+        }
+    }
 }
