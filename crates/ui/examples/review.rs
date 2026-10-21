@@ -121,8 +121,48 @@ impl HttpClient for WholeFileDiffs {
     }
 }
 
+/// Published comments on change 12345, patch set 3: an unresolved thread on
+/// a range with a reply, a resolved one in a quiet part of `queue.rs`, a
+/// comment on the base side, a file comment, and one on the commit message.
+fn comments() -> String {
+    use serde_json::json;
+    let bob = json!({"_account_id": 1000002, "name": "Bob Reviewer", "username": "bob"});
+    let alice = json!({"_account_id": 1000001, "name": "Alice Example", "username": "alice"});
+    let at = |t: &str| format!("2024-06-14 {t}.000000000");
+    let body = json!({
+        "src/sched/queue.rs": [
+            {"id": "q1", "patch_set": 3, "line": 40, "author": bob,
+             "range": {"start_line": 40, "start_character": 8, "end_line": 40, "end_character": 21},
+             "message": "Why the rename?\n\nThe old name was fine and this makes the diff bigger.",
+             "updated": at("09:00:00"), "unresolved": true},
+            {"id": "q2", "patch_set": 3, "line": 40, "author": alice, "in_reply_to": "q1",
+             "range": {"start_line": 40, "start_character": 8, "end_line": 40, "end_character": 21},
+             "message": "It matches the metrics names added in the next change.",
+             "updated": at("09:30:00"), "unresolved": true},
+            {"id": "q3", "patch_set": 3, "line": 70, "author": bob,
+             "message": "nit: could use a constant here", "updated": at("10:00:00"),
+             "unresolved": true},
+            {"id": "q4", "patch_set": 3, "line": 70, "author": alice, "in_reply_to": "q3",
+             "message": "Done", "updated": at("11:00:00"), "unresolved": false},
+            {"id": "q5", "patch_set": 3, "line": 90, "side": "PARENT", "author": bob,
+             "message": "This used to be the slow path, is it still reachable?",
+             "updated": at("12:00:00"), "unresolved": true},
+            {"id": "q6", "patch_set": 3, "author": bob,
+             "message": "Please split this file in a follow-up.", "updated": at("13:00:00"),
+             "unresolved": false},
+        ],
+        "/COMMIT_MSG": [
+            {"id": "m1", "patch_set": 3, "line": 1, "author": bob,
+             "message": "Say what changed, not that it was reworked.",
+             "updated": at("14:00:00"), "unresolved": true},
+        ],
+    });
+    format!(")]}}'\n{body}")
+}
+
 fn server(files: Option<usize>) -> RouteHttpClient {
     let http = RouteHttpClient::new();
+    http.route("/changes/12345/comments", 200, comments());
     let ex = |name: &str| read(&format!("example/{name}"));
     let hw = |name: &str| read(&format!("handwritten/{name}"));
     http.route("/accounts/self/detail", 200, ex("account.json"));

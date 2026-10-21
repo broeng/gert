@@ -4,19 +4,23 @@
 //! per diff or mode change. Rendering only turns the visible slice of rows
 //! into elements.
 
-use std::{cell, rc::Rc, sync::Arc};
+mod thread_card;
+
+use std::{cell, collections::HashMap, rc::Rc, sync::Arc};
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::{Diff, DiffViewMode, ResolvedDiffPreferences};
+use model::{
+    Diff, DiffPair, DiffViewMode, LocalDraftId, ResolvedDiffPreferences, Thread, ThreadId,
+};
 
 use super::{
     actions::*,
     layout::{
         Anchor, Cell, Expansion, FoldRow, HiddenRow, Layout, LayoutOptions, LineKind, REVEAL_STEP,
-        Row,
+        Row, ThreadSlot,
     },
     paint::{Style, line_highlights},
 };
@@ -47,6 +51,18 @@ pub enum DiffEvent {
     RowsChanged,
     /// The view mode was toggled; the owner may want to remember it.
     ModeChanged(DiffViewMode),
+    /// "Retry" was pressed on a draft whose upload failed.
+    RetryDraft(LocalDraftId),
+}
+
+/// Which file of which patch set pair the view shows: what decides where
+/// (and whether) a comment thread appears in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadContext {
+    pub pair: DiffPair,
+    pub path: String,
+    /// The file's name in the base, for a renamed file.
+    pub old_path: Option<String>,
 }
 
 pub struct DiffView {
@@ -82,6 +98,16 @@ pub struct DiffView {
     /// cursor moves or the diff changes. Shown over an `Info` status, but
     /// not over `Busy` or `Error`.
     hint: Option<SharedString>,
+    /// All the change's threads, as last given by the owner.
+    threads: Arc<Vec<Thread>>,
+    /// Indexes into `threads` of those shown in this diff; the position is
+    /// the slot of the layout's thread row.
+    shown: Vec<usize>,
+    slots: Vec<ThreadSlot>,
+    thread_context: Option<ThreadContext>,
+    /// Threads the user opened or closed by hand, whatever their state
+    /// says. Kept across [`Self::set_threads`].
+    thread_open: HashMap<ThreadId, bool>,
 }
 
 impl EventEmitter<DiffEvent> for DiffView {}
@@ -93,6 +119,11 @@ impl Focusable for DiffView {
 }
 
 const DEFAULT_PAGE_ROWS: usize = 20;
+
+/// Unresolved threads and those with a draft of the user's start open.
+fn default_open(t: &Thread) -> bool {
+    t.is_unresolved() || t.has_draft()
+}
 
 /// How far above and below the viewport the list measures rows.
 const OVERDRAW: Pixels = px(300.);
@@ -135,6 +166,11 @@ impl DiffView {
             style: None,
             status: None,
             hint: None,
+            threads: Arc::default(),
+            shown: Vec::new(),
+            slots: Vec::new(),
+            thread_context: None,
+            thread_open: HashMap::new(),
         }
     }
 
@@ -153,6 +189,90 @@ impl DiffView {
             let keep = self.keep_position();
             self.expansion = expansion;
             self.rebuild(keep, cx);
+        }
+    }
+
+    /// Gives the view the change's comment threads. Those that show in this
+    /// file for the patch set pair in `context` appear between the lines.
+    /// If none moved (the same places, maybe other contents), only the
+    /// affected rows are measured again; otherwise the rows are rebuilt,
+    /// keeping the cursor and the opened folds.
+    pub fn set_threads(
+        &mut self,
+        context: ThreadContext,
+        threads: Arc<Vec<Thread>>,
+        cx: &mut Context<Self>,
+    ) {
+        let (mut shown, mut slots) = (Vec::new(), Vec::new());
+        for (i, t) in threads.iter().enumerate() {
+            if let Some(side) = t.side_in(context.pair, &context.path, context.old_path.as_deref())
+            {
+                shown.push(i);
+                slots.push(ThreadSlot {
+                    side,
+                    location: t.location,
+                });
+            }
+        }
+        let old_threads = std::mem::replace(&mut self.threads, threads);
+        let old_shown = std::mem::replace(&mut self.shown, shown);
+        self.thread_context = Some(context);
+        if slots == self.slots {
+            let mut changed = false;
+            for &ix in self.layout.thread_rows() {
+                let Some(Row::Thread(tr)) = self.layout.rows().get(ix) else {
+                    continue;
+                };
+                let was = old_shown.get(tr.slot).and_then(|&i| old_threads.get(i));
+                if was != self.thread_at(tr.slot) {
+                    self.list.remeasure_items(ix..ix + 1);
+                    changed = true;
+                }
+            }
+            if changed {
+                cx.emit(DiffEvent::RowsChanged);
+                cx.notify();
+            }
+            return;
+        }
+        let on_thread = self.thread_id_at(self.cursor);
+        let at_top = {
+            let top = self.list.logical_scroll_top();
+            top.item_ix == 0 && top.offset_in_item == px(0.)
+        };
+        let keep = self.keep_position();
+        self.slots = slots;
+        self.rebuild_with(keep, None);
+        if at_top {
+            // Threads at the top of the file (file comments) must not end
+            // up above the viewport just because the cursor is below them.
+            self.list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
+        }
+        if let Some(row) = on_thread.and_then(|id| self.thread_row_of(&id)) {
+            self.cursor = row;
+        }
+        cx.emit(DiffEvent::RowsChanged);
+        cx.notify();
+    }
+
+    /// The threads shown in this diff, in the layout's slot order.
+    pub fn shown_threads(&self) -> impl Iterator<Item = &Thread> {
+        self.shown.iter().filter_map(|&i| self.threads.get(i))
+    }
+
+    /// Whether the thread is shown open (its messages) rather than as a
+    /// one-line summary: by default when it is unresolved or has a draft.
+    pub fn is_thread_open(&self, id: &ThreadId) -> bool {
+        match self.thread_open.get(id) {
+            Some(open) => *open,
+            None => self
+                .threads
+                .iter()
+                .find(|t| &t.id == id)
+                .is_some_and(default_open),
         }
     }
 
@@ -258,6 +378,12 @@ impl DiffView {
         self.focus.clone()
     }
 
+    /// Height of a row as the list measured it (it must have been drawn).
+    #[cfg(test)]
+    pub(crate) fn row_height_for_test(&self, row: usize) -> Option<Pixels> {
+        self.list.bounds_for_item(row).map(|b| b.size.height)
+    }
+
     // --- internals -------------------------------------------------------
 
     /// Where the cursor is, in file lines and relative to the viewport top.
@@ -276,10 +402,11 @@ impl DiffView {
     }
 
     fn rebuild_with(&mut self, (anchor, rel): (Anchor, usize), follow: Option<u32>) {
-        self.layout = Arc::new(Layout::build(
+        self.layout = Arc::new(Layout::build_with_threads(
             &self.diff,
             &LayoutOptions::from_prefs(&self.prefs),
             &self.expansion,
+            &self.slots,
         ));
         let fold = follow.and_then(|run| {
             self.layout
@@ -321,14 +448,39 @@ impl DiffView {
         }
     }
 
-    /// The nearest selectable row to `row`, looking forward first.
+    /// The nearest row the cursor may rest on: `row` itself if it is one
+    /// (a thread row too), else the nearest line, looking forward first.
     fn snap(&self, row: usize) -> usize {
         let rows = self.layout.rows();
         let row = row.min(rows.len().saturating_sub(1));
+        if rows.get(row).is_some_and(Row::selectable) {
+            return row;
+        }
         (row..rows.len())
             .chain((0..row).rev())
-            .find(|&i| rows[i].selectable())
+            .find(|&i| rows[i].is_line())
+            .or_else(|| rows.iter().position(Row::selectable))
             .unwrap_or(0)
+    }
+
+    fn thread_at(&self, slot: usize) -> Option<&Thread> {
+        self.shown.get(slot).and_then(|&i| self.threads.get(i))
+    }
+
+    /// The thread on `row`, if it is a thread row.
+    fn thread_id_at(&self, row: usize) -> Option<ThreadId> {
+        match self.layout.rows().get(row) {
+            Some(Row::Thread(tr)) => self.thread_at(tr.slot).map(|t| t.id.clone()),
+            _ => None,
+        }
+    }
+
+    fn thread_row_of(&self, id: &ThreadId) -> Option<usize> {
+        self.layout
+            .thread_rows()
+            .iter()
+            .copied()
+            .find(|&ix| self.thread_id_at(ix).as_ref() == Some(id))
     }
 
     fn move_to(&mut self, row: usize, how: Reveal, cx: &mut Context<Self>) {
@@ -359,11 +511,11 @@ impl DiffView {
         self.reveal.set(Some(how));
     }
 
-    /// Moves by `delta` selectable rows (rows that cannot hold the cursor
-    /// are stepped over), stopping at the ends.
+    /// Moves by `delta` lines (rows that are not lines, thread rows
+    /// included, are stepped over), stopping at the ends.
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         let rows = self.layout.rows();
-        let mut i = self.cursor;
+        let (mut i, mut at) = (self.cursor, self.cursor);
         let mut left = delta.unsigned_abs();
         while left > 0 {
             let next = if delta > 0 {
@@ -373,11 +525,12 @@ impl DiffView {
             };
             let Some(n) = next else { break };
             i = n;
-            if rows[i].selectable() {
+            if rows[i].is_line() {
                 left -= 1;
+                at = i;
             }
         }
-        self.move_to(i, Reveal::Nearest, cx);
+        self.move_to(at, Reveal::Nearest, cx);
     }
 
     /// Changes what is folded and rebuilds. The cursor stays on its file
@@ -507,11 +660,13 @@ impl DiffView {
     }
 
     fn cursor_top(&mut self, _: &CursorTop, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, Reveal::Nearest, cx);
+        let first = self.layout.first_selectable().unwrap_or(0);
+        self.move_to(first, Reveal::Nearest, cx);
     }
 
     fn cursor_bottom(&mut self, _: &CursorBottom, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(usize::MAX, Reveal::Nearest, cx);
+        let last = self.layout.last_selectable().unwrap_or(usize::MAX);
+        self.move_to(last, Reveal::Nearest, cx);
     }
 
     fn toggle_mode_action(&mut self, _: &ToggleMode, _: &mut Window, cx: &mut Context<Self>) {
@@ -599,7 +754,9 @@ impl DiffView {
                 .text_color(style.palette.muted_fg)
                 .child(n.text())
                 .into_any_element(),
+            Row::Thread(tr) => thread_card::thread_row(self, ix, tr, &style, cx),
         };
+        let is_thread = matches!(row, Row::Thread(_));
         let selected = ix == self.cursor && row.selectable();
         let reveal = self.reveal.get().filter(|_| selected);
         let viewport = self.viewport;
@@ -607,14 +764,16 @@ impl DiffView {
             .id(("diff-row", ix))
             .relative()
             .w_full()
-            .h(style.row_height)
+            .when(!is_thread, |d| d.h(style.row_height))
             .child(body)
             .when(selected, |d| {
                 d.child(
                     div()
                         .absolute()
                         .inset_0()
-                        .bg(style.palette.cursor_bg)
+                        // A thread card keeps its own colours; the cursor
+                        // shows as the bar and the card's border.
+                        .when(!is_thread, |d| d.bg(style.palette.cursor_bg))
                         .border_l_2()
                         .border_color(style.palette.cursor_bar),
                 )

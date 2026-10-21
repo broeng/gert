@@ -447,3 +447,21 @@ fn focus_inline(cx: &mut TestAppContext, window: AnyWindowHandle, page: &Entity<
     .expect("focus");
     cx.run_until_parked();
 }
+
+#[gpui_kit::test]
+fn inline_diffs_show_the_threads_of_their_file(cx: &mut TestAppContext) {
+    let comments = r#"{"/COMMIT_MSG":[{"id":"c1","patch_set":3,"line":1,"message":"nit","updated":"2024-06-15 10:00:00.000000000","unresolved":true},{"id":"c2","patch_set":2,"line":1,"message":"older patch set","updated":"2024-06-15 10:00:00.000000000"}]}"#;
+    let f = page_with(cx, true, ChangeView::default(), |http| {
+        http.route_json("/comments", comments);
+    });
+    press(cx, &f, &["i"]);
+    cx.update(|cx| {
+        let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
+        let shown: Vec<_> = view
+            .read(cx)
+            .shown_threads()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(shown, [model::ThreadId::Comment("c1".into())]);
+    });
+}

@@ -31,8 +31,9 @@ use sync::Syncer;
 
 use crate::{
     actions::*,
+    comments::{ChangeComments, CommentsEvent},
     diff::{
-        DiffEvent, DiffSizing, DiffStatus, DiffView,
+        DiffEvent, DiffSizing, DiffStatus, DiffView, ThreadContext,
         actions::{NextFile, PrevFile},
     },
     diff_load::{LoadError, context_label, load_diff},
@@ -77,6 +78,8 @@ pub struct DiffPage {
     prefs_focus: FocusHandle,
     task: Option<Task<()>>,
     prefetch: Option<Task<()>>,
+    /// The change's comment threads, shown in the diff.
+    comments: Entity<ChangeComments>,
     _subs: Vec<Subscription>,
 }
 
@@ -98,6 +101,7 @@ impl DiffPage {
         route: DiffRoute,
         cx: &mut Context<Self>,
     ) -> Self {
+        let comments = cx.new(|cx| ChangeComments::new(session.clone(), route.change, cx));
         let mut this = Self {
             session,
             settings: settings.clone(),
@@ -116,10 +120,16 @@ impl DiffPage {
             prefs_focus: cx.focus_handle(),
             task: None,
             prefetch: None,
+            comments: comments.clone(),
             _subs: Vec::new(),
         };
         this._subs
             .push(cx.observe(&settings, |this, _, cx| this.settings_changed(cx)));
+        this._subs
+            .push(cx.subscribe(&comments, |this, _, ev, cx| match ev {
+                CommentsEvent::Changed => this.apply_threads(cx),
+                CommentsEvent::Unauthorized => cx.emit(DiffPageEvent::Unauthorized),
+            }));
         this.load(cx);
         this
     }
@@ -309,8 +319,36 @@ impl DiffPage {
                 });
             }
             DiffEvent::RowsChanged => {}
+            DiffEvent::RetryDraft(id) => {
+                // Drafts are edited and retried from batch 3b on.
+                log::debug!("retry of draft {id:?} requested; not handled yet");
+            }
         }));
         self.view = Some(view);
+        self.apply_threads(cx);
+    }
+
+    /// Hands the change's threads to the diff view, which shows those that
+    /// belong to this file and patch set pair.
+    fn apply_threads(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = &self.view else {
+            return;
+        };
+        let old_path = self
+            .files
+            .iter()
+            .find(|f| f.path == self.route.path)
+            .and_then(|f| f.old_path.clone());
+        let context = ThreadContext {
+            pair: model::DiffPair {
+                base: self.route.base,
+                target: self.route.target,
+            },
+            path: self.route.path.clone(),
+            old_path,
+        };
+        let threads = self.comments.read(cx).threads();
+        view.update(cx, |v, cx| v.set_threads(context, threads, cx));
     }
 
     /// Fetches the next file's diff in the background so that `]` is
