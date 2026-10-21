@@ -121,7 +121,11 @@ fn diff_page_as(
     auth: gerrit_api::Auth,
 ) -> Page {
     let env = env_with(store, &http);
-    let session = crate::session::Session::new(&env, &setup(), Some(auth)).expect("session");
+    let mut server = setup();
+    if let gerrit_api::Auth::Basic { username, .. } = &auth {
+        server.username = Some(username.clone());
+    }
+    let session = crate::session::Session::new(&env, &server, Some(auth)).expect("session");
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
     let path = path.to_owned();
@@ -555,4 +559,47 @@ fn a_401_on_comments_sends_the_user_to_login_but_a_403_does_not(cx: &mut TestApp
     assert!(p.events.lock().expect("log").is_empty());
     // The diff itself still works.
     cx.update(|cx| assert!(p.page.read(cx).view_for_test().is_some()));
+}
+
+fn signed_in() -> gerrit_api::Auth {
+    gerrit_api::Auth::Basic {
+        username: "alice".into(),
+        password: "secret".into(),
+    }
+}
+
+#[gpui_kit::test]
+fn a_comment_written_on_the_page_is_saved_uploaded_and_shown(cx: &mut TestAppContext) {
+    let http = http();
+    http.route_json("/comments", "{}");
+    http.route_json("/changes/7/drafts", "{}");
+    http.route(
+        "/revisions/sha3/drafts",
+        201,
+        r#")]}'
+{"id":"srv1","patch_set":3,"path":"src/a.rs","line":1,"updated":"2024-06-15 10:00:00.000000000","message":"m"}"#,
+    );
+    let p = diff_page_as(cx, seeded(), "src/a.rs", http, signed_in());
+    press(cx, p.window, &["c"]);
+    cx.update_window(p.window, |_, window, cx| window.input("looks odd", cx))
+        .expect("input");
+    let save = if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    };
+    press(cx, p.window, &[save]);
+    cx.run_until_parked();
+    assert_eq!(requests(&p.http, "/revisions/sha3/drafts"), 1);
+    // The draft is a thread of its own now, uploaded.
+    let (threads, synced) = cx.update(|cx| {
+        let v = p.page.read(cx).view_for_test().expect("view");
+        let v = v.read(cx);
+        let threads: Vec<_> = v.shown_threads().collect();
+        let synced = threads
+            .iter()
+            .all(|t| matches!(t.draft().map(|d| &d.sync), Some(model::DraftSync::Synced)));
+        (threads.len(), synced)
+    });
+    assert_eq!((threads, synced), (1, true));
 }

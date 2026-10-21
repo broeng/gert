@@ -20,11 +20,12 @@
 use std::collections::HashMap;
 
 use gpui_kit::*;
-use model::{ChangeNumber, LocalDraftId};
+use model::{ChangeDetail, ChangeNumber, LocalDraftId};
 use sync::DraftSave;
 
 use crate::{
     comments::ChangeComments,
+    diff::DraftRequest,
     session::{Session, is_unauthorized},
 };
 
@@ -72,11 +73,54 @@ impl DraftOutbox {
         c
     }
 
+    /// Carries out what a diff view asked for. `detail` supplies the commit
+    /// of the patch set a new draft goes to.
+    pub fn request(
+        &mut self,
+        change: ChangeNumber,
+        request: DraftRequest,
+        detail: Option<&ChangeDetail>,
+        cx: &mut Context<Self>,
+    ) {
+        match request {
+            DraftRequest::Create { patch_set, input } => {
+                let target = detail
+                    .and_then(|d| d.revisions.iter().find(|r| r.number == patch_set))
+                    .map(|r| r.as_ref());
+                match target {
+                    Some(patch_set) => self.save(
+                        DraftSave::Create {
+                            change,
+                            patch_set,
+                            input,
+                        },
+                        cx,
+                    ),
+                    None => {
+                        log::warn!("no patch set {patch_set} in change {change}: draft dropped")
+                    }
+                }
+            }
+            DraftRequest::Update {
+                id,
+                message,
+                unresolved,
+            } => self.save(
+                DraftSave::Update {
+                    id,
+                    message,
+                    unresolved,
+                },
+                cx,
+            ),
+            DraftRequest::Delete(id) => self.delete(change, id, cx),
+            DraftRequest::Retry(id) => self.retry(change, id, cx),
+        }
+    }
+
     /// Writes the draft locally, then uploads it. Without credentials (the
     /// password is still being fetched) the draft only waits; a later retry
     /// uploads it.
-    // Used by the inline editor (next commit).
-    #[allow(dead_code)]
     pub fn save(&mut self, save: DraftSave, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
         let upload = self.session.can_sync();
@@ -110,7 +154,6 @@ impl DraftOutbox {
     }
 
     /// Deletes the draft locally and, if the server has it, there.
-    #[allow(dead_code)]
     pub fn delete(&mut self, change: ChangeNumber, id: LocalDraftId, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
         let upload = self.session.can_sync();
