@@ -6403,6 +6403,15 @@ dependencies = [
 [[package]]
 name = "sync"
 version = "0.1.0"
+dependencies = [
+ "futures",
+ "gerrit-api",
+ "jiff",
+ "model",
+ "serde_json",
+ "store",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "sync_wrapper"
