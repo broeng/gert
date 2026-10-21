@@ -72,7 +72,7 @@ Claude writes most of the code and the user reviews it. So:
 | Language | Rust, latest stable (no `rust-toolchain.toml` pin) |
 | UI | GPUI, obtained **only** through `gpui-kit`'s re-exports |
 | Widgets/theming | `gpui-kit` from [gpui-component](https://github.com/longbridge/gpui-component), git dependency pinned to a commit; Zed-like dark/light themes following the system setting |
-| Gerrit models | `gerrit_client` from [gerrit-sdk-rust](https://github.com/davido/gerrit-sdk-rust), **models only**, git tag pin |
+| Gerrit wire types | hand-written tolerant serde structs in `gerrit-api`, checked against the vendored OpenAPI spec |
 | HTTP | our own async client over an `HttpClient` trait; the production impl in `app` adapts `gpui-pre-reqwest-client` (Zed's reqwest client, which manages its own tokio runtime) |
 | Storage | SQLite via `rusqlite` (bundled), called from GPUI's background executor |
 | Secrets | `keyring` |
@@ -98,18 +98,22 @@ Claude writes most of the code and the user reviews it. So:
   `~/.cargo/git/checkouts/gpui-component-*`, especially its `examples/`)
   rather than guessing from memory; APIs change between snapshots.
 
-### gerrit-sdk-rust
+### Wire types and the OpenAPI spec
 
-- It is a **generated prototype** (OpenAPI → openapi-generator) pinned to a
-  Gerrit 3.15.0-SNAPSHOT spec. Its API functions are blocking reqwest, and some
-  endpoints are untyped (e.g. `GET /changes/` returns `Vec<serde_json::Value>`).
-- We use **only its `models`** for deserializing responses. We do **not** call
-  its `apis::*` functions.
-- `gerrit_client` types **never leak out of `gerrit-api`**. They are converted
-  into our own `model` types at the crate boundary, so the SDK stays swappable.
-- Known cost: depending on it compiles blocking reqwest and native-tls even
-  though we don't use them. If that becomes a problem, propose an upstream
-  change making the transport optional rather than forking.
+- We do **not** use a generated Gerrit SDK. We tried
+  [gerrit-sdk-rust](https://github.com/davido/gerrit-sdk-rust) and dropped it:
+  its closed enums failed whole pages on unknown values, everything was
+  `Option`/`i32`, and it pulled in blocking reqwest + native-tls.
+- `gerrit-api` has hand-written serde **wire structs** (`wire` module) for
+  the endpoints we use, and nothing else. They must be **tolerant**: unknown
+  fields are ignored, enums keep unknown values (`Unknown(String)`), and
+  optional server fields are `Option` or `#[serde(default)]`.
+- Wire types are private to `gerrit-api`. They are converted into `model`
+  types at the crate boundary.
+- The Gerrit OpenAPI spec is **vendored** at `spec/rest-api-openapi.json` (see
+  `spec/README.md` for where it came from). It is the reference for field names and
+  types, the input for `cargo xtask gen-fixtures`, and a test checks that every
+  wire struct field exists in the corresponding spec schema.
 
 ## Architecture
 
@@ -118,8 +122,8 @@ Cargo workspace:
 ```
 crates/
   gerrit-api/   async REST client: auth, XSSI stripping, HttpClient trait,
-                typed endpoints (incl. typed change query). Deserializes with
-                gerrit_client models, returns `model` types.
+                typed endpoints (incl. typed change query). Private tolerant
+                wire structs, returns `model` types.
   model/        domain types: non-Option where semantically required, real
                 timestamps, newtypes for ids (ChangeNumber, AccountId, ...).
                 No I/O.
@@ -225,7 +229,7 @@ GPUI entities.)
 
 - `model` / `gerrit-api`: unit tests against **schema-generated JSON fixtures**
   in `tests/fixtures/`, produced by `cargo xtask gen-fixtures` from the OpenAPI
-  spec shipped with gerrit-sdk-rust. Fixtures should exercise every field and
+  vendored spec in `spec/`. Fixtures should exercise every field and
   edge cases (missing optional fields, unknown enum values, empty maps), and
   must include the XSSI prefix where a real response would have it.
 - `gerrit-api` takes an `HttpClient` trait object, so tests use a fake client.
