@@ -242,6 +242,30 @@ fn enter_on_a_skip_row_requests_expansion(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn shift_x_without_hidden_lines_says_so_instead_of_asking_the_owner(cx: &mut TestAppContext) {
+    let (window, view, events) = open(cx, sample_expanded(), DiffViewMode::SideBySide);
+    cx.update(|cx| assert!(!view.read(cx).has_hidden_lines()));
+    press(cx, window, "shift-x");
+    assert!(events.lock().expect("log").is_empty());
+    cx.update(|cx| {
+        assert_eq!(
+            view.read(cx).hint(),
+            Some("The whole file is already shown")
+        );
+    });
+    // The message goes away with the next move.
+    press(cx, window, "j");
+    cx.update(|cx| assert_eq!(view.read(cx).hint(), None));
+
+    // With hidden lines the owner is asked, and there is no message.
+    let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
+    cx.update(|cx| assert!(view.read(cx).has_hidden_lines()));
+    press(cx, window, "shift-x");
+    assert_eq!(*events.lock().expect("log"), ["expand all"]);
+    cx.update(|cx| assert_eq!(view.read(cx).hint(), None));
+}
+
+#[gpui_kit::test]
 fn a_new_diff_keeps_the_cursor_on_its_line(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
     // Rest on the second skip row (hidden lines 16..39).

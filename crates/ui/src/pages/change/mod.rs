@@ -40,10 +40,10 @@ use sync::PollPolicy;
 use crate::{
     actions::*,
     diff::{
-        DiffEvent, DiffSizing, DiffView, Expand,
+        DiffEvent, DiffSizing, DiffStatus, DiffView, Expand,
         actions::{NextFile, PrevFile},
     },
-    diff_load::{LoadError, expanded_context, load_diff},
+    diff_load::{LoadError, context_label, expanded_context, load_diff},
     nav::{ChangeView, DiffRoute},
     pages::list::Status,
     row::browser_url,
@@ -708,8 +708,16 @@ impl ChangePage {
         match result {
             Ok(diff) => {
                 inline.error = None;
+                // Say which context an expanded diff shows; the default
+                // context needs no label.
+                let status = inline
+                    .ctx
+                    .map(|c| DiffStatus::Info(format!("Context: {}", context_label(c)).into()));
                 match &inline.view {
-                    Some(view) => view.update(cx, |v, cx| v.set_diff(diff, cx)),
+                    Some(view) => view.update(cx, |v, cx| {
+                        v.set_diff(diff, cx);
+                        v.set_status(status, cx);
+                    }),
                     None => {
                         let view = cx.new(|cx| {
                             let mut v = DiffView::new(diff, prefs, cx);
@@ -720,6 +728,7 @@ impl ChangePage {
                                 cx,
                             );
                             v.set_font_family(font, cx);
+                            v.set_status(status, cx);
                             v
                         });
                         let owned = path.to_owned();
@@ -732,7 +741,17 @@ impl ChangePage {
                 }
             }
             Err(LoadError::Unauthorized) => cx.emit(ChangeEvent::Unauthorized),
-            Err(e) => inline.error = Some(e.to_string()),
+            Err(e) => {
+                // A refetch (more context) that fails must not pass
+                // silently behind the diff that is still shown.
+                if let Some(view) = &inline.view {
+                    let msg = format!("Could not load more lines: {e}");
+                    view.update(cx, |v, cx| {
+                        v.set_status(Some(DiffStatus::Error(msg.into())), cx)
+                    });
+                }
+                inline.error = Some(e.to_string());
+            }
         }
         self.remeasure(Block::File(self.index_of(path)));
         if self.cursor_path() == Some(path) {
@@ -768,8 +787,16 @@ impl ChangePage {
             inline.ctx = Some(ctx);
             inline.key = key;
             inline.phase = Phase::Queued;
+            if let Some(view) = &inline.view {
+                let msg = format!("Loading context: {}\u{2026}", context_label(ctx));
+                view.update(cx, |v, cx| {
+                    v.set_status(Some(DiffStatus::Busy(msg.into())), cx)
+                });
+            }
         }
+        self.remeasure(Block::File(self.index_of(path)));
         self.pump(cx);
+        cx.notify();
     }
 
     /// Whitespace, context, mode, font ...: apply to the open inline diffs

@@ -258,7 +258,7 @@ fn brackets_ask_for_the_neighbouring_files_and_stop_at_the_ends(cx: &mut TestApp
 
 #[gpui_kit::test]
 fn showing_the_whole_file_refetches_with_all_context_and_keeps_the_cursor(cx: &mut TestAppContext) {
-    let p = diff_page(cx, seeded(), "src/a.rs");
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(diff_with_skip()));
     cx.update(|cx| {
         let v = p.page.read(cx).view_for_test().expect("view");
         v.update(cx, |v, cx| v.set_cursor(3, cx));
@@ -281,6 +281,58 @@ fn showing_the_whole_file_refetches_with_all_context_and_keeps_the_cursor(cx: &m
         );
         let v = page.view_for_test().expect("view");
         assert_eq!(v.read(cx).cursor_anchor(), before);
+    });
+}
+
+/// The header says what is on screen, and a refetch that fails shows up on
+/// the view (it used to be swallowed: the old diff stayed, with no sign).
+#[gpui_kit::test]
+fn a_failed_whole_file_request_is_reported_and_the_header_stays_truthful(cx: &mut TestAppContext) {
+    let http = http_with(diff_with_skip());
+    http.route("context=ALL", 400, "bad request");
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http);
+    press(cx, p.window, &["shift-x"]);
+    cx.update(|cx| {
+        let page = p.page.read(cx);
+        assert_eq!(
+            page.shown_for_test().map(|k| k.context),
+            Some(DiffContext::Lines(10)),
+            "still showing the old diff"
+        );
+        assert_eq!(
+            page.key_for_test().map(|k| k.context),
+            Some(DiffContext::Lines(10))
+        );
+        let v = page.view_for_test().expect("view");
+        match v.read(cx).status() {
+            Some(crate::diff::DiffStatus::Error(m)) => {
+                assert!(m.contains("Could not load the diff"), "{m}")
+            }
+            other => panic!("expected an error status, got {other:?}"),
+        }
+    });
+    // Asking again retries the same request.
+    press(cx, p.window, &["shift-x"]);
+    assert_eq!(
+        requests(&p.http, "context=ALL"),
+        2,
+        "{:?}",
+        p.http.requested()
+    );
+}
+
+#[gpui_kit::test]
+fn a_successful_whole_file_request_updates_the_shown_context(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(diff_with_skip()));
+    press(cx, p.window, &["shift-x"]);
+    cx.update(|cx| {
+        let page = p.page.read(cx);
+        assert_eq!(
+            page.shown_for_test().map(|k| k.context),
+            Some(DiffContext::All)
+        );
+        let v = page.view_for_test().expect("view");
+        assert_eq!(v.read(cx).status(), None);
     });
 }
 

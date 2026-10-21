@@ -16,4 +16,4 @@ pub(crate) mod tests;
 
 pub use actions::{DIFF_VIEW, bind_keys};
 pub use layout::{Anchor, Layout, LayoutOptions, SkipRow};
-pub use view::{DiffEvent, DiffSizing, DiffView, Expand};
+pub use view::{DiffEvent, DiffSizing, DiffStatus, DiffView, Expand};
