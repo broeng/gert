@@ -1,18 +1,12 @@
-//! GPUI views. Built on gpui-kit; no I/O here.
+//! GPUI views. Built on gpui-kit; no I/O in render, all network and SQLite
+//! work runs on the background executor.
 
-use gpui_kit::component::*;
-use gpui_kit::*;
+pub mod labels;
+pub mod list_model;
+pub mod nav;
+pub mod row;
+pub mod time_fmt;
+pub mod tracker;
 
-/// Top-level view of the main window.
-pub struct RootView;
-
-impl Render for RootView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .child("Gert")
-    }
-}
+#[cfg(test)]
+mod testing;
