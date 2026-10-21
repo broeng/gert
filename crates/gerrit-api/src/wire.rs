@@ -17,9 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
-#[cfg(test)]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// `ChangeInfo.status`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -282,6 +280,119 @@ pub(crate) struct GeneralPreferencesInfo {
     pub diff_view: Option<String>,
 }
 
+/// `Range`: lines are 1-based, characters 0-based.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct Range {
+    pub start_line: Option<u32>,
+    pub start_character: Option<u32>,
+    pub end_line: Option<u32>,
+    pub end_character: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ContextLineInfo {
+    pub line_number: Option<u32>,
+    pub context_line: Option<String>,
+}
+
+/// `CommentInfo`. The `path` is missing in the by-file lists
+/// (`/comments`, `/drafts`), where the map key carries it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct CommentInfo {
+    pub author: Option<AccountInfo>,
+    pub tag: Option<String>,
+    pub change_message_id: Option<String>,
+    pub unresolved: Option<bool>,
+    pub context_lines: Option<Vec<ContextLineInfo>>,
+    pub patch_set: Option<u32>,
+    pub id: Option<String>,
+    pub path: Option<String>,
+    /// `PARENT` or `REVISION`; absent means `REVISION`.
+    pub side: Option<String>,
+    pub parent: Option<u32>,
+    pub line: Option<u32>,
+    pub range: Option<Range>,
+    pub in_reply_to: Option<String>,
+    pub updated: Option<String>,
+    pub message: Option<String>,
+    pub commit_id: Option<String>,
+}
+
+/// `RobotCommentInfo`: a comment plus what identifies the robot. The
+/// vendored spec's schema lists only the `CommentInfo` fields; `robot_id`
+/// is documented in Gerrit's REST API reference.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct RobotCommentInfo {
+    #[serde(flatten)]
+    pub comment: CommentInfo,
+    pub robot_id: Option<String>,
+}
+
+/// The request body for creating or updating a draft (`DraftInput`).
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct DraftInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<Range>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<bool>,
+}
+
+/// `AttentionSetInput`, the part we send.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct AttentionSetInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The request body of a review (`ReviewInput`), the part we send.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct ReviewInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drafts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_in_progress: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add_to_attention_set: Option<Vec<AttentionSetInput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remove_from_attention_set: Option<Vec<AttentionSetInput>>,
+}
+
+/// The part of `ReviewResult` we read.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ReviewResult {
+    pub labels: Option<BTreeMap<String, i32>>,
+    pub ready: Option<bool>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 pub(crate) struct ChangeInfo {
@@ -377,6 +488,85 @@ mod tests {
         conforms::<RelatedChangesInfo>(&spec, "RelatedChangesInfo");
         conforms::<DiffPreferencesInfo>(&spec, "DiffPreferencesInfo");
         conforms::<GeneralPreferencesInfo>(&spec, "GeneralPreferencesInfo");
+        conforms::<Range>(&spec, "Range");
+        conforms::<ContextLineInfo>(&spec, "ContextLineInfo");
+        conforms::<CommentInfo>(&spec, "CommentInfo");
+        conforms::<ReviewResult>(&spec, "ReviewResult");
+        // The spec's schema omits the robot fields (see the struct).
+        conforms_except::<RobotCommentInfo>(&spec, "RobotCommentInfo", &["robot_id"]);
+    }
+
+    /// The request bodies skip absent fields, so a default value shows no
+    /// keys; check a value with every field set instead.
+    #[test]
+    fn request_structs_conform_to_the_spec() {
+        let spec = spec();
+        let range = Range {
+            start_line: Some(1),
+            start_character: Some(2),
+            end_line: Some(3),
+            end_character: Some(4),
+        };
+        let draft = DraftInput {
+            path: Some("p".into()),
+            side: Some("PARENT".into()),
+            parent: Some(1),
+            line: Some(3),
+            range: Some(range),
+            in_reply_to: Some("x".into()),
+            message: Some("m".into()),
+            unresolved: Some(true),
+        };
+        conforms_value(&spec, "DraftInput", &draft);
+        let att = AttentionSetInput {
+            user: Some("1".into()),
+            reason: Some("r".into()),
+        };
+        conforms_value(&spec, "AttentionSetInput", &att);
+        let review = ReviewInput {
+            message: Some("m".into()),
+            tag: Some("t".into()),
+            labels: Some(BTreeMap::new()),
+            drafts: Some("KEEP".into()),
+            notify: Some("NONE".into()),
+            work_in_progress: Some(true),
+            ready: Some(true),
+            add_to_attention_set: Some(vec![att.clone()]),
+            remove_from_attention_set: Some(vec![att]),
+        };
+        conforms_value(&spec, "ReviewInput", &review);
+    }
+
+    fn conforms_value<T: Serialize>(spec: &Value, schema: &str, value: &T) {
+        let Value::Object(fields) = serde_json::to_value(value).unwrap() else {
+            panic!("{schema}: not an object");
+        };
+        let props = spec["components"]["schemas"][schema]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("schema {schema} not found in spec"));
+        for key in fields.keys() {
+            assert!(
+                props.contains_key(key),
+                "{schema}: field `{key}` is not in the spec"
+            );
+        }
+        assert!(!fields.is_empty(), "{schema}: no fields");
+    }
+
+    /// Like [`conforms`], for fields the spec's schema leaves out.
+    fn conforms_except<T: Default + Serialize>(spec: &Value, schema: &str, extra: &[&str]) {
+        let Value::Object(fields) = serde_json::to_value(T::default()).unwrap() else {
+            panic!("{schema}: wire struct does not serialize to an object");
+        };
+        let props = spec["components"]["schemas"][schema]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("schema {schema} not found in spec"));
+        for key in fields.keys().filter(|k| !extra.contains(&k.as_str())) {
+            assert!(
+                props.contains_key(key),
+                "{schema}: field `{key}` is not in the spec"
+            );
+        }
     }
 
     #[test]

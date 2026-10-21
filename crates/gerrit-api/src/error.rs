@@ -38,10 +38,6 @@ pub enum Error {
         /// The server's explanation (a plain-text body).
         message: String,
     },
-    /// A review was accepted with HTTP 200 but the `ReviewResult` carries an
-    /// `error` (for example a label that could not be applied).
-    #[error("review failed: {0}")]
-    ReviewFailed(String),
     #[error("invalid response body: {0}")]
     Decode(#[from] serde_json::Error),
     #[error("unexpected response contents: {0}")]
@@ -99,7 +95,6 @@ mod tests {
             Error::Conflict {
                 message: "x".into(),
             },
-            Error::ReviewFailed("x".into()),
             Error::InvalidUrl("x".into()),
         ] {
             assert!(!e.is_retryable(), "{e}");
