@@ -10,6 +10,10 @@
 //!
 //! Open the first change with `j`, `Enter`. Requests that no route matches
 //! answer 404, which the pages show as an error.
+//!
+//! Change 12345 has comments (including a patch-set level thread) and two
+//! drafts of alice's. The fake server keeps drafts in memory: you can write,
+//! edit and delete them, and they are listed again after a refresh.
 
 use std::{
     path::PathBuf,
@@ -157,6 +161,18 @@ fn comments() -> String {
              "message": "Say what changed, not that it was reworked.",
              "updated": at("14:00:00"), "unresolved": true},
         ],
+        // Patch-set level: no line, no side (the dev Gerrit answers so).
+        "/PATCHSET_LEVEL": [
+            {"id": "ps1", "patch_set": 3, "author": bob,
+             "message": "Overall this looks good.\n\nPlease add a test for the empty queue.",
+             "updated": at("15:00:00"), "unresolved": true},
+            {"id": "ps2", "patch_set": 3, "author": alice, "in_reply_to": "ps1",
+             "message": "Will do, in the next patch set.", "updated": at("15:30:00"),
+             "unresolved": true},
+            {"id": "ps3", "patch_set": 2, "author": bob,
+             "message": "Thanks for splitting this up.", "updated": at("08:00:00"),
+             "unresolved": false},
+        ],
     });
     format!(")]}}'\n{body}")
 }
@@ -170,22 +186,169 @@ enum Drafts {
     Offline,
 }
 
-fn server(files: Option<usize>, drafts: Drafts) -> RouteHttpClient {
+/// The user's drafts on change 12345, kept in memory like the real server
+/// keeps them: `PUT .../drafts` creates one with a new id (201), `PUT
+/// .../drafts/{id}` replaces its text, `DELETE` removes it (204), and
+/// `GET /changes/12345/drafts` lists what is there, by path. Everything else
+/// goes to `inner`.
+struct DraftServer {
+    inner: WholeFileDiffs,
+    mode: Drafts,
+    state: Mutex<DraftState>,
+}
+
+struct DraftState {
+    next: u32,
+    /// Drafts in creation order: the id and the `CommentInfo`.
+    drafts: Vec<(String, serde_json::Value)>,
+}
+
+impl DraftServer {
+    fn new(inner: WholeFileDiffs, mode: Drafts) -> Self {
+        // Drafts of alice's, shaped like the ones `dev/seed.sh` leaves on
+        // change 3: a reply in a thread, and one on a file.
+        let seed = |id: &str, body: serde_json::Value| {
+            let mut c = body;
+            c["id"] = id.into();
+            c["patch_set"] = 3.into();
+            c["updated"] = "2024-06-15 09:00:00.000000000".into();
+            (id.to_owned(), c)
+        };
+        let drafts = vec![
+            seed(
+                "draft-seed-1",
+                serde_json::json!({"path": "src/sched/queue.rs", "line": 90, "side": "PARENT",
+                    "in_reply_to": "q5", "message": "Still reachable from the old scheduler.",
+                    "unresolved": false}),
+            ),
+            seed(
+                "draft-seed-2",
+                serde_json::json!({"path": "src/sched/queue.rs",
+                    "message": "File-level draft: rename this module?", "unresolved": true}),
+            ),
+        ];
+        Self {
+            inner,
+            mode,
+            state: Mutex::new(DraftState { next: 1, drafts }),
+        }
+    }
+
+    fn reply(
+        status: u16,
+        body: Vec<u8>,
+    ) -> BoxFuture<'static, Result<http::Response<Vec<u8>>, HttpError>> {
+        let resp = http::Response::builder()
+            .status(status)
+            .body(body)
+            .unwrap_or_default();
+        async move { Ok(resp) }.boxed()
+    }
+
+    fn json(
+        status: u16,
+        value: &serde_json::Value,
+    ) -> BoxFuture<'static, Result<http::Response<Vec<u8>>, HttpError>> {
+        Self::reply(status, format!(")]}}'\n{value}").into_bytes())
+    }
+
+    /// Without the patch set: the server's answer to a write leaves it out.
+    fn receipt(c: &serde_json::Value) -> serde_json::Value {
+        let mut c = c.clone();
+        if let Some(o) = c.as_object_mut() {
+            o.remove("patch_set");
+        }
+        c
+    }
+}
+
+impl HttpClient for DraftServer {
+    fn send(
+        &self,
+        req: http::Request<Vec<u8>>,
+    ) -> BoxFuture<'static, Result<http::Response<Vec<u8>>, HttpError>> {
+        use serde_json::{Value, json};
+        let path = req.uri().path().to_owned();
+        let Some((head, tail)) = path
+            .split_once("/changes/12345/")
+            .and_then(|(_, rest)| rest.split_once("drafts"))
+        else {
+            return self.inner.send(req);
+        };
+        let method = req.method().clone();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // The list: `GET /changes/12345/drafts`.
+        if method == http::Method::GET {
+            let mut by_path = serde_json::Map::new();
+            for (_, c) in &state.drafts {
+                let key = c["path"].as_str().unwrap_or_default().to_owned();
+                if let Value::Array(list) = by_path.entry(key).or_insert_with(|| json!([])) {
+                    list.push(c.clone());
+                }
+            }
+            return Self::json(200, &Value::Object(by_path));
+        }
+        match self.mode {
+            Drafts::Ok => {}
+            Drafts::Fail => return Self::reply(400, b"This comment is not welcome here".to_vec()),
+            Drafts::Offline => return Self::reply(503, b"unavailable".to_vec()),
+        }
+        let id = tail.trim_matches('/').to_owned();
+        let at = state.drafts.iter().position(|(d, _)| *d == id);
+        if method == http::Method::DELETE {
+            return match at {
+                Some(i) => {
+                    state.drafts.remove(i);
+                    Self::reply(204, Vec::new())
+                }
+                None => Self::reply(404, b"Not found".to_vec()),
+            };
+        }
+        let body: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
+        // The patch set is the digit the example's revision SHAs repeat.
+        let patch_set = head
+            .rsplit('/')
+            .find(|s| s.len() == 40)
+            .and_then(|sha| sha.chars().next()?.to_digit(10))
+            .unwrap_or(3);
+        let tick = state.next;
+        let updated = format!(
+            "2024-06-15 10:{:02}:{:02}.000000000",
+            tick / 60 % 60,
+            tick % 60
+        );
+        if id.is_empty() {
+            let id = format!("draft-{tick}");
+            state.next += 1;
+            let mut c = body;
+            c["id"] = id.clone().into();
+            c["patch_set"] = patch_set.into();
+            c["updated"] = updated.into();
+            state.drafts.push((id, c.clone()));
+            return Self::json(201, &Self::receipt(&c));
+        }
+        match at {
+            Some(i) => {
+                state.next += 1;
+                let c = &mut state.drafts[i].1;
+                for key in ["message", "unresolved"] {
+                    if let Some(v) = body.get(key) {
+                        c[key] = v.clone();
+                    }
+                }
+                c["updated"] = updated.into();
+                let c = c.clone();
+                Self::json(200, &Self::receipt(&c))
+            }
+            None => Self::reply(404, b"Not found".to_vec()),
+        }
+    }
+}
+
+fn server(files: Option<usize>) -> RouteHttpClient {
     let http = RouteHttpClient::new();
     http.route("/changes/12345/comments", 200, comments());
-    // Drafts are not kept: the server answers a fixed receipt, which is all
-    // the screenshots need.
-    http.route("/changes/12345/drafts", 200, ")]}'\n{}");
     let sha3 = "3".repeat(40);
-    let (status, body) = match drafts {
-        Drafts::Ok => (
-            201,
-            ")]}'\n{\"id\":\"d1\",\"patch_set\":3,\"updated\":\"2024-06-15 10:00:00.000000000\"}",
-        ),
-        Drafts::Fail => (400, "This comment is not welcome here"),
-        Drafts::Offline => (503, "unavailable"),
-    };
-    http.route(&format!("/revisions/{sha3}/drafts"), status, body);
     let ex = |name: &str| read(&format!("example/{name}"));
     let hw = |name: &str| read(&format!("handwritten/{name}"));
     http.route("/accounts/self/detail", 200, ex("account.json"));
@@ -296,7 +459,12 @@ fn main() {
         }
     }
 
-    let http = server(files, drafts);
+    let http = DraftServer::new(
+        WholeFileDiffs {
+            inner: server(files),
+        },
+        drafts,
+    );
     let mut store = Store::open_in_memory().unwrap_or_else(|e| {
         eprintln!("review: {e}");
         std::process::exit(2);
@@ -307,7 +475,7 @@ fn main() {
     });
     let startup = Startup {
         env: Env {
-            http: Arc::new(WholeFileDiffs { inner: http }),
+            http: Arc::new(http),
             store: Arc::new(Mutex::new(store)),
             backend: Arc::new(Demo),
         },
