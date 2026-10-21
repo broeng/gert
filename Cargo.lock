@@ -1924,7 +1924,13 @@ dependencies = [
 name = "gerrit-api"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "futures",
  "gerrit_client",
+ "http",
+ "model",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
