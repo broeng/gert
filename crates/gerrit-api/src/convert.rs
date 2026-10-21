@@ -13,8 +13,6 @@ use crate::wire::{AccountInfo, ChangeInfo, LabelInfo, Status};
 pub enum ConversionError {
     #[error("missing required field `{0}`")]
     MissingField(&'static str),
-    #[error("field `{field}` has out-of-range value {value}")]
-    OutOfRange { field: &'static str, value: i64 },
     #[error("field `{field}`: {source}")]
     Timestamp {
         field: &'static str,
