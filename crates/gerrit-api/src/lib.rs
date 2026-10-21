@@ -1,8 +1,8 @@
 //! Async Gerrit REST client. GPUI-free and runtime-agnostic.
 //!
-//! Responses are deserialized with the `gerrit_client` SDK models and
-//! converted to [`model`] types at the crate boundary; SDK types never appear
-//! in this crate's public API.
+//! Responses are deserialized into private, tolerant wire structs (`wire`)
+//! and converted to [`model`] types at the crate boundary; wire types never
+//! appear in this crate's public API.
 
 mod auth;
 mod client;

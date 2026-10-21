@@ -4,9 +4,7 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
 use futures::executor::block_on;
-use gerrit_client::models as sdk;
 use model::{AccountId, ChangeNumber, ChangeStatus};
-use serde_json::Value;
 
 use crate::{Auth, ChangeQuery, GerritClient, convert, fake::FakeHttpClient, wire};
 
@@ -41,8 +39,8 @@ fn every_change_info_fixture_converts() {
     let files = names("ChangeInfo.");
     assert!(files.len() >= 3, "{files:?}");
     for f in files {
-        let v: Value = serde_json::from_str(&read(&f)).unwrap();
-        let w = wire::parse_change(v).unwrap_or_else(|e| panic!("{f}: {e}"));
+        let w: wire::ChangeInfo =
+            serde_json::from_str(&read(&f)).unwrap_or_else(|e| panic!("{f}: {e}"));
         let s = convert::change_summary(&w).unwrap_or_else(|e| panic!("{f}: {e}"));
         assert_eq!(s.number, ChangeNumber(12345), "{f}");
     }
@@ -53,14 +51,14 @@ fn every_account_info_fixture_converts() {
     let files = names("AccountInfo.");
     assert!(files.len() >= 2, "{files:?}");
     for f in files {
-        let a: sdk::AccountInfo = serde_json::from_str(&read(&f)).unwrap();
+        let a: wire::AccountInfo = serde_json::from_str(&read(&f)).unwrap();
         let a = convert::account(&a).unwrap_or_else(|e| panic!("{f}: {e}"));
         assert_eq!(a.id, AccountId(1_000_001), "{f}");
     }
 }
 
 #[test]
-fn other_schema_fixtures_deserialize_into_sdk_models() {
+fn other_schema_fixtures_deserialize_into_wire_types() {
     macro_rules! check {
         ($ty:ty, $prefix:expr) => {{
             let files = names($prefix);
@@ -70,12 +68,12 @@ fn other_schema_fixtures_deserialize_into_sdk_models() {
             }
         }};
     }
-    check!(sdk::LabelInfo, "LabelInfo.");
-    check!(sdk::ApprovalInfo, "ApprovalInfo.");
-    check!(sdk::RevisionInfo, "RevisionInfo.");
-    check!(sdk::CommitInfo, "CommitInfo.");
-    check!(sdk::GitPerson, "GitPerson.");
-    check!(sdk::AttentionSetInfo, "AttentionSetInfo.");
+    check!(wire::LabelInfo, "LabelInfo.");
+    check!(wire::ApprovalInfo, "ApprovalInfo.");
+    check!(wire::RevisionInfo, "RevisionInfo.");
+    check!(wire::CommitInfo, "CommitInfo.");
+    check!(wire::GitPerson, "GitPerson.");
+    check!(wire::AttentionSetInfo, "AttentionSetInfo.");
 }
 
 #[test]
