@@ -24,12 +24,34 @@ pub fn queries_to_ui(queries: &[QueryConfig]) -> Vec<SavedQuery> {
         .collect()
 }
 
+/// Debug builds only: the HTTP password from `GERT_DEV_PASSWORD`, for
+/// running against the local dev Gerrit (`dev/README.md`) where no keyring
+/// is at hand, such as a headless session. It only applies to a server on
+/// this machine, so a password meant for the dev server cannot be sent to
+/// another one. It is never logged, stored or written anywhere.
+#[cfg(debug_assertions)]
+fn dev_password(base_url: &str) -> Option<String> {
+    dev_password_from(base_url, std::env::var("GERT_DEV_PASSWORD").ok())
+}
+
+#[cfg(debug_assertions)]
+fn dev_password_from(base_url: &str, value: Option<String>) -> Option<String> {
+    let local = ["http://127.0.0.1:", "http://localhost:"]
+        .iter()
+        .any(|prefix| base_url.starts_with(prefix));
+    value.filter(|p| local && !p.is_empty())
+}
+
 impl Backend for AppBackend {
     fn load_password(
         &self,
         base_url: &str,
         username: &str,
     ) -> Result<Option<String>, BackendError> {
+        #[cfg(debug_assertions)]
+        if let Some(password) = dev_password(base_url) {
+            return Ok(Some(password));
+        }
         self.keyring
             .get(base_url, username)
             .map_err(|e| BackendError(e.to_string()))
@@ -63,6 +85,30 @@ impl Backend for AppBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_dev_password_only_applies_to_a_local_server() {
+        let pw = || Some("pw".to_owned());
+        assert_eq!(
+            dev_password_from("http://127.0.0.1:8099", pw()).as_deref(),
+            Some("pw")
+        );
+        assert_eq!(
+            dev_password_from("http://localhost:8080", pw()).as_deref(),
+            Some("pw")
+        );
+        assert_eq!(dev_password_from("https://gerrit.example.com", pw()), None);
+        assert_eq!(
+            dev_password_from("http://127.0.0.1.example.com", pw()),
+            None
+        );
+        assert_eq!(
+            dev_password_from("http://127.0.0.1:8099", Some(String::new())),
+            None
+        );
+        assert_eq!(dev_password_from("http://127.0.0.1:8099", None), None);
+    }
 
     #[test]
     fn anonymous_login_writes_config_without_touching_the_keyring() {
