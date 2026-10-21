@@ -16,6 +16,7 @@ use super::DiffPage;
 use crate::{
     LocalDiff,
     nav::{DiffRoute, Route},
+    outbox::DraftOutbox,
     pages::change::ChangePage,
     session::{SavedQuery, Startup},
     settings::DiffSettings,
@@ -128,7 +129,8 @@ fn diff_page_as(
     let (window, page) = open(cx, |window, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
         settings_out = Some(settings.clone());
-        let page = cx.new(|cx| DiffPage::new(session, settings, route(&path), cx));
+        let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
+        let page = cx.new(|cx| DiffPage::new(session, settings, route(&path), outbox, cx));
         cx.subscribe(&page, move |_, ev: &super::DiffPageEvent, _| {
             let text = match ev {
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
@@ -216,6 +218,7 @@ fn an_unknown_patch_set_is_an_error_not_a_blank_page(cx: &mut TestAppContext) {
         .expect("session");
     let (_w, page) = open(cx, |_, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
+        let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
         cx.new(|cx| {
             DiffPage::new(
                 session,
@@ -224,6 +227,7 @@ fn an_unknown_patch_set_is_an_error_not_a_blank_page(cx: &mut TestAppContext) {
                     target: PatchSetNumber(9),
                     ..route("src/a.rs")
                 },
+                outbox,
                 cx,
             )
         })

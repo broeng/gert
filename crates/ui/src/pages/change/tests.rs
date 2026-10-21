@@ -13,6 +13,7 @@ use super::{ChangeEvent, ChangePage, state::Block};
 use crate::{
     LocalDiff,
     nav::ChangeView,
+    outbox::DraftOutbox,
     session::Session,
     settings::DiffSettings,
     testing::{detail, file, whole_file},
@@ -106,7 +107,9 @@ fn page_with(
     let log = events.clone();
     let (window, page) = open(cx, |window, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
-        let page = cx.new(|cx| ChangePage::new(session, settings, ChangeNumber(7), view, true, cx));
+        let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
+        let page = cx
+            .new(|cx| ChangePage::new(session, settings, ChangeNumber(7), view, true, outbox, cx));
         cx.subscribe(&page, move |_, ev: &ChangeEvent, _| {
             let text = match ev {
                 ChangeEvent::Unauthorized => "unauthorized".to_owned(),
