@@ -6,10 +6,13 @@
 //!
 //! Every row is keyed by [`ServerId`], so several servers can live in one
 //! database. Schema changes are ordered steps tracked with
-//! `PRAGMA user_version`; see `migrations.rs`.
+//! `PRAGMA user_version`; see `migrations.rs`. The change and diff view
+//! caches (file lists, diffs, related changes, diff preferences) live in
+//! `review_cache.rs`, including the pruning policy.
 
 mod error;
 mod migrations;
+mod review_cache;
 
 use std::{path::Path, time::Duration};
 
@@ -17,6 +20,9 @@ use model::{ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub use error::Error;
+pub use review_cache::{
+    CachedDiff, CachedDiffPreferences, CachedFileList, CachedRelated, PrunePolicy, PruneReport,
+};
 
 /// How long a writer waits for a competing connection before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);

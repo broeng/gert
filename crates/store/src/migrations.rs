@@ -50,6 +50,53 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (server_id, number)
     );
     ",
+    // v1 -> v2: caches for the change and diff views. `base_sha` is the empty
+    // string when comparing against the parent commit. `fetched_ms` is Unix
+    // milliseconds; `size` is the byte length of a diff's JSON.
+    "
+    CREATE TABLE file_lists (
+        server_id     INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        change_number INTEGER NOT NULL,
+        base_sha      TEXT NOT NULL,
+        target_sha    TEXT NOT NULL,
+        files_json    TEXT NOT NULL,
+        reviewed_json TEXT,
+        fetched_ms    INTEGER NOT NULL,
+        PRIMARY KEY (server_id, change_number, base_sha, target_sha)
+    );
+    CREATE INDEX file_lists_fetched ON file_lists (fetched_ms);
+
+    CREATE TABLE diffs (
+        server_id     INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        change_number INTEGER NOT NULL,
+        base_sha      TEXT NOT NULL,
+        target_sha    TEXT NOT NULL,
+        path          TEXT NOT NULL,
+        whitespace    TEXT NOT NULL,
+        context       TEXT NOT NULL,
+        json          TEXT NOT NULL,
+        size          INTEGER NOT NULL,
+        fetched_ms    INTEGER NOT NULL,
+        PRIMARY KEY (server_id, change_number, base_sha, target_sha, path, whitespace, context)
+    );
+    CREATE INDEX diffs_fetched ON diffs (fetched_ms);
+
+    CREATE TABLE related_changes (
+        server_id     INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        change_number INTEGER NOT NULL,
+        revision_sha  TEXT NOT NULL,
+        json          TEXT NOT NULL,
+        fetched_ms    INTEGER NOT NULL,
+        PRIMARY KEY (server_id, change_number, revision_sha)
+    );
+    CREATE INDEX related_changes_fetched ON related_changes (fetched_ms);
+
+    CREATE TABLE diff_preferences (
+        server_id  INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+        json       TEXT NOT NULL,
+        fetched_ms INTEGER NOT NULL
+    );
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {
