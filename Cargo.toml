@@ -23,6 +23,15 @@ ui = { path = "crates/ui" }
 gpui-kit = { git = "https://github.com/longbridge/gpui-component", rev = "1676826d9d49b90f4d7b6808b69924f58796f6f1" } # v0.8.0
 # Must equal the gpui-pre version gpui-component pins at the rev above.
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
+# Syntax highlighting for diffs. Versions and features must equal what
+# gpui-component's workspace uses at the rev above, so Cargo resolves one
+# copy; bump them together with gpui-kit.
+syntect = { version = "5.3.0", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+] }
+two-face = { version = "0.4.5", default-features = false, features = ["syntect-fancy"] }
 
 anyhow = "1"
 base64 = "0.22"
