@@ -539,6 +539,23 @@ fn only_changed_votes_are_in_the_body(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn tab_enters_a_vote_row_on_the_current_vote(cx: &mut TestAppContext) {
+    let f = dialog(cx, |_| {}, |_| {});
+    // Message, Resolved, then Code-Review on bob's +1 (index 3), not -2.
+    press(cx, &f, &["tab", "tab"]);
+    let on_plus_one = cx.update(|cx| f.dialog.read(cx).vote_focus_for_test(0, 3));
+    assert!(focused(cx, &f, on_plus_one));
+    press(cx, &f, &["right"]);
+    let selected =
+        |cx: &mut TestAppContext| cx.update(|cx| f.dialog.read(cx).votes_for_test()[0].selected);
+    assert_eq!(selected(cx), 2, "Right moves from the current vote");
+    // The next row (Verified, no vote) starts on 0, the middle of -1 0 +1.
+    press(cx, &f, &["tab"]);
+    let on_zero = cx.update(|cx| f.dialog.read(cx).vote_focus_for_test(1, 1));
+    assert!(focused(cx, &f, on_zero));
+}
+
+#[gpui_kit::test]
 fn left_and_right_pick_the_neighbouring_value(cx: &mut TestAppContext) {
     let f = dialog(cx, |_| {}, |_| {});
     let h = cx.update(|cx| f.dialog.read(cx).vote_focus_for_test(0, 3));
@@ -674,7 +691,9 @@ fn a_draft_the_server_refuses_is_reported_and_nothing_is_posted(cx: &mut TestApp
     let error = cx
         .update(|cx| f.dialog.read(cx).error_for_test().map(str::to_owned))
         .expect("an error");
-    assert!(error.contains("could not be uploaded"), "{error}");
+    assert!(error.contains("message could not be uploaded"), "{error}");
+    // The dialog lists no drafts here, so it must not point at a button.
+    assert!(!error.contains("Upload drafts"), "{error}");
     assert!(!writes(&f).iter().any(|w| w.starts_with("POST")));
     assert!(events(&f).is_empty(), "the dialog stays open");
     // The text is a draft in the store.
@@ -1002,4 +1021,22 @@ mod from_the_shell {
         let hint = cx.update(|cx| page.read(cx).hint_for_test());
         assert!(matches!(hint, Some((t, false)) if t == "Sign in to reply"));
     }
+}
+
+#[test]
+fn the_upload_hint_names_the_button_only_when_the_list_has_the_drafts() {
+    use model::{LocalDraftId, PatchSetNumber};
+    let pending = |id| sync::PendingDraft {
+        local_id: LocalDraftId(id),
+        path: "a.rs".into(),
+        patch_set: PatchSetNumber(3),
+        reason: "down".into(),
+    };
+    // Draft 1 is in the dialog's list, 2 is the message.
+    let both = sync::Error::DraftsNotUploaded(vec![pending(1), pending(2)]);
+    assert!(super::describe(&both, &[LocalDraftId(1)]).contains("Upload drafts"));
+    let only_message = sync::Error::DraftsNotUploaded(vec![pending(2)]);
+    let text = super::describe(&only_message, &[LocalDraftId(1)]);
+    assert!(!text.contains("Upload drafts"), "{text}");
+    assert!(text.contains("message could not be uploaded"), "{text}");
 }

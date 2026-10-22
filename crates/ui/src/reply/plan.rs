@@ -37,6 +37,13 @@ impl VoteRow {
     pub fn changed(&self) -> bool {
         self.selected != self.current
     }
+
+    /// The choice the keyboard focus starts on: the selected value (the
+    /// user's own vote until they pick another), else 0, else the first.
+    pub fn focus_index(&self) -> usize {
+        let at = |v: i32| self.choices.iter().position(|c| c.value == v);
+        at(self.selected).or_else(|| at(0)).unwrap_or(0)
+    }
 }
 
 /// Text of a vote value: `+1`, `-2`, `0`.
@@ -650,6 +657,31 @@ mod tests {
         );
         assert!(i.other_patch_set && i.pending() && !i.failed());
         assert_eq!(i.problem().as_deref(), Some("not uploaded: offline"));
+    }
+
+    #[test]
+    fn the_focus_starts_on_the_selected_vote_else_zero() {
+        let mut d = change();
+        with_labels(&mut d);
+        let mut rows = vote_rows(&d, Some("bob"));
+        let by = |rows: &[VoteRow], l: &str| rows.iter().position(|r| r.label == l).unwrap();
+        let (cr, v) = (by(&rows, "Code-Review"), by(&rows, "Verified"));
+        // bob has no vote on Verified: 0 is the third of -1 0 +1.
+        assert_eq!(rows[v].focus_index(), 1);
+        assert_eq!(
+            rows[cr].choices[rows[cr].focus_index()].value,
+            rows[cr].selected
+        );
+        // After a pick the focus follows the selection.
+        rows[cr].selected = 2;
+        assert_eq!(rows[cr].focus_index(), 4);
+        // A vote the user may not set (any more): back to 0.
+        rows[cr].selected = 7;
+        assert_eq!(rows[cr].focus_index(), 2);
+        // Without a 0 among the values: the first.
+        rows[v].choices.retain(|c| c.value != 0);
+        rows[v].selected = 0;
+        assert_eq!(rows[v].focus_index(), 0);
     }
 
     #[test]
