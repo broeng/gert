@@ -196,6 +196,14 @@ impl Shell {
         self
     }
 
+    /// Sets whether a vote moves on to the next open change of the chain
+    /// (the `[review] advance_after_vote` setting).
+    pub fn with_advance_after_vote(self, on: bool, cx: &mut Context<Self>) -> Self {
+        self.layout
+            .update(cx, |layout, cx| layout.set_advance_after_vote(on, cx));
+        self
+    }
+
     /// Opens the dashboard from the cache right away and fetches the
     /// password in the background.
     fn start(&mut self, server: Option<ServerSetup>, window: &mut Window, cx: &mut Context<Self>) {

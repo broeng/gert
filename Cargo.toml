@@ -37,6 +37,7 @@ thiserror = "2"
 directories = "6"
 keyring = "4"
 toml = "1"
+toml_edit = "0.25"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 
 [workspace.lints.rust]
