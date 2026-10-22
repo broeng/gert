@@ -19,6 +19,12 @@ impl Error {
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, Self::Api(e) if e.is_unauthorized())
     }
+
+    /// True if the server answered and refused the request (403, 409, other
+    /// HTTP errors), as opposed to not being reachable.
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, Self::Api(e) if e.is_refusal())
+    }
 }
 
 /// A draft that is not (yet) on the server, and why.

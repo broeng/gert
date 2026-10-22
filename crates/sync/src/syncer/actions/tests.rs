@@ -162,6 +162,45 @@ fn refused_actions_leave_the_cache_alone() {
 }
 
 #[test]
+fn a_refusal_fetches_the_change_but_other_failures_do_not() {
+    let http = routes("NEW", json!({"submit": {"enabled": true}}));
+    let syncer = syncer_for(&http, signed_in());
+    block_on(syncer.refresh_change(CHANGE)).unwrap();
+
+    // Meanwhile the change was merged elsewhere; the submit is refused.
+    http.route_json("GET /changes/7?", &change_json("MERGED", json!({})));
+    http.route("POST /changes/7/submit", 409, "change is merged\n");
+    http.route("POST /changes/7/abandon", 403, "no\n");
+    http.route("POST /changes/7/rebase", 401, "");
+    http.route("POST /changes/7/restore", 503, "down");
+    let err = block_on(syncer.submit(CHANGE)).unwrap_err();
+    let detail = block_on(syncer.refresh_after_refusal(CHANGE, &err)).unwrap();
+    assert_eq!(detail.summary.status, ChangeStatus::Merged);
+    assert_eq!(
+        syncer.cached_change(CHANGE).unwrap().unwrap().detail,
+        detail
+    );
+
+    // 403 counts too.
+    let err = block_on(syncer.abandon(CHANGE, None)).unwrap_err();
+    assert!(block_on(syncer.refresh_after_refusal(CHANGE, &err)).is_some());
+
+    // 401, a transient 5xx and an unreachable server do not.
+    let n = http.sent().len();
+    for err in [
+        block_on(syncer.rebase(CHANGE, None)).unwrap_err(),
+        block_on(syncer.restore(CHANGE, None)).unwrap_err(),
+        Error::Api(gerrit_api::Error::Http(gerrit_api::HttpError(
+            "reset".into(),
+        ))),
+    ] {
+        assert!(block_on(syncer.refresh_after_refusal(CHANGE, &err)).is_none());
+    }
+    // Only the two writes went out.
+    assert_eq!(http.sent().len(), n + 2);
+}
+
+#[test]
 fn a_failed_refresh_after_an_accepted_action_is_not_an_error() {
     let http = RouteHttpClient::new();
     http.route("POST /changes/7/wip", 200, "");

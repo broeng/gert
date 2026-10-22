@@ -60,6 +60,22 @@ impl Error {
         }
     }
 
+    /// Whether the server answered and said no to this request (403, 404,
+    /// 400, 409 or another HTTP error that is not a transient one), as
+    /// opposed to the request not getting through (transport, 5xx from a
+    /// proxy), the credentials (401) or a local failure. After a refusal
+    /// our picture of the change may be stale.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            Self::Forbidden { .. }
+            | Self::NotFound
+            | Self::BadRequest { .. }
+            | Self::Conflict { .. } => true,
+            Self::Status { .. } => !self.is_retryable(),
+            _ => false,
+        }
+    }
+
     /// Whether the credentials were refused (401); the one case that should
     /// send the user to the login page.
     pub fn is_unauthorized(&self) -> bool {
@@ -70,6 +86,38 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refusals_are_answers_that_say_no_to_the_request() {
+        let status = |code| Error::Status {
+            code,
+            body: String::new(),
+        };
+        assert!(
+            Error::Conflict {
+                message: "m".into()
+            }
+            .is_refusal()
+        );
+        assert!(
+            Error::Forbidden {
+                message: "m".into()
+            }
+            .is_refusal()
+        );
+        assert!(
+            Error::BadRequest {
+                message: "m".into()
+            }
+            .is_refusal()
+        );
+        assert!(Error::NotFound.is_refusal());
+        assert!(status(500).is_refusal());
+        assert!(status(412).is_refusal());
+        assert!(!status(503).is_refusal());
+        assert!(!Error::Unauthorized.is_refusal());
+        assert!(!Error::Http(HttpError("reset".into())).is_refusal());
+    }
 
     #[test]
     fn only_transport_and_transient_failures_are_retryable() {

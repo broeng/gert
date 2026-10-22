@@ -3,9 +3,11 @@
 //! Every method sends the request, and only if the server accepted it
 //! fetches the change again (detail, and with it the actions the user may
 //! now run) into the cache, so the UI re-renders from the store. A refused
-//! action (401, 403, 409, ...) is returned as an error and leaves the cache
-//! as it was: there is no optimistic update and no outbox, an action needs
-//! a connection.
+//! action (401, 403, 409, ...) is returned as an error: there is no
+//! optimistic update and no outbox, an action needs a connection. A caller
+//! that gets a refusal asks [`Syncer::refresh_after_refusal`] for the
+//! change as the server has it, since the refusal usually means the cached
+//! one is stale (the change was merged, rebased or abandoned meanwhile).
 //!
 //! The result is the refreshed detail, or `None` when the action went
 //! through but fetching the change failed afterwards (logged; the next
@@ -73,6 +75,22 @@ impl Syncer {
     ) -> Result<Option<ChangeDetail>, Error> {
         self.client.set_private(change, private).await?;
         Ok(self.refresh_after_action(change, "private").await)
+    }
+
+    /// After `error` refused a write to `change`: fetches the change into
+    /// the cache and returns it, so the UI can show what the server has.
+    /// Does nothing (`None`) for errors that are not a refusal: a transport
+    /// failure says nothing about the change, and 401 means logging in. If
+    /// fetching fails too, that is logged and the cache stays as it was.
+    pub async fn refresh_after_refusal(
+        &self,
+        change: ChangeNumber,
+        error: &Error,
+    ) -> Option<ChangeDetail> {
+        if !error.is_refusal() {
+            return None;
+        }
+        self.refresh_after_action(change, "a refused write").await
     }
 
     pub(super) async fn refresh_after_action(
