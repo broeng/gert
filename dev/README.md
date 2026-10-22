@@ -133,6 +133,13 @@ changes; `--reset` clears them.
 - A hashtag list comes back in varying order.
 - `GET /changes/{n}/robotcomments` is 404 on 3.14 (no endpoint).
 - `GET /changes/{n}/drafts` includes `commit_id` for every draft.
+- The `revert` action is offered to `admin` on a merged change, not to its
+  owner `alice`; `cherrypick` (on the current revision) is offered to everyone
+  who can see the change. Reverting an open change is 409 "change is new".
+  A cherry-pick to a branch that does not exist is 400 "Branch
+  refs/heads/x does not exist.", one that conflicts is 409 "Cherry pick failed:
+  merge conflict ...", and a cherry-pick to the change's own branch is
+  accepted (a new change).
 - Setting a reviewed mark twice, and clearing one that is not set, are both
   fine (no error).
 

@@ -405,8 +405,14 @@ fn user(name: &str) -> GerritClient {
 /// A raw request as `alice`, for what `GerritClient` has no call for
 /// (creating changes). Returns status and body.
 fn raw(method: &str, path: &str, body: Option<serde_json::Value>) -> (u16, String) {
+    raw_as("alice", method, path, body)
+}
+
+/// Like [`raw`], as another dev user.
+fn raw_as(who: &str, method: &str, path: &str, body: Option<serde_json::Value>) -> (u16, String) {
     use base64::Engine as _;
-    let token = base64::engine::general_purpose::STANDARD.encode("alice:alice-dev-password");
+    let token =
+        base64::engine::general_purpose::STANDARD.encode(format!("{who}:{who}-dev-password"));
     let mut req = http::Request::builder()
         .method(method)
         .uri(format!("{}/a{path}", base_url()))
@@ -1181,4 +1187,110 @@ fn reviewer_topic_and_hashtag_edits_are_refused_without_permission() {
         block_on(anon.add_reviewer(n, "bob", ReviewerState::Cc, false)),
         Err(Error::Unauthorized)
     ));
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn a_merged_change_is_reverted_into_a_new_change() {
+    // The dev site's ACL gives the revert action to the administrators only:
+    // for alice (the owner) the merged change has no `revert` action.
+    let c = admin();
+    let admin = admin();
+    let (n, _) = new_change_file("revert", &unique_file("revert"), "to be reverted\n");
+    // Not merged yet: no revert action, and the server refuses.
+    assert!(
+        block_on(c.get_change(n))
+            .unwrap()
+            .action("revert")
+            .is_none()
+    );
+    match block_on(c.revert(n, None)) {
+        Err(e) => println!("revert of an open change: {e}"),
+        Ok(s) => panic!("{s:?}"),
+    }
+    approve(&admin, n);
+    block_on(admin.submit(n)).expect("submit");
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(
+        d.action("revert").is_some_and(|a| a.enabled),
+        "{:?}",
+        d.change_actions
+    );
+
+    let sha = d.current_revision.clone().expect("sha");
+    let message = format!(
+        "Revert \"{}\"\n\nThis reverts commit {}.\n\nReason for revert: tests",
+        d.summary.subject, sha.0
+    );
+    let new = block_on(c.revert(n, Some(&message))).expect("revert");
+    assert_ne!(new.number, n);
+    assert_eq!(new.status, ChangeStatus::New);
+    let nd = block_on(c.get_change(new.number)).unwrap();
+    assert_eq!(
+        nd.commit_message
+            .as_deref()
+            .map(|m| m.starts_with(&message)),
+        Some(true)
+    );
+    assert!(
+        block_on(c.get_change(n))
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.message.contains("revert")),
+    );
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn a_change_is_cherry_picked_to_another_branch_or_refused() {
+    let c = alice();
+    let admin = admin();
+    // The branch may exist from an earlier run.
+    let (code, body) = raw_as(
+        "admin",
+        "PUT",
+        "/projects/demo%2Fscheduler/branches/stable",
+        Some(serde_json::json!({"revision": "main"})),
+    );
+    assert!(code == 201 || code == 409, "{code} {body}");
+
+    let file = unique_file("pick");
+    let (n, sha) = new_change_file("pick", &file, "from main\n");
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(d.action("cherrypick").is_some_and(|a| a.enabled));
+    let new = block_on(c.cherry_pick(n, &sha, "stable", Some("Picked to stable\n\nBody")))
+        .expect("cherry-pick");
+    assert_ne!(new.number, n);
+    assert_eq!(new.branch, "stable");
+    let nd = block_on(c.get_change(new.number)).unwrap();
+    assert!(
+        nd.commit_message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("Picked to stable"))
+    );
+
+    // Unknown branch.
+    match block_on(c.cherry_pick(n, &sha, "no-such-branch", None)) {
+        Err(e) => println!("unknown branch: {e}"),
+        Ok(s) => panic!("{s:?}"),
+    }
+    // The same branch.
+    match block_on(c.cherry_pick(n, &sha, "main", None)) {
+        Err(e) => println!("same branch: {e}"),
+        Ok(s) => println!("same branch accepted: {s:?}"),
+    }
+
+    // A conflict: the picked file is now on `stable` (merged there), and
+    // another change adds it with other content.
+    approve(&admin, new.number);
+    block_on(admin.submit(new.number)).expect("submit on stable");
+    let (m, msha) = new_change_file("pick conflict", &file, "other content\n");
+    match block_on(c.cherry_pick(m, &msha, "stable", None)) {
+        Err(Error::Conflict { message }) => {
+            println!("cherry-pick conflict: {message}");
+            assert!(!message.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
 }
