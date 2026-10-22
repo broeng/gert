@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "enabled_options": [
+    "enabled_options-value"
+  ],
+  "label": "label-value",
+  "method": "method-value",
+  "title": "title-value"
+}

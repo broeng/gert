@@ -136,6 +136,8 @@ fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) 
         attention: Default::default(),
         permitted_labels: Default::default(),
         label_values: Default::default(),
+        change_actions: Default::default(),
+        revision_actions: Default::default(),
     };
     store
         .save_change_detail(

@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Account, AccountId, ChangeMessage, ChangeNumber, LabelValue, PatchSetNumber, Revision,
+    Account, AccountId, Actions, ChangeMessage, ChangeNumber, LabelValue, PatchSetNumber, Revision,
     RevisionId, SubmitRequirement, Timestamp,
 };
 
@@ -131,6 +131,15 @@ pub struct ChangeDetail {
     /// (`labels[].values`), for the reply dialog.
     #[serde(default)]
     pub label_values: BTreeMap<String, Vec<LabelValue>>,
+    /// What the user may do with the change (`CHANGE_ACTIONS`): abandon,
+    /// restore, wip, ready, private, revert, ... Empty for anonymous
+    /// sessions.
+    #[serde(default)]
+    pub change_actions: Actions,
+    /// What the user may do with the current patch set (`CURRENT_ACTIONS`):
+    /// submit, rebase, cherrypick, ... Empty for anonymous sessions.
+    #[serde(default)]
+    pub revision_actions: Actions,
 }
 
 /// One account in a change's attention set.
@@ -151,6 +160,15 @@ impl ChangeDetail {
     pub fn current(&self) -> Option<&Revision> {
         let sha = self.current_revision.as_ref()?;
         self.revisions.iter().find(|r| &r.sha == sha)
+    }
+
+    /// The action with this id, from the revision actions first, then the
+    /// change actions. `None` if the server does not offer it at all; check
+    /// [`ActionInfo::enabled`](crate::ActionInfo::enabled) before running it.
+    pub fn action(&self, id: &str) -> Option<&crate::ActionInfo> {
+        self.revision_actions
+            .get(id)
+            .or_else(|| self.change_actions.get(id))
     }
 }
 
@@ -213,6 +231,8 @@ mod tests {
             attention: vec![],
             permitted_labels: BTreeMap::new(),
             label_values: BTreeMap::new(),
+            change_actions: BTreeMap::new(),
+            revision_actions: BTreeMap::new(),
         }
     }
 
@@ -229,6 +249,8 @@ mod tests {
             "attention",
             "permitted_labels",
             "label_values",
+            "change_actions",
+            "revision_actions",
         ] {
             obj.remove(key);
         }
@@ -236,6 +258,30 @@ mod tests {
         assert_eq!(d.current_patch_set, Some(PatchSetNumber(2)));
         assert!(d.revisions.is_empty() && d.messages.is_empty() && d.votes.is_empty());
         assert!(d.attention.is_empty() && d.permitted_labels.is_empty());
+    }
+
+    #[test]
+    fn action_lookup_prefers_the_revision_and_keeps_unknown_ids() {
+        use crate::ActionInfo;
+        let act = |label: &str| ActionInfo {
+            label: Some(label.into()),
+            enabled: true,
+            ..Default::default()
+        };
+        let mut d = detail();
+        d.change_actions.insert("abandon".into(), act("Abandon"));
+        d.change_actions.insert("x".into(), act("change"));
+        d.revision_actions.insert("x".into(), act("revision"));
+        d.revision_actions.insert("plugin~thing".into(), act("P"));
+        assert_eq!(
+            d.action("abandon").unwrap().label.as_deref(),
+            Some("Abandon")
+        );
+        assert_eq!(d.action("x").unwrap().label.as_deref(), Some("revision"));
+        assert!(d.action("plugin~thing").is_some() && d.action("submit").is_none());
+        // `enabled` is absent when false.
+        let a: ActionInfo = serde_json::from_str(r#"{"method":"POST"}"#).unwrap();
+        assert!(!a.enabled && a.enabled_options.is_empty());
     }
 
     #[test]

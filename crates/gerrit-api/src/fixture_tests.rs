@@ -92,6 +92,7 @@ fn other_schema_fixtures_deserialize_into_wire_types() {
     check!(wire::CommitInfo, "CommitInfo.");
     check!(wire::GitPerson, "GitPerson.");
     check!(wire::AttentionSetInfo, "AttentionSetInfo.");
+    check!(wire::ActionInfo, "ActionInfo.");
     check!(wire::FileMeta, "FileMeta.");
     check!(wire::ContentEntry, "ContentEntry.");
     check!(wire::DiffInfo, "DiffInfo.");

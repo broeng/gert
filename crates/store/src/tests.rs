@@ -174,6 +174,16 @@ fn change_detail_round_trip_updates_summary() {
         attention: vec![],
         permitted_labels: Default::default(),
         label_values: Default::default(),
+        change_actions: [(
+            "abandon".to_owned(),
+            model::ActionInfo {
+                method: Some("POST".into()),
+                enabled: true,
+                ..Default::default()
+            },
+        )]
+        .into(),
+        revision_actions: Default::default(),
     };
     s.save_change_detail(id, &detail, ts(T2)).unwrap();
     let got = s.load_change_detail(id, ChangeNumber(5)).unwrap().unwrap();

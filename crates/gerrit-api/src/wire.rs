@@ -126,6 +126,17 @@ pub(crate) struct CommitInfo {
     pub committer: Option<GitPerson>,
 }
 
+/// `ActionInfo`. Its id is the key of the map it comes in.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ActionInfo {
+    pub method: Option<String>,
+    pub label: Option<String>,
+    pub title: Option<String>,
+    pub enabled: Option<bool>,
+    pub enabled_options: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 pub(crate) struct RevisionInfo {
@@ -139,6 +150,9 @@ pub(crate) struct RevisionInfo {
     pub ref_name: Option<String>,
     pub description: Option<String>,
     pub commit: Option<CommitInfo>,
+    /// Only with `CURRENT_ACTIONS` (current revision) or `ALL_REVISIONS`
+    /// with `CURRENT_ACTIONS`; keyed by action id.
+    pub actions: Option<BTreeMap<String, ActionInfo>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -429,6 +443,8 @@ pub(crate) struct ChangeInfo {
     pub revisions: Option<BTreeMap<String, RevisionInfo>>,
     pub messages: Option<Vec<ChangeMessageInfo>>,
     pub submit_requirements: Option<Vec<SubmitRequirementResultInfo>>,
+    /// Keyed by action id (`CHANGE_ACTIONS`).
+    pub actions: Option<BTreeMap<String, ActionInfo>>,
     /// Set on the last element of a query page that has a successor.
     #[serde(rename = "_more_changes")]
     pub more_changes: Option<bool>,
@@ -473,6 +489,7 @@ mod tests {
         conforms::<ApprovalInfo>(&spec, "ApprovalInfo");
         conforms::<LabelInfo>(&spec, "LabelInfo");
         conforms::<AttentionSetInfo>(&spec, "AttentionSetInfo");
+        conforms::<ActionInfo>(&spec, "ActionInfo");
         conforms::<GitPerson>(&spec, "GitPerson");
         conforms::<CommitInfo>(&spec, "CommitInfo");
         conforms::<RevisionInfo>(&spec, "RevisionInfo");

@@ -3,14 +3,15 @@
 use std::collections::BTreeMap;
 
 use model::{
-    Account, AccountId, AttentionEntry, ChangeDetail, ChangeMessage, ChangeNumber, ChangeStatus,
-    ChangeSummary, ChangedChunk, Comment, CommentRange, Commit, CommitParent, ContextLine, Diff,
-    DiffChangeType, DiffChunk, DiffContext, DiffFileMeta, DiffPreferences, DiffViewMode,
-    DraftHandling, DraftInput, DraftReceipt, ExpressionResult, ExpressionStatus, FileEntry,
-    FileStatus, GitPerson, IntralineEdit, IntralineStatus, LabelSummary, LabelValue, LabelVote,
-    Location, PatchSetNumber, RelatedChange, ReviewInput, ReviewResult, Revision, RevisionId,
-    RevisionKind, Side, SubmitRequirement, SubmitRequirementStatus, Timestamp, TimestampParseError,
-    Whitespace, file_order, parse_gerrit_timestamp,
+    Account, AccountId, ActionInfo, Actions, AttentionEntry, ChangeDetail, ChangeMessage,
+    ChangeNumber, ChangeStatus, ChangeSummary, ChangedChunk, Comment, CommentRange, Commit,
+    CommitParent, ContextLine, Diff, DiffChangeType, DiffChunk, DiffContext, DiffFileMeta,
+    DiffPreferences, DiffViewMode, DraftHandling, DraftInput, DraftReceipt, ExpressionResult,
+    ExpressionStatus, FileEntry, FileStatus, GitPerson, IntralineEdit, IntralineStatus,
+    LabelSummary, LabelValue, LabelVote, Location, PatchSetNumber, RelatedChange, ReviewInput,
+    ReviewResult, Revision, RevisionId, RevisionKind, Side, SubmitRequirement,
+    SubmitRequirementStatus, Timestamp, TimestampParseError, Whitespace, file_order,
+    parse_gerrit_timestamp,
 };
 
 use crate::wire::{
@@ -119,6 +120,24 @@ pub(crate) fn commit(c: &CommitInfo) -> Result<Commit, ConversionError> {
         subject: c.subject.clone().unwrap_or_default(),
         message: c.message.clone(),
     })
+}
+
+fn actions(m: Option<&BTreeMap<String, wire::ActionInfo>>) -> Actions {
+    m.into_iter()
+        .flatten()
+        .map(|(id, a)| {
+            (
+                id.clone(),
+                ActionInfo {
+                    method: a.method.clone(),
+                    label: a.label.clone(),
+                    title: a.title.clone(),
+                    enabled: a.enabled.unwrap_or(false),
+                    enabled_options: a.enabled_options.clone().unwrap_or_default(),
+                },
+            )
+        })
+        .collect()
 }
 
 fn revision(sha: &str, r: &RevisionInfo) -> Result<Revision, ConversionError> {
@@ -356,6 +375,8 @@ pub(crate) fn change_detail(c: &ChangeInfo) -> Result<ChangeDetail, ConversionEr
         attention,
         permitted_labels,
         label_values,
+        change_actions: actions(c.actions.as_ref()),
+        revision_actions: actions(rev.and_then(|r| r.actions.as_ref())),
     })
 }
 
