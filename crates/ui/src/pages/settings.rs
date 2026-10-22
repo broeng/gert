@@ -7,8 +7,7 @@
 //! backend returns, so what is on screen is what is on disk.
 
 use gpui_kit::component::Disableable as _;
-use gpui_kit::component::Selectable as _;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -787,7 +786,7 @@ impl SettingsPage {
                 Button::new("start-dashboard")
                     .label("Dashboard")
                     .small()
-                    .selected(!search && !editing)
+                    .when(!search && !editing, |b| b.primary())
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, w, cx| {
                         this.cursor = this.startup_row();
@@ -801,7 +800,7 @@ impl SettingsPage {
                 Button::new("start-search")
                     .label("Search")
                     .small()
-                    .selected(search || editing)
+                    .when(search || editing, |b| b.primary())
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, w, cx| {
                         if this.can_change() && this.mode == Mode::Browsing {
