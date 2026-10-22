@@ -129,6 +129,9 @@ pub struct Cell {
     /// URLs in `text` (byte ranges, sorted); Ctrl-click opens them. Lines
     /// are never wrapped or split, so a URL always sits in one cell.
     pub urls: Vec<Range<usize>>,
+    /// The line as it is in the file, when `text` differs from it (tabs
+    /// expanded, a long line cut): syntax spans are byte ranges of it.
+    pub raw: Option<Arc<str>>,
 }
 
 /// What the layout needs to know of a comment thread to place it.
@@ -824,6 +827,7 @@ impl Builder {
             kind,
             due_to_rebase: false,
             comments: self.comment_marks(side, number, line),
+            raw: needs_expansion(line).then(|| Arc::from(line)),
         }
     }
 
