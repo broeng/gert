@@ -1,7 +1,7 @@
 //! Rendering of the change page blocks.
 
 use gpui_kit::component::Disableable as _;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -308,11 +308,17 @@ impl ChangePage {
                     (false, true) => q.text(),
                     (false, false) => format!("{}  ({key})", q.text()),
                 };
+                // Code-Review is the vote that is cast most, so it stands out.
+                let strong = q.label == "Code-Review";
+                let disabled = q.applied || voting;
                 Button::new(("quick-vote", i))
                     .label(label)
                     .small()
-                    .outline()
-                    .disabled(q.applied || voting)
+                    .custom(crate::theme::vote_button(strong, cx))
+                    // Over the variant's faint idle background; a disabled
+                    // button keeps its disabled look.
+                    .when(strong && !disabled, |b| b.bg(crate::theme::vote_blue()))
+                    .disabled(disabled)
                     .on_click(cx.listener(move |this, _, _, cx| this.quick_vote(i, cx)))
             })
             .collect();
