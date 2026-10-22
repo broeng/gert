@@ -712,6 +712,16 @@ impl Shell {
     /// result.
     fn action_done(&mut self, done: &Done, window: &mut Window, cx: &mut Context<Self>) {
         self.close_menu(window, cx);
+        if let Some(new) = done.opened {
+            // A revert or cherry-pick made another change: go there (Back
+            // returns to this one). Its detail is in the cache already.
+            self.navigate(Route::Change(new), window, cx);
+            if let Page::Change(p) = &self.page {
+                let note = done.note();
+                p.update(cx, |p, cx| p.say(note, cx));
+            }
+            return;
+        }
         match &self.page {
             Page::Change(p) => p.update(cx, |p, cx| p.action_done(done, cx)),
             Page::Diff(p) => {

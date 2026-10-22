@@ -730,7 +730,12 @@ fn message_input(message: String, unresolved: bool) -> DraftInput {
 }
 
 /// Puts `text` into the field with the cursor at its end.
-fn put_text(input: &Entity<TextareaState>, text: &str, window: &mut Window, cx: &mut App) {
+pub(crate) fn put_text(
+    input: &Entity<TextareaState>,
+    text: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
     if text.is_empty() {
         return;
     }

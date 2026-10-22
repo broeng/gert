@@ -138,6 +138,7 @@ impl ActionDialog {
                     cx.emit(ActionEvent::Done(Box::new(Done {
                         kind,
                         detail: out.detail,
+                        opened: None,
                     })))
                 }
             },
@@ -145,10 +146,14 @@ impl ActionDialog {
         cx.notify();
     }
 
-    fn set_fields_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+    pub(super) fn set_fields_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
         self.message
             .update(cx, |i, cx| i.set_disabled(disabled, cx));
         self.base.update(cx, |i, cx| i.set_disabled(disabled, cx));
+        self.commit_message
+            .update(cx, |i, cx| i.set_disabled(disabled, cx));
+        self.destination
+            .update(cx, |i, cx| i.set_disabled(disabled, cx));
         self.rev
             .input
             .update(cx, |i, cx| i.set_disabled(disabled, cx));

@@ -450,6 +450,7 @@ fn topic_and_hashtags_are_offered_only_when_the_server_has_them() {
             Kind::Abandon,
             Kind::Wip,
             Kind::Private,
+            Kind::CherryPick,
             Kind::Reviewers,
             Kind::Topic,
             Kind::Hashtags

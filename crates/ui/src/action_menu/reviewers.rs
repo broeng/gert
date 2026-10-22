@@ -397,6 +397,7 @@ impl ActionDialog {
             cx.emit(ActionEvent::Done(Box::new(Done {
                 kind: Kind::Reviewers,
                 detail: self.rev.fresh.then(|| self.detail.clone()),
+                opened: None,
             })));
         } else {
             cx.emit(ActionEvent::Close);
