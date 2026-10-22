@@ -479,3 +479,33 @@ fn the_dialog_opens_without_a_change_on_a_named_rule(cx: &mut TestAppContext) {
     press(cx, &f, &["escape", "escape"]);
     assert!(dialog(cx, &f).is_none());
 }
+
+fn color_field_opens_on(cx: &mut TestAppContext, key: &'static str) {
+    {
+        let f = on_the_change(cx, vec![rule("Gen", "*.pb.go", FilterAction::Dim)]);
+        let d = open_dialog(cx, &f);
+        press(
+            cx,
+            &f,
+            &["e", "tab", "tab", "tab", "tab", "right", "right", "tab"],
+        );
+        let picker = cx.update(|cx| d.read(cx).picker_for_test());
+        cx.update(|cx| assert!(!picker.read(cx).is_open()));
+        press(cx, &f, &[key]);
+        cx.update(|cx| assert!(picker.read(cx).is_open(), "{key}"));
+        press(cx, &f, &["escape"]);
+        cx.update(|cx| assert!(!picker.read(cx).is_open()));
+        // Esc closed the popover only, not the form.
+        assert_eq!(mode(cx, &d), "editing");
+    }
+}
+
+#[gpui_kit::test]
+fn enter_on_the_color_field_opens_the_picker(cx: &mut TestAppContext) {
+    color_field_opens_on(cx, "enter");
+}
+
+#[gpui_kit::test]
+fn space_on_the_color_field_opens_the_picker(cx: &mut TestAppContext) {
+    color_field_opens_on(cx, "space");
+}
