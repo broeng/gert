@@ -845,7 +845,9 @@ impl DiffPage {
                         div()
                             .flex_none()
                             .font_family(theme.mono_font_family.clone())
-                            .when(style.dimmed, |d| d.text_color(muted.opacity(0.55)))
+                            .when(style.dimmed, |d| {
+                                d.text_color(theme.foreground.opacity(0.55))
+                            })
                             .when_some(style.color, |d, c| d.text_color(Hsla::from(c)))
                             .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
                             .child(self.path_label()),
