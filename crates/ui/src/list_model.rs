@@ -2,8 +2,14 @@
 
 use model::ChangeNumber;
 
-/// Rows per page, for dashboard sections and search results.
-pub const PAGE_SIZE: usize = 25;
+/// Rows per page of search results. A maximized window on a big display
+/// shows more than 25 rows, and a page that ends halfway down the window
+/// looks like a list that did not grow with it.
+pub const PAGE_SIZE: usize = 50;
+
+/// Rows of a dashboard section: the sections stack, so one that is as long
+/// as a window would push the others out of sight.
+pub const DASHBOARD_ROWS: usize = 25;
 
 /// A cursor over several sections of rows (one section for search
 /// results, one per saved query on the dashboard).
@@ -233,23 +239,24 @@ mod tests {
     #[test]
     fn pager_ranges() {
         let p = Pager { page: 1 };
-        assert_eq!(p.range(60), 25..50);
-        assert_eq!(p.range(30), 25..30);
+        let n = PAGE_SIZE;
+        assert_eq!(p.range(n * 2 + 10), n..n * 2);
+        assert_eq!(p.range(n + 5), n..n + 5);
         assert_eq!(p.range(10), 10..10);
-        assert!(p.has_cached_next(60));
-        assert!(!p.has_cached_next(50));
-        assert!(p.has_next(50, true));
-        assert!(!p.has_next(50, false));
+        assert!(p.has_cached_next(n * 2 + 10));
+        assert!(!p.has_cached_next(n * 2));
+        assert!(p.has_next(n * 2, true));
+        assert!(!p.has_next(n * 2, false));
     }
 
     #[test]
     fn pager_clamps_after_shrink() {
         let mut p = Pager { page: 3 };
-        p.clamp(30);
+        p.clamp(PAGE_SIZE + 5);
         assert_eq!(p.page, 1);
         p.clamp(0);
         assert_eq!(p.page, 0);
-        p.clamp(25);
+        p.clamp(PAGE_SIZE);
         assert_eq!(p.page, 0);
     }
 }

@@ -10,6 +10,7 @@ use model::{ChangeDetail, ChangeNumber};
 use store::{ServerId, Store};
 
 use crate::{
+    list_model::PAGE_SIZE,
     login::tests::FakeBackend,
     nav::Route,
     pages::list::{ChangeListPage, ListKind},
@@ -120,6 +121,32 @@ fn dashboard_shows_cached_rows_and_j_k_cross_sections(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_list_follows_the_window_height_when_it_is_resized(cx: &mut TestAppContext) {
+    let numbers: Vec<u64> = (1..=60).collect();
+    let env = env_with(seeded(&[("a", &numbers)]), &FakeHttpClient::new());
+    let session = Session::new(&env, &setup(), None).expect("session");
+    let specs = vec![spec("A", "a")];
+    let (window, page) = open(cx, |_, cx| {
+        cx.new(|cx| ChangeListPage::new(session, ListKind::Dashboard, specs, None, true, cx))
+    });
+    cx.run_until_parked();
+    let scroll = cx.update(|cx| page.read(cx).scroll_for_test());
+    let visual = gpui_kit::VisualTestContext::from_window(window, cx);
+
+    // The test window is 700px high; the page is the root, with no footer.
+    assert_eq!(scroll.bounds().size.height, px(700.));
+    visual.simulate_resize(size(px(1400.), px(1000.)));
+    cx.run_until_parked();
+    assert_eq!(scroll.bounds().size.height, px(1000.));
+    assert_eq!(scroll.bounds().size.width, px(1400.));
+    visual.simulate_resize(size(px(900.), px(300.)));
+    cx.run_until_parked();
+    assert_eq!(scroll.bounds().size.height, px(300.));
+    // A dashboard section is capped, the rows beyond it are for the search.
+    cx.update(|cx| assert_eq!(page.read(cx).visible_rows(0).len(), 25));
+}
+
+#[gpui_kit::test]
 fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) {
     let mut store = seeded(&[("status:open", &[7, 8])]);
     let detail = ChangeDetail {
@@ -193,7 +220,7 @@ fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn search_pages_through_cached_rows_with_n_and_p(cx: &mut TestAppContext) {
-    let numbers: Vec<u64> = (1..=30).collect();
+    let numbers: Vec<u64> = (1..=(PAGE_SIZE as u64 + 5)).collect();
     let env = env_with(seeded(&[("owner:self", &numbers)]), &FakeHttpClient::new());
     let session = Session::new(&env, &setup(), None).expect("session");
     let (window, page) = open(cx, |window, cx| {
@@ -216,12 +243,15 @@ fn search_pages_through_cached_rows_with_n_and_p(cx: &mut TestAppContext) {
         cx.update_window(window, |_, window, cx| window.press(key, cx))
             .expect("press");
     };
-    cx.update(|cx| assert_eq!(page.read(cx).visible_rows(0).len(), 25));
+    cx.update(|cx| assert_eq!(page.read(cx).visible_rows(0).len(), PAGE_SIZE));
     press(cx, "n");
     cx.update(|cx| {
         let p = page.read(cx);
         assert_eq!(p.visible_rows(0).len(), 5);
-        assert_eq!(p.selected_number(), Some(ChangeNumber(26)));
+        assert_eq!(
+            p.selected_number(),
+            Some(ChangeNumber(PAGE_SIZE as u64 + 1))
+        );
     });
     press(cx, "p");
     cx.update(|cx| assert_eq!(page.read(cx).selected_number(), Some(ChangeNumber(1))));
