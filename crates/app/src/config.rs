@@ -492,6 +492,22 @@ impl Config {
         out
     }
 
+    /// The `[[filters]]` entries that [`Config::file_filters`] ignores: no
+    /// name, an unknown action, or a name used before. A save from the UI
+    /// keeps them in the file, so a hand-written rule is never lost just
+    /// because the loader could not use it.
+    pub fn ignored_filters(&self) -> Vec<FilterConfig> {
+        let mut seen: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        for f in &self.filters {
+            match f.to_filter() {
+                Some(r) if !seen.contains(&r.name) => seen.push(r.name),
+                _ => out.push(f.clone()),
+            }
+        }
+        out
+    }
+
     pub fn startup_page(&self) -> StartupPage {
         self.startup
             .as_ref()
