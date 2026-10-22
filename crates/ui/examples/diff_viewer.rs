@@ -1,12 +1,14 @@
 //! Dev-only: shows the diff widget on a fixture from `tests/fixtures`.
 //!
 //! ```text
-//! cargo run -p ui --example diff_viewer [FIXTURE] [--unified] [--inline] [--tab N] [--font NAME]
+//! cargo run -p ui --example diff_viewer [FIXTURE] [--unified] [--inline] [--tab N] [--font NAME] [--path FILE] [--light|--dark]
 //! ```
 //!
 //! `FIXTURE` is a path, or a name such as `diff`, `large_diff` or
 //! `diff_rename` (looked up in `tests/fixtures/` and
 //! `tests/fixtures/handwritten/`, with `.response.json` appended).
+//! `--path` names the file the diff is of (e.g. `src/lib.rs`), which picks
+//! the syntax highlighting; without it the diff is drawn plain.
 //! Expansion requests are only logged: there is no server to ask.
 //!
 //! The fixture goes through `GerritClient` and a fake HTTP client, because
@@ -16,7 +18,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use gerrit_api::{Auth, DiffParams, GerritClient, fake::FakeHttpClient};
-use gpui_kit::component::Theme;
+use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use model::{ChangeNumber, DiffViewMode, ResolvedDiffPreferences, RevisionId};
 use ui::diff::{DiffEvent, DiffSizing, DiffView};
@@ -59,12 +61,17 @@ fn main() {
     let mut prefs = ResolvedDiffPreferences::default();
     let mut inline = false;
     let mut font = None;
+    let mut path: Option<String> = None;
+    let mut mode = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--unified" => prefs.view_mode = DiffViewMode::Unified,
             "--inline" => inline = true,
             "--tab" => prefs.tab_size = args.next().and_then(|n| n.parse().ok()).unwrap_or(4),
             "--font" => font = args.next(),
+            "--path" => path = args.next(),
+            "--light" => mode = Some(ThemeMode::Light),
+            "--dark" => mode = Some(ThemeMode::Dark),
             other => name = other.to_owned(),
         }
     }
@@ -79,6 +86,9 @@ fn main() {
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
+        if let Some(m) = mode {
+            Theme::change(m, None, cx);
+        }
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1200.), px(760.)), cx)),
             titlebar: Some(TitlebarOptions {
@@ -88,13 +98,18 @@ fn main() {
             ..Default::default()
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
+            if mode.is_none() {
+                Theme::sync_system_appearance(Some(window), cx);
+            }
             let view = cx.new(|cx| {
                 let mut v = DiffView::new(diff, prefs, cx);
                 if inline {
                     v.set_sizing(DiffSizing::Inline { max_rows: Some(30) }, cx);
                 }
                 v.set_font_family(font.map(Into::into), cx);
+                if let Some(path) = &path {
+                    v.set_path(path, cx);
+                }
                 v
             });
             cx.subscribe(&view, |_, ev: &DiffEvent, _| match ev {
