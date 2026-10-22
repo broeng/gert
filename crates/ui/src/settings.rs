@@ -61,6 +61,27 @@ impl DiffSettings {
     }
 }
 
+/// Layout choices of the running session that every change page shares,
+/// so that stepping through a relation chain keeps the panel open. Not
+/// persisted.
+#[derive(Default)]
+pub struct PageLayout {
+    /// The relation chain is wanted as a side panel (it still falls back
+    /// to the box in a narrow window).
+    related_panel: bool,
+}
+
+impl PageLayout {
+    pub fn related_panel(&self) -> bool {
+        self.related_panel
+    }
+
+    pub fn toggle_related_panel(&mut self, cx: &mut Context<Self>) {
+        self.related_panel = !self.related_panel;
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

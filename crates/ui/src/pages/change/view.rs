@@ -43,6 +43,12 @@ impl Section {
 pub(super) use crate::card::title_bar as card_title_bar;
 
 /// Width for 72 monospace columns, the card padding and border.
+/// Width of the relation chain side panel: room for `#12345`, a subject of
+/// ~30 characters and the status pills, while the left side keeps ~640px
+/// at the narrowest window that still gets the panel.
+const RELATED_PANEL_WIDTH: f32 = 360.;
+/// Below this window width the chain stays in its box, wanted panel or not.
+const RELATED_PANEL_MIN_WINDOW: f32 = 1000.;
 const COMMIT_BASIS: f32 = 660.;
 
 const LABEL_ORDER: [&str; 2] = ["Code-Review", "Verified"];
@@ -206,10 +212,9 @@ impl ChangePage {
     }
 
     fn header(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let muted = theme.muted_foreground;
-        let status = self.status_line(cx);
-        let Some(d) = &self.detail else {
+        let muted = cx.theme().muted_foreground;
+        if self.detail.is_none() {
+            let status = self.status_line(cx);
             let text = if self.loaded && matches!(self.status, Status::Failed(_)) {
                 "Could not load the change."
             } else {
@@ -221,7 +226,58 @@ impl ChangePage {
                 .child(div().text_color(muted).child(text))
                 .child(status)
                 .into_any_element();
+        }
+        let bar = (!self.panel_shown).then(|| self.header_bar(cx)).flatten();
+        let info = self.change_info(cx);
+        let commit = self.commit(cx);
+        let related = (!self.panel_shown)
+            .then(|| self.related_block(false, cx))
+            .flatten();
+        // Wrapping columns: each grows from a basis, so a narrow window
+        // stacks them instead of squeezing the text.
+        let column = |basis: f32, child: AnyElement| {
+            div()
+                .flex_grow(1.)
+                .flex_basis(px(basis))
+                .min_w(px(260.))
+                .max_w_full()
+                .child(child)
         };
+        // The commit message needs ~72 monospace columns (plus padding) to
+        // not wrap in the middle; it keeps that width while there is room
+        // and shrinks or wraps only when the window is narrower.
+        let commit_column = |child: AnyElement| {
+            div()
+                .flex_grow(1.)
+                .flex_basis(px(COMMIT_BASIS))
+                .min_w(px(260.))
+                .max_w_full()
+                .child(child)
+        };
+        v_flex()
+            .gap_2()
+            .children(bar)
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .flex_wrap()
+                    .gap_x_4()
+                    .gap_y_3()
+                    .child(column(320., info))
+                    .child(commit_column(commit))
+                    .when_some(related, |d, r| d.child(column(320., r))),
+            )
+            .into_any_element()
+    }
+
+    /// The status / number / subject bar. With the relation chain as a side
+    /// panel it is drawn above both the list and the panel, not in the list.
+    pub(super) fn header_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let status = self.status_line(cx);
+        let d = self.detail.as_ref()?;
         let c = &d.summary;
         let (status_text, unknown) = status_label(&c.status);
         let status_color = match c.status {
@@ -263,45 +319,7 @@ impl ChangePage {
             )
             .child(div().flex_1())
             .child(status);
-        let info = self.change_info(cx);
-        let commit = self.commit(cx);
-        let related = self.related_block(cx);
-        // Wrapping columns: each grows from a basis, so a narrow window
-        // stacks them instead of squeezing the text.
-        let column = |basis: f32, child: AnyElement| {
-            div()
-                .flex_grow(1.)
-                .flex_basis(px(basis))
-                .min_w(px(260.))
-                .max_w_full()
-                .child(child)
-        };
-        // The commit message needs ~72 monospace columns (plus padding) to
-        // not wrap in the middle; it keeps that width while there is room
-        // and shrinks or wraps only when the window is narrower.
-        let commit_column = |child: AnyElement| {
-            div()
-                .flex_grow(1.)
-                .flex_basis(px(COMMIT_BASIS))
-                .min_w(px(260.))
-                .max_w_full()
-                .child(child)
-        };
-        v_flex()
-            .gap_2()
-            .child(bar)
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_start()
-                    .flex_wrap()
-                    .gap_x_4()
-                    .gap_y_3()
-                    .child(column(320., info))
-                    .child(commit_column(commit))
-                    .when_some(related, |d, r| d.child(column(320., r))),
-            )
-            .into_any_element()
+        Some(bar.into_any_element())
     }
 
     /// First column of the top: who and where, then the submit requirements
@@ -778,16 +796,25 @@ impl ChangePage {
         self.has_focus
     }
 
+    /// Whether there is a relation chain worth showing.
+    pub(super) fn has_chain(&self) -> bool {
+        self.related.as_ref().is_some_and(|r| r.changes.len() > 1)
+    }
+
     /// The relation chain, `None` when there is nothing but this change.
     /// The box is capped in height and scrolls, so a long stack does not
-    /// push the files down; the current change has an arrow and a tint.
-    fn related_block(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// push the files down; the current change has an arrow and a tint. As
+    /// the `panel` it fills the height of its column instead.
+    pub(super) fn related_block(
+        &mut self,
+        panel: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let r = self.related.as_ref().filter(|r| r.changes.len() > 1)?;
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let rows = r.changes.iter().enumerate().map(|(i, c)| {
             let this_change = c.number == self.number;
-            let selected = self.related_cursor == Some(i);
             let number = c.number;
             h_flex()
                 .id(("related", i))
@@ -795,14 +822,7 @@ impl ChangePage {
                 .px_1()
                 .items_center()
                 .text_sm()
-                .border_l_2()
-                .border_color(if selected {
-                    theme.list_active_border
-                } else {
-                    theme.transparent
-                })
                 .when(this_change, |d| d.bg(theme.accent))
-                .when(selected, |d| d.bg(theme.list_active))
                 .hover(|d| d.bg(theme.list_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if number != this.number {
@@ -835,26 +855,43 @@ impl ChangePage {
                 .children(related_pills(c, cx))
         });
         let scroll = self.related_scroll.clone();
+        let list = v_flex()
+            .id("related-list")
+            .overflow_y_scroll()
+            .track_scroll(&self.related_scroll)
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .children(rows.collect::<Vec<_>>());
+        let list = if panel {
+            list.flex_1().min_h_0()
+        } else {
+            list.max_h(px(220.)).on_scroll_wheel(move |ev, window, cx| {
+                let delta = ev.delta.pixel_delta(window.line_height()).y;
+                keep_wheel_while_scrollable(&scroll, delta, cx);
+            })
+        };
+        let toggle = div()
+            .id("related-toggle")
+            .text_xs()
+            // The stock theme's `link` is near-black; `info` is its blue.
+            .text_color(theme.info)
+            .cursor_pointer()
+            .hover(|d| d.underline())
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_related_panel(cx)))
+            .child(if panel {
+                "Collapse (Shift-L)"
+            } else {
+                "Show as panel (Shift-L)"
+            });
         Some(
             v_flex()
                 .gap_1()
+                .when(panel, |d| d.size_full())
                 .child(section_title("Relation chain", cx))
-                .child(
-                    v_flex()
-                        .id("related-list")
-                        .max_h(px(220.))
-                        .overflow_y_scroll()
-                        .track_scroll(&self.related_scroll)
-                        .on_scroll_wheel(move |ev, window, cx| {
-                            let delta = ev.delta.pixel_delta(window.line_height()).y;
-                            keep_wheel_while_scrollable(&scroll, delta, cx);
-                        })
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme.border)
-                        .children(rows.collect::<Vec<_>>()),
-                )
+                .child(list)
+                .child(toggle)
                 .into_any_element(),
         )
     }
@@ -1120,6 +1157,31 @@ fn related_pills(c: &RelatedChange, cx: &App) -> Vec<Div> {
 impl Render for ChangePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.has_focus = self.focus.is_focused(window);
+        let shown = self.layout.read(cx).related_panel()
+            && window.viewport_size().width >= px(RELATED_PANEL_MIN_WINDOW)
+            && self.has_chain();
+        if shown != self.panel_shown {
+            // The header changes shape: its bar moves in or out of the list.
+            self.panel_shown = shown;
+            self.remeasure(Block::Header);
+            self.reveal_current_related();
+        }
+        let page = div()
+            .relative()
+            .size_full()
+            .flex_1()
+            .min_w_0()
+            .child(
+                list(
+                    self.list.clone(),
+                    cx.processor(|this, ix, window, cx| this.render_block(ix, window, cx)),
+                )
+                .size_full(),
+            )
+            .vertical_scrollbar(&self.list);
+        let panel = shown.then(|| self.related_block(true, cx)).flatten();
+        let bar = shown.then(|| self.header_bar(cx)).flatten();
+        let theme = cx.theme().clone();
         v_flex()
             .id("change-page")
             .key_context(CHANGE_PAGE)
@@ -1140,7 +1202,7 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::toggle_commit))
             .on_action(cx.listener(Self::next_related))
             .on_action(cx.listener(Self::prev_related))
-            .on_action(cx.listener(Self::open_related))
+            .on_action(cx.listener(Self::toggle_related_panel_action))
             .on_action(cx.listener(Self::focus_files))
             .on_action(cx.listener(Self::next_thread))
             .on_action(cx.listener(Self::prev_thread))
@@ -1154,16 +1216,27 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::open_actions))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::page_up))
-            .relative()
             .size_full()
+            .children(bar.map(|b| div().w_full().px_4().pt_1().pb_2().child(b)))
             .child(
-                list(
-                    self.list.clone(),
-                    cx.processor(|this, ix, window, cx| this.render_block(ix, window, cx)),
-                )
-                .size_full(),
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(page)
+                    .children(panel.map(|p| {
+                        div()
+                            .w(px(RELATED_PANEL_WIDTH))
+                            .flex_none()
+                            .h_full()
+                            .pl_2()
+                            .pr_4()
+                            .pb_2()
+                            .border_l_1()
+                            .border_color(theme.border)
+                            .child(p)
+                    })),
             )
-            .vertical_scrollbar(&self.list)
     }
 }
 

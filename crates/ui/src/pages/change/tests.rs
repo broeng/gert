@@ -15,7 +15,7 @@ use crate::{
     nav::ChangeView,
     outbox::DraftOutbox,
     session::Session,
-    settings::DiffSettings,
+    settings::{DiffSettings, PageLayout},
     testing::{detail, file, whole_file},
     tests::{URL, env_with, open, setup},
 };
@@ -145,8 +145,19 @@ fn page_in(
     let (window, page) = open(cx, |window, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
-        let page = cx
-            .new(|cx| ChangePage::new(session, settings, ChangeNumber(7), view, true, outbox, cx));
+        let layout = cx.new(|_| PageLayout::default());
+        let page = cx.new(|cx| {
+            ChangePage::new(
+                session,
+                settings,
+                layout,
+                ChangeNumber(7),
+                view,
+                true,
+                outbox,
+                cx,
+            )
+        });
         cx.subscribe(&page, move |_, ev: &ChangeEvent, _| {
             let text = match ev {
                 ChangeEvent::Unauthorized => "unauthorized".to_owned(),
@@ -155,6 +166,7 @@ fn page_in(
                 ChangeEvent::Reply(_) => "reply".to_owned(),
                 ChangeEvent::Actions(_) => "actions".to_owned(),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
+                ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
                 ChangeEvent::OpenDiff(d) => format!(
                     "diff {} {:?}..{} {}{}",
                     d.change,
@@ -804,12 +816,18 @@ fn r_only_hints_for_anonymous_sessions(cx: &mut TestAppContext) {
 /// [`seeded`] plus a chain of `n` changes around change 7 (the middle one),
 /// cached for its current patch set.
 fn seeded_with_chain(n: u64) -> Store {
+    seeded_with_chain_at(n, n / 2)
+}
+
+/// Like [`seeded_with_chain`], with change 7 at row `at` (0 is the tip).
+/// The others are 100 + their row.
+fn seeded_with_chain_at(n: u64, at: u64) -> Store {
     let mut store = seeded();
     let chain: Vec<model::RelatedChange> = (0..n)
         .map(|i| model::RelatedChange {
             project: "p".into(),
             change_id: None,
-            number: ChangeNumber(if i == n / 2 { 7 } else { 100 + i }),
+            number: ChangeNumber(if i == at { 7 } else { 100 + i }),
             patch_set: PatchSetNumber(1),
             current_patch_set: Some(PatchSetNumber(1)),
             status: Some(model::ChangeStatus::New),
@@ -873,4 +891,110 @@ fn the_wheel_over_the_relation_chain_scrolls_the_chain_and_not_the_page(cx: &mut
     wheel(cx, &f, over, -40.);
     assert_eq!(chain.offset().y, -max);
     assert_ne!(page_top(&list), (0, gpui_kit::px(0.)));
+}
+
+fn chain_page(cx: &mut TestAppContext, n: u64, at: u64) -> Fixture {
+    page_in(
+        cx,
+        seeded_with_chain_at(n, at),
+        None,
+        setup(),
+        ChangeView::default(),
+        |_| {},
+    )
+}
+
+fn events(f: &Fixture) -> Vec<String> {
+    f.events.lock().expect("log").clone()
+}
+
+fn panel_shown(cx: &mut TestAppContext, f: &Fixture) -> bool {
+    cx.update(|cx| f.page.read(cx).panel_shown_for_test())
+}
+
+#[gpui_kit::test]
+fn shift_j_and_k_replace_the_page_with_the_next_and_previous_chain_entry(cx: &mut TestAppContext) {
+    // Rows: 100, 101, 7, 103, 104 (newest descendant first).
+    let f = chain_page(cx, 5, 2);
+    press(cx, &f, &["shift-j"]);
+    press(cx, &f, &["shift-k"]);
+    assert_eq!(events(&f), ["replace 103", "replace 101"]);
+}
+
+#[gpui_kit::test]
+fn shift_j_and_k_do_nothing_at_the_ends_of_the_chain(cx: &mut TestAppContext) {
+    let f = chain_page(cx, 3, 0);
+    press(cx, &f, &["shift-k"]);
+    assert!(events(&f).is_empty());
+    press(cx, &f, &["shift-j"]);
+    assert_eq!(events(&f), ["replace 101"]);
+
+    let f = chain_page(cx, 3, 2);
+    press(cx, &f, &["shift-j"]);
+    assert!(events(&f).is_empty());
+
+    // No chain at all.
+    let f = page(cx, false, ChangeView::default());
+    press(cx, &f, &["shift-j", "shift-k"]);
+    assert!(events(&f).is_empty());
+}
+
+#[gpui_kit::test]
+fn clicking_a_chain_row_opens_it_as_a_new_history_entry(cx: &mut TestAppContext) {
+    let f = chain_page(cx, 5, 2);
+    let scroll = cx.update(|cx| f.page.read(cx).related_scroll_for_test());
+    let at = scroll.bounds_for_item(3).expect("row 3").center();
+    gpui_kit::VisualTestContext::from_window(f.window, cx).simulate_click(at, Default::default());
+    cx.run_until_parked();
+    assert_eq!(events(&f), ["change 103"]);
+}
+
+#[gpui_kit::test]
+fn shift_l_and_the_link_toggle_the_relation_panel(cx: &mut TestAppContext) {
+    let f = chain_page(cx, 5, 2);
+    assert!(!panel_shown(cx, &f));
+    press(cx, &f, &["shift-l"]);
+    assert!(panel_shown(cx, &f));
+    press(cx, &f, &["shift-l"]);
+    assert!(!panel_shown(cx, &f));
+
+    // The link under the box does the same, and so does the one in the panel.
+    for expect in [true, false] {
+        let scroll = cx.update(|cx| f.page.read(cx).related_scroll_for_test());
+        let b = scroll.bounds();
+        let at = gpui_kit::point(b.left() + gpui_kit::px(20.), b.bottom() + gpui_kit::px(8.));
+        let at = if expect {
+            at
+        } else {
+            gpui_kit::point(at.x, at.y + gpui_kit::px(8.))
+        };
+        gpui_kit::VisualTestContext::from_window(f.window, cx)
+            .simulate_click(at, Default::default());
+        cx.run_until_parked();
+        assert_eq!(panel_shown(cx, &f), expect);
+    }
+}
+
+#[gpui_kit::test]
+fn the_panel_gives_way_to_the_box_in_a_narrow_window(cx: &mut TestAppContext) {
+    let f = chain_page(cx, 5, 2);
+    press(cx, &f, &["shift-l"]);
+    assert!(panel_shown(cx, &f));
+    let resize = |cx: &mut TestAppContext, w: f32| {
+        gpui_kit::VisualTestContext::from_window(f.window, cx)
+            .simulate_resize(gpui_kit::size(gpui_kit::px(w), gpui_kit::px(800.)));
+        cx.run_until_parked();
+    };
+    resize(cx, 900.);
+    assert!(!panel_shown(cx, &f));
+    // The wish is kept: widening brings the panel back.
+    resize(cx, 1400.);
+    assert!(panel_shown(cx, &f));
+}
+
+#[gpui_kit::test]
+fn no_chain_no_panel(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    press(cx, &f, &["shift-l"]);
+    assert!(!panel_shown(cx, &f));
 }

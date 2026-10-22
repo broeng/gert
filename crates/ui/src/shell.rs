@@ -27,7 +27,7 @@ use crate::{
     reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
     session::{Env, SavedQuery, ServerSetup, Session, Startup},
-    settings::DiffSettings,
+    settings::{DiffSettings, PageLayout},
 };
 
 enum Page {
@@ -106,6 +106,7 @@ pub struct Shell {
     window_active: bool,
     credentials_task: Option<Task<()>>,
     settings: Entity<DiffSettings>,
+    layout: Entity<PageLayout>,
     prefs_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -181,6 +182,7 @@ impl Shell {
             window_active: window.is_window_active(),
             credentials_task: None,
             settings: cx.new(|_| DiffSettings::new(diff)),
+            layout: cx.new(|_| PageLayout::default()),
             prefs_task: None,
             _subs: subs,
         };
@@ -497,9 +499,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Page {
         let settings = self.settings.clone();
+        let layout = self.layout.clone();
         let outbox = self.outbox_for(&session, cx);
-        let page =
-            cx.new(|cx| ChangePage::new(session, settings, number, view, active, outbox, cx));
+        let page = cx
+            .new(|cx| ChangePage::new(session, settings, layout, number, view, active, outbox, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
@@ -509,6 +512,11 @@ impl Shell {
                 ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 ChangeEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
+                // Like stepping through files: Back leaves the walk.
+                ChangeEvent::ReplaceChange(n) => {
+                    this.nav.replace(Route::Change(*n));
+                    this.show(window, cx)
+                }
                 ChangeEvent::OpenDiff(route) => {
                     this.navigate(Route::Diff(route.clone()), window, cx)
                 }

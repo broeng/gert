@@ -32,9 +32,13 @@ actions!(
         NextBase,
         PrevBase,
         ToggleCommit,
+        /// `shift-j` / `shift-k`: open the next / previous change of the
+        /// relation chain (down / up the list).
         NextRelated,
         PrevRelated,
-        OpenRelated,
+        /// `shift-l`: show the relation chain as a side panel, or as the
+        /// capped box again.
+        ToggleRelatedPanel,
         /// Esc on the change page: give the focus back to the file list.
         FocusFiles,
         /// `x`: open the comment thread under the thread cursor (its diff,
@@ -177,7 +181,7 @@ pub fn change_entries() -> Vec<Entry> {
         // The comment thread list. `shift-n` / `shift-p` are the diff's
         // next / previous thread keys (PolyGerrit's `N` / `P`); `x` opens a
         // thread like it does in the diff. `Enter` stays with the files
-        // (as `shift-enter` does with the related changes).
+        // (`shift-j` / `shift-k` open the related changes).
         e(
             "Shift-N / Shift-P",
             KeyBinding::new("shift-n", NextThread, Some(k)),
@@ -219,13 +223,14 @@ pub fn change_entries() -> Vec<Entry> {
         e(
             "Shift-J / Shift-K",
             KeyBinding::new("shift-j", NextRelated, Some(k)),
-            "Next / previous related change",
+            "Open the next / previous change of the relation chain (down / up the list: towards the parent / the child)",
         ),
         e("", KeyBinding::new("shift-k", PrevRelated, Some(k)), ""),
+        // `shift-r` is Refresh, hence `l`: the chain as a list.
         e(
-            "Shift-Enter",
-            KeyBinding::new("shift-enter", OpenRelated, Some(k)),
-            "Open the selected related change",
+            "Shift-L",
+            KeyBinding::new("shift-l", ToggleRelatedPanel, Some(k)),
+            "Show the relation chain as a side panel / back in the box",
         ),
         e(
             "Space / Shift-Space",

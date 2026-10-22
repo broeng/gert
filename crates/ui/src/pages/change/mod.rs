@@ -56,7 +56,7 @@ use crate::{
     reply, reviewed,
     row::browser_url,
     session::{Session, is_unauthorized},
-    settings::DiffSettings,
+    settings::{DiffSettings, PageLayout},
     tracker::Tracker,
 };
 use state::{Block, Content, PatchSel, step};
@@ -69,8 +69,11 @@ const MAX_PARALLEL_DIFFS: usize = 3;
 
 pub enum ChangeEvent {
     Unauthorized,
-    /// A related change was chosen.
+    /// A related change was clicked: a new history entry.
     OpenChange(ChangeNumber),
+    /// Shift-J / Shift-K stepped to a related change: replaces the current
+    /// history entry, so that Back leaves the walk.
+    ReplaceChange(ChangeNumber),
     /// A file's diff page was chosen.
     OpenDiff(DiffRoute),
     /// A refresh succeeded: the server is reachable.
@@ -127,8 +130,12 @@ pub struct ChangePage {
     sel: PatchSel,
     files: Files,
     related: Option<Related>,
-    related_cursor: Option<usize>,
-    /// Scroll position of the capped relation chain box.
+    /// Session layout shared by the change pages.
+    layout: Entity<PageLayout>,
+    /// The relation chain is drawn as the side panel (wanted, wide enough
+    /// and there is a chain), as of the last render.
+    panel_shown: bool,
+    /// Scroll position of the relation chain box or panel.
     related_scroll: ScrollHandle,
     /// Index into `files.list`.
     cursor: usize,
@@ -181,9 +188,13 @@ impl Focusable for ChangePage {
 }
 
 impl ChangePage {
+    // The shared session entities (settings, layout, outbox) are separate
+    // arguments, as everywhere else in the shell.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session: Session,
         settings: Entity<DiffSettings>,
+        layout: Entity<PageLayout>,
         number: ChangeNumber,
         view: ChangeView,
         window_active: bool,
@@ -194,6 +205,7 @@ impl ChangePage {
         let mut this = Self {
             session,
             settings: settings.clone(),
+            layout: layout.clone(),
             number,
             detail: None,
             fetched_at: None,
@@ -206,7 +218,7 @@ impl ChangePage {
             },
             files: Files::default(),
             related: None,
-            related_cursor: None,
+            panel_shown: false,
             related_scroll: ScrollHandle::new(),
             cursor: 0,
             want_file: view.file,
@@ -238,6 +250,7 @@ impl ChangePage {
         };
         this._subs
             .push(cx.observe(&settings, |this, _, cx| this.settings_changed(cx)));
+        this._subs.push(cx.observe(&layout, |_, _, cx| cx.notify()));
         this._subs
             .push(cx.subscribe(&comments, |this, _, ev, cx| match ev {
                 CommentsEvent::Changed => this.apply_threads(cx),
@@ -286,6 +299,11 @@ impl ChangePage {
     #[cfg(test)]
     pub(crate) fn focus_handle_for_test(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panel_shown_for_test(&self) -> bool {
+        self.panel_shown
     }
 
     #[cfg(test)]
@@ -500,7 +518,6 @@ impl ChangePage {
         }
         if self.related.as_ref().map(|r| &r.sha) != sha.as_ref() {
             self.related = None;
-            self.related_cursor = None;
         }
         self.read_threads(cx);
         if let Some(key) = key {
@@ -624,6 +641,7 @@ impl ChangePage {
             sha: sha.clone(),
             changes,
         });
+        self.reveal_current_related();
         self.rebuild_blocks();
         cx.notify();
     }
@@ -1096,39 +1114,55 @@ impl ChangePage {
         cx.notify();
     }
 
-    fn move_related(&mut self, delta: isize, cx: &mut Context<Self>) {
+    /// Scrolls the relation chain (box or panel) to this change.
+    fn reveal_current_related(&self) {
+        let at = self
+            .related
+            .as_ref()
+            .and_then(|r| r.changes.iter().position(|c| c.number == self.number));
+        if let Some(ix) = at {
+            self.related_scroll.scroll_to_item(ix);
+        }
+    }
+
+    /// Opens the change `delta` rows further down the relation chain (the
+    /// list is newest descendant first), replacing the history entry. Does
+    /// nothing at the ends, or when this change is not in the chain.
+    fn step_related(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(r) = &self.related else {
             return;
         };
-        let start = self
-            .related_cursor
-            .or_else(|| r.changes.iter().position(|c| c.number == self.number));
-        let n = match start {
-            Some(s) => step(s, r.changes.len(), delta),
-            None => 0,
-        };
-        self.related_cursor = Some(n);
-        self.related_scroll.scroll_to_item(n);
-        self.list.scroll_to_reveal_item(0);
-        cx.notify();
+        let target = r
+            .changes
+            .iter()
+            .position(|c| c.number == self.number)
+            .and_then(|i| r.changes.get(i.checked_add_signed(delta)?))
+            .map(|c| c.number);
+        if let Some(n) = target {
+            cx.emit(ChangeEvent::ReplaceChange(n));
+        }
     }
 
     fn next_related(&mut self, _: &NextRelated, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_related(1, cx);
+        self.step_related(1, cx);
     }
 
     fn prev_related(&mut self, _: &PrevRelated, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_related(-1, cx);
+        self.step_related(-1, cx);
     }
 
-    fn open_related(&mut self, _: &OpenRelated, _: &mut Window, cx: &mut Context<Self>) {
-        let number = self
-            .related_cursor
-            .and_then(|i| self.related.as_ref()?.changes.get(i))
-            .map(|c| c.number);
-        if let Some(n) = number.filter(|n| *n != self.number) {
-            cx.emit(ChangeEvent::OpenChange(n));
-        }
+    fn toggle_related_panel_action(
+        &mut self,
+        _: &ToggleRelatedPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_related_panel(cx);
+    }
+
+    fn toggle_related_panel(&mut self, cx: &mut Context<Self>) {
+        self.layout.update(cx, |l, cx| l.toggle_related_panel(cx));
+        self.reveal_current_related();
     }
 
     fn focus_files(&mut self, _: &FocusFiles, window: &mut Window, cx: &mut Context<Self>) {
