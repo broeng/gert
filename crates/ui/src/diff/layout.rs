@@ -1077,15 +1077,66 @@ pub struct Expanded {
 /// ranges of the result. With `show_tabs` the first cell of each tab is a
 /// `→`, reported in `tabs`.
 pub fn expand_line(line: &str, marks: &[Range<usize>], tab_size: u32, show_tabs: bool) -> Expanded {
-    if line.len() <= MAX_LINE_BYTES && !line.contains('\t') {
+    if !needs_expansion(line) {
         return Expanded {
             text: Arc::from(line),
             marks: marks.to_vec(),
             tabs: Vec::new(),
         };
     }
-    let tab = tab_size.max(1) as usize;
     let bounds: Vec<usize> = marks.iter().flat_map(|r| [r.start, r.end]).collect();
+    let (out, mapped, tabs) = expand_bounds(line, &bounds, tab_size, show_tabs);
+    let marks = mapped
+        .iter()
+        .step_by(2)
+        .zip(mapped.iter().skip(1).step_by(2))
+        .filter(|(from, to)| to > from)
+        .map(|(from, to)| *from..*to)
+        .collect();
+    Expanded {
+        text: Arc::from(out),
+        marks,
+        tabs,
+    }
+}
+
+/// Translates sorted, non-overlapping spans (byte ranges of the raw `line`,
+/// each with a payload) to byte ranges of the display text [`expand_line`]
+/// makes of it. Spans that fall into the cut-off tail of a long line are
+/// dropped.
+pub fn map_spans<T: Copy>(
+    line: &str,
+    spans: &[(Range<usize>, T)],
+    tab_size: u32,
+    show_tabs: bool,
+) -> Vec<(Range<usize>, T)> {
+    if !needs_expansion(line) {
+        return spans.to_vec();
+    }
+    let bounds: Vec<usize> = spans.iter().flat_map(|(r, _)| [r.start, r.end]).collect();
+    let (_, mapped, _) = expand_bounds(line, &bounds, tab_size, show_tabs);
+    spans
+        .iter()
+        .zip(mapped.as_chunks::<2>().0)
+        .filter(|(_, [from, to])| to > from)
+        .map(|((_, v), [from, to])| (*from..*to, *v))
+        .collect()
+}
+
+fn needs_expansion(line: &str) -> bool {
+    line.len() > MAX_LINE_BYTES || line.contains('\t')
+}
+
+/// The shared core of [`expand_line`] and [`map_spans`]: the display text,
+/// the display offsets of `bounds` (sorted byte offsets of `line`) and the
+/// tab markers.
+fn expand_bounds(
+    line: &str,
+    bounds: &[usize],
+    tab_size: u32,
+    show_tabs: bool,
+) -> (String, Vec<usize>, Vec<Range<usize>>) {
+    let tab = tab_size.max(1) as usize;
     let mut mapped = Vec::with_capacity(bounds.len());
     let mut out = String::with_capacity(line.len() + 16);
     let mut tabs = Vec::new();
@@ -1125,18 +1176,7 @@ pub fn expand_line(line: &str, marks: &[Range<usize>], tab_size: u32, show_tabs:
     if truncated {
         out.push('\u{2026}');
     }
-    let marks = mapped
-        .iter()
-        .step_by(2)
-        .zip(mapped.iter().skip(1).step_by(2))
-        .filter(|(from, to)| to > from)
-        .map(|(from, to)| *from..*to)
-        .collect();
-    Expanded {
-        text: Arc::from(out),
-        marks,
-        tabs,
-    }
+    (out, mapped, tabs)
 }
 
 #[cfg(test)]
@@ -1652,6 +1692,22 @@ mod tests {
             Some(("a b", LineKind::Common))
         );
         assert!(l.chunks().is_empty());
+    }
+
+    #[test]
+    fn spans_follow_tab_expansion() {
+        let spans = [(1..4, 'a'), (5..8, 'b')];
+        // "\tfoo bar": the tab becomes four spaces.
+        assert_eq!(
+            map_spans("\tfoo bar", &spans, 4, false),
+            [(4..7, 'a'), (8..11, 'b')]
+        );
+        // A line without tabs is unchanged.
+        assert_eq!(map_spans("xfoo bar", &spans, 4, false), spans);
+        // Spans in the cut-off tail of a long line are dropped.
+        let long = format!("\t{}", "x".repeat(MAX_LINE_BYTES + 10));
+        let tail = [(1..3, 'a'), (MAX_LINE_BYTES + 5..MAX_LINE_BYTES + 8, 'b')];
+        assert_eq!(map_spans(&long, &tail, 4, false), [(4..6, 'a')]);
     }
 
     #[test]
