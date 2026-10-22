@@ -1078,10 +1078,27 @@ fn text_pane(cell: &Cell, style: &Style) -> Div {
                 .bg(p.ruler)
         }))
         .when(!cell.text.is_empty(), |d| {
-            d.child(
-                StyledText::new(SharedString::from(cell.text.clone()))
-                    .with_highlights(line_highlights(cell, p)),
-            )
+            let text = StyledText::new(SharedString::from(cell.text.clone()))
+                .with_highlights(line_highlights(cell, p));
+            if cell.urls.is_empty() {
+                return d.child(text);
+            }
+            // Ctrl-click (Cmd on macOS) on a URL opens it. The click still
+            // reaches the row, so it moves the cursor there as well.
+            let layout = text.layout().clone();
+            let urls = cell.urls.clone();
+            let line = cell.text.clone();
+            d.child(text)
+                .on_mouse_up(MouseButton::Left, move |e, _, cx| {
+                    if !e.modifiers.secondary() {
+                        return;
+                    }
+                    if let Ok(ix) = layout.index_for_position(e.position)
+                        && let Some(r) = urls.iter().find(|r| r.contains(&ix))
+                    {
+                        cx.open_url(&line[r.clone()]);
+                    }
+                })
         })
 }
 
