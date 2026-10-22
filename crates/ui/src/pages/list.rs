@@ -17,7 +17,7 @@ use sync::PollPolicy;
 use crate::{
     actions::*,
     labels::{label_columns, mark, short_name},
-    list_model::{ListModel, PAGE_SIZE, Pager},
+    list_model::{DASHBOARD_ROWS, ListModel, PAGE_SIZE, Pager},
     row::{browser_url, chips, size_text},
     session::{SavedQuery, Session, is_unauthorized},
     theme::{chip_colors, mark_color},
@@ -168,6 +168,11 @@ impl ChangeListPage {
     }
 
     #[cfg(test)]
+    pub(crate) fn scroll_for_test(&self) -> ScrollHandle {
+        self.scroll.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn focus_handle_for_test(&self) -> FocusHandle {
         self.focus.clone()
     }
@@ -182,8 +187,16 @@ impl ChangeListPage {
             return &[];
         };
         match self.kind {
-            ListKind::Dashboard => &s.rows[..s.rows.len().min(PAGE_SIZE)],
+            ListKind::Dashboard => &s.rows[..s.rows.len().min(DASHBOARD_ROWS)],
             ListKind::Search => &s.rows[self.pager.range(s.rows.len())],
+        }
+    }
+
+    /// Rows asked of the server per request.
+    fn fetch_limit(&self) -> u32 {
+        match self.kind {
+            ListKind::Dashboard => DASHBOARD_ROWS as u32,
+            ListKind::Search => PAGE_SIZE as u32,
         }
     }
 
@@ -242,11 +255,12 @@ impl ChangeListPage {
     fn refresh(&mut self, i: usize, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
         let query = self.sections[i].spec.query.clone();
+        let limit = self.fetch_limit();
         self.sections[i].status = Status::Refreshing;
         self.sections[i].task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let update = syncer.refresh_query(&query, PAGE_SIZE as u32).await?;
+                    let update = syncer.refresh_query(&query, limit).await?;
                     let cached = if update.changed {
                         syncer.cached_query(&query)?
                     } else {
@@ -264,11 +278,12 @@ impl ChangeListPage {
     fn load_more(&mut self, i: usize, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
         let query = self.sections[i].spec.query.clone();
+        let limit = self.fetch_limit();
         self.sections[i].status = Status::LoadingMore;
         self.sections[i].task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let update = syncer.load_more(&query, PAGE_SIZE as u32).await?;
+                    let update = syncer.load_more(&query, limit).await?;
                     let cached = syncer.cached_query(&query)?;
                     Ok::<_, sync::Error>((update, cached))
                 })
@@ -585,7 +600,7 @@ impl ChangeListPage {
         let theme = cx.theme().clone();
         let count = if s.loaded {
             let n = s.rows.len().min(if self.kind == ListKind::Dashboard {
-                PAGE_SIZE
+                DASHBOARD_ROWS
             } else {
                 usize::MAX
             });
