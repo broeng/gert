@@ -425,16 +425,20 @@ fn the_preferences_panel_changes_session_settings_and_refetches(cx: &mut TestApp
         let v = p.page.read(cx).view_for_test().expect("view");
         assert_eq!(v.read(cx).mode(), DiffViewMode::Unified);
     });
-    press(cx, p.window, &["t", "s", "i"]);
+    press(cx, p.window, &["t", "s", "i", "y"]);
     cx.update(|cx| {
         let r = p.settings.read(cx).resolved();
         assert_eq!(r.tab_size, 2); // 8 -> 2
         assert!(!r.show_tabs);
         assert!(!r.intraline_difference);
+        assert!(!r.syntax_highlighting);
     });
     // Esc closes the panel and the diff view has the keyboard again.
     press(cx, p.window, &["escape"]);
     cx.update(|cx| assert!(!p.page.read(cx).prefs_open_for_test()));
+    // `y` toggles syntax highlighting without the panel too.
+    press(cx, p.window, &["y"]);
+    cx.update(|cx| assert!(p.settings.read(cx).resolved().syntax_highlighting));
     let before = cx.update(|cx| {
         let v = p.page.read(cx).view_for_test().expect("view");
         v.read(cx).cursor()

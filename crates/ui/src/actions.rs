@@ -441,6 +441,12 @@ pub fn diff_page_entries() -> Vec<Entry> {
             KeyBinding::new(",", TogglePrefs, Some(k)),
             "Diff preferences",
         ),
+        // Also in the preferences panel; here it needs no panel first.
+        e(
+            "Y",
+            KeyBinding::new("y", PrefsSyntax, Some(k)),
+            "Syntax highlighting on / off",
+        ),
     ]
 }
 
