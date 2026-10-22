@@ -22,7 +22,7 @@ fn main() {
 }
 
 /// Everything that can fail before the window opens.
-fn startup() -> anyhow::Result<Startup> {
+fn startup() -> anyhow::Result<(Startup, bool)> {
     let paths = Paths::discover()?;
     let config = Config::load(&paths.config_file)
         .context("reading the configuration")?
@@ -38,7 +38,8 @@ fn startup() -> anyhow::Result<Startup> {
         None => None,
     };
     let http = GpuiHttpClient::new().context("creating the HTTP client")?;
-    Ok(Startup {
+    let advance_after_vote = config.advance_after_vote();
+    let startup = Startup {
         env: Env {
             http: Arc::new(http),
             store: Arc::new(Mutex::new(store)),
@@ -57,18 +58,23 @@ fn startup() -> anyhow::Result<Startup> {
                 .unwrap_or_default(),
             font_family: config.diff.and_then(|d| d.font_family),
         },
-    })
+    };
+    Ok((startup, advance_after_vote))
 }
 
 fn run() -> anyhow::Result<()> {
-    let startup = startup()?;
+    let (startup, advance_after_vote) = startup()?;
     ui::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
         let options = ui::window_options(APP_NAME, APP_NAME, size(px(1200.), px(760.)), cx);
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
-            cx.new(|cx| Shell::new(startup, window, cx).with_app_name(APP_NAME))
+            cx.new(|cx| {
+                Shell::new(startup, window, cx)
+                    .with_app_name(APP_NAME)
+                    .with_advance_after_vote(advance_after_vote, cx)
+            })
         });
         match opened {
             Ok((window, _)) => {

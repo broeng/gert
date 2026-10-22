@@ -9,6 +9,14 @@
 //! name = "Your turn"
 //! query = "attention:self"
 //!
+//! # Optional: what opens on start. Default: the dashboard.
+//! [startup]
+//! page = "dashboard"                   # or instead: query = "status:open project:foo"
+//!
+//! # Optional: review flow.
+//! [review]
+//! advance_after_vote = true            # go to the next open change after a vote
+//!
 //! # Optional: local overrides of the diff view. Every key is optional. They
 //! # win over the preferences stored on the server (Settings > Preferences >
 //! # Diff Preferences in the web UI) and are never written back to it.
@@ -28,6 +36,10 @@
 //! ```
 //!
 //! The HTTP password is never stored here; see [`crate::secrets`].
+//!
+//! The file is also edited by hand, so the writer ([`Config::update`]) never
+//! regenerates it: it re-reads the file, and applies only the keys that
+//! changed to the parsed document, which keeps comments and formatting.
 
 use std::{
     fs, io,
@@ -37,6 +49,7 @@ use std::{
 use directories::ProjectDirs;
 use model::{DiffContext, DiffPreferences, DiffViewMode, Whitespace};
 use serde::{Deserialize, Serialize};
+use toml_edit::{DocumentMut, Item};
 
 use crate::APP_NAME;
 
@@ -53,6 +66,8 @@ pub enum ConfigError {
     Write { path: PathBuf, source: io::Error },
     #[error("cannot serialize the configuration: {0}")]
     Serialize(#[from] toml::ser::Error),
+    #[error("cannot parse {path} for editing, leaving it untouched: {message}")]
+    Edit { path: PathBuf, message: String },
     #[error("no home directory found")]
     NoHome,
 }
@@ -64,6 +79,72 @@ pub struct Config {
     pub queries: Vec<QueryConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<StartupConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewConfig>,
+}
+
+/// What opens on start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupPage {
+    Dashboard,
+    Query(String),
+}
+
+/// The `[startup]` section: `page = "dashboard"` or `query = "..."`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartupConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+impl StartupConfig {
+    /// The section that selects `page`.
+    pub fn for_page(page: &StartupPage) -> Self {
+        match page {
+            StartupPage::Dashboard => Self {
+                page: Some("dashboard".into()),
+                query: None,
+            },
+            StartupPage::Query(q) => Self {
+                page: None,
+                query: Some(q.clone()),
+            },
+        }
+    }
+
+    /// A non-blank `query` wins; `page` must be "dashboard" (or absent).
+    /// Anything else falls back to the dashboard with a warning.
+    pub fn target(&self) -> StartupPage {
+        if let Some(q) = self
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+        {
+            return StartupPage::Query(q.to_owned());
+        }
+        match self.page.as_deref().map(|p| p.trim().to_ascii_lowercase()) {
+            None => StartupPage::Dashboard,
+            Some(p) if p == "dashboard" => StartupPage::Dashboard,
+            Some(p) => {
+                log::warn!("config: [startup] page = {p:?} is not \"dashboard\"; using it");
+                StartupPage::Dashboard
+            }
+        }
+    }
+}
+
+/// The `[review]` section.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advance_after_vote: Option<bool>,
 }
 
 /// `context = 10` or `context = "all"`.
@@ -219,7 +300,24 @@ impl Config {
             }),
             queries,
             diff: self.diff,
+            startup: self.startup,
+            review: self.review,
         }
+    }
+
+    pub fn startup_page(&self) -> StartupPage {
+        self.startup
+            .as_ref()
+            .map(StartupConfig::target)
+            .unwrap_or(StartupPage::Dashboard)
+    }
+
+    /// Default on.
+    pub fn advance_after_vote(&self) -> bool {
+        self.review
+            .as_ref()
+            .and_then(|r| r.advance_after_vote)
+            .unwrap_or(true)
     }
 
     /// Reads the file; `Ok(None)` if it does not exist.
@@ -242,21 +340,201 @@ impl Config {
             })
     }
 
-    /// Writes the file, creating parent directories. The write goes to a
-    /// temporary file first so a crash cannot leave a truncated config.
+    /// Writes this configuration as a whole, as [`Config::update`] would.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        let text = toml::to_string_pretty(self)?;
-        let werr = |source| ConfigError::Write {
+        Self::update(path, |c| *c = self.clone()).map(|_| ())
+    }
+
+    /// Re-reads the file, applies `change` to what is on disk now, and
+    /// writes back only the keys that `change` altered, into the parsed
+    /// document so comments and formatting survive. Reading at save time
+    /// merges with edits made to the file since it was loaded. A file that
+    /// does not parse is refused and left untouched; a missing one is
+    /// created. Returns the configuration as written.
+    pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<Config, ConfigError> {
+        let text = match fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        };
+        let old: Config = toml::from_str(&text).map_err(|source| ConfigError::Parse {
             path: path.to_owned(),
             source,
-        };
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(werr)?;
+        })?;
+        let mut doc: DocumentMut =
+            text.parse()
+                .map_err(|e: toml_edit::TomlError| ConfigError::Edit {
+                    path: path.to_owned(),
+                    message: e.to_string(),
+                })?;
+        let mut new = old.clone();
+        change(&mut new);
+        if new != old {
+            apply_changes(&old, &new, &mut doc)?;
+            write_atomic(path, &doc.to_string())?;
         }
-        let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, text).map_err(werr)?;
-        fs::rename(&tmp, path).map_err(werr)
+        Ok(new)
     }
+}
+
+/// The scalar and table keys of `new` that differ from `old` (everything
+/// but the query list) go into `doc`.
+fn apply_changes(old: &Config, new: &Config, doc: &mut DocumentMut) -> Result<(), ConfigError> {
+    let tables = |c: &Config| -> Result<toml::Table, ConfigError> {
+        let mut t = toml::Table::try_from(c)?;
+        t.remove("queries");
+        Ok(t)
+    };
+    apply_table(&tables(old)?, &tables(new)?, doc.as_table_mut());
+    if old.queries != new.queries {
+        apply_queries(&new.queries, doc.as_table_mut());
+    }
+    Ok(())
+}
+
+fn apply_table(old: &toml::Table, new: &toml::Table, target: &mut toml_edit::Table) {
+    for key in old.keys().filter(|k| !new.contains_key(*k)) {
+        target.remove(key);
+    }
+    for (key, value) in new {
+        if old.get(key) == Some(value) {
+            continue;
+        }
+        if let toml::Value::Table(sub) = value {
+            if !matches!(target.get(key), Some(Item::Table(_))) {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(false);
+                target.insert(key, Item::Table(t));
+            }
+            if let Some(Item::Table(t)) = target.get_mut(key) {
+                let empty = toml::Table::new();
+                let before = match old.get(key) {
+                    Some(toml::Value::Table(o)) => o,
+                    _ => &empty,
+                };
+                apply_table(before, sub, t);
+            }
+            continue;
+        }
+        let mut v = to_edit_value(value);
+        // Keep an inline comment on the line of the key we replace.
+        if let Some(Item::Value(prev)) = target.get(key) {
+            *v.decor_mut() = prev.decor().clone();
+        }
+        target.insert(key, Item::Value(v));
+    }
+}
+
+fn to_edit_value(v: &toml::Value) -> toml_edit::Value {
+    match v {
+        toml::Value::String(s) => s.as_str().into(),
+        toml::Value::Integer(i) => (*i).into(),
+        toml::Value::Float(f) => (*f).into(),
+        toml::Value::Boolean(b) => (*b).into(),
+        toml::Value::Datetime(d) => d.to_string().into(),
+        toml::Value::Array(a) => a.iter().map(to_edit_value).collect(),
+        toml::Value::Table(t) => {
+            let mut inline = toml_edit::InlineTable::new();
+            for (k, v) in t {
+                inline.insert(k, to_edit_value(v));
+            }
+            inline.into()
+        }
+    }
+}
+
+fn query_of(t: &toml_edit::Table) -> Option<(String, String)> {
+    Some((
+        t.get("name")?.as_str()?.to_owned(),
+        t.get("query")?.as_str()?.to_owned(),
+    ))
+}
+
+fn set_str(t: &mut toml_edit::Table, key: &str, text: &str) {
+    let mut v: toml_edit::Value = text.into();
+    if let Some(Item::Value(prev)) = t.get(key) {
+        *v.decor_mut() = prev.decor().clone();
+    }
+    t.insert(key, Item::Value(v));
+}
+
+/// Rewrites the `[[queries]]` tables. A table of the file that equals a new
+/// entry (name and query) is reused as is, with its comments, wherever the
+/// entry moved to. A new entry that matches nothing takes over the unused
+/// table at its own position when there is one (an edit in place: only
+/// `name` and `query` are replaced, comments and other keys stay), else a
+/// fresh table is made. The limit: comments belong to the table below them,
+/// so deleting an entry deletes the comment lines directly above it, and a
+/// section comment above the first `[[queries]]` moves with that table.
+/// Tables are matched by content, so hand edits of the list on disk are
+/// respected.
+fn apply_queries(new: &[QueryConfig], root: &mut toml_edit::Table) {
+    let mut existing: Vec<Option<toml_edit::Table>> = match root.get("queries") {
+        Some(Item::ArrayOfTables(a)) => a.iter().cloned().map(Some).collect(),
+        _ => Vec::new(),
+    };
+    let existing_keys: Vec<Option<(String, String)>> = existing
+        .iter()
+        .map(|t| t.as_ref().and_then(query_of))
+        .collect();
+    let mut chosen: Vec<Option<toml_edit::Table>> = vec![None; new.len()];
+    for (i, q) in new.iter().enumerate() {
+        let key = Some((q.name.clone(), q.query.clone()));
+        if let Some(j) =
+            (0..existing.len()).find(|&j| existing[j].is_some() && existing_keys[j] == key)
+        {
+            chosen[i] = existing[j].take();
+        }
+    }
+    let mut out = toml_edit::ArrayOfTables::new();
+    for (i, q) in new.iter().enumerate() {
+        let table = match chosen[i].take() {
+            Some(t) => t,
+            None => {
+                let mut t = existing
+                    .get_mut(i)
+                    .and_then(Option::take)
+                    .unwrap_or_default();
+                set_str(&mut t, "name", &q.name);
+                set_str(&mut t, "query", &q.query);
+                t
+            }
+        };
+        // Tables print sorted by their parsed position; clear it so the new
+        // order (the order of the array) wins.
+        let mut table = table;
+        table.set_position(None);
+        out.push(table);
+    }
+    if out.is_empty() {
+        root.remove("queries");
+    } else {
+        root.insert("queries", Item::ArrayOfTables(out));
+    }
+}
+
+/// Temp file in the same directory, flushed to disk, then renamed over the
+/// target, so a crash leaves either the old or the new file.
+fn write_atomic(path: &Path, text: &str) -> Result<(), ConfigError> {
+    use io::Write as _;
+    let werr = |source| ConfigError::Write {
+        path: path.to_owned(),
+        source,
+    };
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(werr)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    let mut f = fs::File::create(&tmp).map_err(werr)?;
+    f.write_all(text.as_bytes()).map_err(werr)?;
+    f.sync_all().map_err(werr)?;
+    drop(f);
+    fs::rename(&tmp, path).map_err(werr)
 }
 
 /// Where this application keeps its files.
@@ -436,6 +714,220 @@ mod tests {
         assert!(!text.contains("tab_size"), "{text}");
         assert_eq!(Config::load(&path).unwrap(), Some(cfg));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    const COMMENTED: &str = r#"# My config, edited by hand.
+
+# The server.
+[server]
+url = "https://g.example.com" # prod
+username = "jdoe"
+
+# --- queries ---
+# first
+[[queries]]
+name = "A"
+query = "status:open" # inline a
+
+# second
+[[queries]]
+name = "B"
+query = "owner:self"
+
+# third
+[[queries]]
+name = "C"
+query = "is:wip"
+
+# Diff look.
+[diff]
+tab_size = 4 # four
+# trailing diff comment
+
+[review]
+# advance after a vote
+advance_after_vote = false
+"#;
+
+    fn commented(name: &str) -> PathBuf {
+        let dir = tmp(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, COMMENTED).unwrap();
+        path
+    }
+
+    fn lines_kept(text: &str, gone: &[&str]) {
+        for line in COMMENTED.lines().filter(|l| !l.is_empty()) {
+            if !gone.iter().any(|g| line.contains(g)) {
+                assert!(text.contains(line), "lost {line:?} in\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn editing_one_query_keeps_every_other_comment() {
+        let path = commented("edit1");
+        Config::update(&path, |c| c.queries[1].query = "owner:self is:open".into()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        lines_kept(&text, &["owner:self"]);
+        assert!(text.contains("# second"), "{text}");
+        assert!(text.contains("query = \"owner:self is:open\""), "{text}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.queries[1], q("B", "owner:self is:open"));
+        assert_eq!(cfg.queries.len(), 3);
+    }
+
+    #[test]
+    fn adding_a_query_keeps_every_comment() {
+        let path = commented("add1");
+        Config::update(&path, |c| c.queries.push(q("D", "is:merged"))).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        lines_kept(&text, &[]);
+        assert_eq!(Config::load(&path).unwrap().unwrap().queries.len(), 4);
+    }
+
+    #[test]
+    fn deleting_a_query_drops_only_its_own_comment() {
+        let path = commented("del1");
+        Config::update(&path, |c| {
+            c.queries.remove(1);
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        lines_kept(&text, &["# second", "\"B\"", "owner:self"]);
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.queries, vec![q("A", "status:open"), q("C", "is:wip")]);
+    }
+
+    #[test]
+    fn reordering_queries_moves_their_comments_along() {
+        let path = commented("reorder1");
+        Config::update(&path, |c| c.queries.swap(0, 2)).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        lines_kept(&text, &[]);
+        let third = text.find("# third").unwrap();
+        let first = text.find("# first").unwrap();
+        assert!(third < first, "{text}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.queries[0].name, "C");
+        assert_eq!(cfg.queries[2].name, "A");
+    }
+
+    #[test]
+    fn changing_a_scalar_keeps_its_inline_comment() {
+        let path = commented("scalar1");
+        Config::update(&path, |c| {
+            c.diff.get_or_insert_with(Default::default).tab_size = Some(8);
+            c.server.as_mut().unwrap().url = "https://h.example.com".into();
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("tab_size = 8 # four"), "{text}");
+        assert!(
+            text.contains("url = \"https://h.example.com\" # prod"),
+            "{text}"
+        );
+        lines_kept(&text, &["tab_size", "url ="]);
+    }
+
+    #[test]
+    fn login_on_a_commented_file_keeps_the_comments() {
+        let path = commented("login1");
+        Config::update(&path, |c| {
+            *c = std::mem::take(c).after_login("https://new.example.com", Some("x"));
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        lines_kept(&text, &["url =", "username"]);
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.server.unwrap().url, "https://new.example.com");
+        assert_eq!(cfg.queries.len(), 3);
+    }
+
+    #[test]
+    fn an_unchanged_update_does_not_touch_the_file() {
+        let path = commented("noop1");
+        Config::update(&path, |_| {}).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), COMMENTED);
+    }
+
+    #[test]
+    fn an_unparseable_file_is_refused_and_untouched() {
+        let dir = tmp("refuse1");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        for bad in ["[server\nurl = ", "server = 3\n"] {
+            fs::write(&path, bad).unwrap();
+            let err = Config::update(&path, |c| c.queries.push(q("x", "y"))).unwrap_err();
+            assert!(err.to_string().contains("config.toml"), "{err}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), bad);
+        }
+    }
+
+    #[test]
+    fn edits_made_on_disk_since_loading_survive_a_save() {
+        let path = commented("merge1");
+        // The user edits another key by hand after we loaded.
+        let edited = COMMENTED.replace("tab_size = 4", "tab_size = 2");
+        fs::write(&path, edited).unwrap();
+        // A save from the copy loaded earlier would revert tab_size; update
+        // works on what is on disk now.
+        Config::update(&path, |c| c.queries.push(q("D", "is:merged"))).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("tab_size = 2 # four"), "{text}");
+        assert_eq!(Config::load(&path).unwrap().unwrap().queries.len(), 4);
+    }
+
+    #[test]
+    fn a_missing_file_is_created() {
+        let dir = tmp("create1");
+        let path = dir.join("sub").join("config.toml");
+        Config::update(&path, |c| c.queries.push(q("a", "b"))).unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().unwrap().queries,
+            vec![q("a", "b")]
+        );
+    }
+
+    #[test]
+    fn startup_and_review_default_and_round_trip() {
+        let cfg = Config::default();
+        assert_eq!(cfg.startup_page(), StartupPage::Dashboard);
+        assert!(cfg.advance_after_vote());
+
+        let parsed: Config = toml::from_str(
+            "[startup]\nquery = \"status:open project:foo\"\n[review]\nadvance_after_vote = false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.startup_page(),
+            StartupPage::Query("status:open project:foo".into())
+        );
+        assert!(!parsed.advance_after_vote());
+
+        let odd: Config = toml::from_str("[startup]\npage = \"inbox\"\n").unwrap();
+        assert_eq!(odd.startup_page(), StartupPage::Dashboard);
+        let blank: Config = toml::from_str("[startup]\nquery = \"  \"\n").unwrap();
+        assert_eq!(blank.startup_page(), StartupPage::Dashboard);
+
+        let dir = tmp("startup1");
+        let path = dir.join("config.toml");
+        Config::update(&path, |c| {
+            c.startup = Some(StartupConfig::for_page(&StartupPage::Query("a b".into())));
+            c.review = Some(ReviewConfig {
+                advance_after_vote: Some(false),
+            });
+        })
+        .unwrap();
+        let back = Config::load(&path).unwrap().unwrap();
+        assert_eq!(back.startup_page(), StartupPage::Query("a b".into()));
+        assert!(!back.advance_after_vote());
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[startup]") && text.contains("[review]"),
+            "{text}"
+        );
     }
 
     #[test]

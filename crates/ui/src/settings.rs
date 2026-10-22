@@ -87,7 +87,6 @@ impl PageLayout {
         self.advance_after_vote
     }
 
-    #[allow(dead_code)] // The settings page (3b) calls it.
     pub fn set_advance_after_vote(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.advance_after_vote != on {
             self.advance_after_vote = on;

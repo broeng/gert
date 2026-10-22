@@ -70,14 +70,10 @@ impl Backend for AppBackend {
                 .set(base_url, user, pass)
                 .map_err(|e| BackendError(e.to_string()))?;
         }
-        let existing = Config::load(&self.config_file).unwrap_or_else(|e| {
-            log::warn!("ignoring unreadable config: {e}");
-            None
-        });
-        let config = existing.unwrap_or_default().after_login(base_url, username);
-        config
-            .save(&self.config_file)
-            .map_err(|e| BackendError(e.to_string()))?;
+        let config = Config::update(&self.config_file, |c| {
+            *c = std::mem::take(c).after_login(base_url, username);
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
         Ok(queries_to_ui(&config.queries))
     }
 }
