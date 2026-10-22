@@ -24,7 +24,11 @@
 //!    optional message (abandon, restore, WIP) or base (rebase). `Ctrl-Enter`
 //!    (`Cmd-Enter`) confirms, `Esc` cancels. Ready and the private toggles
 //!    run right from the menu.
-//! 3. Running: the request goes out on the background executor and `Esc`
+//! 3. Reviewers (`v`), topic (`t`) and hashtags (`h`) are steps of their own
+//!    with text fields: see `reviewers` and `tags`. The reviewers step stays
+//!    open after each change; `Esc` closes the dialog and the page takes the
+//!    new detail.
+//! 4. Running: the request goes out on the background executor and `Esc`
 //!    does not cancel it. A refused action (403, 409, ...) goes back to the
 //!    step it came from with the server's message; 401 goes to the login
 //!    flow; nothing is queued, an action needs a connection.
@@ -33,6 +37,9 @@
 //! after the server accepted an action; the page takes that detail.
 
 pub mod actions;
+mod edit;
+mod reviewers;
+mod tags;
 #[cfg(test)]
 mod tests;
 
@@ -40,7 +47,10 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::{ChangeDetail, ChangeNumber, SubmitRequirementStatus, action_id};
+use model::{ChangeDetail, ChangeNumber, ReviewerState, SubmitRequirementStatus, action_id};
+
+use reviewers::Reviewers;
+use tags::Tags;
 
 use crate::{
     reply::{Look, chip},
@@ -95,10 +105,14 @@ pub enum Kind {
     Ready,
     Private,
     Unprivate,
+    /// Steps with their own fields, not run from the menu.
+    Reviewers,
+    Topic,
+    Hashtags,
 }
 
 impl Kind {
-    const ALL: [Kind; 8] = [
+    const ALL: [Kind; 11] = [
         Kind::Submit,
         Kind::Rebase,
         Kind::Abandon,
@@ -107,6 +121,9 @@ impl Kind {
         Kind::Ready,
         Kind::Private,
         Kind::Unprivate,
+        Kind::Reviewers,
+        Kind::Topic,
+        Kind::Hashtags,
     ];
 
     /// The id of the action in Gerrit's `actions` maps.
@@ -120,6 +137,9 @@ impl Kind {
             Kind::Ready => action_id::READY,
             Kind::Private => action_id::PRIVATE,
             Kind::Unprivate => action_id::PRIVATE_DELETE,
+            Kind::Reviewers => "",
+            Kind::Topic => action_id::TOPIC,
+            Kind::Hashtags => action_id::HASHTAGS,
         }
     }
 
@@ -134,6 +154,9 @@ impl Kind {
             Kind::Ready => "Ready for review",
             Kind::Private => "Mark private",
             Kind::Unprivate => "Unmark private",
+            Kind::Reviewers => "Reviewers and CC",
+            Kind::Topic => "Edit topic",
+            Kind::Hashtags => "Edit hashtags",
         }
     }
 
@@ -146,6 +169,9 @@ impl Kind {
             Kind::Restore => 'r',
             Kind::Wip | Kind::Ready => 'w',
             Kind::Private | Kind::Unprivate => 'p',
+            Kind::Reviewers => 'v',
+            Kind::Topic => 't',
+            Kind::Hashtags => 'h',
         }
     }
 
@@ -160,6 +186,9 @@ impl Kind {
             Kind::Ready => "Marked ready for review",
             Kind::Private => "Marked private",
             Kind::Unprivate => "Marked not private",
+            Kind::Reviewers => "Reviewers changed",
+            Kind::Topic => "Topic changed",
+            Kind::Hashtags => "Hashtags changed",
         }
     }
 
@@ -174,13 +203,24 @@ impl Kind {
             Kind::Ready => "Not marked ready for review",
             Kind::Private => "Not marked private",
             Kind::Unprivate => "Not marked not private",
+            Kind::Reviewers => "Reviewers not changed",
+            Kind::Topic => "Topic not changed",
+            Kind::Hashtags => "Hashtags not changed",
         }
     }
 
     /// Whether a confirmation comes first. Ready and the private toggles
     /// are cheap to undo and run from the menu.
     fn confirms(self) -> bool {
-        !matches!(self, Kind::Ready | Kind::Private | Kind::Unprivate)
+        !matches!(
+            self,
+            Kind::Ready
+                | Kind::Private
+                | Kind::Unprivate
+                | Kind::Reviewers
+                | Kind::Topic
+                | Kind::Hashtags
+        )
     }
 
     /// Whether the confirmation has a message field.
@@ -204,6 +244,8 @@ impl Kind {
             Kind::Ready => syncer.set_work_in_progress(change, false, None).await,
             Kind::Private => syncer.set_private(change, true).await,
             Kind::Unprivate => syncer.set_private(change, false).await,
+            // Steps: their edits go through `edit::Edit`.
+            Kind::Reviewers | Kind::Topic | Kind::Hashtags => Ok(None),
         }
     }
 }
@@ -223,6 +265,15 @@ pub fn menu_entries(detail: &ChangeDetail) -> Vec<MenuEntry> {
     Kind::ALL
         .into_iter()
         .filter_map(|kind| {
+            if kind == Kind::Reviewers {
+                // The server decides; a refusal is shown in the step.
+                return Some(MenuEntry {
+                    kind,
+                    label: kind.label().to_owned(),
+                    enabled: true,
+                    reason: None,
+                });
+            }
             let a = detail.action(kind.id())?;
             Some(MenuEntry {
                 kind,
@@ -249,6 +300,9 @@ enum Step {
     Menu,
     Confirm(Kind),
     Running(Kind),
+    Reviewers,
+    Topic,
+    Hashtags,
 }
 
 pub struct ActionDialog {
@@ -261,6 +315,10 @@ pub struct ActionDialog {
     error: Option<String>,
     message: Entity<TextareaState>,
     base: Entity<InputState>,
+    rev: Reviewers,
+    tags: Tags,
+    /// A reviewer, topic or hashtag edit is under way.
+    busy: bool,
     focus: FocusHandle,
     cancel_focus: FocusHandle,
     confirm_focus: FocusHandle,
@@ -296,7 +354,38 @@ impl ActionDialog {
         let base = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Base: change number or commit SHA (optional)")
         });
+        let rev = Reviewers::new(window, cx);
+        let tags = Tags::new(window, cx);
         let subs = vec![
+            cx.subscribe_in(
+                &rev.input,
+                window,
+                |this, _, ev: &InputEvent, _, cx| match ev {
+                    InputEvent::Change => this.query_changed(cx),
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        shift,
+                    } => this.add_current(
+                        if *shift {
+                            ReviewerState::Cc
+                        } else {
+                            ReviewerState::Reviewer
+                        },
+                        cx,
+                    ),
+                    _ => {}
+                },
+            ),
+            cx.subscribe_in(&tags.topic, window, |this, _, ev: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    this.save_topic(cx);
+                }
+            }),
+            cx.subscribe_in(&tags.add, window, |this, _, ev: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    this.save_hashtags(cx);
+                }
+            }),
             cx.subscribe_in(
                 &message,
                 window,
@@ -326,6 +415,9 @@ impl ActionDialog {
             error: None,
             message,
             base,
+            rev,
+            tags,
+            busy: false,
             focus: cx.focus_handle(),
             cancel_focus: cx.focus_handle(),
             confirm_focus: cx.focus_handle(),
@@ -338,7 +430,7 @@ impl ActionDialog {
     }
 
     fn running(&self) -> bool {
-        matches!(self.step, Step::Running(_))
+        matches!(self.step, Step::Running(_)) || self.busy
     }
 
     // ---- the menu ----
@@ -392,6 +484,12 @@ impl ActionDialog {
             return;
         }
         let kind = entry.kind;
+        match kind {
+            Kind::Reviewers => return self.enter_reviewers(window, cx),
+            Kind::Topic => return self.enter_topic(window, cx),
+            Kind::Hashtags => return self.enter_hashtags(window, cx),
+            _ => {}
+        }
         if kind.confirms() {
             self.step = Step::Confirm(kind);
             let target = match kind {
@@ -425,6 +523,16 @@ impl ActionDialog {
         self.pick_key('p', window, cx);
     }
 
+    fn pick_reviewers(&mut self, _: &PickReviewers, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_key('v', window, cx);
+    }
+    fn pick_topic(&mut self, _: &PickTopic, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_key('t', window, cx);
+    }
+    fn pick_hashtags(&mut self, _: &PickHashtags, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_key('h', window, cx);
+    }
+
     // ---- closing, focus ----
 
     fn close_action(&mut self, _: &CloseMenu, _: &mut Window, cx: &mut Context<Self>) {
@@ -434,16 +542,42 @@ impl ActionDialog {
     /// Closes the dialog. Not while an action runs: the request is under
     /// way and cannot be taken back.
     pub fn close(&mut self, cx: &mut Context<Self>) {
-        if !self.running() {
+        if self.running() {
+            return;
+        }
+        if self.step == Step::Reviewers {
+            self.close_reviewers(cx);
+        } else {
             cx.emit(ActionEvent::Close);
         }
     }
 
     fn tab_order(&self, cx: &App) -> Vec<FocusHandle> {
+        let mut v = Vec::new();
+        match self.step {
+            Step::Reviewers => {
+                v.push(self.rev.input.read(cx).focus_handle(cx));
+                v.extend(self.rev.rows.iter().cloned());
+                v.push(self.cancel_focus.clone());
+                return v;
+            }
+            Step::Topic => {
+                v.push(self.tags.topic.read(cx).focus_handle(cx));
+            }
+            Step::Hashtags => {
+                v.push(self.tags.add.read(cx).focus_handle(cx));
+                v.extend(self.tags.chips.iter().cloned());
+            }
+            _ => {}
+        }
+        if matches!(self.step, Step::Topic | Step::Hashtags) {
+            v.push(self.cancel_focus.clone());
+            v.push(self.confirm_focus.clone());
+            return v;
+        }
         let Step::Confirm(kind) = self.step else {
             return Vec::new();
         };
-        let mut v = Vec::new();
         if kind.takes_message() {
             v.push(self.message.read(cx).focus_handle(cx));
         }
@@ -485,6 +619,11 @@ impl ActionDialog {
 
     /// Runs the action of the confirmation with the typed message or base.
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.step {
+            Step::Topic => return self.save_topic(cx),
+            Step::Hashtags => return self.save_hashtags(cx),
+            _ => {}
+        }
         let Step::Confirm(kind) = self.step else {
             return;
         };
@@ -571,6 +710,35 @@ impl ActionDialog {
     #[cfg(test)]
     pub(crate) fn error_for_test(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notice_for_test(&self) -> Option<String> {
+        self.rev.notice.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn suggestions_for_test(&self) -> Vec<String> {
+        self.rev
+            .suggestions
+            .iter()
+            .map(|s| s.reviewer_input())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn suggested_for_test(
+        &mut self,
+        query: &str,
+        list: Vec<model::SuggestedReviewer>,
+        cx: &mut Context<Self>,
+    ) {
+        self.suggested(query, Ok(list), cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detail_for_test(&self) -> &ChangeDetail {
+        &self.detail
     }
 
     #[cfg(test)]
@@ -772,6 +940,7 @@ impl ActionDialog {
 
 impl Render for ActionDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.reviewers_frame(window, cx);
         if let Some(handle) = self.pending_focus.take() {
             window.defer(cx, move |window, cx| window.focus(&handle, cx));
         }
@@ -781,6 +950,9 @@ impl Render for ActionDialog {
         let step = self.step;
         let (title, confirm_label) = match step {
             Step::Menu => ("Change actions".to_owned(), None),
+            Step::Reviewers => ("Reviewers and CC".to_owned(), None),
+            Step::Topic => ("Topic".to_owned(), None),
+            Step::Hashtags => ("Hashtags".to_owned(), None),
             Step::Confirm(k) | Step::Running(k) => (
                 self.entries
                     .iter()
@@ -797,9 +969,76 @@ impl Render for ActionDialog {
         };
         let body = match step {
             Step::Menu => self.render_menu(window, cx),
+            Step::Reviewers => self.render_reviewers(window, cx),
+            Step::Topic => self.render_topic(),
+            Step::Hashtags => self.render_hashtags(window, cx),
             Step::Confirm(k) | Step::Running(k) => self.render_confirm(k, cx),
         };
+        let save_label = match step {
+            Step::Topic => Some("Save topic"),
+            Step::Hashtags => Some("Apply"),
+            _ => None,
+        };
         let footer = match (step, confirm_label) {
+            (Step::Reviewers, _) => h_flex()
+                .gap_2()
+                .pt_1()
+                .items_center()
+                .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(
+                    "Enter adds a reviewer, Shift-Enter a CC, Up/Down choose. \
+                     Tab to the list: Enter moves, Delete removes. Esc closes",
+                ))
+                .child(
+                    chip(
+                        "action-close",
+                        "Close",
+                        &self.cancel_focus,
+                        Look::Plain,
+                        running,
+                        window,
+                        cx,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                ),
+            (Step::Topic | Step::Hashtags, _) => h_flex()
+                .gap_2()
+                .pt_1()
+                .items_center()
+                .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(
+                    if step == Step::Hashtags {
+                        "Enter applies, Tab to a hashtag and Delete removes it, Esc cancels"
+                    } else {
+                        "Enter saves, Esc cancels"
+                    },
+                ))
+                .child(
+                    chip(
+                        "action-cancel",
+                        "Cancel",
+                        &self.cancel_focus,
+                        Look::Plain,
+                        running,
+                        window,
+                        cx,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                )
+                .child(
+                    chip(
+                        "action-confirm",
+                        if running {
+                            "Working\u{2026}"
+                        } else {
+                            save_label.unwrap_or("Save")
+                        },
+                        &self.confirm_focus,
+                        Look::Primary,
+                        running,
+                        window,
+                        cx,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                ),
             (Step::Menu, _) => h_flex().pt_1().child(
                 div()
                     .text_xs()
@@ -854,6 +1093,7 @@ impl Render for ActionDialog {
         let working = running && !matches!(step, Step::Running(k) if k.confirms());
         let key_context = match step {
             Step::Menu => format!("{ACTION_DIALOG} {ACTION_MENU}"),
+            Step::Reviewers => format!("{ACTION_DIALOG} {REVIEWERS_STEP}"),
             _ => ACTION_DIALOG.to_owned(),
         };
 
@@ -884,6 +1124,11 @@ impl Render for ActionDialog {
                     .on_action(cx.listener(Self::pick_restore))
                     .on_action(cx.listener(Self::pick_wip))
                     .on_action(cx.listener(Self::pick_private))
+                    .on_action(cx.listener(Self::pick_reviewers))
+                    .on_action(cx.listener(Self::pick_topic))
+                    .on_action(cx.listener(Self::pick_hashtags))
+                    .on_action(cx.listener(Self::suggest_down))
+                    .on_action(cx.listener(Self::suggest_up))
                     .w(px(520.))
                     .max_w_full()
                     .max_h_full()
@@ -923,7 +1168,7 @@ impl Render for ActionDialog {
                                 )
                             })
                             .when_some(self.error.clone(), |d, e| {
-                                d.child(div().pt_2().text_xs().text_color(theme.danger).child(e))
+                                d.child(reviewers::lines(&e, theme.danger).pt_2())
                             })
                             .child(footer),
                     ),

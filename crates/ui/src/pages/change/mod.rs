@@ -1185,12 +1185,6 @@ impl ChangePage {
             return;
         }
         match &self.detail {
-            Some(d) if action_menu::menu_entries(d).is_empty() => self.hint.say(
-                "There is nothing you can do with this change",
-                false,
-                cx,
-                |p| &mut p.hint,
-            ),
             Some(d) => cx.emit(ChangeEvent::Actions(Box::new(d.clone()))),
             None => self
                 .hint

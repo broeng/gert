@@ -27,6 +27,16 @@ actions!(
         PickRestore,
         PickWip,
         PickPrivate,
+        PickReviewers,
+        PickTopic,
+        PickHashtags,
+        /// Down / Up in the reviewer field: the next / previous suggestion.
+        SuggestDown,
+        SuggestUp,
+        /// Delete / Backspace on a listed reviewer or hashtag.
+        RemoveItem,
+        /// Enter on a listed reviewer: between reviewers and CC.
+        MoveItem,
     ]
 );
 
@@ -35,9 +45,18 @@ pub const ACTION_DIALOG: &str = "ActionDialog";
 /// Added to the context while the menu itself (not a confirmation) shows.
 pub const ACTION_MENU: &str = "ActionMenu";
 
+/// Added to the context in the reviewers step.
+pub const REVIEWERS_STEP: &str = "ReviewersStep";
+/// A listed reviewer or CC that has the focus.
+pub const REVIEWER_ROW: &str = "ReviewerRow";
+/// A listed hashtag that has the focus.
+pub const HASHTAG_CHIP: &str = "HashtagChip";
+
 /// The text fields give Tab up instead of indenting: this binding is as
 /// deep as the field's own (`Input`) and registered after it, so it wins.
 const IN_FIELD: &str = "ActionDialog > Input";
+/// Likewise for Up / Down: the field would move its caret.
+const IN_REVIEWER_FIELD: &str = "ReviewersStep > Input";
 
 pub fn entries() -> Vec<Entry> {
     fn e(
@@ -78,6 +97,34 @@ pub fn entries() -> Vec<Entry> {
             "Mark work in progress / ready for review",
         ),
         e("P", "p", PickPrivate, m, "Mark private / not private"),
+        e("V", "v", PickReviewers, m, "Reviewers and CC"),
+        e("T", "t", PickTopic, m, "Topic"),
+        e("H", "h", PickHashtags, m, "Hashtags"),
+        e(
+            "Down / Up",
+            "down",
+            SuggestDown,
+            IN_REVIEWER_FIELD,
+            "Reviewers: next / previous suggestion (Enter adds, Shift-Enter adds as CC)",
+        ),
+        e("", "up", SuggestUp, IN_REVIEWER_FIELD, ""),
+        e(
+            "Delete / Backspace",
+            "delete",
+            RemoveItem,
+            REVIEWER_ROW,
+            "On a listed reviewer or hashtag (Tab to it): remove",
+        ),
+        e("", "backspace", RemoveItem, REVIEWER_ROW, ""),
+        e("", "delete", RemoveItem, HASHTAG_CHIP, ""),
+        e("", "backspace", RemoveItem, HASHTAG_CHIP, ""),
+        e(
+            "Enter",
+            "enter",
+            MoveItem,
+            REVIEWER_ROW,
+            "On a listed reviewer: move between reviewers and CC",
+        ),
         e(
             if cfg!(target_os = "macos") {
                 "Cmd-Enter"
