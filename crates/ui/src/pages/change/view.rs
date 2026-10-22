@@ -518,8 +518,8 @@ impl ChangePage {
                         .border_color(theme.border)
                         // Set off from the columns beside it, which sit on
                         // the page background.
-                        .bg(theme.secondary)
-                        .text_color(theme.secondary_foreground)
+                        .bg(crate::theme::commit_card_background(cx))
+                        .text_color(theme.foreground)
                         .font_family(theme.mono_font_family.clone())
                         .text_sm()
                         .children(lines_of(
