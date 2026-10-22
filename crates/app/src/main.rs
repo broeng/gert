@@ -50,6 +50,7 @@ fn startup() -> anyhow::Result<(Startup, bool)> {
         },
         server,
         queries: queries_to_ui(&config.queries),
+        filters: config.file_filters(),
         start_page: startup_to_ui(&config.startup_page()),
         diff: LocalDiff {
             preferences: config

@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use ui::{Backend, BackendError, SavedQuery, StartupPage as UiStartupPage};
+use ui::{Backend, BackendError, SavedQuery, StartupPage as UiStartupPage, filters::FileFilter};
 
 use crate::{
-    config::{Config, QueryConfig, StartupConfig, StartupPage},
+    config::{Config, FilterConfig, QueryConfig, StartupConfig, StartupPage},
     secrets::Keyring,
 };
 
@@ -89,6 +89,14 @@ impl Backend for AppBackend {
         })
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(queries_to_ui(&config.queries))
+    }
+
+    fn save_filters(&self, filters: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
+        let config = Config::update(&self.config_file, |c| {
+            c.filters = filters.iter().map(FilterConfig::from_filter).collect();
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        Ok(config.file_filters())
     }
 
     fn save_startup_page(&self, page: &UiStartupPage) -> Result<UiStartupPage, BackendError> {
@@ -187,6 +195,36 @@ mod tests {
         let text = std::fs::read_to_string(&b.config_file).unwrap();
         assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
         assert!(text.contains("name = \"B\""), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_filters_keeps_the_comments_and_the_queries() {
+        use ui::filters::FilterAction;
+        let dir = std::env::temp_dir().join(format!("backend-filters-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let b = AppBackend {
+            config_file: dir.join("config.toml"),
+            keyring: Keyring,
+        };
+        std::fs::write(
+            &b.config_file,
+            "# mine\n[server]\nurl = \"https://g\" # prod\n\n[[queries]]\nname = \"A\"\nquery = \"x\"\n",
+        )
+        .unwrap();
+        let new = [FileFilter {
+            name: "Gen".into(),
+            globs: vec!["*.pb.go".into()],
+            projects: Vec::new(),
+            action: FilterAction::Dim,
+            enabled: true,
+        }];
+        assert_eq!(b.save_filters(&new).unwrap(), new);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
+        assert!(text.contains("name = \"A\""), "{text}");
+        assert!(text.contains("action = \"dim\""), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

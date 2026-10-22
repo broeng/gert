@@ -930,6 +930,7 @@ mod from_the_shell {
     use store::Store;
 
     use crate::{
+        filters::FileFilter,
         nav::Route,
         session::{Backend, BackendError, SavedQuery, ServerSetup, Startup, StartupPage},
         shell::Shell,
@@ -946,6 +947,10 @@ mod from_the_shell {
 
         fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
             Err(BackendError("not used".into()))
+        }
+
+        fn save_filters(&self, f: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
+            Ok(f.to_vec())
         }
 
         fn save_startup_page(&self, p: &StartupPage) -> Result<StartupPage, BackendError> {
@@ -995,6 +1000,7 @@ mod from_the_shell {
             }],
             diff: Default::default(),
             start_page: Default::default(),
+            filters: Vec::new(),
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))

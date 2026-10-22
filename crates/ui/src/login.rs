@@ -140,6 +140,13 @@ pub(crate) mod tests {
             Ok(queries.to_vec())
         }
 
+        fn save_filters(
+            &self,
+            f: &[crate::filters::FileFilter],
+        ) -> Result<Vec<crate::filters::FileFilter>, BackendError> {
+            Ok(f.to_vec())
+        }
+
         fn save_startup_page(
             &self,
             p: &crate::session::StartupPage,

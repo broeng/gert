@@ -28,7 +28,7 @@ use crate::{
     reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
     session::{Env, SavedQuery, ServerSetup, Session, Startup, StartupPage},
-    settings::{DiffSettings, PageLayout},
+    settings::{DiffSettings, FileFilters, PageLayout},
 };
 
 enum Page {
@@ -113,6 +113,10 @@ pub struct Shell {
     credentials_task: Option<Task<()>>,
     settings: Entity<DiffSettings>,
     layout: Entity<PageLayout>,
+    /// The file filter rules and their session toggles; the pages get it
+    /// with the change and diff pages.
+    #[allow(dead_code)] // handed to the pages in the next batch
+    filters: Entity<FileFilters>,
     prefs_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -123,6 +127,7 @@ impl Shell {
             env,
             server,
             queries,
+            filters,
             diff,
             start_page,
         } = startup;
@@ -191,6 +196,7 @@ impl Shell {
             credentials_task: None,
             settings: cx.new(|_| DiffSettings::new(diff)),
             layout: cx.new(|_| PageLayout::default()),
+            filters: cx.new(|_| FileFilters::new(filters)),
             prefs_task: None,
             _subs: subs,
         };
