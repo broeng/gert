@@ -436,6 +436,7 @@ fn shell_flow(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Shell>, Route
             query: "status:open".into(),
         }],
         diff: LocalDiff::default(),
+        start_page: Default::default(),
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))

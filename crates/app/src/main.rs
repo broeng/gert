@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context as _;
 use gert::{
     APP_NAME,
-    backend::{AppBackend, queries_to_ui},
+    backend::{AppBackend, queries_to_ui, startup_to_ui},
     config::{Config, DiffConfig, Paths},
     http::GpuiHttpClient,
     secrets::Keyring,
@@ -50,6 +50,7 @@ fn startup() -> anyhow::Result<(Startup, bool)> {
         },
         server,
         queries: queries_to_ui(&config.queries),
+        start_page: startup_to_ui(&config.startup_page()),
         diff: LocalDiff {
             preferences: config
                 .diff

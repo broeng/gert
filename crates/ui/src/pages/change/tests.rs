@@ -487,6 +487,7 @@ fn shell_with_many_files(
             query: "status:open".into(),
         }],
         diff: LocalDiff::default(),
+        start_page: Default::default(),
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| crate::shell::Shell::new(startup, window, cx))

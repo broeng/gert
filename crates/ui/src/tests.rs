@@ -179,6 +179,7 @@ fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) 
         server: Some(setup()),
         queries: vec![spec("Open", "status:open")],
         diff: Default::default(),
+        start_page: Default::default(),
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -210,6 +211,7 @@ fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
         server: Some(setup()),
         queries: vec![spec("Open", "status:open")],
         diff: Default::default(),
+        start_page: Default::default(),
     };
     let (_window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -284,6 +286,7 @@ fn cached_server_diff_preferences_sit_under_the_local_overrides(cx: &mut TestApp
             },
             font_family: Some("Iosevka".into()),
         },
+        start_page: Default::default(),
     };
     let (_window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -311,7 +314,7 @@ mod drafts {
     use crate::{
         outbox::DraftOutbox,
         pages::list::ListEvent,
-        session::{Backend, BackendError, SavedQuery, ServerSetup, Startup},
+        session::{Backend, BackendError, SavedQuery, ServerSetup, Startup, StartupPage},
         shell::Shell,
     };
 
@@ -325,6 +328,14 @@ mod drafts {
 
         fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
             Err(BackendError("not used".into()))
+        }
+
+        fn save_startup_page(&self, p: &StartupPage) -> Result<StartupPage, BackendError> {
+            Ok(p.clone())
+        }
+
+        fn save_advance_after_vote(&self, on: bool) -> Result<bool, BackendError> {
+            Ok(on)
         }
 
         fn save_login(
@@ -412,6 +423,7 @@ mod drafts {
             }),
             queries: vec![spec("Open", "status:open")],
             diff: Default::default(),
+            start_page: Default::default(),
         };
         let started = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
@@ -494,7 +506,7 @@ mod settings_page {
     use crate::{
         login::tests::FakeBackend,
         nav::Route,
-        session::{Env, Startup},
+        session::{Env, Startup, StartupPage},
         shell::Shell,
     };
 
@@ -505,6 +517,10 @@ mod settings_page {
     }
 
     fn fixture(cx: &mut TestAppContext, fail: bool) -> Fixture {
+        fixture_at(cx, fail, StartupPage::Dashboard)
+    }
+
+    fn fixture_at(cx: &mut TestAppContext, fail: bool, start_page: StartupPage) -> Fixture {
         let backend = Arc::new(FakeBackend {
             fail,
             ..Default::default()
@@ -521,6 +537,7 @@ mod settings_page {
             server: Some(setup()),
             queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
             diff: Default::default(),
+            start_page,
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
@@ -663,5 +680,111 @@ mod settings_page {
             assert!(error && text.contains("disk full"), "{text}");
             assert_eq!(page.read(cx).queries_for_test().len(), 2);
         });
+    }
+    fn advance_on(cx: &mut TestAppContext, f: &Fixture) -> bool {
+        cx.update(|cx| {
+            f.shell
+                .read(cx)
+                .layout_for_test()
+                .read(cx)
+                .advance_after_vote()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn toggling_advance_after_vote_saves_it_and_flips_the_layout(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        assert!(advance_on(cx, &f));
+        // Two query rows, the startup row, then the advance row.
+        for _ in 0..3 {
+            press(cx, &f, "j");
+        }
+        press(cx, &f, "space");
+        assert!(!advance_on(cx, &f));
+        assert_eq!(*f.backend.saved_advance.lock().unwrap(), [false]);
+        press(cx, &f, "enter");
+        assert!(advance_on(cx, &f));
+        assert_eq!(*f.backend.saved_advance.lock().unwrap(), [false, true]);
+    }
+
+    #[gpui_kit::test]
+    fn a_failed_advance_save_keeps_the_old_value(cx: &mut TestAppContext) {
+        let f = fixture(cx, true);
+        open_settings(cx, &f);
+        for _ in 0..3 {
+            press(cx, &f, "j");
+        }
+        press(cx, &f, "space");
+        assert!(advance_on(cx, &f));
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            let (text, error) = page.read(cx).hint_for_test().expect("hint");
+            assert!(error && text.contains("disk full"), "{text}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_startup_query_needs_text_and_is_saved(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        for _ in 0..2 {
+            press(cx, &f, "j");
+        }
+        // Space on "dashboard" starts typing the query; empty is refused.
+        press(cx, &f, "space");
+        let input = cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            page.read(cx).startup_input_for_test()
+        });
+        press(cx, &f, "enter");
+        assert!(f.backend.saved_startup.lock().unwrap().is_empty());
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            assert!(page.read(cx).editing_for_test());
+        });
+        type_into(cx, &f, &input, " is:open owner:self ");
+        press(cx, &f, "enter");
+        let want = StartupPage::Search("is:open owner:self".into());
+        assert_eq!(
+            *f.backend.saved_startup.lock().unwrap(),
+            std::slice::from_ref(&want)
+        );
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            assert_eq!(page.read(cx).start_page_for_test(), &want);
+            assert!(!page.read(cx).editing_for_test());
+        });
+
+        // Space again goes back to the dashboard.
+        press(cx, &f, "space");
+        assert_eq!(
+            f.backend.saved_startup.lock().unwrap().last(),
+            Some(&StartupPage::Dashboard)
+        );
+
+        // The shell remembers it for the next time the page opens.
+        press(cx, &f, "u");
+        open_settings(cx, &f);
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            assert_eq!(page.read(cx).start_page_for_test(), &StartupPage::Dashboard);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_shell_opens_on_the_configured_search(cx: &mut TestAppContext) {
+        let f = fixture_at(cx, false, StartupPage::Search("owner:self".into()));
+        cx.update(|cx| {
+            assert_eq!(
+                f.shell.read(cx).route(),
+                &Route::Search("owner:self".into())
+            );
+        });
+        // The dashboard is still one key away.
+        press(cx, &f, "u");
+        cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Dashboard));
+        let f = fixture(cx, false);
+        cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Dashboard));
     }
 }

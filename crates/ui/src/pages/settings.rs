@@ -1,12 +1,15 @@
-//! The settings page. It edits the saved queries of the dashboard; more
-//! sections (startup page, review flow) are meant to follow below them.
+//! The settings page: the saved queries of the dashboard, the startup page
+//! and the review flow (advance after a vote). The cursor walks the query
+//! rows, then the startup row, then the advance row.
 //!
 //! Every committed change is written straight away through the backend
 //! (the config file), off the main thread. The list shown is the one the
 //! backend returns, so what is on screen is what is on disk.
 
 use gpui_kit::component::Disableable as _;
+use gpui_kit::component::Selectable as _;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -17,13 +20,16 @@ use crate::{
     actions::*,
     card,
     hint::Hint,
-    session::{Env, SavedQuery},
+    session::{Env, SavedQuery, StartupPage},
+    settings::PageLayout,
 };
 
 /// What the page tells the shell.
 pub enum SettingsEvent {
     /// The saved queries were written; this is the list now in effect.
     QueriesSaved(Vec<SavedQuery>),
+    /// The startup page was written.
+    StartupSaved(StartupPage),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +41,8 @@ enum Mode {
     },
     /// Asking whether to delete row `index`.
     Confirming(usize),
+    /// Typing the query of the startup page.
+    EditingStartup,
 }
 
 // ---- pure list logic ----
@@ -100,6 +108,9 @@ pub struct SettingsPage {
     mode: Mode,
     name: Entity<InputState>,
     query: Entity<InputState>,
+    startup_input: Entity<InputState>,
+    start_page: StartupPage,
+    layout: Entity<PageLayout>,
     /// Why the row being edited cannot be saved.
     invalid: Option<&'static str>,
     /// A save is in flight: keys that change the list wait.
@@ -123,12 +134,16 @@ impl SettingsPage {
     pub fn new(
         env: Env,
         queries: Vec<SavedQuery>,
+        start_page: StartupPage,
+        layout: Entity<PageLayout>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Query, e.g. is:open"));
-        let subs = [&name, &query]
+        let startup_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Query, e.g. is:open owner:self"));
+        let subs = [&name, &query, &startup_input]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, ev: &InputEvent, window, cx| {
@@ -145,6 +160,9 @@ impl SettingsPage {
             mode: Mode::Browsing,
             name,
             query,
+            startup_input,
+            start_page,
+            layout,
             invalid: None,
             busy: false,
             hint: Hint::default(),
@@ -166,13 +184,32 @@ impl SettingsPage {
     }
 
     #[cfg(test)]
+    pub(crate) fn startup_input_for_test(&self) -> Entity<InputState> {
+        self.startup_input.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_page_for_test(&self) -> &StartupPage {
+        &self.start_page
+    }
+
+    #[cfg(test)]
     pub(crate) fn hint_for_test(&self) -> Option<(String, bool)> {
         self.hint.current().map(|(t, e)| (t.to_owned(), e))
     }
 
     #[cfg(test)]
     pub(crate) fn editing_for_test(&self) -> bool {
-        matches!(self.mode, Mode::Editing { .. })
+        matches!(self.mode, Mode::Editing { .. } | Mode::EditingStartup)
+    }
+
+    /// Cursor positions after the query rows.
+    fn startup_row(&self) -> usize {
+        self.queries.len()
+    }
+
+    fn advance_row(&self) -> usize {
+        self.queries.len() + 1
     }
 
     /// Whether a key may change the list now.
@@ -189,8 +226,8 @@ impl SettingsPage {
     }
 
     fn select(&mut self, to: usize, cx: &mut Context<Self>) {
-        if self.mode == Mode::Browsing && !self.queries.is_empty() {
-            self.cursor = to.min(self.queries.len() - 1);
+        if self.mode == Mode::Browsing {
+            self.cursor = to.min(self.advance_row());
             cx.notify();
         }
     }
@@ -198,9 +235,45 @@ impl SettingsPage {
     // ---- editing ----
 
     fn edit_query(&mut self, _: &EditQuery, window: &mut Window, cx: &mut Context<Self>) {
-        if self.can_change() && self.cursor < self.queries.len() {
-            self.start_edit(self.cursor, window, cx);
+        if !self.can_change() {
+            return;
         }
+        if self.cursor < self.queries.len() {
+            self.start_edit(self.cursor, window, cx);
+        } else if self.cursor == self.startup_row() {
+            self.start_startup_edit(window, cx);
+        } else {
+            self.save_advance(!self.layout.read(cx).advance_after_vote(), window, cx);
+        }
+    }
+
+    /// `space`: flip the setting under the cursor.
+    fn toggle_setting(&mut self, _: &ToggleSetting, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_change() || self.mode != Mode::Browsing {
+            return;
+        }
+        if self.cursor == self.startup_row() {
+            match self.start_page {
+                StartupPage::Dashboard => self.start_startup_edit(window, cx),
+                StartupPage::Search(_) => self.save_startup(StartupPage::Dashboard, window, cx),
+            }
+        } else if self.cursor == self.advance_row() {
+            self.save_advance(!self.layout.read(cx).advance_after_vote(), window, cx);
+        }
+    }
+
+    fn start_startup_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = match &self.start_page {
+            StartupPage::Search(q) => q.clone(),
+            StartupPage::Dashboard => String::new(),
+        };
+        self.startup_input
+            .update(cx, |s, cx| s.set_value(text, window, cx));
+        self.cursor = self.startup_row();
+        self.mode = Mode::EditingStartup;
+        self.invalid = None;
+        self.startup_input.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
     }
 
     fn add_query(&mut self, _: &AddQuery, window: &mut Window, cx: &mut Context<Self>) {
@@ -225,15 +298,20 @@ impl SettingsPage {
     }
 
     fn cancel_edit(&mut self, _: &CancelEdit, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode, Mode::Editing { .. }) && !self.busy {
+        if matches!(self.mode, Mode::Editing { .. } | Mode::EditingStartup) && !self.busy {
+            let new_row =
+                matches!(self.mode, Mode::Editing { index } if index >= self.queries.len());
             self.leave_edit(window, cx);
+            if new_row {
+                // Back to the last query (the "add" row is gone).
+                self.cursor = self.queries.len().saturating_sub(1);
+            }
         }
     }
 
     fn leave_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mode = Mode::Browsing;
         self.invalid = None;
-        self.cursor = self.cursor.min(self.queries.len().saturating_sub(1));
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -249,12 +327,23 @@ impl SettingsPage {
     }
 
     fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Mode::Editing { index } = self.mode else {
-            return;
-        };
         if self.busy {
             return;
         }
+        if self.mode == Mode::EditingStartup {
+            let text = self.startup_input.read(cx).value().trim().to_owned();
+            if text.is_empty() {
+                self.invalid = Some("Enter the query text.");
+                cx.notify();
+            } else {
+                self.invalid = None;
+                self.save_startup(StartupPage::Search(text), window, cx);
+            }
+            return;
+        }
+        let Mode::Editing { index } = self.mode else {
+            return;
+        };
         let name = self.name.read(cx).value().to_string();
         let text = self.query.read(cx).value().to_string();
         match validate(&name, &text) {
@@ -358,12 +447,74 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// Writes the startup page in the background; on failure the old one
+    /// stays and a hint says why.
+    fn save_startup(&mut self, page: StartupPage, window: &mut Window, cx: &mut Context<Self>) {
+        self.busy = true;
+        let backend = self.env.backend.clone();
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.save_startup_page(&page) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(saved) => {
+                        this.start_page = saved.clone();
+                        this.leave_edit(window, cx);
+                        cx.emit(SettingsEvent::StartupSaved(saved));
+                    }
+                    Err(e) => {
+                        this.hint.say(
+                            format!("Could not save the startup page: {e}"),
+                            true,
+                            cx,
+                            |p| &mut p.hint,
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Writes `advance_after_vote`; on success the shared layout follows at
+    /// once, so the next vote uses it.
+    fn save_advance(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.busy = true;
+        let backend = self.env.backend.clone();
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.save_advance_after_vote(on) })
+                .await;
+            this.update_in(cx, |this, _, cx| {
+                this.busy = false;
+                match result {
+                    Ok(saved) => this
+                        .layout
+                        .update(cx, |l, cx| l.set_advance_after_vote(saved, cx)),
+                    Err(e) => {
+                        this.hint
+                            .say(format!("Could not save the setting: {e}"), true, cx, |p| {
+                                &mut p.hint
+                            });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     // ---- rendering ----
 
     fn key_context(&self) -> &'static str {
         match self.mode {
             Mode::Browsing => "SettingsPage Browsing",
-            Mode::Editing { .. } => "SettingsPage Editing",
+            Mode::Editing { .. } | Mode::EditingStartup => "SettingsPage Editing",
             Mode::Confirming(_) => "SettingsPage Confirming",
         }
     }
@@ -581,6 +732,187 @@ impl SettingsPage {
             .into_any_element()
     }
 
+    /// A titled card with one row, highlighted when the cursor is on it.
+    fn section(
+        &self,
+        title: &'static str,
+        note: &'static str,
+        row: impl IntoElement,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        v_flex()
+            .w_full()
+            .child(card::frame(
+                card::title_bar(cx)
+                    .child(div().font_semibold().child(title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(note),
+                    ),
+                true,
+                false,
+                cx,
+            ))
+            .child(card::frame(
+                card::row_separator(cx).child(
+                    h_flex()
+                        .id(title)
+                        .px_3()
+                        .py_1p5()
+                        .gap_3()
+                        .items_center()
+                        .when(selected, |d| d.bg(theme.list_active))
+                        .child(row),
+                ),
+                false,
+                true,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_startup(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let editing = self.mode == Mode::EditingStartup;
+        let search = matches!(self.start_page, StartupPage::Search(_));
+        let busy = self.busy;
+        let choose = h_flex()
+            .gap_1()
+            .flex_none()
+            .child(
+                Button::new("start-dashboard")
+                    .label("Dashboard")
+                    .small()
+                    .selected(!search && !editing)
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, w, cx| {
+                        this.cursor = this.startup_row();
+                        if this.can_change() && this.start_page != StartupPage::Dashboard {
+                            this.leave_edit(w, cx);
+                            this.save_startup(StartupPage::Dashboard, w, cx);
+                        }
+                    })),
+            )
+            .child(
+                Button::new("start-search")
+                    .label("Search")
+                    .small()
+                    .selected(search || editing)
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, w, cx| {
+                        if this.can_change() && this.mode == Mode::Browsing {
+                            this.start_startup_edit(w, cx);
+                        }
+                    })),
+            );
+        let detail = if editing {
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.startup_input).small()),
+                )
+                .child(
+                    Button::new("startup-save")
+                        .label("Save")
+                        .small()
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, w, cx| this.commit_edit(w, cx))),
+                )
+                .child(
+                    Button::new("startup-cancel")
+                        .label("Cancel")
+                        .small()
+                        .on_click(
+                            cx.listener(|this, _, w, cx| this.cancel_edit(&CancelEdit, w, cx)),
+                        ),
+                )
+                .children(
+                    self.invalid
+                        .map(|why| div().text_sm().text_color(theme.danger).child(why)),
+                )
+                .into_any_element()
+        } else if let StartupPage::Search(q) = &self.start_page {
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.muted_foreground)
+                        .child(q.clone()),
+                )
+                .child(
+                    Button::new("startup-edit")
+                        .label("Edit")
+                        .small()
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, w, cx| {
+                            if this.can_change() && this.mode == Mode::Browsing {
+                                this.start_startup_edit(w, cx);
+                            }
+                        })),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .text_color(theme.muted_foreground)
+                .child("The saved queries")
+                .into_any_element()
+        };
+        let row = h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .child(div().w(px(200.)).flex_none().child("Open on start"))
+            .child(choose)
+            .child(detail);
+        self.section(
+            "Startup page",
+            "What opens when the app starts. Space switches, Enter edits the query.",
+            row,
+            self.cursor == self.startup_row() && self.mode == Mode::Browsing,
+            cx,
+        )
+    }
+
+    fn render_review(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.layout.read(cx).advance_after_vote();
+        let busy = self.busy;
+        let row = Checkbox::new("advance-after-vote")
+            .label("Advance after a vote: go to the next open change of the relation chain")
+            .checked(on)
+            .disabled(busy)
+            .on_click(cx.listener(|this, checked: &bool, w, cx| {
+                this.cursor = this.advance_row();
+                if this.can_change() {
+                    this.save_advance(*checked, w, cx);
+                }
+            }));
+        self.section(
+            "Review",
+            "Applies to quick votes and to the reply dialog. Space toggles.",
+            row,
+            self.cursor == self.advance_row() && self.mode == Mode::Browsing,
+            cx,
+        )
+    }
+
     fn render_hint(&self, cx: &App) -> Option<impl IntoElement> {
         let (text, error) = self.hint.current()?;
         let theme = cx.theme();
@@ -603,6 +935,8 @@ impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let queries = self.render_queries(cx);
+        let startup = self.render_startup(cx);
+        let review = self.render_review(cx);
         v_flex()
             .id("settings")
             .key_context(self.key_context())
@@ -610,6 +944,7 @@ impl Render for SettingsPage {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))
             .on_action(cx.listener(Self::edit_query))
+            .on_action(cx.listener(Self::toggle_setting))
             .on_action(cx.listener(Self::add_query))
             .on_action(cx.listener(Self::delete_query))
             .on_action(cx.listener(Self::confirm_delete))
@@ -636,7 +971,9 @@ impl Render for SettingsPage {
                             .py_4()
                             .gap_4()
                             .child(div().px_4().text_xl().font_semibold().child("Settings"))
-                            .child(queries),
+                            .child(queries)
+                            .child(startup)
+                            .child(review),
                     )
                     .vertical_scrollbar(&self.scroll),
             )
@@ -651,7 +988,7 @@ impl Render for SettingsPage {
                     .text_color(theme.muted_foreground)
                     .child(
                         "j / k: select    Enter / e: edit    a: add    d: delete    \
-                         Shift-J / Shift-K: move    u: back to the dashboard",
+                         Shift-J / Shift-K: move    Space: toggle    u: back to the dashboard",
                     ),
             )
     }

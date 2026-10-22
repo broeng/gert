@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use ui::{Backend, BackendError, SavedQuery};
+use ui::{Backend, BackendError, SavedQuery, StartupPage as UiStartupPage};
 
 use crate::{
-    config::{Config, QueryConfig},
+    config::{Config, QueryConfig, StartupConfig, StartupPage},
     secrets::Keyring,
 };
 
@@ -90,6 +90,36 @@ impl Backend for AppBackend {
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(queries_to_ui(&config.queries))
     }
+
+    fn save_startup_page(&self, page: &UiStartupPage) -> Result<UiStartupPage, BackendError> {
+        let target = match page {
+            UiStartupPage::Dashboard => StartupPage::Dashboard,
+            UiStartupPage::Search(q) => StartupPage::Query(q.clone()),
+        };
+        let config = Config::update(&self.config_file, |c| {
+            c.startup = Some(StartupConfig::for_page(&target));
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        Ok(startup_to_ui(&config.startup_page()))
+    }
+
+    fn save_advance_after_vote(&self, on: bool) -> Result<bool, BackendError> {
+        let config = Config::update(&self.config_file, |c| {
+            c.review
+                .get_or_insert_with(Default::default)
+                .advance_after_vote = Some(on);
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        Ok(config.advance_after_vote())
+    }
+}
+
+/// The UI's form of the configured startup page.
+pub fn startup_to_ui(page: &StartupPage) -> UiStartupPage {
+    match page {
+        StartupPage::Dashboard => UiStartupPage::Dashboard,
+        StartupPage::Query(q) => UiStartupPage::Search(q.clone()),
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +187,45 @@ mod tests {
         let text = std::fs::read_to_string(&b.config_file).unwrap();
         assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
         assert!(text.contains("name = \"B\""), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_startup_page_and_advance_setting_round_trip_with_comments() {
+        let dir = std::env::temp_dir().join(format!("backend-startup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let b = AppBackend {
+            config_file: dir.join("config.toml"),
+            keyring: Keyring,
+        };
+        std::fs::write(
+            &b.config_file,
+            "[server]\nurl = \"https://g\"\n\n# opens on start\n[startup]\npage = \"dashboard\"\n",
+        )
+        .unwrap();
+        let search = UiStartupPage::Search("is:open owner:self".into());
+        assert_eq!(b.save_startup_page(&search).unwrap(), search);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(text.contains("# opens on start"), "{text}");
+        assert!(text.contains("query = \"is:open owner:self\""), "{text}");
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(
+            cfg.startup_page(),
+            StartupPage::Query("is:open owner:self".into())
+        );
+
+        assert_eq!(
+            b.save_startup_page(&UiStartupPage::Dashboard).unwrap(),
+            UiStartupPage::Dashboard
+        );
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(!text.contains("query ="), "{text}");
+        assert!(text.contains("# opens on start"), "{text}");
+
+        assert!(!b.save_advance_after_vote(false).unwrap());
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert!(!cfg.advance_after_vote());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -13,6 +13,15 @@ pub struct SavedQuery {
     pub query: String,
 }
 
+/// What opens on start.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StartupPage {
+    #[default]
+    Dashboard,
+    /// A search with this (non-blank) query.
+    Search(String),
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct BackendError(pub String);
@@ -37,6 +46,12 @@ pub trait Backend: Send + Sync + 'static {
     /// Writes the saved queries to the config file, keeping the rest of it
     /// as it is. Returns the list now in effect.
     fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError>;
+
+    /// Writes the startup page (`[startup]`). Returns what is now in effect.
+    fn save_startup_page(&self, page: &StartupPage) -> Result<StartupPage, BackendError>;
+
+    /// Writes `[review] advance_after_vote`. Returns the value now in effect.
+    fn save_advance_after_vote(&self, on: bool) -> Result<bool, BackendError>;
 }
 
 /// The pieces every page needs, handed over by `app`.
@@ -72,6 +87,8 @@ pub struct Startup {
     pub server: Option<ServerSetup>,
     pub queries: Vec<SavedQuery>,
     pub diff: LocalDiff,
+    /// The page to open once a server is set up.
+    pub start_page: StartupPage,
 }
 
 /// A logged-in (or anonymous) connection to one server.

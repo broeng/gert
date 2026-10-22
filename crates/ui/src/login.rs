@@ -124,6 +124,8 @@ pub(crate) mod tests {
         pub saved: Mutex<Vec<Saved>>,
         pub fail: bool,
         pub saved_queries: Mutex<Vec<Vec<SavedQuery>>>,
+        pub saved_startup: Mutex<Vec<crate::session::StartupPage>>,
+        pub saved_advance: Mutex<Vec<bool>>,
     }
 
     impl Backend for FakeBackend {
@@ -136,6 +138,25 @@ pub(crate) mod tests {
             }
             self.saved_queries.lock().unwrap().push(queries.to_vec());
             Ok(queries.to_vec())
+        }
+
+        fn save_startup_page(
+            &self,
+            p: &crate::session::StartupPage,
+        ) -> Result<crate::session::StartupPage, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_startup.lock().unwrap().push(p.clone());
+            Ok(p.clone())
+        }
+
+        fn save_advance_after_vote(&self, on: bool) -> Result<bool, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_advance.lock().unwrap().push(on);
+            Ok(on)
         }
         fn save_login(
             &self,

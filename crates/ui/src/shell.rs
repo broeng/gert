@@ -27,7 +27,7 @@ use crate::{
     },
     reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
-    session::{Env, SavedQuery, ServerSetup, Session, Startup},
+    session::{Env, SavedQuery, ServerSetup, Session, Startup, StartupPage},
     settings::{DiffSettings, PageLayout},
 };
 
@@ -91,6 +91,8 @@ pub struct Shell {
     outbox: Option<Entity<DraftOutbox>>,
     outbox_subs: Vec<Subscription>,
     queries: Vec<SavedQuery>,
+    /// What `start` opens (the `[startup]` setting).
+    start_page: StartupPage,
     nav: NavState,
     page: Page,
     page_subs: Vec<Subscription>,
@@ -122,6 +124,7 @@ impl Shell {
             server,
             queries,
             diff,
+            start_page,
         } = startup;
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search changes  ( / )"));
         let mut subs = vec![
@@ -170,6 +173,7 @@ impl Shell {
             outbox: None,
             outbox_subs: Vec::new(),
             queries,
+            start_page,
             nav: NavState::new(Route::Login),
             page: Page::Login(login),
             page_subs: Vec::new(),
@@ -230,7 +234,10 @@ impl Shell {
                 return self.show(window, cx);
             }
         }
-        self.nav.reset(Route::Dashboard);
+        self.nav.reset(match &self.start_page {
+            StartupPage::Dashboard => Route::Dashboard,
+            StartupPage::Search(q) => Route::Search(q.clone()),
+        });
         self.show(window, cx);
         self.load_diff_preferences(cx);
         let Some(username) = username else {
@@ -425,6 +432,11 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn layout_for_test(&self) -> &Entity<PageLayout> {
+        &self.layout
+    }
+
+    #[cfg(test)]
     pub(crate) fn settings(&self) -> &Entity<DiffSettings> {
         &self.settings
     }
@@ -518,7 +530,8 @@ impl Shell {
     fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Page {
         let env = self.env.clone();
         let queries = self.queries.clone();
-        let page = cx.new(|cx| SettingsPage::new(env, queries, window, cx));
+        let (start, layout) = (self.start_page.clone(), self.layout.clone());
+        let page = cx.new(|cx| SettingsPage::new(env, queries, start, layout, window, cx));
         self.page_subs.push(
             cx.subscribe_in(
                 &page,
@@ -527,6 +540,7 @@ impl Shell {
                     // The dashboard is built from this list when it is shown
                     // again, from the cache for the queries it already knew.
                     SettingsEvent::QueriesSaved(queries) => this.queries = queries.clone(),
+                    SettingsEvent::StartupSaved(page) => this.start_page = page.clone(),
                 },
             ),
         );

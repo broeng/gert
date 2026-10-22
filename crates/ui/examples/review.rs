@@ -46,7 +46,9 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use model::{DiffPreferences, DiffViewMode};
 use store::Store;
-use ui::{Backend, BackendError, Env, LocalDiff, SavedQuery, ServerSetup, Shell, Startup};
+use ui::{
+    Backend, BackendError, Env, LocalDiff, SavedQuery, ServerSetup, Shell, Startup, StartupPage,
+};
 
 const URL: &str = "https://gerrit.example.com";
 
@@ -59,6 +61,14 @@ impl Backend for Demo {
 
     fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
         Err(BackendError("the demo has no settings".into()))
+    }
+
+    fn save_startup_page(&self, p: &StartupPage) -> Result<StartupPage, BackendError> {
+        Ok(p.clone())
+    }
+
+    fn save_advance_after_vote(&self, on: bool) -> Result<bool, BackendError> {
+        Ok(on)
     }
 
     fn save_login(
@@ -1147,6 +1157,7 @@ fn main() {
             preferences: local,
             font_family: font,
         },
+        start_page: Default::default(),
     };
 
     ui::application().run(move |cx| {
