@@ -9,6 +9,17 @@
 //! name = "Your turn"
 //! query = "attention:self"
 //!
+//! # Optional: file filters. Rules that hide, dim or highlight files of a
+//! # change by path glob. `projects` (exact names), `color`, `bold` and
+//! # `enabled` are optional; `enabled` defaults to true.
+//! [[filters]]
+//! name = "Generated"
+//! globs = ["*.pb.go", "gen/**"]        # no "/": the name at any depth
+//! projects = ["platform/foo"]          # absent or empty: every project
+//! action = "hide"                      # hide | dim | highlight
+//! color = "#e5a50a"                    # highlight only
+//! bold = true                          # highlight only
+//!
 //! # Optional: what opens on start. Default: the dashboard.
 //! [startup]
 //! page = "dashboard"                   # or instead: query = "status:open project:foo"
@@ -50,6 +61,7 @@ use directories::ProjectDirs;
 use model::{DiffContext, DiffPreferences, DiffViewMode, Whitespace};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item};
+use ui::filters::{FileFilter, FilterAction, format_hex_color, parse_hex_color, validate_glob};
 
 use crate::APP_NAME;
 
@@ -77,6 +89,8 @@ pub struct Config {
     pub server: Option<ServerConfig>,
     #[serde(default)]
     pub queries: Vec<QueryConfig>,
+    #[serde(default)]
+    pub filters: Vec<FilterConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,6 +265,163 @@ pub struct QueryConfig {
     pub query: String,
 }
 
+/// A `[[filters]]` table. The fields are plain strings and options, so a
+/// typo in a value never fails the whole file; [`FilterConfig::to_filter`]
+/// drops what it cannot use, with a warning.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilterConfig {
+    pub name: String,
+    pub globs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl FilterConfig {
+    /// The rule as the UI uses it. A rule with an unknown action or no name
+    /// can do nothing and is dropped; a bad color or glob is dropped from
+    /// an otherwise good rule.
+    pub fn to_filter(&self) -> Option<FileFilter> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            log::warn!("config: ignoring a [[filters]] entry without a name");
+            return None;
+        }
+        let action = match self.action.trim().to_ascii_lowercase().as_str() {
+            "hide" => FilterAction::Hide,
+            "dim" => FilterAction::Dim,
+            "highlight" => FilterAction::Highlight {
+                color: self.color.as_deref().and_then(|c| {
+                    let color = parse_hex_color(c);
+                    if color.is_none() {
+                        log::warn!("config: filter {name:?}: color {c:?} is not \"#rrggbb\"");
+                    }
+                    color
+                }),
+                bold: self.bold.unwrap_or(false),
+            },
+            other => {
+                log::warn!(
+                    "config: ignoring filter {name:?}: action {other:?} is not \
+                     \"hide\", \"dim\" or \"highlight\""
+                );
+                return None;
+            }
+        };
+        let globs = self
+            .globs
+            .iter()
+            .filter(|g| match validate_glob(g) {
+                Ok(()) => true,
+                Err(e) => {
+                    log::warn!("config: filter {name:?}: ignoring glob {g:?}: {e}");
+                    false
+                }
+            })
+            .cloned()
+            .collect();
+        Some(FileFilter {
+            name: name.to_owned(),
+            globs,
+            projects: self.projects.clone(),
+            action,
+            enabled: self.enabled.unwrap_or(true),
+        })
+    }
+
+    /// The table for a rule; default values are left as `None` or empty so
+    /// they are not written.
+    pub fn from_filter(f: &FileFilter) -> Self {
+        let (action, color, bold) = match &f.action {
+            FilterAction::Hide => ("hide", None, None),
+            FilterAction::Dim => ("dim", None, None),
+            FilterAction::Highlight { color, bold } => (
+                "highlight",
+                color.map(format_hex_color),
+                bold.then_some(true),
+            ),
+        };
+        Self {
+            name: f.name.clone(),
+            globs: f.globs.clone(),
+            projects: f.projects.clone(),
+            action: action.to_owned(),
+            color,
+            bold,
+            enabled: (!f.enabled).then_some(false),
+        }
+    }
+
+    /// The same rule with explicit defaults (`enabled = true`, `bold =
+    /// false`) removed, for matching tables of the file by content.
+    fn normalized(mut self) -> Self {
+        if self.enabled == Some(true) {
+            self.enabled = None;
+        }
+        if self.bold == Some(false) {
+            self.bold = None;
+        }
+        self
+    }
+
+    /// Reads a table of the document; `None` if a key has the wrong type.
+    fn from_table(t: &toml_edit::Table) -> Option<Self> {
+        let strings = |key: &str| -> Option<Vec<String>> {
+            match t.get(key) {
+                None => Some(Vec::new()),
+                Some(item) => item
+                    .as_array()?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+            }
+        };
+        let opt = |key: &str| t.get(key);
+        Some(
+            Self {
+                name: opt("name")?.as_str()?.to_owned(),
+                globs: strings("globs")?,
+                projects: strings("projects")?,
+                action: opt("action")?.as_str()?.to_owned(),
+                color: match opt("color") {
+                    None => None,
+                    Some(c) => Some(c.as_str()?.to_owned()),
+                },
+                bold: match opt("bold") {
+                    None => None,
+                    Some(b) => Some(b.as_bool()?),
+                },
+                enabled: match opt("enabled") {
+                    None => None,
+                    Some(b) => Some(b.as_bool()?),
+                },
+            }
+            .normalized(),
+        )
+    }
+
+    /// Writes this rule into `t`, keeping the comments and the key order of
+    /// what is there. Keys that hold a default are removed.
+    fn fill(&self, t: &mut toml_edit::Table) {
+        set_value(t, "name", self.name.as_str().into());
+        set_value(t, "globs", self.globs.iter().map(String::as_str).collect());
+        let projects =
+            (!self.projects.is_empty()).then(|| self.projects.iter().map(String::as_str).collect());
+        set_or_remove(t, "projects", projects);
+        set_value(t, "action", self.action.as_str().into());
+        set_or_remove(t, "color", self.color.as_deref().map(Into::into));
+        set_or_remove(t, "bold", self.bold.map(Into::into));
+        set_or_remove(t, "enabled", self.enabled.map(Into::into));
+    }
+}
+
 fn q(name: &str, query: &str) -> QueryConfig {
     QueryConfig {
         name: name.to_owned(),
@@ -299,10 +470,26 @@ impl Config {
                 username: username.map(str::to_owned),
             }),
             queries,
+            filters: self.filters,
             diff: self.diff,
             startup: self.startup,
             review: self.review,
         }
+    }
+
+    /// The usable `[[filters]]` rules, in file order. A later rule with the
+    /// name of an earlier one is dropped: the names are the identity of the
+    /// toggle buttons.
+    pub fn file_filters(&self) -> Vec<FileFilter> {
+        let mut out: Vec<FileFilter> = Vec::new();
+        for f in self.filters.iter().filter_map(FilterConfig::to_filter) {
+            if out.iter().any(|o| o.name == f.name) {
+                log::warn!("config: ignoring a second filter named {:?}", f.name);
+            } else {
+                out.push(f);
+            }
+        }
+        out
     }
 
     pub fn startup_page(&self) -> StartupPage {
@@ -383,16 +570,20 @@ impl Config {
 }
 
 /// The scalar and table keys of `new` that differ from `old` (everything
-/// but the query list) go into `doc`.
+/// but the query and filter lists) go into `doc`.
 fn apply_changes(old: &Config, new: &Config, doc: &mut DocumentMut) -> Result<(), ConfigError> {
     let tables = |c: &Config| -> Result<toml::Table, ConfigError> {
         let mut t = toml::Table::try_from(c)?;
         t.remove("queries");
+        t.remove("filters");
         Ok(t)
     };
     apply_table(&tables(old)?, &tables(new)?, doc.as_table_mut());
     if old.queries != new.queries {
         apply_queries(&new.queries, doc.as_table_mut());
+    }
+    if old.filters != new.filters {
+        apply_filters(&new.filters, doc.as_table_mut());
     }
     Ok(())
 }
@@ -455,66 +646,110 @@ fn query_of(t: &toml_edit::Table) -> Option<(String, String)> {
     ))
 }
 
-fn set_str(t: &mut toml_edit::Table, key: &str, text: &str) {
-    let mut v: toml_edit::Value = text.into();
+fn set_value(t: &mut toml_edit::Table, key: &str, mut v: toml_edit::Value) {
     if let Some(Item::Value(prev)) = t.get(key) {
         *v.decor_mut() = prev.decor().clone();
     }
     t.insert(key, Item::Value(v));
 }
 
-/// Rewrites the `[[queries]]` tables. A table of the file that equals a new
-/// entry (name and query) is reused as is, with its comments, wherever the
-/// entry moved to. A new entry that matches nothing takes over the unused
-/// table at its own position when there is one (an edit in place: only
-/// `name` and `query` are replaced, comments and other keys stay), else a
-/// fresh table is made. The limit: comments belong to the table below them,
-/// so deleting an entry deletes the comment lines directly above it, and a
-/// section comment above the first `[[queries]]` moves with that table.
-/// Tables are matched by content, so hand edits of the list on disk are
-/// respected.
+fn set_or_remove(t: &mut toml_edit::Table, key: &str, v: Option<toml_edit::Value>) {
+    match v {
+        Some(v) => set_value(t, key, v),
+        None => {
+            t.remove(key);
+        }
+    }
+}
+
+/// Rewrites the `[[queries]]` tables, see [`apply_array`].
 fn apply_queries(new: &[QueryConfig], root: &mut toml_edit::Table) {
-    let mut existing: Vec<Option<toml_edit::Table>> = match root.get("queries") {
+    apply_array(
+        root,
+        "queries",
+        new,
+        |q| Some((q.name.clone(), q.query.clone())),
+        query_of,
+        |q, t| {
+            set_value(t, "name", q.name.as_str().into());
+            set_value(t, "query", q.query.as_str().into());
+        },
+    );
+}
+
+/// Rewrites the `[[filters]]` tables, see [`apply_array`]. Tables are
+/// matched on the rule they hold, not on how it is spelled: an explicit
+/// `enabled = true` is the same as none.
+fn apply_filters(new: &[FilterConfig], root: &mut toml_edit::Table) {
+    apply_array(
+        root,
+        "filters",
+        new,
+        |f| Some(f.clone().normalized()),
+        FilterConfig::from_table,
+        |f, t| f.fill(t),
+    );
+}
+
+/// Rewrites the array of tables `key`. A table of the file that equals a new
+/// entry (by `table_key`) is reused as is, with its comments, wherever the
+/// entry moved to. A new entry that matches nothing takes over the unused
+/// table at its own position when there is one (an edit in place: `fill`
+/// replaces the values, comments and other keys stay), else a fresh table is
+/// made. The limit: comments belong to the table below them, so deleting an
+/// entry deletes the comment lines directly above it, and a section comment
+/// above the first table moves with that table. Tables are matched by
+/// content, so hand edits of the list on disk are respected.
+fn apply_array<T, K: PartialEq>(
+    root: &mut toml_edit::Table,
+    key: &str,
+    new: &[T],
+    entry_key: impl Fn(&T) -> Option<K>,
+    table_key: impl Fn(&toml_edit::Table) -> Option<K>,
+    fill: impl Fn(&T, &mut toml_edit::Table),
+) {
+    let mut existing: Vec<Option<toml_edit::Table>> = match root.get(key) {
         Some(Item::ArrayOfTables(a)) => a.iter().cloned().map(Some).collect(),
         _ => Vec::new(),
     };
-    let existing_keys: Vec<Option<(String, String)>> = existing
+    let existing_keys: Vec<Option<K>> = existing
         .iter()
-        .map(|t| t.as_ref().and_then(query_of))
+        .map(|t| t.as_ref().and_then(&table_key))
         .collect();
-    let mut chosen: Vec<Option<toml_edit::Table>> = vec![None; new.len()];
-    for (i, q) in new.iter().enumerate() {
-        let key = Some((q.name.clone(), q.query.clone()));
+    let mut chosen: Vec<Option<toml_edit::Table>> = new.iter().map(|_| None).collect();
+    for (i, entry) in new.iter().enumerate() {
+        let wanted = entry_key(entry);
+        if wanted.is_none() {
+            continue;
+        }
         if let Some(j) =
-            (0..existing.len()).find(|&j| existing[j].is_some() && existing_keys[j] == key)
+            (0..existing.len()).find(|&j| existing[j].is_some() && existing_keys[j] == wanted)
         {
             chosen[i] = existing[j].take();
         }
     }
     let mut out = toml_edit::ArrayOfTables::new();
-    for (i, q) in new.iter().enumerate() {
-        let table = match chosen[i].take() {
+    for (i, entry) in new.iter().enumerate() {
+        let mut table = match chosen[i].take() {
             Some(t) => t,
             None => {
                 let mut t = existing
                     .get_mut(i)
                     .and_then(Option::take)
                     .unwrap_or_default();
-                set_str(&mut t, "name", &q.name);
-                set_str(&mut t, "query", &q.query);
+                fill(entry, &mut t);
                 t
             }
         };
         // Tables print sorted by their parsed position; clear it so the new
         // order (the order of the array) wins.
-        let mut table = table;
         table.set_position(None);
         out.push(table);
     }
     if out.is_empty() {
-        root.remove("queries");
+        root.remove(key);
     } else {
-        root.insert("queries", Item::ArrayOfTables(out));
+        root.insert(key, Item::ArrayOfTables(out));
     }
 }
 
@@ -939,5 +1174,236 @@ advance_after_vote = false
         let err = Config::load(&path).unwrap_err();
         assert!(err.to_string().contains("config.toml"), "{err}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    const FILTERED: &str = r##"# Top of the file.
+[server]
+url = "https://gerrit.example.com"
+
+# queries
+[[queries]]
+name = "A"
+query = "status:open" # inline a
+
+# generated code
+[[filters]]
+name = "Generated"
+globs = ["*.pb.go", "gen/**"] # inline globs
+projects = ["platform/foo"]
+action = "hide"
+
+# lock files
+[[filters]]
+name = "Locks"
+globs = ["*.lock"]
+action = "dim"
+enabled = true
+
+# mine
+[[filters]]
+name = "Mine"
+globs = ["src/mine/**"]
+action = "highlight"
+color = "#e5a50a"
+bold = true
+enabled = false
+
+[review]
+# advance after a vote
+advance_after_vote = false
+"##;
+
+    fn filtered(name: &str) -> PathBuf {
+        let dir = tmp(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, FILTERED).unwrap();
+        path
+    }
+
+    fn filter_lines_kept(text: &str, gone: &[&str]) {
+        for line in FILTERED.lines().filter(|l| !l.is_empty()) {
+            if !gone.iter().any(|g| line.contains(g)) {
+                assert!(text.contains(line), "lost {line:?} in\n{text}");
+            }
+        }
+    }
+
+    fn parse(text: &str) -> Config {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_full_and_a_minimal_filter_parse() {
+        let cfg = parse(FILTERED);
+        let rules = cfg.file_filters();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].name, "Generated");
+        assert_eq!(rules[0].globs, ["*.pb.go", "gen/**"]);
+        assert_eq!(rules[0].projects, ["platform/foo"]);
+        assert_eq!(rules[0].action, FilterAction::Hide);
+        assert!(rules[0].enabled);
+        assert_eq!(rules[1].action, FilterAction::Dim);
+        assert!(rules[1].projects.is_empty());
+        assert_eq!(
+            rules[2].action,
+            FilterAction::Highlight {
+                color: parse_hex_color("#e5a50a"),
+                bold: true
+            }
+        );
+        assert!(!rules[2].enabled);
+
+        let cfg = parse("[[filters]]\nname = \"x\"\nglobs = [\"a\"]\naction = \"dim\"\n");
+        let rules = cfg.file_filters();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].enabled && rules[0].projects.is_empty());
+    }
+
+    #[test]
+    fn a_file_without_filters_has_none() {
+        assert!(
+            parse("[server]\nurl = \"https://x\"\n")
+                .file_filters()
+                .is_empty()
+        );
+        assert!(parse("").filters.is_empty());
+    }
+
+    #[test]
+    fn bad_values_drop_only_what_is_bad() {
+        let cfg = parse(
+            r##"
+[[filters]]
+name = "weird"
+globs = ["a"]
+action = "explode"
+
+[[filters]]
+name = "color"
+globs = ["[", "*.rs"]
+action = "highlight"
+color = "red"
+bold = true
+
+[[filters]]
+globs = ["x"]
+action = "hide"
+
+[[filters]]
+name = "color"
+globs = ["y"]
+action = "hide"
+"##,
+        );
+        let rules = cfg.file_filters();
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        assert_eq!(rules[0].name, "color");
+        assert_eq!(rules[0].globs, ["*.rs"]);
+        assert_eq!(
+            rules[0].action,
+            FilterAction::Highlight {
+                color: None,
+                bold: true
+            }
+        );
+    }
+
+    #[test]
+    fn filters_convert_back_without_default_keys() {
+        let rules = parse(FILTERED).file_filters();
+        let back: Vec<FilterConfig> = rules.iter().map(FilterConfig::from_filter).collect();
+        assert_eq!(back[1].enabled, None);
+        assert_eq!(back[0].bold, None);
+        assert_eq!(back[0].color, None);
+        assert_eq!(back[2].enabled, Some(false));
+        assert_eq!(back[2].color.as_deref(), Some("#e5a50a"));
+        let path = tmp("defaults").join("config.toml");
+        Config::update(&path, |c| c.filters = back).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("enabled = true"), "{text}");
+        assert!(!text.contains("bold = false"), "{text}");
+        assert!(!text.contains("projects = []"), "{text}");
+        let rules2 = Config::load(&path).unwrap().unwrap().file_filters();
+        assert_eq!(rules, rules2);
+    }
+
+    #[test]
+    fn editing_a_filter_keeps_every_comment_and_the_queries() {
+        let path = filtered("fedit");
+        Config::update(&path, |c| c.filters[1].globs.push("go.sum".into())).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        filter_lines_kept(&text, &["*.lock"]);
+        assert!(text.contains("globs = [\"*.lock\", \"go.sum\"]"), "{text}");
+        assert!(text.contains("# lock files"), "{text}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.queries, vec![q("A", "status:open")]);
+        assert_eq!(cfg.file_filters()[1].globs, ["*.lock", "go.sum"]);
+    }
+
+    #[test]
+    fn adding_a_filter_keeps_every_comment() {
+        let path = filtered("fadd");
+        let new = FileFilter {
+            name: "Docs".into(),
+            globs: vec!["docs/**".into()],
+            projects: Vec::new(),
+            action: FilterAction::Hide,
+            enabled: true,
+        };
+        Config::update(&path, |c| c.filters.push(FilterConfig::from_filter(&new))).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        filter_lines_kept(&text, &[]);
+        let rules = Config::load(&path).unwrap().unwrap().file_filters();
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[3], new);
+    }
+
+    #[test]
+    fn deleting_a_filter_drops_only_its_own_comment() {
+        let path = filtered("fdel");
+        Config::update(&path, |c| {
+            c.filters.remove(1);
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        filter_lines_kept(
+            &text,
+            &[
+                "# lock files",
+                "Locks",
+                "*.lock",
+                "\"dim\"",
+                "enabled = true",
+            ],
+        );
+        let cfg = Config::load(&path).unwrap().unwrap();
+        let names: Vec<_> = cfg.file_filters().into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["Generated", "Mine"]);
+        assert_eq!(cfg.queries.len(), 1);
+    }
+
+    #[test]
+    fn reordering_filters_moves_their_comments_along() {
+        let path = filtered("freorder");
+        Config::update(&path, |c| c.filters.swap(0, 2)).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        filter_lines_kept(&text, &[]);
+        assert!(text.find("# mine").unwrap() < text.find("# generated code").unwrap());
+        // The explicit `enabled = true` of "Locks" survives the move.
+        assert!(text.contains("enabled = true"), "{text}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        let names: Vec<_> = cfg.file_filters().into_iter().map(|f| f.name).collect();
+        assert_eq!(names, ["Mine", "Locks", "Generated"]);
+        assert_eq!(cfg.queries.len(), 1);
+    }
+
+    #[test]
+    fn deleting_every_filter_removes_the_array() {
+        let path = filtered("fall");
+        Config::update(&path, |c| c.filters.clear()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("filters"), "{text}");
+        assert!(text.contains("[[queries]]"));
     }
 }

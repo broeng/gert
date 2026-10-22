@@ -198,6 +198,14 @@ impl FileMatcher {
     }
 }
 
+/// Whether one glob compiles. A blank one is fine: it is ignored.
+pub fn validate_glob(pattern: &str) -> Result<(), String> {
+    match build_glob(pattern) {
+        Some(Err(e)) => Err(e.kind().to_string()),
+        _ => Ok(()),
+    }
+}
+
 /// Checks a rule before it is saved: `others` are the other rules of the
 /// list (without this one).
 pub fn validate(rule: &FileFilter, others: &[FileFilter]) -> Result<(), String> {
@@ -208,15 +216,10 @@ pub fn validate(rule: &FileFilter, others: &[FileFilter]) -> Result<(), String> 
     if others.iter().any(|o| o.name == rule.name) {
         return Err(format!("There is already a filter named {name:?}."));
     }
-    let mut any = false;
     for pattern in &rule.globs {
-        match build_glob(pattern) {
-            None => {}
-            Some(Ok(_)) => any = true,
-            Some(Err(e)) => return Err(format!("Invalid glob {:?}: {}", pattern.trim(), e.kind())),
-        }
+        validate_glob(pattern).map_err(|e| format!("Invalid glob {:?}: {e}", pattern.trim()))?;
     }
-    if !any {
+    if rule.globs.iter().all(|g| g.trim().is_empty()) {
         return Err("Add at least one glob.".into());
     }
     Ok(())
