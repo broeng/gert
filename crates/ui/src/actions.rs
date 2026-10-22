@@ -33,6 +33,8 @@ actions!(
         DeleteQuery,
         MoveQueryDown,
         MoveQueryUp,
+        /// `space`: switch the startup page, or toggle advance-after-vote.
+        ToggleSetting,
         /// `y` / `Enter` while asked to delete.
         ConfirmDelete,
         /// `n` / `Esc` while asked to delete.
@@ -505,6 +507,11 @@ pub fn settings_entries() -> Vec<Entry> {
             "Edit the query (Tab: other field, Enter: save, Esc: cancel)",
         ),
         e("", KeyBinding::new("e", EditQuery, Some(b)), ""),
+        e(
+            "Space",
+            KeyBinding::new("space", ToggleSetting, Some(b)),
+            "Startup page: dashboard or search; advance after a vote: on or off",
+        ),
         e("a", KeyBinding::new("a", AddQuery, Some(b)), "Add a query"),
         e(
             "d",

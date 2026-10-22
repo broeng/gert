@@ -931,7 +931,7 @@ mod from_the_shell {
 
     use crate::{
         nav::Route,
-        session::{Backend, BackendError, SavedQuery, ServerSetup, Startup},
+        session::{Backend, BackendError, SavedQuery, ServerSetup, Startup, StartupPage},
         shell::Shell,
         testing::{detail, summary},
         tests::{URL, env_with, open, setup},
@@ -946,6 +946,14 @@ mod from_the_shell {
 
         fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
             Err(BackendError("not used".into()))
+        }
+
+        fn save_startup_page(&self, p: &StartupPage) -> Result<StartupPage, BackendError> {
+            Ok(p.clone())
+        }
+
+        fn save_advance_after_vote(&self, on: bool) -> Result<bool, BackendError> {
+            Ok(on)
         }
 
         fn save_login(
@@ -986,6 +994,7 @@ mod from_the_shell {
                 query: "status:open".into(),
             }],
             diff: Default::default(),
+            start_page: Default::default(),
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
