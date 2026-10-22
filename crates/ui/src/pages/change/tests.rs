@@ -123,10 +123,22 @@ fn page_as(
     view: ChangeView,
     routes: impl FnOnce(&RouteHttpClient),
 ) -> Fixture {
+    page_in(cx, seeded(), auth, server, view, routes)
+}
+
+/// Like [`page_as`], on the given cache.
+fn page_in(
+    cx: &mut TestAppContext,
+    store: Store,
+    auth: Option<Auth>,
+    server: crate::session::ServerSetup,
+    view: ChangeView,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fixture {
     let http = RouteHttpClient::new();
     http.route("/diff", 200, diff_body());
     routes(&http);
-    let env = env_with(seeded(), &http);
+    let env = env_with(store, &http);
     let session = Session::new(&env, &server, auth).expect("session");
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
@@ -787,4 +799,78 @@ fn r_only_hints_for_anonymous_sessions(cx: &mut TestAppContext) {
         .expect("a note");
     assert!(!error && note.starts_with("Sign in"), "{note}");
     assert!(f.http.sent().iter().all(|r| r.method == "GET"));
+}
+
+/// [`seeded`] plus a chain of `n` changes around change 7 (the middle one),
+/// cached for its current patch set.
+fn seeded_with_chain(n: u64) -> Store {
+    let mut store = seeded();
+    let chain: Vec<model::RelatedChange> = (0..n)
+        .map(|i| model::RelatedChange {
+            project: "p".into(),
+            change_id: None,
+            number: ChangeNumber(if i == n / 2 { 7 } else { 100 + i }),
+            patch_set: PatchSetNumber(1),
+            current_patch_set: Some(PatchSetNumber(1)),
+            status: Some(model::ChangeStatus::New),
+            submittable: None,
+            work_in_progress: false,
+            commit: None,
+        })
+        .collect();
+    store
+        .save_related(ServerId(1), ChangeNumber(7), &"sha3".into(), &chain, ts())
+        .expect("related");
+    store
+}
+
+fn wheel(cx: &mut TestAppContext, f: &Fixture, at: gpui_kit::Point<gpui_kit::Pixels>, dy: f32) {
+    let mut vcx = gpui_kit::VisualTestContext::from_window(f.window, cx);
+    vcx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: at,
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(dy))),
+        ..Default::default()
+    });
+}
+
+#[gpui_kit::test]
+fn the_wheel_over_the_relation_chain_scrolls_the_chain_and_not_the_page(cx: &mut TestAppContext) {
+    let f = page_in(
+        cx,
+        seeded_with_chain(14),
+        None,
+        setup(),
+        ChangeView::default(),
+        |_| {},
+    );
+    // A window too short for the page to fit, so that the page can scroll.
+    gpui_kit::VisualTestContext::from_window(f.window, cx)
+        .simulate_resize(gpui_kit::size(gpui_kit::px(1100.), gpui_kit::px(400.)));
+    cx.run_until_parked();
+    let (chain, list) = cx.update(|cx| {
+        let p = f.page.read(cx);
+        (p.related_scroll_for_test(), p.list_for_test())
+    });
+    let max = chain.max_offset().y;
+    assert!(max > gpui_kit::px(0.), "the chain overflows its box");
+    let b = chain.bounds();
+    let over = gpui_kit::point(b.center().x, b.top() + gpui_kit::px(20.));
+    let page_top = |list: &gpui_kit::ListState| {
+        let t = list.logical_scroll_top();
+        (t.item_ix, t.offset_in_item)
+    };
+    assert_eq!(page_top(&list), (0, gpui_kit::px(0.)));
+
+    // Down inside the box: only the box moves.
+    wheel(cx, &f, over, -30.);
+    assert_eq!(chain.offset().y, gpui_kit::px(-30.));
+    assert_eq!(page_top(&list), (0, gpui_kit::px(0.)));
+
+    // At the end of the box the wheel goes on to the page.
+    wheel(cx, &f, over, -(max.as_f32() + 100.));
+    assert_eq!(chain.offset().y, -max);
+    assert_eq!(page_top(&list), (0, gpui_kit::px(0.)));
+    wheel(cx, &f, over, -40.);
+    assert_eq!(chain.offset().y, -max);
+    assert_ne!(page_top(&list), (0, gpui_kit::px(0.)));
 }

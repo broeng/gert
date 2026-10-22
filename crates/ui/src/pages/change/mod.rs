@@ -289,6 +289,16 @@ impl ChangePage {
     }
 
     #[cfg(test)]
+    pub(crate) fn related_scroll_for_test(&self) -> ScrollHandle {
+        self.related_scroll.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn list_for_test(&self) -> ListState {
+        self.list.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn scroll_to_end_for_test(&mut self) {
         let last = self.blocks.len().saturating_sub(1);
         self.list.scroll_to(ListOffset {
