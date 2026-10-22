@@ -128,6 +128,8 @@ pub struct ChangePage {
     files: Files,
     related: Option<Related>,
     related_cursor: Option<usize>,
+    /// Scroll position of the capped relation chain box.
+    related_scroll: ScrollHandle,
     /// Index into `files.list`.
     cursor: usize,
     /// Put the cursor on this file once the list is there.
@@ -205,6 +207,7 @@ impl ChangePage {
             files: Files::default(),
             related: None,
             related_cursor: None,
+            related_scroll: ScrollHandle::new(),
             cursor: 0,
             want_file: view.file,
             jump: true,
@@ -621,11 +624,8 @@ impl ChangePage {
         let d = self.detail.as_ref();
         Content {
             loaded: d.is_some(),
-            requirements: d.map_or(0, |d| d.submit_requirements.len()),
-            labels: d.map_or(0, |d| d.votes.len()),
             files: self.files.list.len(),
             threads: self.listed.len(),
-            related: self.related.as_ref().map_or(0, |r| r.changes.len()),
             messages: d.map_or(0, |d| d.messages.len()),
         }
     }
@@ -1082,7 +1082,7 @@ impl ChangePage {
 
     fn toggle_commit(&mut self, _: &ToggleCommit, _: &mut Window, cx: &mut Context<Self>) {
         self.commit_open = !self.commit_open;
-        self.remeasure(Block::Commit);
+        self.remeasure(Block::Header);
         cx.notify();
     }
 
@@ -1098,10 +1098,8 @@ impl ChangePage {
             None => 0,
         };
         self.related_cursor = Some(n);
-        if let Some(ix) = self.block_index(Block::Related) {
-            self.list.scroll_to_reveal_item(ix);
-        }
-        self.remeasure(Block::Related);
+        self.related_scroll.scroll_to_item(n);
+        self.list.scroll_to_reveal_item(0);
         cx.notify();
     }
 

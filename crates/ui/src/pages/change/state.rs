@@ -110,11 +110,9 @@ fn cycle<T: Copy + PartialEq>(items: &[T], current: Option<T>, forward: bool) ->
 /// these, so a change with thousands of files costs only the visible ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Block {
+    /// The header bar and the three columns under it: change info, commit
+    /// message and relation chain.
     Header,
-    Requirements,
-    Votes,
-    People,
-    Commit,
     /// Patch set selector and the "Files" heading.
     PatchSets,
     /// "Loading files", an error or "no files" in place of the rows.
@@ -128,7 +126,6 @@ pub enum Block {
     Thread(usize),
     /// The patch-set level threads, as cards, and the button for a new one.
     PatchSetComments,
-    Related,
     LogHeader,
     Message(usize),
 }
@@ -137,12 +134,9 @@ pub enum Block {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Content {
     pub loaded: bool,
-    pub requirements: usize,
-    pub labels: usize,
     pub files: usize,
     /// Threads the list shows (after the filter).
     pub threads: usize,
-    pub related: usize,
     pub messages: usize,
 }
 
@@ -151,14 +145,6 @@ pub fn blocks(c: Content) -> Vec<Block> {
     if !c.loaded {
         return v;
     }
-    if c.requirements > 0 {
-        v.push(Block::Requirements);
-    }
-    if c.labels > 0 {
-        v.push(Block::Votes);
-    }
-    v.push(Block::People);
-    v.push(Block::Commit);
     v.push(Block::PatchSets);
     if c.files == 0 {
         v.push(Block::FilesNotice);
@@ -170,9 +156,6 @@ pub fn blocks(c: Content) -> Vec<Block> {
     }
     v.extend((0..c.threads).map(Block::Thread));
     v.push(Block::PatchSetComments);
-    if c.related > 1 {
-        v.push(Block::Related);
-    }
     if c.messages > 0 {
         v.push(Block::LogHeader);
         v.extend((0..c.messages).map(Block::Message));
@@ -331,46 +314,34 @@ mod tests {
         assert_eq!(none, [Block::Header]);
         let b = blocks(Content {
             loaded: true,
-            requirements: 2,
-            labels: 1,
             files: 2,
             threads: 1,
-            related: 3,
             messages: 2,
         });
         assert_eq!(
             b,
             [
                 Block::Header,
-                Block::Requirements,
-                Block::Votes,
-                Block::People,
-                Block::Commit,
                 Block::PatchSets,
                 Block::File(0),
                 Block::File(1),
                 Block::ThreadsHeader,
                 Block::Thread(0),
                 Block::PatchSetComments,
-                Block::Related,
                 Block::LogHeader,
                 Block::Message(0),
                 Block::Message(1),
             ]
         );
-        // No files: a notice; a lone related entry (the change itself) hides
-        // the section.
+        // No files: a notice.
         let b = blocks(Content {
             loaded: true,
-            related: 1,
             ..Default::default()
         });
         assert_eq!(
             b,
             [
                 Block::Header,
-                Block::People,
-                Block::Commit,
                 Block::PatchSets,
                 Block::FilesNotice,
                 Block::ThreadsHeader,

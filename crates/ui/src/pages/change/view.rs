@@ -81,10 +81,6 @@ impl ChangePage {
         };
         let inner = match block {
             Block::Header => self.header(cx),
-            Block::Requirements => self.requirements(cx),
-            Block::Votes => self.votes(cx),
-            Block::People => self.people_block(cx),
-            Block::Commit => self.commit(cx),
             Block::PatchSets => self.patch_sets(cx),
             Block::FilesNotice => self.files_notice(cx),
             Block::File(i) => self.file(i, cx),
@@ -92,7 +88,6 @@ impl ChangePage {
             Block::ThreadsNotice => self.threads_notice(cx),
             Block::Thread(i) => self.thread_row(i, cx),
             Block::PatchSetComments => self.patchset_comments(cx),
-            Block::Related => self.related_block(cx),
             Block::LogHeader => self.log_header(cx),
             Block::Message(i) => self.message(i, cx),
         };
@@ -177,70 +172,135 @@ impl ChangePage {
                 .into_any_element();
         };
         let c = &d.summary;
-        let now = Timestamp::now();
-        let tz = TimeZone::system();
         let (status_text, unknown) = status_label(&c.status);
         let status_color = match c.status {
             ChangeStatus::Merged => theme.success,
             ChangeStatus::Abandoned => theme.muted_foreground,
             _ => theme.primary,
         };
-        let field = |name: &'static str, value: String| {
-            h_flex()
-                .gap_1()
-                .child(div().text_color(muted).child(name))
-                .child(div().child(value))
+        let bar = h_flex()
+            .w_full()
+            .gap_2()
+            .items_center()
+            .flex_wrap()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .child(if unknown {
+                pill(c.status.to_string(), muted)
+            } else {
+                pill(status_text, status_color)
+            })
+            .child(div().text_color(muted).child(format!("#{}", c.number)))
+            .children(
+                chips(c)
+                    .into_iter()
+                    .filter(|chip| {
+                        !matches!(chip, crate::row::Chip::Merged | crate::row::Chip::Abandoned)
+                    })
+                    .map(|chip| pill(chip.text(), chip_colors(chip, cx).0)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .text_lg()
+                    .font_semibold()
+                    .child(c.subject.clone()),
+            )
+            .child(div().flex_1())
+            .child(status);
+        let info = self.change_info(cx);
+        let commit = self.commit(cx);
+        let related = self.related_block(cx);
+        // Wrapping columns: each grows from a basis, so a narrow window
+        // stacks them instead of squeezing the text.
+        let column = |basis: f32, child: AnyElement| {
+            div()
+                .flex_grow(1.)
+                .flex_basis(px(basis))
+                .min_w(px(260.))
+                .max_w_full()
+                .child(child)
         };
         v_flex()
-            .gap_1()
+            .gap_2()
+            .child(bar)
             .child(
                 h_flex()
-                    .gap_2()
-                    .items_center()
+                    .w_full()
+                    .items_start()
                     .flex_wrap()
-                    .child(div().text_color(muted).child(format!("#{}", c.number)))
-                    .child(if unknown {
-                        pill(c.status.to_string(), muted)
-                    } else {
-                        pill(status_text, status_color)
-                    })
-                    .children(
-                        chips(c)
-                            .into_iter()
-                            .filter(|chip| {
-                                !matches!(
-                                    chip,
-                                    crate::row::Chip::Merged | crate::row::Chip::Abandoned
-                                )
-                            })
-                            .map(|chip| pill(chip.text(), chip_colors(chip, cx).0)),
-                    )
-                    .child(div().text_lg().font_semibold().child(c.subject.clone()))
-                    .child(div().flex_1())
-                    .child(status),
-            )
-            .child(
-                h_flex()
                     .gap_x_4()
-                    .gap_y_0p5()
-                    .flex_wrap()
-                    .text_sm()
-                    .child(field("Owner", c.owner.display()))
-                    .child(field("Project", format!("{} ({})", c.project, c.branch)))
-                    .when_some(c.topic.clone(), |d, t| d.child(field("Topic", t)))
-                    .when(!c.hashtags.is_empty(), |d| {
-                        d.child(field(
-                            "Hashtags",
-                            c.hashtags
-                                .iter()
-                                .map(|h| format!("#{h}"))
-                                .collect::<Vec<_>>()
-                                .join(" "),
-                        ))
-                    })
-                    .child(field("Updated", relative(now, c.updated, &tz)))
-                    .child(field("Created", relative(now, c.created, &tz))),
+                    .gap_y_3()
+                    .child(column(340., info))
+                    .child(column(400., commit))
+                    .when_some(related, |d, r| d.child(column(340., r))),
             )
+            .into_any_element()
+    }
+
+    /// First column of the top: who and where, then the submit requirements
+    /// and the votes.
+    fn change_info(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(d) = &self.detail else {
+            return div().into_any_element();
+        };
+        let muted = cx.theme().muted_foreground;
+        let c = &d.summary;
+        let now = Timestamp::now();
+        let tz = TimeZone::system();
+        let field = |name: &'static str, value: String| {
+            h_flex()
+                .gap_3()
+                .text_sm()
+                .items_baseline()
+                .child(div().w(px(110.)).flex_none().text_color(muted).child(name))
+                .child(div().min_w_0().child(value))
+        };
+        let list = |name: &'static str, list: &[Account]| {
+            field(
+                name,
+                if list.is_empty() {
+                    "none".to_owned()
+                } else {
+                    people(list)
+                },
+            )
+        };
+        let fields = v_flex()
+            .gap_0p5()
+            .child(field("Owner", c.owner.display()))
+            .child(list("Reviewers", &d.reviewers))
+            .child(list("CC", &d.cc))
+            .child(field(
+                "Repo | Branch",
+                format!("{} | {}", c.project, c.branch),
+            ))
+            .when_some(c.topic.clone(), |d, t| d.child(field("Topic", t)))
+            .when(!c.hashtags.is_empty(), |d| {
+                d.child(field(
+                    "Hashtags",
+                    c.hashtags
+                        .iter()
+                        .map(|h| format!("#{h}"))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ))
+            })
+            .child(field("Updated", relative(now, c.updated, &tz)))
+            .child(field("Created", relative(now, c.created, &tz)));
+        let has_requirements = !d.submit_requirements.is_empty();
+        let has_votes = !d.votes.is_empty();
+        let requirements = has_requirements.then(|| self.requirements(cx));
+        let votes = has_votes.then(|| self.votes(cx));
+        v_flex()
+            .gap_2()
+            .child(fields)
+            .children(requirements)
+            .children(votes)
             .into_any_element()
     }
 
@@ -253,13 +313,15 @@ impl ChangePage {
             let (glyph, color) = requirement_mark(r, cx);
             let note = requirement_note(r);
             h_flex()
-                .gap_2()
+                .gap_x_2()
+                .flex_wrap()
                 .items_baseline()
                 .text_sm()
                 .child(div().w(px(14.)).flex_none().text_color(color).child(glyph))
                 .child(div().child(r.name.clone()))
                 .child(
                     div()
+                        .min_w_0()
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(note),
@@ -323,7 +385,8 @@ impl ChangePage {
                         .into_any_element()
                 } else {
                     h_flex()
-                        .gap_3()
+                        .min_w_0()
+                        .gap_x_3()
                         .flex_wrap()
                         .children(voters)
                         .into_any_element()
@@ -333,30 +396,6 @@ impl ChangePage {
             .gap_0p5()
             .child(section_title("Votes", cx))
             .children(rows.collect::<Vec<_>>())
-            .into_any_element()
-    }
-
-    fn people_block(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(d) = &self.detail else {
-            return div().into_any_element();
-        };
-        let muted = cx.theme().muted_foreground;
-        let row = |name: &'static str, list: &[Account]| {
-            h_flex()
-                .gap_3()
-                .text_sm()
-                .items_baseline()
-                .child(div().w(px(110.)).flex_none().text_color(muted).child(name))
-                .child(div().min_w_0().child(if list.is_empty() {
-                    "none".to_owned()
-                } else {
-                    people(list)
-                }))
-        };
-        v_flex()
-            .gap_0p5()
-            .child(row("Reviewers", &d.reviewers))
-            .child(row("CC", &d.cc))
             .into_any_element()
     }
 
@@ -415,6 +454,7 @@ impl ChangePage {
                         .rounded_md()
                         .border_1()
                         .border_color(theme.border)
+                        .bg(theme.background)
                         .font_family(theme.mono_font_family.clone())
                         .text_sm()
                         .children(lines_of(
@@ -653,10 +693,11 @@ impl ChangePage {
         self.has_focus
     }
 
-    fn related_block(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(r) = &self.related else {
-            return div().into_any_element();
-        };
+    /// The relation chain, `None` when there is nothing but this change.
+    /// The box is capped in height and scrolls, so a long stack does not
+    /// push the files down; the current change has an arrow and a tint.
+    fn related_block(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let r = self.related.as_ref().filter(|r| r.changes.len() > 1)?;
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let rows = r.changes.iter().enumerate().map(|(i, c)| {
@@ -675,6 +716,7 @@ impl ChangePage {
                 } else {
                     theme.transparent
                 })
+                .when(this_change, |d| d.bg(theme.accent))
                 .when(selected, |d| d.bg(theme.list_active))
                 .hover(|d| d.bg(theme.list_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -684,7 +726,14 @@ impl ChangePage {
                 }))
                 .child(
                     div()
-                        .w(px(72.))
+                        .w(px(12.))
+                        .flex_none()
+                        .text_color(theme.primary)
+                        .child(if this_change { "\u{2192}" } else { "" }),
+                )
+                .child(
+                    div()
+                        .w(px(64.))
                         .flex_none()
                         .whitespace_nowrap()
                         .text_color(muted)
@@ -698,14 +747,26 @@ impl ChangePage {
                         .child(related_subject(c)),
                 )
                 .child(div().flex_1())
-                .children(related_pills(c, this_change, cx))
+                .children(related_pills(c, cx))
         });
-        v_flex()
-            .gap_0p5()
-            .pt_2()
-            .child(section_title("Related changes", cx))
-            .children(rows.collect::<Vec<_>>())
-            .into_any_element()
+        Some(
+            v_flex()
+                .gap_1()
+                .child(section_title("Relation chain", cx))
+                .child(
+                    v_flex()
+                        .id("related-list")
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.related_scroll)
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .children(rows.collect::<Vec<_>>()),
+                )
+                .into_any_element(),
+        )
     }
 
     fn log_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -864,12 +925,9 @@ fn related_subject(c: &RelatedChange) -> String {
         .map_or_else(|| "(no subject)".to_owned(), |k| k.subject.clone())
 }
 
-fn related_pills(c: &RelatedChange, this_change: bool, cx: &App) -> Vec<Div> {
+fn related_pills(c: &RelatedChange, cx: &App) -> Vec<Div> {
     let t = cx.theme();
     let mut v = Vec::new();
-    if this_change {
-        v.push(pill("this change", t.primary));
-    }
     match &c.status {
         Some(ChangeStatus::Merged) => v.push(pill("Merged", t.success)),
         Some(ChangeStatus::Abandoned) => v.push(pill("Abandoned", t.muted_foreground)),
