@@ -1,7 +1,8 @@
 //! The settings page: the saved queries of the dashboard, the startup page,
-//! the review flow (advance after a vote) and the file filters. The cursor
-//! walks the query rows, then the startup row, then the advance row, then
-//! the filter rows (one empty-state row when there are none).
+//! the review flow (advance after a vote), the theme and the file filters.
+//! The cursor walks the query rows, then the startup row, the advance row
+//! and the theme row, then the filter rows (one empty-state row when there
+//! are none).
 //!
 //! The filters are edited in the Manage filters dialog, which the shell
 //! opens when the page emits [`SettingsEvent::ManageFilters`]; the page only
@@ -27,6 +28,7 @@ use crate::{
     hint::Hint,
     session::{Env, SavedQuery, StartupPage},
     settings::{FileFilters, PageLayout},
+    theme::{self as app_theme, ThemeName},
 };
 
 /// What the page tells the shell.
@@ -252,9 +254,13 @@ impl SettingsPage {
         self.queries.len() + 1
     }
 
+    fn theme_row(&self) -> usize {
+        self.queries.len() + 2
+    }
+
     /// The first filter row (the empty-state row when there are no rules).
     fn filters_row(&self) -> usize {
-        self.queries.len() + 2
+        self.queries.len() + 3
     }
 
     /// The last row the cursor can be on.
@@ -305,6 +311,8 @@ impl SettingsPage {
             self.start_edit(self.cursor, window, cx);
         } else if self.cursor == self.startup_row() {
             self.start_startup_edit(window, cx);
+        } else if self.cursor == self.theme_row() {
+            self.save_theme(app_theme::current(cx).next(), window, cx);
         } else {
             self.save_advance(!self.layout.read(cx).advance_after_vote(), window, cx);
         }
@@ -322,6 +330,8 @@ impl SettingsPage {
             }
         } else if self.cursor == self.advance_row() {
             self.save_advance(!self.layout.read(cx).advance_after_vote(), window, cx);
+        } else if self.cursor == self.theme_row() {
+            self.save_theme(app_theme::current(cx).next(), window, cx);
         }
     }
 
@@ -597,6 +607,32 @@ impl SettingsPage {
                     Err(e) => {
                         this.hint
                             .say(format!("Could not save the setting: {e}"), true, cx, |p| {
+                                &mut p.hint
+                            });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Writes the theme; on success it applies at once.
+    fn save_theme(&mut self, name: ThemeName, window: &mut Window, cx: &mut Context<Self>) {
+        self.busy = true;
+        let backend = self.env.backend.clone();
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.save_theme(name) })
+                .await;
+            this.update_in(cx, |this, _, cx| {
+                this.busy = false;
+                match result {
+                    Ok(saved) => app_theme::set(saved, cx),
+                    Err(e) => {
+                        this.hint
+                            .say(format!("Could not save the theme: {e}"), true, cx, |p| {
                                 &mut p.hint
                             });
                     }
@@ -1012,6 +1048,40 @@ impl SettingsPage {
         )
     }
 
+    fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = app_theme::current(cx);
+        let busy = self.busy;
+        let choose = h_flex()
+            .gap_1()
+            .flex_none()
+            .children(ThemeName::ALL.into_iter().map(|name| {
+                Button::new(("theme", name as usize))
+                    .label(name.label())
+                    .small()
+                    .when(name == current, |b| b.primary())
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        this.cursor = this.theme_row();
+                        if this.can_change() && app_theme::current(cx) != name {
+                            this.save_theme(name, w, cx);
+                        }
+                    }))
+            }));
+        let row = h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .child(div().w(px(200.)).flex_none().child("Theme"))
+            .child(choose);
+        self.section(
+            "Appearance",
+            "Light or dark follows the system setting. Space switches the theme.",
+            row,
+            self.cursor == self.theme_row() && self.mode == Mode::Browsing,
+            cx,
+        )
+    }
+
     /// What the rule does: the word, with a swatch and "bold" for a highlight.
     fn render_effect(&self, action: &FilterAction, cx: &App) -> AnyElement {
         let theme = cx.theme();
@@ -1190,6 +1260,7 @@ impl Render for SettingsPage {
         let queries = self.render_queries(cx);
         let startup = self.render_startup(cx);
         let review = self.render_review(cx);
+        let appearance = self.render_appearance(cx);
         let filters = self.render_filters(cx);
         v_flex()
             .id("settings")
@@ -1228,6 +1299,7 @@ impl Render for SettingsPage {
                             .child(queries)
                             .child(startup)
                             .child(review)
+                            .child(appearance)
                             .child(filters),
                     )
                     .vertical_scrollbar(&self.scroll),

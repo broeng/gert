@@ -346,6 +346,13 @@ mod drafts {
             Ok(on)
         }
 
+        fn save_theme(
+            &self,
+            t: crate::theme::ThemeName,
+        ) -> Result<crate::theme::ThemeName, BackendError> {
+            Ok(t)
+        }
+
         fn save_login(
             &self,
             _: &str,
@@ -745,6 +752,52 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    fn switching_the_theme_saves_and_applies_it(cx: &mut TestAppContext) {
+        use crate::theme::{self, ThemeName};
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        let applied = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                let name = gpui_kit::component::ActiveTheme::theme(cx).theme_name();
+                (theme::current(cx), name.to_string())
+            })
+        };
+        assert_eq!(applied(cx).0, ThemeName::Cwc);
+        // Two query rows, the startup and advance rows, then the theme row.
+        for _ in 0..4 {
+            press(cx, &f, "j");
+        }
+        press(cx, &f, "space");
+        let (now, name) = applied(cx);
+        assert_eq!(now, ThemeName::Solarized);
+        assert!(name.starts_with("Solarized"), "{name}");
+        assert_eq!(
+            *f.backend.saved_theme.lock().unwrap(),
+            [ThemeName::Solarized]
+        );
+        press(cx, &f, "enter");
+        let (now, name) = applied(cx);
+        assert_eq!(now, ThemeName::Cwc);
+        assert!(name.starts_with("CWC"), "{name}");
+    }
+
+    #[gpui_kit::test]
+    fn a_failed_theme_save_keeps_the_theme(cx: &mut TestAppContext) {
+        let f = fixture(cx, true);
+        open_settings(cx, &f);
+        for _ in 0..4 {
+            press(cx, &f, "j");
+        }
+        press(cx, &f, "space");
+        cx.update(|cx| {
+            assert_eq!(crate::theme::current(cx), crate::theme::ThemeName::Cwc);
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            let (text, error) = page.read(cx).hint_for_test().expect("hint");
+            assert!(error && text.contains("disk full"), "{text}");
+        });
+    }
+
+    #[gpui_kit::test]
     fn a_startup_query_needs_text_and_is_saved(cx: &mut TestAppContext) {
         let f = fixture(cx, false);
         open_settings(cx, &f);
@@ -845,9 +898,9 @@ mod settings_page {
         })
     }
 
-    /// Cursor on the first filter row: 2 queries, startup, advance.
+    /// Cursor on the first filter row: 2 queries, startup, advance, theme.
     fn to_filters(cx: &mut TestAppContext, f: &Fixture) {
-        for _ in 0..4 {
+        for _ in 0..5 {
             press(cx, f, "j");
         }
     }
@@ -858,13 +911,13 @@ mod settings_page {
         open_settings(cx, &f);
         assert_eq!(page_state(cx, &f).1, ["gen", "lock"]);
         to_filters(cx, &f);
-        assert_eq!(page_state(cx, &f).0, 4);
+        assert_eq!(page_state(cx, &f).0, 5);
         press(cx, &f, "j");
         press(cx, &f, "j");
         // The last rule is the last row.
-        assert_eq!(page_state(cx, &f).0, 5);
+        assert_eq!(page_state(cx, &f).0, 6);
         press(cx, &f, "k");
-        assert_eq!(page_state(cx, &f).0, 4);
+        assert_eq!(page_state(cx, &f).0, 5);
     }
 
     #[gpui_kit::test]
@@ -879,7 +932,7 @@ mod settings_page {
         assert_eq!(dialog_state(cx, &f), None);
         // Focus is back on the page: the cursor still works.
         press(cx, &f, "k");
-        assert_eq!(page_state(cx, &f).0, 4);
+        assert_eq!(page_state(cx, &f).0, 5);
         press(cx, &f, "d");
         // Deleting is the dialog's business, with its confirmation.
         assert_eq!(dialog_state(cx, &f), Some((0, "browsing")));
@@ -912,7 +965,7 @@ mod settings_page {
         open_settings(cx, &f);
         to_filters(cx, &f);
         press(cx, &f, "j");
-        assert_eq!(page_state(cx, &f), (4, Vec::new()));
+        assert_eq!(page_state(cx, &f), (5, Vec::new()));
         press(cx, &f, "enter");
         assert_eq!(dialog_state(cx, &f), Some((0, "adding")));
     }
@@ -937,7 +990,7 @@ mod settings_page {
             })
         });
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (4, vec!["lock".into(), "gen".into()]));
+        assert_eq!(page_state(cx, &f), (5, vec!["lock".into(), "gen".into()]));
         // Removing the rule under the cursor clamps it.
         cx.update(|cx| {
             filters.update(cx, |ff, cx| {
@@ -945,9 +998,9 @@ mod settings_page {
             })
         });
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (4, vec!["gen".into()]));
+        assert_eq!(page_state(cx, &f), (5, vec!["gen".into()]));
         cx.update(|cx| filters.update(cx, |ff, cx| ff.set_rules(Vec::new(), cx)));
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (4, Vec::new()));
+        assert_eq!(page_state(cx, &f), (5, Vec::new()));
     }
 }

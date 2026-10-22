@@ -324,7 +324,7 @@ fn entry(
         (draft, view.editor.as_ref()),
         (Some(d), Some(ed)) if ed.key == EditKey::Draft(d.local_id)
     );
-    let link = gpui_kit::component::ActiveTheme::theme(&**cx).info;
+    let link = gpui_kit::component::ActiveTheme::theme(&**cx).link;
     let lines = e.message().lines().enumerate().map(|(i, line)| {
         if line.trim().is_empty() {
             div().h(px(6.))

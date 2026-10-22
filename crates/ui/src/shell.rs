@@ -74,7 +74,7 @@ impl Page {
 
 /// Registers key bindings. Call once after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
-    crate::theme::install(cx);
+    crate::theme::set(crate::theme::ThemeName::default(), cx);
     // Always show the scroll bars: the default only shows them while
     // scrolling, which hides that a long list or diff scrolls at all.
     gpui_kit::component::Theme::set_scrollbar_mode(

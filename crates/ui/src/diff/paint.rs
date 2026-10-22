@@ -54,8 +54,7 @@ impl Palette {
     pub fn new(focused: bool, cx: &App) -> Self {
         let t = cx.theme();
         let dark = t.is_dark();
-        let sol = crate::theme::palette(cx);
-        let c = crate::theme::solarized::color;
+        let diff = crate::theme::diff_colors(cx);
         let (cursor, cursor_alpha) = if focused {
             (t.primary, if dark { 0.16 } else { 0.12 })
         } else {
@@ -70,18 +69,18 @@ impl Palette {
             skip_bg: t.muted_foreground.opacity(0.10),
             cursor_bg: cursor.opacity(cursor_alpha),
             cursor_bar: cursor,
-            removed_row: c(sol.red_1bg),
-            added_row: c(sol.green_1bg),
-            removed_gutter: c(sol.red_2bg),
-            added_gutter: c(sol.green_2bg),
+            removed_row: diff.removed_row,
+            added_row: diff.added_row,
+            removed_gutter: diff.removed_mark,
+            added_gutter: diff.added_mark,
             rebase: t.muted_foreground,
-            removed_mark: c(sol.red_2bg),
-            added_mark: c(sol.green_2bg),
-            comment_mark: c(sol.yellow_2bg),
+            removed_mark: diff.removed_mark,
+            added_mark: diff.added_mark,
+            comment_mark: diff.comment_mark,
             unresolved: t.warning,
             resolved: t.muted_foreground,
             danger: t.danger,
-            link: t.info,
+            link: t.link,
             card_fg: t.foreground,
         }
     }

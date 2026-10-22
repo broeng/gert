@@ -28,6 +28,10 @@
 //! [review]
 //! advance_after_vote = true            # go to the next open change after a vote
 //!
+//! # Optional: look. The light or dark variant follows the system setting.
+//! [appearance]
+//! theme = "cwc"                        # or "solarized"
+//!
 //! # Optional: local overrides of the diff view. Every key is optional. They
 //! # win over the preferences stored on the server (Settings > Preferences >
 //! # Diff Preferences in the web UI) and are never written back to it.
@@ -61,6 +65,7 @@ use directories::ProjectDirs;
 use model::{DiffContext, DiffPreferences, DiffViewMode, Whitespace};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item};
+use ui::ThemeName;
 use ui::filters::{FileFilter, FilterAction, format_hex_color, parse_hex_color, validate_glob};
 
 use crate::APP_NAME;
@@ -97,6 +102,8 @@ pub struct Config {
     pub startup: Option<StartupConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appearance: Option<AppearanceConfig>,
 }
 
 /// What opens on start.
@@ -159,6 +166,16 @@ impl StartupConfig {
 pub struct ReviewConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advance_after_vote: Option<bool>,
+}
+
+/// The `[appearance]` section.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceConfig {
+    /// A [`ThemeName`] key; one this client does not know falls back to the
+    /// default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
 }
 
 /// `context = 10` or `context = "all"`.
@@ -474,6 +491,7 @@ impl Config {
             diff: self.diff,
             startup: self.startup,
             review: self.review,
+            appearance: self.appearance,
         }
     }
 
@@ -521,6 +539,22 @@ impl Config {
             .as_ref()
             .and_then(|r| r.advance_after_vote)
             .unwrap_or(true)
+    }
+
+    /// Default: [`ThemeName::default`], also for a name this client does
+    /// not know (with a warning).
+    pub fn theme(&self) -> ThemeName {
+        let Some(key) = self.appearance.as_ref().and_then(|a| a.theme.as_deref()) else {
+            return ThemeName::default();
+        };
+        ThemeName::from_key(key).unwrap_or_else(|| {
+            let default = ThemeName::default();
+            log::warn!(
+                "config: [appearance] theme = {key:?} is unknown; using {:?}",
+                default.key()
+            );
+            default
+        })
     }
 
     /// Reads the file; `Ok(None)` if it does not exist.
@@ -1156,6 +1190,12 @@ advance_after_vote = false
             StartupPage::Query("status:open project:foo".into())
         );
         assert!(!parsed.advance_after_vote());
+
+        assert_eq!(cfg.theme(), ThemeName::Cwc);
+        let themed: Config = toml::from_str("[appearance]\ntheme = \"Solarized\"\n").unwrap();
+        assert_eq!(themed.theme(), ThemeName::Solarized);
+        let unknown: Config = toml::from_str("[appearance]\ntheme = \"zenburn\"\n").unwrap();
+        assert_eq!(unknown.theme(), ThemeName::Cwc);
 
         let odd: Config = toml::from_str("[startup]\npage = \"inbox\"\n").unwrap();
         assert_eq!(odd.startup_page(), StartupPage::Dashboard);

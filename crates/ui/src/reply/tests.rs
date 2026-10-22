@@ -961,6 +961,13 @@ mod from_the_shell {
             Ok(on)
         }
 
+        fn save_theme(
+            &self,
+            t: crate::theme::ThemeName,
+        ) -> Result<crate::theme::ThemeName, BackendError> {
+            Ok(t)
+        }
+
         fn save_login(
             &self,
             _: &str,

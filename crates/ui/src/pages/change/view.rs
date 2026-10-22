@@ -327,7 +327,7 @@ impl ChangePage {
                     .custom(crate::theme::vote_button(strong, cx))
                     // Over the variant's faint idle background; a disabled
                     // button keeps its disabled look.
-                    .when(strong && !disabled, |b| b.bg(crate::theme::vote_blue()))
+                    .when(strong && !disabled, |b| b.bg(cx.theme().primary))
                     .disabled(disabled)
                     .on_click(cx.listener(move |this, _, _, cx| this.quick_vote(i, cx)))
             })
@@ -592,7 +592,7 @@ impl ChangePage {
                             "commit-message",
                             message.as_deref().unwrap_or("(not available)"),
                             true,
-                            theme.info,
+                            theme.link,
                         )),
                 )
             })
@@ -1043,8 +1043,7 @@ impl ChangePage {
         let toggle = div()
             .id("related-toggle")
             .text_xs()
-            // The stock theme's `link` is near-black; `info` is its blue.
-            .text_color(theme.info)
+            .text_color(theme.link)
             .cursor_pointer()
             .hover(|d| d.underline())
             .on_click(cx.listener(|this, _, _, cx| this.toggle_related_panel(cx)))
@@ -1093,7 +1092,7 @@ impl ChangePage {
             .text_sm()
             .when(auto, |d| d.text_color(muted));
         let text = if open {
-            text.children(message_lines(ix, m, theme.info))
+            text.children(message_lines(ix, m, theme.link))
         } else {
             text.cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_message(ix, cx)))

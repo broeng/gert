@@ -6,7 +6,7 @@ use gerrit_api::{Auth, GerritClient, HttpClient};
 use store::{ServerId, Store};
 use sync::Syncer;
 
-use crate::filters::FileFilter;
+use crate::{filters::FileFilter, theme::ThemeName};
 
 /// A named Gerrit query shown as a dashboard section.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +58,9 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Writes `[review] advance_after_vote`. Returns the value now in effect.
     fn save_advance_after_vote(&self, on: bool) -> Result<bool, BackendError>;
+
+    /// Writes `[appearance] theme`. Returns the theme now in effect.
+    fn save_theme(&self, theme: ThemeName) -> Result<ThemeName, BackendError>;
 }
 
 /// The pieces every page needs, handed over by `app`.
