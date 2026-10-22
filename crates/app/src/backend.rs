@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use ui::{Backend, BackendError, SavedQuery, StartupPage as UiStartupPage, filters::FileFilter};
+use ui::{
+    Backend, BackendError, SavedQuery, StartupPage as UiStartupPage, ThemeName, filters::FileFilter,
+};
 
 use crate::{
     config::{Config, FilterConfig, QueryConfig, StartupConfig, StartupPage},
@@ -126,6 +128,14 @@ impl Backend for AppBackend {
         })
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(config.advance_after_vote())
+    }
+
+    fn save_theme(&self, theme: ThemeName) -> Result<ThemeName, BackendError> {
+        let config = Config::update(&self.config_file, |c| {
+            c.appearance.get_or_insert_with(Default::default).theme = Some(theme.key().to_owned());
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        Ok(config.theme())
     }
 }
 
@@ -308,6 +318,19 @@ mod tests {
         assert!(!b.save_advance_after_vote(false).unwrap());
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
         assert!(!cfg.advance_after_vote());
+
+        assert_eq!(
+            b.save_theme(ThemeName::Solarized).unwrap(),
+            ThemeName::Solarized
+        );
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(
+            text.contains("[appearance]\ntheme = \"solarized\""),
+            "{text}"
+        );
+        assert!(text.contains("# opens on start"), "{text}");
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(cfg.theme(), ThemeName::Solarized);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

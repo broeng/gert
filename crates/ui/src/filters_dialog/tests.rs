@@ -58,6 +58,13 @@ impl Backend for Recorder {
         Ok(on)
     }
 
+    fn save_theme(
+        &self,
+        t: crate::theme::ThemeName,
+    ) -> Result<crate::theme::ThemeName, BackendError> {
+        Ok(t)
+    }
+
     fn save_login(
         &self,
         _: &str,

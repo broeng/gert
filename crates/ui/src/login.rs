@@ -126,6 +126,7 @@ pub(crate) mod tests {
         pub saved_queries: Mutex<Vec<Vec<SavedQuery>>>,
         pub saved_startup: Mutex<Vec<crate::session::StartupPage>>,
         pub saved_advance: Mutex<Vec<bool>>,
+        pub saved_theme: Mutex<Vec<crate::theme::ThemeName>>,
     }
 
     impl Backend for FakeBackend {
@@ -164,6 +165,17 @@ pub(crate) mod tests {
             }
             self.saved_advance.lock().unwrap().push(on);
             Ok(on)
+        }
+
+        fn save_theme(
+            &self,
+            t: crate::theme::ThemeName,
+        ) -> Result<crate::theme::ThemeName, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_theme.lock().unwrap().push(t);
+            Ok(t)
         }
         fn save_login(
             &self,

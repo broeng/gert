@@ -11,7 +11,7 @@ use gert::{
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 use store::Store;
-use ui::{Env, LocalDiff, ServerSetup, Shell, Startup};
+use ui::{Env, LocalDiff, ServerSetup, Shell, Startup, ThemeName};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -22,7 +22,7 @@ fn main() {
 }
 
 /// Everything that can fail before the window opens.
-fn startup() -> anyhow::Result<(Startup, bool)> {
+fn startup() -> anyhow::Result<(Startup, bool, ThemeName)> {
     let paths = Paths::discover()?;
     let config = Config::load(&paths.config_file)
         .context("reading the configuration")?
@@ -39,6 +39,7 @@ fn startup() -> anyhow::Result<(Startup, bool)> {
     };
     let http = GpuiHttpClient::new().context("creating the HTTP client")?;
     let advance_after_vote = config.advance_after_vote();
+    let theme = config.theme();
     let startup = Startup {
         env: Env {
             http: Arc::new(http),
@@ -61,14 +62,15 @@ fn startup() -> anyhow::Result<(Startup, bool)> {
             font_family: config.diff.and_then(|d| d.font_family),
         },
     };
-    Ok((startup, advance_after_vote))
+    Ok((startup, advance_after_vote, theme))
 }
 
 fn run() -> anyhow::Result<()> {
-    let (startup, advance_after_vote) = startup()?;
+    let (startup, advance_after_vote, theme) = startup()?;
     ui::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
+        ui::set_theme(theme, cx);
         let options = ui::window_options(APP_NAME, APP_NAME, size(px(1200.), px(760.)), cx);
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             Theme::sync_system_appearance(Some(window), cx);

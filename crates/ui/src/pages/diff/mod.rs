@@ -911,7 +911,7 @@ impl DiffPage {
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffPageEvent::UpToChange)))
                             .child(
                                 div()
-                                    .text_color(theme.info)
+                                    .text_color(theme.link)
                                     .flex_none()
                                     .child(format!("Change {}:", self.route.change)),
                             )

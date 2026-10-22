@@ -76,6 +76,10 @@ impl Backend for Demo {
         Ok(on)
     }
 
+    fn save_theme(&self, t: ui::ThemeName) -> Result<ui::ThemeName, BackendError> {
+        Ok(t)
+    }
+
     fn save_login(
         &self,
         _: &str,
@@ -1120,6 +1124,7 @@ fn demo_filters() -> Vec<FileFilter> {
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut mode = None;
+    let mut theme = ui::ThemeName::default();
     let mut local = DiffPreferences::default();
     let mut font = None;
     let mut files = None;
@@ -1130,6 +1135,12 @@ fn main() {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dark" => mode = Some(ThemeMode::Dark),
+            "--theme" => {
+                theme = args
+                    .next()
+                    .and_then(|t| ui::ThemeName::from_key(&t))
+                    .unwrap_or_default()
+            }
             "--light" => mode = Some(ThemeMode::Light),
             "--unified" => local.view_mode = Some(DiffViewMode::Unified),
             "--font" => font = args.next(),
@@ -1193,6 +1204,7 @@ fn main() {
     ui::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
+        ui::set_theme(theme, cx);
         if let Some(m) = mode {
             Theme::change(m, None, cx);
         }

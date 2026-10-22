@@ -63,6 +63,7 @@ fn main() {
     let mut font = None;
     let mut path: Option<String> = None;
     let mut mode = None;
+    let mut theme = ui::ThemeName::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--unified" => prefs.view_mode = DiffViewMode::Unified,
@@ -72,6 +73,12 @@ fn main() {
             "--path" => path = args.next(),
             "--light" => mode = Some(ThemeMode::Light),
             "--dark" => mode = Some(ThemeMode::Dark),
+            "--theme" => {
+                theme = args
+                    .next()
+                    .and_then(|t| ui::ThemeName::from_key(&t))
+                    .unwrap_or_default()
+            }
             other => name = other.to_owned(),
         }
     }
@@ -86,6 +93,7 @@ fn main() {
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
+        ui::set_theme(theme, cx);
         if let Some(m) = mode {
             Theme::change(m, None, cx);
         }
