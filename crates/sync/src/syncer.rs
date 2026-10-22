@@ -331,6 +331,7 @@ mod actions;
 mod comments;
 mod edits;
 
+pub use actions::NewChange;
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
 pub use edits::ReviewerAdded;
 pub use store::DraftCounts;

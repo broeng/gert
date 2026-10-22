@@ -152,6 +152,51 @@ fn rebase_options_reach_the_server_and_the_change_is_refreshed() {
 }
 
 #[test]
+fn revert_and_cherry_pick_cache_the_new_change_and_refresh_the_original() {
+    let new_json = change_json("NEW", json!({})).replace("\"_number\":7", "\"_number\":12");
+    let http = routes("MERGED", json!({}));
+    http.route_json("GET /changes/12?", &new_json);
+    http.route_json("POST /changes/7/revert", &new_json);
+    http.route_json("POST /changes/7/revisions/abc/cherrypick", &new_json);
+    let syncer = syncer_for(&http, signed_in());
+
+    let made = block_on(syncer.revert(CHANGE, Some("Revert it"))).unwrap();
+    assert_eq!(made.number, ChangeNumber(12));
+    assert_eq!(made.detail.unwrap().summary.number, ChangeNumber(12));
+    assert!(syncer.cached_change(ChangeNumber(12)).unwrap().is_some());
+    assert!(syncer.cached_change(CHANGE).unwrap().is_some());
+
+    let made =
+        block_on(syncer.cherry_pick(CHANGE, &RevisionId("abc".into()), "stable", None)).unwrap();
+    assert_eq!(made.number, ChangeNumber(12));
+    let sent = http.sent();
+    assert_eq!(sent[0].target, "/a/changes/7/revert");
+    assert_eq!(sent[0].body_text(), r#"{"message":"Revert it"}"#);
+    assert!(
+        sent.iter()
+            .any(|s| s.target == "/a/changes/7/revisions/abc/cherrypick"
+                && s.body_text() == r#"{"destination":"stable"}"#)
+    );
+}
+
+#[test]
+fn a_failed_fetch_after_a_revert_still_names_the_new_change() {
+    let new_json = change_json("NEW", json!({})).replace("\"_number\":7", "\"_number\":12");
+    let http = RouteHttpClient::new();
+    http.route_json("POST /changes/7/revert", &new_json);
+    http.route("GET /changes/", 503, "down");
+    let syncer = syncer_for(&http, signed_in());
+    let made = block_on(syncer.revert(CHANGE, None)).unwrap();
+    assert_eq!((made.number, made.detail), (ChangeNumber(12), None));
+
+    http.route("POST /changes/7/revert", 409, "change is not merged\n");
+    assert!(matches!(
+        block_on(syncer.revert(CHANGE, None)),
+        Err(Error::Api(gerrit_api::Error::Conflict { .. }))
+    ));
+}
+
+#[test]
 fn refused_actions_leave_the_cache_alone() {
     let http = routes("NEW", json!({"submit": {"enabled": true}}));
     let syncer = syncer_for(&http, signed_in());

@@ -1,4 +1,5 @@
-//! Change actions: submit, rebase, abandon, restore, WIP / ready, private.
+//! Change actions: submit, rebase, abandon, restore, WIP / ready, private,
+//! revert and cherry-pick.
 //!
 //! Every method sends the request, and only if the server accepted it
 //! fetches the change again (detail, and with it the actions the user may
@@ -12,11 +13,24 @@
 //! The result is the refreshed detail, or `None` when the action went
 //! through but fetching the change failed afterwards (logged; the next
 //! refresh catches up). Callers must not treat that as a failed action.
+//!
+//! Revert and cherry-pick create a *new* change: they answer with its
+//! number and detail (see [`NewChange`]), and refresh the original too,
+//! which got a message about it.
 
-use model::{ChangeDetail, ChangeNumber};
+use model::{ChangeDetail, ChangeNumber, RevisionId};
 
 use super::Syncer;
 use crate::Error;
+
+/// The change a revert or cherry-pick created.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewChange {
+    pub number: ChangeNumber,
+    /// It as the server has it, now in the cache; `None` if only fetching
+    /// it failed (the change exists).
+    pub detail: Option<ChangeDetail>,
+}
 
 impl Syncer {
     /// Submits the change.
@@ -35,6 +49,43 @@ impl Syncer {
     ) -> Result<Option<ChangeDetail>, Error> {
         self.client.rebase(change, base, options).await?;
         Ok(self.refresh_after_action(change, "rebase").await)
+    }
+
+    /// Reverts the merged change in a new change with `message` as its
+    /// commit message.
+    pub async fn revert(
+        &self,
+        change: ChangeNumber,
+        message: Option<&str>,
+    ) -> Result<NewChange, Error> {
+        let created = self.client.revert(change, message).await?;
+        Ok(self.refresh_after_creating(change, created.number).await)
+    }
+
+    /// Copies the revision `target` of the change onto the branch
+    /// `destination` as a new change.
+    pub async fn cherry_pick(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        destination: &str,
+        message: Option<&str>,
+    ) -> Result<NewChange, Error> {
+        let created = self
+            .client
+            .cherry_pick(change, target, destination, message)
+            .await?;
+        Ok(self.refresh_after_creating(change, created.number).await)
+    }
+
+    async fn refresh_after_creating(&self, from: ChangeNumber, new: ChangeNumber) -> NewChange {
+        // The original has a message about the new change now; best effort.
+        self.refresh_after_action(from, "creating a change from it")
+            .await;
+        NewChange {
+            number: new,
+            detail: self.refresh_after_action(new, "creating it").await,
+        }
     }
 
     pub async fn abandon(
