@@ -225,3 +225,26 @@ fn the_queue_is_cut_at_the_entry_capacity(cx: &mut TestAppContext) {
     queue(cx, &r, &refs, true);
     cx.read(|cx| assert_eq!(r.cache.read(cx).queued_for_test(), super::MAX_ENTRIES));
 }
+
+#[test]
+fn ahead_paths_go_in_bracket_order_without_skipped_or_magic_files() {
+    use crate::filters::FileStyle;
+    use crate::testing::file;
+    let files: Vec<_> = ["/COMMIT_MSG", "a", "b", "c", "d", "/MERGE_LIST"]
+        .iter()
+        .map(|p| file(p, model::FileStatus::Modified))
+        .collect();
+    let mut styles = vec![FileStyle::default(); files.len()];
+    assert_eq!(
+        super::ahead_paths(&files, &styles, None),
+        ["a", "b", "c", "d"]
+    );
+    assert_eq!(
+        super::ahead_paths(&files, &styles, Some("b")),
+        ["c", "d", "a"]
+    );
+    styles[3].dimmed = true; // c
+    styles[1].hidden = true; // a
+    assert_eq!(super::ahead_paths(&files, &styles, Some("b")), ["d"]);
+    assert_eq!(super::ahead_paths(&files, &styles, None), ["b", "d"]);
+}

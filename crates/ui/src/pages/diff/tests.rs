@@ -148,6 +148,30 @@ fn diff_page_ruled(
     rules: Vec<FileFilter>,
     seed: Vec<(DiffKey, Highlight)>,
 ) -> Page {
+    diff_page_full(
+        cx,
+        store,
+        route,
+        http,
+        auth,
+        rules,
+        seed,
+        LocalDiff::default(),
+    )
+}
+
+/// Like [`diff_page_ruled`], with local preference overrides too.
+#[allow(clippy::too_many_arguments)]
+fn diff_page_full(
+    cx: &mut TestAppContext,
+    store: Store,
+    route: DiffRoute,
+    http: RouteHttpClient,
+    auth: gerrit_api::Auth,
+    rules: Vec<FileFilter>,
+    seed: Vec<(DiffKey, Highlight)>,
+    local: LocalDiff,
+) -> Page {
     let env = env_with(store, &http);
     let mut server = setup();
     if let gerrit_api::Auth::Basic { username, .. } = &auth {
@@ -160,7 +184,7 @@ fn diff_page_ruled(
     let mut filters_out = None;
     let mut syntax_out = None;
     let (window, page) = open(cx, |window, cx| {
-        let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
+        let settings = cx.new(|_| DiffSettings::new(local));
         settings_out = Some(settings.clone());
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
         let filters = cx.new(|_| FileFilters::new(rules));
@@ -246,17 +270,22 @@ fn a_cached_diff_is_shown_without_a_request(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_missing_diff_is_fetched_once_and_the_next_one_is_prefetched(cx: &mut TestAppContext) {
+fn a_missing_diff_is_fetched_once_and_the_files_after_it_are_fetched_ahead(
+    cx: &mut TestAppContext,
+) {
     let p = diff_page(cx, seeded(), "src/a.rs");
     cx.update(|cx| assert!(p.page.read(cx).view_for_test().is_some()));
     assert_eq!(requests(&p.http, "src%2Fa.rs/diff"), 1);
+    // The syntax worker does the fetching, each file once; the magic file
+    // is not worth coloring.
+    assert_eq!(requests(&p.http, "src%2Fb.rs/diff"), 1);
+    assert_eq!(requests(&p.http, "src%2Fc.rs/diff"), 1);
     assert_eq!(
-        requests(&p.http, "src%2Fb.rs/diff"),
-        1,
+        requests(&p.http, "COMMIT_MSG"),
+        0,
         "{:?}",
         p.http.requested()
     );
-    assert_eq!(requests(&p.http, "src%2Fc.rs/diff"), 0);
 }
 
 #[gpui_kit::test]
@@ -1161,4 +1190,105 @@ fn a_plain_file_is_stored_as_plain(cx: &mut TestAppContext) {
             Some(true)
         );
     });
+}
+
+// ---- highlighting the files ahead ----
+
+fn queued(cx: &mut TestAppContext, p: &Page) -> Vec<String> {
+    cx.update(|cx| {
+        p.syntax
+            .read(cx)
+            .last_queue_for_test()
+            .iter()
+            .map(|k| k.path.clone())
+            .collect()
+    })
+}
+
+fn path_key(path: &str) -> DiffKey {
+    DiffKey {
+        path: path.into(),
+        ..a_key()
+    }
+}
+
+#[gpui_kit::test]
+fn the_files_after_the_shown_one_are_queued_then_the_earlier_ones(cx: &mut TestAppContext) {
+    let p = diff_page(cx, seeded(), "src/b.rs");
+    assert_eq!(queued(cx, &p), ["src/c.rs", "src/a.rs"]);
+    let p = diff_page(cx, seeded(), "/COMMIT_MSG");
+    assert_eq!(queued(cx, &p), ["src/a.rs", "src/b.rs", "src/c.rs"]);
+}
+
+#[gpui_kit::test]
+fn queued_files_end_up_highlighted_in_the_cache(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(rust_body()));
+    cx.update(|cx| {
+        p.syntax.update(cx, |c, _| {
+            for path in ["src/b.rs", "src/c.rs"] {
+                let hit = c.get(&path_key(path));
+                assert!(matches!(hit, Some(Some(_))), "{path}: {hit:?}");
+            }
+            assert!(c.get(&path_key("/COMMIT_MSG")).is_none());
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn hidden_and_dimmed_files_are_not_fetched_ahead(cx: &mut TestAppContext) {
+    let p = filtered_page(
+        cx,
+        "/COMMIT_MSG",
+        vec![
+            rule("Hide", "a.rs", FilterAction::Hide),
+            rule("Dim", "b.rs", FilterAction::Dim),
+        ],
+    );
+    assert_eq!(queued(cx, &p), ["src/c.rs"]);
+    assert_eq!(requests(&p.http, "src%2Fa.rs/diff"), 0);
+    assert_eq!(requests(&p.http, "src%2Fb.rs/diff"), 0);
+    assert_eq!(requests(&p.http, "src%2Fc.rs/diff"), 1);
+    // Showing a rule again queues the file.
+    p.filters.update(cx, |f, cx| f.toggle("Dim", cx));
+    cx.run_until_parked();
+    assert_eq!(queued(cx, &p), ["src/b.rs", "src/c.rs"]);
+    assert_eq!(requests(&p.http, "src%2Fb.rs/diff"), 1);
+}
+
+fn syntax_off() -> LocalDiff {
+    let mut local = LocalDiff::default();
+    local.preferences.syntax_highlighting = Some(false);
+    local
+}
+
+#[gpui_kit::test]
+fn with_highlighting_off_nothing_is_queued_and_the_next_diff_is_prefetched(
+    cx: &mut TestAppContext,
+) {
+    let p = diff_page_full(
+        cx,
+        seeded(),
+        route("src/a.rs"),
+        http(),
+        gerrit_api::Auth::Anonymous,
+        Vec::new(),
+        Vec::new(),
+        syntax_off(),
+    );
+    assert!(queued(cx, &p).is_empty());
+    assert_eq!(requests(&p.http, "src%2Fb.rs/diff"), 1);
+    assert_eq!(requests(&p.http, "src%2Fc.rs/diff"), 0);
+    // Turning it on queues the files.
+    p.settings.update(cx, |s, cx| {
+        s.update_session(|p| p.syntax_highlighting = Some(true), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(queued(cx, &p), ["src/b.rs", "src/c.rs"]);
+    assert_eq!(requests(&p.http, "src%2Fc.rs/diff"), 1);
+    // And off again clears the queue.
+    p.settings.update(cx, |s, cx| {
+        s.update_session(|p| p.syntax_highlighting = Some(false), cx)
+    });
+    cx.run_until_parked();
+    assert!(queued(cx, &p).is_empty());
 }
