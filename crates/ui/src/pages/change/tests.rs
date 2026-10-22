@@ -12,10 +12,11 @@ use store::{ServerId, Store};
 use super::{ChangeEvent, ChangePage, state::Block};
 use crate::{
     LocalDiff,
+    filters::{FileFilter, FilterAction},
     nav::ChangeView,
     outbox::DraftOutbox,
     session::Session,
-    settings::{DiffSettings, PageLayout},
+    settings::{DiffSettings, FileFilters, PageLayout},
     testing::{detail, file, whole_file},
     tests::{URL, env_with, open, setup},
 };
@@ -76,6 +77,7 @@ fn seeded() -> Store {
 struct Fixture {
     window: AnyWindowHandle,
     page: Entity<ChangePage>,
+    filters: Entity<FileFilters>,
     http: RouteHttpClient,
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -142,15 +144,19 @@ fn page_in(
     let session = Session::new(&env, &server, auth).expect("session");
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
+    let mut filters_out = None;
     let (window, page) = open(cx, |window, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
         let layout = cx.new(|_| PageLayout::default());
+        let filters = cx.new(|_| FileFilters::new(Vec::new()));
+        filters_out = Some(filters.clone());
         let page = cx.new(|cx| {
             ChangePage::new(
                 session,
                 settings,
                 layout,
+                filters,
                 ChangeNumber(7),
                 view,
                 true,
@@ -165,6 +171,7 @@ fn page_in(
                 ChangeEvent::Refreshed => return,
                 ChangeEvent::Reply(_) => "reply".to_owned(),
                 ChangeEvent::Actions(_) => "actions".to_owned(),
+                ChangeEvent::ManageFilters { project } => format!("manage filters {project}"),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
                 ChangeEvent::Advance(n, note) => format!("advance {n}: {note}"),
@@ -190,6 +197,7 @@ fn page_in(
     Fixture {
         window,
         page,
+        filters: filters_out.expect("filters were created"),
         http,
         events,
     }
@@ -1213,4 +1221,174 @@ fn a_second_vote_while_one_is_on_its_way_is_ignored(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(reviews(&f).len(), 1);
+}
+
+// --- file filters ------------------------------------------------------
+
+fn rule(name: &str, glob: &str, action: FilterAction) -> FileFilter {
+    FileFilter {
+        name: name.into(),
+        globs: vec![glob.into()],
+        projects: Vec::new(),
+        action,
+        enabled: true,
+    }
+}
+
+fn set_rules(cx: &mut TestAppContext, f: &Fixture, rules: Vec<FileFilter>) {
+    f.filters
+        .update(cx, |filters, cx| filters.set_rules(rules, cx));
+    cx.run_until_parked();
+}
+
+fn visible(cx: &mut TestAppContext, f: &Fixture) -> Vec<String> {
+    cx.update(|cx| {
+        f.page
+            .read(cx)
+            .visible_paths()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn hidden_files_leave_the_blocks_and_the_cursor_follows_the_visible_ones(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    set_rules(cx, &f, vec![rule("Gen", "a.rs", FilterAction::Hide)]);
+    assert_eq!(visible(cx, &f), ["/COMMIT_MSG", "src/b.rs", "src/c.rs"]);
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert_eq!(p.file_paths(), PATHS, "the list itself is unchanged");
+        let blocks = p.blocks_for_test();
+        assert!(blocks.contains(&Block::File(2)));
+        assert!(!blocks.contains(&Block::File(3)));
+        let at = |b| blocks.iter().position(|x| *x == b).expect("block");
+        assert_eq!(at(Block::FilterBar), at(Block::PatchSets) + 1);
+    });
+    // j steps over the hidden file; Enter opens the file under the cursor,
+    // not the entry of the full list with the same number.
+    press(cx, &f, &["j", "enter"]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/b.rs"));
+    let events = f.events.lock().expect("log").clone();
+    assert_eq!(events, ["diff 7 None..3 src/b.rs".to_owned()]);
+}
+
+#[gpui_kit::test]
+fn the_cursor_stays_on_its_file_when_the_rules_change(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    press(cx, &f, &["j", "j"]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/b.rs"));
+    set_rules(cx, &f, vec![rule("Gen", "a.rs", FilterAction::Hide)]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/b.rs"));
+    // Hiding the file under the cursor puts it on a file that is shown.
+    set_rules(cx, &f, vec![rule("Gen", "*.rs", FilterAction::Hide)]);
+    assert_eq!(visible(cx, &f), ["/COMMIT_MSG"]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("/COMMIT_MSG"));
+    set_rules(cx, &f, Vec::new());
+    assert_eq!(visible(cx, &f), PATHS);
+}
+
+#[gpui_kit::test]
+fn brackets_skip_dimmed_files_but_j_and_k_do_not(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    set_rules(cx, &f, vec![rule("Dim", "b.rs", FilterAction::Dim)]);
+    press(cx, &f, &["]", "]"]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/c.rs"));
+    press(cx, &f, &["["]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/a.rs"));
+    press(cx, &f, &["j"]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/b.rs"));
+    press(cx, &f, &["j", "k"]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/b.rs"));
+    // Highlighted files are not skipped.
+    set_rules(
+        cx,
+        &f,
+        vec![rule(
+            "Hi",
+            "b.rs",
+            FilterAction::Highlight {
+                color: None,
+                bold: true,
+            },
+        )],
+    );
+    press(cx, &f, &["["]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/a.rs"));
+    press(cx, &f, &["]"]);
+    assert_eq!(cursor(cx, &f).as_deref(), Some("src/b.rs"));
+}
+
+#[gpui_kit::test]
+fn toggling_a_rule_restyles_the_page_live(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    set_rules(cx, &f, vec![rule("Gen", "a.rs", FilterAction::Hide)]);
+    assert_eq!(visible(cx, &f).len(), 3);
+    f.filters
+        .update(cx, |filters, cx| filters.toggle("Gen", cx));
+    cx.run_until_parked();
+    assert_eq!(visible(cx, &f), PATHS);
+    // `f 1` is the same toggle.
+    press(cx, &f, &["f", "1"]);
+    assert_eq!(visible(cx, &f).len(), 3);
+    press(cx, &f, &["f", "1"]);
+    assert_eq!(visible(cx, &f), PATHS);
+    // No second rule: a note, nothing else changes.
+    press(cx, &f, &["f", "2"]);
+    assert_eq!(visible(cx, &f), PATHS);
+    assert!(cx.update(|cx| f.page.read(cx).hint_for_test()).is_some());
+}
+
+#[gpui_kit::test]
+fn rules_of_other_projects_do_not_apply_or_get_a_key(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    let mut other = rule("Other", "a.rs", FilterAction::Hide);
+    other.projects = vec!["some/other".into()];
+    set_rules(
+        cx,
+        &f,
+        vec![other, rule("Mine", "b.rs", FilterAction::Hide)],
+    );
+    assert_eq!(visible(cx, &f), ["/COMMIT_MSG", "src/a.rs", "src/c.rs"]);
+    press(cx, &f, &["f", "1"]); // the first button is "Mine"
+    assert_eq!(visible(cx, &f), PATHS);
+}
+
+#[gpui_kit::test]
+fn a_change_whose_files_are_all_hidden_says_so(cx: &mut TestAppContext) {
+    let mut store = seeded();
+    let server = store.server_id(URL).expect("server");
+    store
+        .save_file_list(
+            server,
+            &key(None, 3),
+            &files(&["a.pb.go", "b.pb.go"]),
+            None,
+            ts(),
+        )
+        .expect("files");
+    let f = page_in(cx, store, None, setup(), ChangeView::default(), |_| {});
+    set_rules(cx, &f, vec![rule("Gen", "*.pb.go", FilterAction::Hide)]);
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert!(p.visible_paths().is_empty());
+        assert!(p.blocks_for_test().contains(&Block::FilesNotice));
+        assert!(p.blocks_for_test().contains(&Block::FilterBar));
+        assert_eq!(
+            p.files_notice_text(),
+            ("All 2 files are hidden by filters".to_owned(), false)
+        );
+    });
+    assert_eq!(cursor(cx, &f), None);
+    press(cx, &f, &["j", "enter", "]"]);
+    assert!(f.events.lock().expect("log").is_empty());
+}
+
+#[gpui_kit::test]
+fn manage_filters_emits_an_event_with_the_project(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    press(cx, &f, &["f", "m"]);
+    let events = f.events.lock().expect("log").clone();
+    assert_eq!(events, ["manage filters platform/foo".to_owned()]);
 }

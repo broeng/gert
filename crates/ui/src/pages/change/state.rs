@@ -115,6 +115,8 @@ pub enum Block {
     Header,
     /// Patch set selector and the "Files" heading.
     PatchSets,
+    /// The file filter buttons, and the table header under them.
+    FilterBar,
     /// "Loading files", an error or "no files" in place of the rows.
     FilesNotice,
     File(usize),
@@ -134,6 +136,7 @@ pub enum Block {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Content {
     pub loaded: bool,
+    /// Files the filters leave visible.
     pub files: usize,
     /// Threads the list shows (after the filter).
     pub threads: usize,
@@ -146,6 +149,7 @@ pub fn blocks(c: Content) -> Vec<Block> {
         return v;
     }
     v.push(Block::PatchSets);
+    v.push(Block::FilterBar);
     if c.files == 0 {
         v.push(Block::FilesNotice);
     }
@@ -323,6 +327,7 @@ mod tests {
             [
                 Block::Header,
                 Block::PatchSets,
+                Block::FilterBar,
                 Block::File(0),
                 Block::File(1),
                 Block::ThreadsHeader,
@@ -343,6 +348,7 @@ mod tests {
             [
                 Block::Header,
                 Block::PatchSets,
+                Block::FilterBar,
                 Block::FilesNotice,
                 Block::ThreadsHeader,
                 Block::ThreadsNotice,

@@ -564,9 +564,13 @@ impl Shell {
     ) -> Page {
         let settings = self.settings.clone();
         let layout = self.layout.clone();
+        let filters = self.filters.clone();
         let outbox = self.outbox_for(&session, cx);
-        let page = cx
-            .new(|cx| ChangePage::new(session, settings, layout, number, view, active, outbox, cx));
+        let page = cx.new(|cx| {
+            ChangePage::new(
+                session, settings, layout, filters, number, view, active, outbox, cx,
+            )
+        });
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
@@ -575,6 +579,10 @@ impl Shell {
                 ChangeEvent::Refreshed => this.server_reachable(cx),
                 ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 ChangeEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
+                // The Manage filters dialog is opened from here once it exists.
+                ChangeEvent::ManageFilters { project } => {
+                    log::debug!("manage file filters (project {project})")
+                }
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 // Like stepping through files: Back leaves the walk.
                 ChangeEvent::ReplaceChange(n) => {
@@ -607,7 +615,8 @@ impl Shell {
     ) -> Page {
         let settings = self.settings.clone();
         let outbox = self.outbox_for(&session, cx);
-        let page = cx.new(|cx| DiffPage::new(session, settings, route, outbox, cx));
+        let filters = self.filters.clone();
+        let page = cx.new(|cx| DiffPage::new(session, settings, filters, route, outbox, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,

@@ -50,6 +50,7 @@ use crate::{
         actions::{NextFile, PrevFile},
     },
     diff_load::{LoadError, load_diff},
+    filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
     nav::{ChangeView, DiffRoute},
     outbox::DraftOutbox,
@@ -57,7 +58,7 @@ use crate::{
     reply, reviewed,
     row::browser_url,
     session::{Session, is_unauthorized},
-    settings::{DiffSettings, PageLayout},
+    settings::{DiffSettings, FileFilters, PageLayout},
     tracker::Tracker,
 };
 use state::{Block, Content, PatchSel, step};
@@ -86,6 +87,11 @@ pub enum ChangeEvent {
     Reply(Box<ChangeDetail>),
     /// `m`: open the change action menu for this change.
     Actions(Box<ChangeDetail>),
+    /// `f m` or the Manage filters button: the dialog for the file filter
+    /// rules, with the change's project at hand.
+    ManageFilters {
+        project: String,
+    },
 }
 
 /// The file list of the current patch set pair.
@@ -141,7 +147,14 @@ pub struct ChangePage {
     panel_shown: bool,
     /// Scroll position of the relation chain box or panel.
     related_scroll: ScrollHandle,
-    /// Index into `files.list`.
+    /// The file filter rules and which are on, shared by all pages.
+    filters: Entity<FileFilters>,
+    /// The filter style of each entry of `files.list`.
+    styles: Vec<FileStyle>,
+    /// Indexes into `files.list` of the files the filters do not hide. The
+    /// file blocks, the cursor and the row clicks all index this list.
+    visible: Vec<usize>,
+    /// Index into `visible`.
     cursor: usize,
     /// Put the cursor on this file once the list is there.
     want_file: Option<String>,
@@ -204,6 +217,7 @@ impl ChangePage {
         session: Session,
         settings: Entity<DiffSettings>,
         layout: Entity<PageLayout>,
+        filters: Entity<FileFilters>,
         number: ChangeNumber,
         view: ChangeView,
         window_active: bool,
@@ -215,6 +229,9 @@ impl ChangePage {
             session,
             settings: settings.clone(),
             layout: layout.clone(),
+            filters: filters.clone(),
+            styles: Vec::new(),
+            visible: Vec::new(),
             number,
             detail: None,
             fetched_at: None,
@@ -262,6 +279,8 @@ impl ChangePage {
         this._subs
             .push(cx.observe(&settings, |this, _, cx| this.settings_changed(cx)));
         this._subs.push(cx.observe(&layout, |_, _, cx| cx.notify()));
+        this._subs
+            .push(cx.observe(&filters, |this, _, cx| this.filters_changed(cx)));
         this._subs
             .push(cx.subscribe(&comments, |this, _, ev, cx| match ev {
                 CommentsEvent::Changed => this.apply_threads(cx),
@@ -338,7 +357,8 @@ impl ChangePage {
 
     /// The path under the file cursor.
     pub fn cursor_path(&self) -> Option<&str> {
-        self.files.list.get(self.cursor).map(|f| f.path.as_str())
+        let &ix = self.visible.get(self.cursor)?;
+        self.files.list.get(ix).map(|f| f.path.as_str())
     }
 
     #[cfg(test)]
@@ -349,6 +369,15 @@ impl ChangePage {
     #[cfg(test)]
     pub(crate) fn file_paths(&self) -> Vec<&str> {
         self.files.list.iter().map(|f| f.path.as_str()).collect()
+    }
+
+    /// The paths of the files the list shows (the filters hide the rest).
+    #[cfg(test)]
+    pub(crate) fn visible_paths(&self) -> Vec<&str> {
+        self.visible
+            .iter()
+            .map(|&i| self.files.list[i].path.as_str())
+            .collect()
     }
 
     #[cfg(test)]
@@ -529,6 +558,8 @@ impl ChangePage {
                 ..Default::default()
             };
             self.inline.clear();
+            self.styles.clear();
+            self.visible.clear();
             self.cursor = 0;
             self.jump = true;
         }
@@ -595,9 +626,8 @@ impl ChangePage {
         self.files.reviewed = list.reviewed.unwrap_or_default().into_iter().collect();
         self.files.loaded = true;
         self.files.error = None;
-        self.cursor = keep
-            .and_then(|p| self.files.list.iter().position(|f| f.path == p))
-            .unwrap_or_else(|| self.cursor.min(self.files.list.len().saturating_sub(1)));
+        self.compute_styles(cx);
+        self.cursor = self.cursor_on(keep.as_deref());
         let paths: HashSet<_> = self.files.list.iter().map(|f| f.path.as_str()).collect();
         self.inline.retain(|p, _| paths.contains(p.as_str()));
         self.recount();
@@ -662,13 +692,81 @@ impl ChangePage {
         cx.notify();
     }
 
+    // ---- file filters ----
+
+    /// Styles every file with the rules that are on for this change's
+    /// project, and lists the ones that stay visible.
+    fn compute_styles(&mut self, cx: &App) {
+        let matcher = match &self.detail {
+            Some(d) => self.filters.read(cx).matcher(&d.summary.project),
+            None => FileMatcher::default(),
+        };
+        self.styles = self
+            .files
+            .list
+            .iter()
+            .map(|f| matcher.style(&f.path))
+            .collect();
+        self.visible = (0..self.styles.len())
+            .filter(|&i| !self.styles[i].hidden)
+            .collect();
+    }
+
+    /// The cursor (an index into `visible`) for the file at `path`, else the
+    /// current one kept in range.
+    fn cursor_on(&self, path: Option<&str>) -> usize {
+        path.and_then(|p| {
+            self.visible
+                .iter()
+                .position(|&i| self.files.list[i].path == p)
+        })
+        .unwrap_or_else(|| self.cursor.min(self.visible.len().saturating_sub(1)))
+    }
+
+    /// A rule was toggled or the rules were replaced: restyle, and keep the
+    /// cursor on its file if that is still shown.
+    fn filters_changed(&mut self, cx: &mut Context<Self>) {
+        let keep = self.cursor_path().map(str::to_owned);
+        self.compute_styles(cx);
+        self.cursor = self.cursor_on(keep.as_deref());
+        self.rebuild_blocks();
+        cx.notify();
+    }
+
+    /// `f 1` .. `f 9`: toggles the filter button at `position`.
+    fn toggle_filter(&mut self, action: &ToggleFilter, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(d) = &self.detail else {
+            return;
+        };
+        let name = self
+            .filters
+            .read(cx)
+            .applicable(&d.summary.project)
+            .get(action.position)
+            .map(|r| r.name.clone());
+        match name {
+            Some(name) => self.filters.update(cx, |f, cx| f.toggle(&name, cx)),
+            None => self
+                .hint
+                .say("No such file filter", false, cx, |p| &mut p.hint),
+        }
+    }
+
+    fn manage_filters(&mut self, _: &ManageFilters, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = &self.detail {
+            cx.emit(ChangeEvent::ManageFilters {
+                project: d.summary.project.clone(),
+            });
+        }
+    }
+
     // ---- blocks ----
 
     fn content(&self) -> Content {
         let d = self.detail.as_ref();
         Content {
             loaded: d.is_some(),
-            files: self.files.list.len(),
+            files: self.visible.len(),
             threads: self.listed.len(),
             messages: d.map_or(0, |d| d.messages.len()),
         }
@@ -768,10 +866,9 @@ impl ChangePage {
     }
 
     fn index_of(&self, path: &str) -> usize {
-        self.files
-            .list
+        self.visible
             .iter()
-            .position(|f| f.path == path)
+            .position(|&i| self.files.list[i].path == path)
             .unwrap_or(usize::MAX)
     }
 
@@ -1001,7 +1098,7 @@ impl ChangePage {
     // ---- actions ----
 
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let n = step(self.cursor, self.files.list.len(), delta);
+        let n = step(self.cursor, self.visible.len(), delta);
         if n != self.cursor {
             self.cursor = n;
             self.reveal_cursor();
@@ -1017,12 +1114,22 @@ impl ChangePage {
         self.move_cursor(-1, cx);
     }
 
+    /// `]` / `[`: the next / previous file that is not dimmed.
+    fn jump_file(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let skipped = |i: usize| skips(&self.styles[self.visible[i]]);
+        if let Some(n) = next_unskipped(self.visible.len(), self.cursor, forward, skipped) {
+            self.cursor = n;
+            self.reveal_cursor();
+            cx.notify();
+        }
+    }
+
     fn next_file(&mut self, _: &NextFile, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(1, cx);
+        self.jump_file(true, cx);
     }
 
     fn prev_file(&mut self, _: &PrevFile, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(-1, cx);
+        self.jump_file(false, cx);
     }
 
     fn open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
@@ -1033,8 +1140,8 @@ impl ChangePage {
         let Some(d) = &self.detail else {
             return;
         };
-        let (Some(file), Some(target)) = (self.files.list.get(ix), self.sel.target_number(d))
-        else {
+        let file = self.visible.get(ix).and_then(|&i| self.files.list.get(i));
+        let (Some(file), Some(target)) = (file, self.sel.target_number(d)) else {
             return;
         };
         self.cursor = ix;
@@ -1052,7 +1159,8 @@ impl ChangePage {
     }
 
     fn toggle_inline_at(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(path) = self.files.list.get(ix).map(|f| f.path.clone()) else {
+        let file = self.visible.get(ix).and_then(|&i| self.files.list.get(i));
+        let Some(path) = file.map(|f| f.path.clone()) else {
             return;
         };
         if self.inline.contains_key(&path) {
@@ -1064,7 +1172,11 @@ impl ChangePage {
     }
 
     fn toggle_all_inline(&mut self, _: &ToggleAllInline, _: &mut Window, cx: &mut Context<Self>) {
-        let paths: Vec<String> = self.files.list.iter().map(|f| f.path.clone()).collect();
+        let paths: Vec<String> = self
+            .visible
+            .iter()
+            .map(|&i| self.files.list[i].path.clone())
+            .collect();
         if paths.is_empty() {
             return;
         }

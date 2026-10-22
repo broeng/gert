@@ -83,6 +83,8 @@ actions!(
         /// `r`: mark the file under the cursor (change page) or shown (diff
         /// page) as reviewed, or take the mark off again.
         ToggleReviewed,
+        /// `f m` on the change page: open the Manage filters dialog.
+        ManageFilters,
         // Diff page.
         /// Show or hide the diff preferences panel.
         TogglePrefs,
@@ -101,6 +103,14 @@ actions!(
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = ui, no_json)]
 pub struct QuickVote {
+    pub position: usize,
+}
+
+/// `f 1` .. `f 9` on the change page: toggle the file filter button at
+/// `position` (0 is the first rule that applies to the change).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = ui, no_json)]
+pub struct ToggleFilter {
     pub position: usize,
 }
 
@@ -181,7 +191,7 @@ pub fn change_entries() -> Vec<Entry> {
         e(
             "[ / ]",
             KeyBinding::new("]", NextFile, Some(k)),
-            "Next / previous file",
+            "Next / previous file that is not dimmed",
         ),
         e("", KeyBinding::new("[", PrevFile, Some(k)), ""),
         e(
@@ -322,6 +332,56 @@ pub fn change_entries() -> Vec<Entry> {
             "",
         ),
         e(
+            "F 1 to F 9",
+            KeyBinding::new("f 1", ToggleFilter { position: 0 }, Some(k)),
+            "Toggle the file filter with that number (hide, dim or highlight files)",
+        ),
+        e(
+            "",
+            KeyBinding::new("f 2", ToggleFilter { position: 1 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("f 3", ToggleFilter { position: 2 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("f 4", ToggleFilter { position: 3 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("f 5", ToggleFilter { position: 4 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("f 6", ToggleFilter { position: 5 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("f 7", ToggleFilter { position: 6 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("f 8", ToggleFilter { position: 7 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("f 9", ToggleFilter { position: 8 }, Some(k)),
+            "",
+        ),
+        e(
+            "F M",
+            KeyBinding::new("f m", ManageFilters, Some(k)),
+            "Manage file filters",
+        ),
+        e(
             "Space / Shift-Space",
             KeyBinding::new("space", ScrollPageDown, Some(k)),
             "Scroll a page down / up",
@@ -350,7 +410,7 @@ pub fn diff_page_entries() -> Vec<Entry> {
         e(
             "] / [",
             KeyBinding::new("]", NextFile, Some(k)),
-            "Next / previous file",
+            "Next / previous file that is not hidden or dimmed",
         ),
         e("", KeyBinding::new("[", PrevFile, Some(k)), ""),
         e(
