@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use model::{ChangeSummary, LabelSummary};
+use model::{AccountId, ChangeDetail, ChangeSummary, LabelSummary};
 
 /// What a label cell shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +93,31 @@ pub fn short_name(label: &str) -> String {
     }
 }
 
+/// The votes one account has on the change, as `(short label, value)`:
+/// Code-Review and Verified first, the rest alphabetical, zero votes (a
+/// vote taken back) left out. Compact enough for a list row (`CR +2`,
+/// `V -1`).
+pub fn votes_of(detail: &ChangeDetail, account: AccountId) -> Vec<(String, i32)> {
+    let mut names: Vec<&String> = detail.votes.keys().collect();
+    names.sort_by_key(|n| {
+        let rank = match n.as_str() {
+            "Code-Review" => 0,
+            "Verified" => 1,
+            _ => 2,
+        };
+        (rank, (*n).clone())
+    });
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let vote = detail.votes[name]
+                .iter()
+                .find(|v| v.account.id == account && v.value != 0)?;
+            Some((short_name(name), vote.value))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +200,34 @@ mod tests {
         assert_eq!(short_name("Verified"), "V");
         assert_eq!(short_name("Presubmit-Ready"), "PR");
         assert_eq!(short_name("Commit-Queue"), "CQ");
+    }
+
+    #[test]
+    fn a_reviewers_votes_are_ordered_and_skip_zero() {
+        use crate::testing::{account, detail};
+        use model::LabelVote;
+        let vote = |id, value| LabelVote {
+            account: account(id, "x"),
+            value,
+            date: None,
+        };
+        let mut d = detail(1, 1, 1);
+        d.votes.insert("Zeta".into(), vec![vote(2, 1)]);
+        d.votes
+            .insert("Verified".into(), vec![vote(3, -1), vote(2, 1)]);
+        d.votes
+            .insert("Code-Review".into(), vec![vote(2, 2), vote(3, 0)]);
+        d.votes.insert("Empty".into(), vec![]);
+        d.votes.insert("Taken-Back".into(), vec![vote(2, 0)]);
+        assert_eq!(
+            votes_of(&d, AccountId(2)),
+            [
+                ("CR".to_owned(), 2),
+                ("V".to_owned(), 1),
+                ("Z".to_owned(), 1)
+            ]
+        );
+        assert_eq!(votes_of(&d, AccountId(3)), [("V".to_owned(), -1)]);
+        assert!(votes_of(&d, AccountId(9)).is_empty());
     }
 }
