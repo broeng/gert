@@ -40,12 +40,13 @@ use crate::{
         actions::{NextFile, PrevFile},
     },
     diff_load::{LoadError, context_label, load_diff},
+    filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
     nav::DiffRoute,
     outbox::DraftOutbox,
     reply, reviewed,
     session::{Session, is_unauthorized},
-    settings::DiffSettings,
+    settings::{DiffSettings, FileFilters},
     theme::chip_colors,
 };
 use prefs::{next_context, next_tab_size, next_whitespace, whitespace_label};
@@ -77,6 +78,10 @@ pub struct DiffPage {
     detail: Option<ChangeDetail>,
     files_key: Option<FilesKey>,
     files: Vec<FileEntry>,
+    /// The file filter rules and which are on, shared by all pages.
+    filters: Entity<FileFilters>,
+    /// The filter style of each entry of `files`.
+    styles: Vec<FileStyle>,
     /// The files of this patch set the user marked reviewed.
     reviewed: HashSet<String>,
     /// A note for the user (why a key did nothing, a failed request).
@@ -118,6 +123,7 @@ impl DiffPage {
     pub fn new(
         session: Session,
         settings: Entity<DiffSettings>,
+        filters: Entity<FileFilters>,
         route: DiffRoute,
         outbox: Entity<DraftOutbox>,
         cx: &mut Context<Self>,
@@ -131,6 +137,8 @@ impl DiffPage {
             detail: None,
             files_key: None,
             files: Vec::new(),
+            filters: filters.clone(),
+            styles: Vec::new(),
             reviewed: HashSet::new(),
             hint: Hint::default(),
             key: None,
@@ -151,6 +159,10 @@ impl DiffPage {
         };
         this._subs
             .push(cx.observe(&settings, |this, _, cx| this.settings_changed(cx)));
+        this._subs.push(cx.observe(&filters, |this, _, cx| {
+            this.restyle(cx);
+            cx.notify();
+        }));
         this._subs
             .push(cx.subscribe(&comments, |this, _, ev, cx| match ev {
                 CommentsEvent::Changed => this.apply_threads(cx),
@@ -227,6 +239,7 @@ impl DiffPage {
             self.files_key = Some(key);
             self.files = files;
             self.reviewed = reviewed;
+            self.restyle(cx);
         }
         if let Some(e) = l.error {
             self.loading = false;
@@ -245,6 +258,21 @@ impl DiffPage {
             }
         }
         cx.notify();
+    }
+
+    /// Styles every file with the rules that are on for the change's
+    /// project.
+    fn restyle(&mut self, cx: &App) {
+        let matcher = match &self.detail {
+            Some(d) => self.filters.read(cx).matcher(&d.summary.project),
+            None => FileMatcher::default(),
+        };
+        self.styles = self.files.iter().map(|f| matcher.style(&f.path)).collect();
+    }
+
+    /// The filter style of the file shown.
+    fn current_style(&self) -> Option<&FileStyle> {
+        self.styles.get(self.position()?)
     }
 
     /// Fetches the diff for the current preferences (after the whitespace
@@ -399,7 +427,16 @@ impl DiffPage {
             return;
         }
         let syncer: Syncer = self.session.syncer().clone();
-        let files = self.files.clone();
+        // The file after the shown one that `]` would go to: the shown file
+        // and the ones that are not skipped, since the prefetch takes the
+        // next entry of the list it is given.
+        let files: Vec<FileEntry> = self
+            .files
+            .iter()
+            .zip(&self.styles)
+            .filter(|(f, style)| f.path == self.route.path || !skips(style))
+            .map(|(f, _)| f.clone())
+            .collect();
         let key = match &self.files_key {
             Some(fk) => self.make_key(fk, cx),
             None => shown.clone(),
@@ -538,6 +575,7 @@ impl DiffPage {
     /// the chips as they are now (the dialog shows the error).
     pub fn detail_refreshed(&mut self, detail: &ChangeDetail, cx: &mut Context<Self>) {
         self.detail = Some(detail.clone());
+        self.restyle(cx);
         cx.notify();
     }
 
@@ -625,16 +663,23 @@ impl DiffPage {
         }
     }
 
-    fn next_file(&mut self, _: &NextFile, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(i) = self.position().filter(|i| i + 1 < self.files.len()) {
-            self.go_to(i + 1, cx);
+    /// The next / previous file that is neither hidden nor dimmed.
+    fn step_file(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(from) = self.position() else {
+            return;
+        };
+        let skipped = |i: usize| self.styles.get(i).is_some_and(skips);
+        if let Some(i) = next_unskipped(self.files.len(), from, forward, skipped) {
+            self.go_to(i, cx);
         }
     }
 
+    fn next_file(&mut self, _: &NextFile, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_file(true, cx);
+    }
+
     fn prev_file(&mut self, _: &PrevFile, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(i) = self.position().filter(|i| *i > 0) {
-            self.go_to(i - 1, cx);
-        }
+        self.step_file(false, cx);
     }
 
     // ---- preferences panel ----
@@ -715,6 +760,19 @@ impl DiffPage {
         }
     }
 
+    /// "N of M" over the files that are not hidden. When the shown file is
+    /// one of the hidden ones there is no number for it.
+    fn position_label(&self) -> Option<String> {
+        let shown = self.styles.iter().filter(|s| !s.hidden).count();
+        let i = self.position()?;
+        Some(if self.styles.get(i).is_some_and(|s| s.hidden) {
+            format!("\u{2013} of {shown}")
+        } else {
+            let rank = self.styles.iter().take(i + 1).filter(|s| !s.hidden).count();
+            format!("{rank} of {shown}")
+        })
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -731,9 +789,8 @@ impl DiffPage {
             Some(b) => format!("Patchset {b} \u{2192} {}", self.route.target),
             None => format!("Base \u{2192} Patchset {}", self.route.target),
         };
-        let position = self
-            .position()
-            .map(|i| format!("{} of {}", i + 1, self.files.len()));
+        let position = self.position_label();
+        let style = self.current_style().cloned().unwrap_or_default();
         let mode = match prefs.view_mode {
             DiffViewMode::SideBySide => "side-by-side",
             DiffViewMode::Unified => "unified",
@@ -788,8 +845,20 @@ impl DiffPage {
                         div()
                             .flex_none()
                             .font_family(theme.mono_font_family.clone())
+                            .when(style.dimmed, |d| d.text_color(muted.opacity(0.55)))
+                            .when_some(style.color, |d, c| d.text_color(Hsla::from(c)))
+                            .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
                             .child(self.path_label()),
-                    ),
+                    )
+                    .when(style.hidden || style.dimmed, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("filtered: {}", style.rules.join(", "))),
+                        )
+                    }),
             )
             .child(
                 h_flex()

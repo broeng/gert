@@ -13,10 +13,17 @@ use model::{
 };
 
 use super::{
-    ChangePage, Phase,
+    ChangeEvent, ChangePage, Phase,
     state::{Block, size_text},
 };
-use crate::{actions::*, pages::list::Status, row::chips, theme::chip_colors, time_fmt::relative};
+use crate::{
+    actions::*,
+    filters::{FileStyle, FilterAction},
+    pages::list::Status,
+    row::chips,
+    theme::chip_colors,
+    time_fmt::relative,
+};
 
 /// The cards of the page. Consecutive blocks of one section are drawn as
 /// one card.
@@ -31,7 +38,9 @@ impl Section {
     fn of(b: Block) -> Option<Self> {
         match b {
             Block::Header => None,
-            Block::PatchSets | Block::FilesNotice | Block::File(_) => Some(Self::Files),
+            Block::PatchSets | Block::FilterBar | Block::FilesNotice | Block::File(_) => {
+                Some(Self::Files)
+            }
             Block::ThreadsHeader
             | Block::ThreadsNotice
             | Block::Thread(_)
@@ -123,6 +132,7 @@ impl ChangePage {
         let inner = match block {
             Block::Header => self.header(cx),
             Block::PatchSets => self.patch_sets(cx),
+            Block::FilterBar => self.filter_bar(cx),
             Block::FilesNotice => self.files_notice(cx),
             Block::File(i) => self.file(i, cx),
             Block::ThreadsHeader => self.threads_header(cx),
@@ -692,31 +702,144 @@ impl ChangePage {
                         d.child(div().text_xs().text_color(muted).child(info))
                     }),
             )
-            .when(self.files.loaded && count > 0, |d| {
+            .into_any_element()
+    }
+
+    /// The file filter buttons, "N hidden" and the Manage filters button;
+    /// the file table's header sits under them.
+    fn filter_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let Some(d) = &self.detail else {
+            return div().into_any_element();
+        };
+        let project = d.summary.project.clone();
+        let rules: Vec<_> = {
+            let filters = self.filters.read(cx);
+            filters
+                .applicable(&project)
+                .into_iter()
+                .map(|r| (r.name.clone(), filters.is_active(r), r.action.clone()))
+                .collect()
+        };
+        let buttons: Vec<_> = rules
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, on, action))| {
+                let label = match i {
+                    0..=8 => format!("{name}  (f {})", i + 1),
+                    _ => name.clone(),
+                };
+                let button = Button::new(("file-filter", i))
+                    .label(label)
+                    .small()
+                    .when(on, |b| b.primary())
+                    .when(!on, |b| b.outline())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.filters.update(cx, |f, cx| f.toggle(&name, cx))
+                    }));
+                // What the rule does, next to the button: a swatch of the
+                // highlight, or the word.
+                let effect = match &action {
+                    FilterAction::Hide => div().text_xs().text_color(muted).child("hide"),
+                    FilterAction::Dim => div().text_xs().text_color(muted).child("dim"),
+                    FilterAction::Highlight { color, bold } => {
+                        let swatch = div()
+                            .size_2()
+                            .rounded_full()
+                            .bg(color.map_or(theme.foreground, Hsla::from));
+                        h_flex()
+                            .gap_0p5()
+                            .items_center()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(swatch)
+                            .when(*bold, |d| d.child("bold"))
+                    }
+                };
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .opacity(if on { 1. } else { 0.8 })
+                    .child(button)
+                    .child(effect)
+            })
+            .collect();
+        let hidden = self.files.list.len() - self.visible.len();
+        v_flex()
+            .child(
+                h_flex()
+                    .px_3()
+                    .py_1()
+                    .gap_3()
+                    .items_center()
+                    .flex_wrap()
+                    .children(buttons)
+                    .when(hidden > 0, |d| {
+                        d.child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(format!("{hidden} hidden")),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("manage-filters")
+                            .label("Manage filters  (f m)")
+                            .small()
+                            .outline()
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ChangeEvent::ManageFilters {
+                                    project: project.clone(),
+                                })
+                            })),
+                    ),
+            )
+            .when(self.files.loaded && !self.visible.is_empty(), |d| {
                 d.child(file_table_header(cx))
             })
             .into_any_element()
     }
 
+    /// What the notice in place of the file rows says, and whether it is an
+    /// error.
+    pub(super) fn files_notice_text(&self) -> (String, bool) {
+        if let Some(e) = &self.files.error {
+            (format!("Could not load the files: {e}"), true)
+        } else if self.files.loaded && !self.files.list.is_empty() {
+            let n = self.files.list.len();
+            (format!("All {n} files are hidden by filters"), false)
+        } else if self.files.loaded {
+            ("No files changed".to_owned(), false)
+        } else {
+            ("Loading files\u{2026}".to_owned(), false)
+        }
+    }
+
     fn files_notice(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let (text, color) = if let Some(e) = &self.files.error {
-            (format!("Could not load the files: {e}"), theme.danger)
-        } else if self.files.loaded {
-            ("No files changed".to_owned(), theme.muted_foreground)
-        } else {
-            ("Loading files\u{2026}".to_owned(), theme.muted_foreground)
-        };
+        let (text, error) = self.files_notice_text();
         div()
             .py_1()
             .text_sm()
-            .text_color(color)
+            .text_color(if error {
+                theme.danger
+            } else {
+                theme.muted_foreground
+            })
             .child(text)
             .into_any_element()
     }
 
     fn file(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(f) = self.files.list.get(ix).cloned() else {
+        let Some(&fi) = self.visible.get(ix) else {
+            return div().into_any_element();
+        };
+        let (Some(f), Some(style)) = (
+            self.files.list.get(fi).cloned(),
+            self.styles.get(fi).cloned(),
+        ) else {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
@@ -724,9 +847,9 @@ impl ChangePage {
         let selected = ix == self.cursor;
         let reviewed = self.files.reviewed.contains(&f.path);
         let max_change = self
-            .files
-            .list
+            .visible
             .iter()
+            .map(|&i| &self.files.list[i])
             .filter(|f| !f.is_special() && !f.binary)
             .map(|f| f.lines_inserted + f.lines_deleted)
             .max()
@@ -743,6 +866,11 @@ impl ChangePage {
             FileStatus::Deleted => theme.danger,
             FileStatus::Modified => muted,
             _ => theme.warning,
+        };
+        let letter_color = if style.dimmed {
+            letter_color.opacity(DIMMED)
+        } else {
+            letter_color
         };
         let row = h_flex()
             .id(("file-row", ix))
@@ -781,7 +909,7 @@ impl ChangePage {
                     .text_color(letter_color)
                     .child(f.status.letter().to_owned()),
             )
-            .child(file_path(&f, cx))
+            .child(file_path(&f, &style, cx))
             .child(super::thread_list::counts_cell(
                 self.counts.get(&f.path).copied(),
                 cx,
@@ -1064,7 +1192,10 @@ fn requirement_note(r: &SubmitRequirement) -> String {
     format!("{state}{missing}")
 }
 
-fn file_path(f: &FileEntry, cx: &App) -> Div {
+/// Opacity of the status letter and the path of a dimmed file.
+const DIMMED: f32 = 0.55;
+
+fn file_path(f: &FileEntry, style: &FileStyle, cx: &App) -> Div {
     let theme = cx.theme();
     let name = match f.path.as_str() {
         COMMIT_MSG_PATH => "Commit message".to_owned(),
@@ -1083,9 +1214,12 @@ fn file_path(f: &FileEntry, cx: &App) -> Div {
         .truncate()
         .text_color(if f.is_special() {
             theme.muted_foreground
+        } else if style.dimmed {
+            theme.muted_foreground.opacity(DIMMED)
         } else {
-            theme.foreground
+            style.color.map_or(theme.foreground, Hsla::from)
         })
+        .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
         .child(text)
 }
 
@@ -1249,6 +1383,8 @@ impl Render for ChangePage {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::refresh_now))
             .on_action(cx.listener(Self::quick_vote_action))
+            .on_action(cx.listener(Self::toggle_filter))
+            .on_action(cx.listener(Self::manage_filters))
             .on_action(cx.listener(Self::open_in_browser))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))

@@ -15,11 +15,12 @@ use store::Store;
 use super::DiffPage;
 use crate::{
     LocalDiff,
+    filters::{FileFilter, FilterAction},
     nav::{DiffRoute, Route},
     outbox::DraftOutbox,
     pages::change::ChangePage,
     session::{SavedQuery, Startup},
-    settings::DiffSettings,
+    settings::{DiffSettings, FileFilters},
     shell::Shell,
     testing::{detail, file, summary, whole_file},
     tests::{URL, env_with, open, setup},
@@ -97,6 +98,7 @@ struct Page {
     window: AnyWindowHandle,
     page: Entity<DiffPage>,
     settings: Entity<DiffSettings>,
+    filters: Entity<FileFilters>,
     http: RouteHttpClient,
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -131,6 +133,18 @@ fn diff_page_route(
     http: RouteHttpClient,
     auth: gerrit_api::Auth,
 ) -> Page {
+    diff_page_ruled(cx, store, route, http, auth, Vec::new())
+}
+
+/// Like [`diff_page_route`], with file filter rules from the start.
+fn diff_page_ruled(
+    cx: &mut TestAppContext,
+    store: Store,
+    route: DiffRoute,
+    http: RouteHttpClient,
+    auth: gerrit_api::Auth,
+    rules: Vec<FileFilter>,
+) -> Page {
     let env = env_with(store, &http);
     let mut server = setup();
     if let gerrit_api::Auth::Basic { username, .. } = &auth {
@@ -140,11 +154,14 @@ fn diff_page_route(
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
     let mut settings_out = None;
+    let mut filters_out = None;
     let (window, page) = open(cx, |window, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
         settings_out = Some(settings.clone());
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
-        let page = cx.new(|cx| DiffPage::new(session, settings, route, outbox, cx));
+        let filters = cx.new(|_| FileFilters::new(rules));
+        filters_out = Some(filters.clone());
+        let page = cx.new(|cx| DiffPage::new(session, settings, filters, route, outbox, cx));
         cx.subscribe(&page, move |_, ev: &super::DiffPageEvent, _| {
             let text = match ev {
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
@@ -169,6 +186,7 @@ fn diff_page_route(
         window,
         page,
         settings: settings_out.expect("settings"),
+        filters: filters_out.expect("filters were created"),
         http,
         events,
     }
@@ -236,10 +254,12 @@ fn an_unknown_patch_set_is_an_error_not_a_blank_page(cx: &mut TestAppContext) {
     let (_w, page) = open(cx, |_, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
+        let filters = cx.new(|_| FileFilters::new(Vec::new()));
         cx.new(|cx| {
             DiffPage::new(
                 session,
                 settings,
+                filters,
                 DiffRoute {
                     target: PatchSetNumber(9),
                     ..route("src/a.rs")
@@ -916,4 +936,108 @@ fn an_older_patch_set_stays_and_the_note_names_the_current_one(cx: &mut TestAppC
             Some(PatchSetNumber(4))
         );
     });
+}
+
+// --- file filters ------------------------------------------------------
+
+fn rule(name: &str, glob: &str, action: FilterAction) -> FileFilter {
+    FileFilter {
+        name: name.into(),
+        globs: vec![glob.into()],
+        projects: Vec::new(),
+        action,
+        enabled: true,
+    }
+}
+
+fn filtered_page(cx: &mut TestAppContext, path: &str, rules: Vec<FileFilter>) -> Page {
+    diff_page_ruled(
+        cx,
+        seeded(),
+        route(path),
+        http(),
+        gerrit_api::Auth::Anonymous,
+        rules,
+    )
+}
+
+fn opened(p: &Page) -> Vec<String> {
+    p.events.lock().expect("log").clone()
+}
+
+#[gpui_kit::test]
+fn brackets_skip_hidden_and_dimmed_files(cx: &mut TestAppContext) {
+    // Files: COMMIT_MSG, a (dimmed), b (hidden), c.
+    let rules = vec![
+        rule("Dim", "a.rs", FilterAction::Dim),
+        rule("Gen", "b.rs", FilterAction::Hide),
+    ];
+    let p = filtered_page(cx, "/COMMIT_MSG", rules.clone());
+    press(cx, p.window, &["]"]);
+    assert_eq!(opened(&p), ["open src/c.rs"]);
+    let p = filtered_page(cx, "src/c.rs", rules.clone());
+    press(cx, p.window, &["["]);
+    assert_eq!(opened(&p), ["open /COMMIT_MSG"]);
+    // Past the last unskipped file there is nowhere to go.
+    press(cx, p.window, &["]"]);
+    assert_eq!(opened(&p), ["open /COMMIT_MSG"]);
+    // A skipped file can be shown (from a comment); `]` goes on from it.
+    let p = filtered_page(cx, "src/a.rs", rules);
+    press(cx, p.window, &["]"]);
+    assert_eq!(opened(&p), ["open src/c.rs"]);
+}
+
+#[gpui_kit::test]
+fn a_toggle_changes_where_brackets_go_at_once(cx: &mut TestAppContext) {
+    let p = filtered_page(
+        cx,
+        "src/a.rs",
+        vec![rule("Gen", "b.rs", FilterAction::Hide)],
+    );
+    press(cx, p.window, &["]"]);
+    assert_eq!(opened(&p), ["open src/c.rs"]);
+    p.filters.update(cx, |f, cx| f.toggle("Gen", cx));
+    press(cx, p.window, &["]"]);
+    assert_eq!(opened(&p), ["open src/c.rs", "open src/b.rs"]);
+}
+
+#[gpui_kit::test]
+fn the_position_counts_only_files_that_are_not_hidden(cx: &mut TestAppContext) {
+    let rules = vec![rule("Gen", "a.rs", FilterAction::Hide)];
+    let p = filtered_page(cx, "src/b.rs", rules.clone());
+    cx.update(|cx| {
+        assert_eq!(p.page.read(cx).position_label().as_deref(), Some("2 of 3"));
+    });
+    let p = filtered_page(cx, "src/a.rs", rules);
+    cx.update(|cx| {
+        let page = p.page.read(cx);
+        assert_eq!(page.position_label().as_deref(), Some("\u{2013} of 3"));
+        let style = page.current_style().expect("style");
+        assert!(style.hidden);
+        assert_eq!(style.rules, ["Gen"]);
+    });
+    // Un-hiding restyles the open page.
+    p.filters.update(cx, |f, cx| f.toggle("Gen", cx));
+    cx.update(|cx| {
+        let page = p.page.read(cx);
+        assert_eq!(page.position_label().as_deref(), Some("2 of 4"));
+        assert!(page.current_style().is_some_and(|s| s.rules.is_empty()));
+    });
+}
+
+#[gpui_kit::test]
+fn the_prefetch_goes_to_the_next_unskipped_file(cx: &mut TestAppContext) {
+    let p = filtered_page(
+        cx,
+        "src/a.rs",
+        vec![rule("Gen", "b.rs", FilterAction::Hide)],
+    );
+    assert_eq!(requests(&p.http, "src%2Fa.rs/diff"), 1);
+    assert_eq!(
+        requests(&p.http, "src%2Fb.rs/diff"),
+        0,
+        "{:?}",
+        p.http.requested()
+    );
+    assert_eq!(requests(&p.http, "src%2Fc.rs/diff"), 1);
 }
