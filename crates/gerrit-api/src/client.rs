@@ -486,6 +486,55 @@ impl GerritClient {
         self.change_action(change, "/rebase", &body).await
     }
 
+    /// `POST /changes/{n}/revert`: creates a new change that reverts
+    /// `change` (which must be merged; the server says otherwise with
+    /// [`Error::Conflict`]). `message` is the new change's commit message;
+    /// without one the server writes its default. Returns the new change.
+    pub async fn revert(
+        &self,
+        change: ChangeNumber,
+        message: Option<&str>,
+    ) -> Result<ChangeSummary, Error> {
+        let body = wire::RevertInput {
+            message: message
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(Into::into),
+        };
+        self.change_action(change, "/revert", &body).await
+    }
+
+    /// `POST /changes/{n}/revisions/{rev}/cherrypick`: copies the revision
+    /// onto the branch `destination` as a new change, with `message` as its
+    /// commit message (the server keeps the original one without). A
+    /// conflict is [`Error::Conflict`], a branch that does not exist
+    /// [`Error::BadRequest`], both with the server's text. Returns the new
+    /// change.
+    pub async fn cherry_pick(
+        &self,
+        change: ChangeNumber,
+        target: &RevisionId,
+        destination: &str,
+        message: Option<&str>,
+    ) -> Result<ChangeSummary, Error> {
+        let body = wire::CherryPickInput {
+            destination: destination.trim().to_owned(),
+            message: message
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(Into::into),
+        };
+        let v = self
+            .write_json(
+                http::Method::POST,
+                &revision_path(change, target, "/cherrypick"),
+                &body,
+            )
+            .await?;
+        let info: wire::ChangeInfo = serde_json::from_value(v)?;
+        Ok(convert::change_summary(&info)?)
+    }
+
     /// `POST /changes/{n}/abandon` with an optional message.
     pub async fn abandon(
         &self,
@@ -2164,6 +2213,55 @@ mod tests {
             body_json(&reqs[1]),
             json!({"base": "abc", "allow_conflicts": true, "on_behalf_of_uploader": true})
         );
+    }
+
+    #[test]
+    fn revert_posts_the_message_and_returns_the_new_change() {
+        let (fake, c) = action_fake(ACTION_CHANGE);
+        let s =
+            block_on(c.revert(ChangeNumber(5), Some("Revert \"x\"\n\nWhy: because\n"))).unwrap();
+        assert_eq!(s.number, ChangeNumber(5));
+        fake.push_response(200, xssi(ACTION_CHANGE));
+        block_on(c.revert(ChangeNumber(5), None)).unwrap();
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::POST);
+        assert_eq!(reqs[0].uri(), "https://h/a/changes/5/revert");
+        assert_eq!(
+            body_json(&reqs[0]),
+            json!({"message": "Revert \"x\"\n\nWhy: because"})
+        );
+        assert_eq!(body_json(&reqs[1]), json!({}));
+    }
+
+    #[test]
+    fn cherry_pick_posts_the_destination_to_the_revision() {
+        let (fake, c) = action_fake(ACTION_CHANGE);
+        let rev = RevisionId("abc123".into());
+        block_on(c.cherry_pick(ChangeNumber(5), &rev, " stable ", Some("msg"))).unwrap();
+        fake.push_response(200, xssi(ACTION_CHANGE));
+        block_on(c.cherry_pick(ChangeNumber(5), &rev, "stable", Some("  "))).unwrap();
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::POST);
+        assert_eq!(
+            reqs[0].uri(),
+            "https://h/a/changes/5/revisions/abc123/cherrypick"
+        );
+        assert_eq!(
+            body_json(&reqs[0]),
+            json!({"destination": "stable", "message": "msg"})
+        );
+        assert_eq!(body_json(&reqs[1]), json!({"destination": "stable"}));
+        // The server's refusals keep their text.
+        fake.push_response(409, "Cherry pick failed: merge conflict\n");
+        assert!(matches!(
+            block_on(c.cherry_pick(ChangeNumber(5), &rev, "stable", None)),
+            Err(Error::Conflict { message }) if message.contains("merge conflict")
+        ));
+        fake.push_response(400, "Branch nope not found\n");
+        assert!(matches!(
+            block_on(c.cherry_pick(ChangeNumber(5), &rev, "nope", None)),
+            Err(Error::BadRequest { .. })
+        ));
     }
 
     #[test]
