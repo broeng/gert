@@ -149,6 +149,7 @@ fn diff_page_route(
             let text = match ev {
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
                 super::DiffPageEvent::OpenFile(r) => format!("open {}", r.path),
+                super::DiffPageEvent::Reply(_) => "reply".to_owned(),
             };
             log.lock().expect("log").push(text);
         })
@@ -760,4 +761,32 @@ fn r_only_hints_when_anonymous(cx: &mut TestAppContext) {
     let note = cx.update(|cx| p.page.read(cx).hint_for_test());
     assert!(matches!(note, Some((t, false)) if t.starts_with("Sign in")));
     assert!(p.http.sent().iter().all(|r| r.method == "GET"));
+}
+
+#[gpui_kit::test]
+fn a_asks_for_the_reply_dialog_when_signed_in(cx: &mut TestAppContext) {
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http(),
+        signed_in(),
+    );
+    press(cx, p.window, &["a"]);
+    assert_eq!(*p.events.lock().expect("log"), ["reply"]);
+}
+
+#[gpui_kit::test]
+fn a_only_hints_when_anonymous(cx: &mut TestAppContext) {
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http(),
+        gerrit_api::Auth::Anonymous,
+    );
+    press(cx, p.window, &["a"]);
+    assert!(p.events.lock().expect("log").is_empty());
+    let note = cx.update(|cx| p.page.read(cx).hint_for_test());
+    assert!(matches!(note, Some((t, false)) if t == "Sign in to reply"));
 }

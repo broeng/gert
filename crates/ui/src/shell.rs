@@ -10,7 +10,7 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex
 use gpui_kit::component::{TitleBar, window_border};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::ChangeNumber;
+use model::{ChangeDetail, ChangeNumber};
 
 use crate::{
     actions::{self, *},
@@ -23,6 +23,7 @@ use crate::{
         list::{ChangeListPage, ListEvent, ListKind},
         login::{LoginPage, LoginPrefill},
     },
+    reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
     session::{Env, SavedQuery, ServerSetup, Session, Startup},
     settings::DiffSettings,
@@ -74,6 +75,7 @@ pub fn init(cx: &mut App) {
     );
     actions::bind_keys(cx);
     crate::diff::bind_keys(cx);
+    crate::reply::actions::bind_keys(cx);
 }
 
 pub struct Shell {
@@ -91,6 +93,9 @@ pub struct Shell {
     focus: FocusHandle,
     help: bool,
     help_scroll: ScrollHandle,
+    /// The reply dialog while it is open (modal; the pages keep their state).
+    reply: Option<Entity<ReplyDialog>>,
+    reply_subs: Vec<Subscription>,
     /// Shown in the title bar when nobody is signed in.
     app_name: SharedString,
     window_active: bool,
@@ -131,6 +136,12 @@ impl Shell {
         // none of our bindings match. Hand the focus to the closest ancestor
         // that is still there, or to the page.
         subs.push(cx.on_focus_lost(window, |this, window, cx| {
+            // The dialog is modal: the focus stays in it.
+            if let Some(dialog) = &this.reply {
+                let handle = dialog.focus_handle(cx);
+                window.focus(&handle, cx);
+                return;
+            }
             let target = window
                 .focus_lost_restore_target(cx)
                 .unwrap_or_else(|| this.page.focus_handle(cx));
@@ -156,6 +167,8 @@ impl Shell {
             focus: cx.focus_handle(),
             help: false,
             help_scroll: ScrollHandle::new(),
+            reply: None,
+            reply_subs: Vec::new(),
             app_name: SharedString::default(),
             window_active: window.is_window_active(),
             credentials_task: None,
@@ -386,6 +399,7 @@ impl Shell {
     /// Builds the page for the current route and focuses it.
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.page_subs.clear();
+        self.drop_reply(cx);
         let mut route = self.nav.current().clone();
         if self.session.is_none() && route != Route::Login {
             self.nav.reset(Route::Login);
@@ -483,6 +497,7 @@ impl Shell {
             |this, _, ev: &ChangeEvent, window, cx| match ev {
                 ChangeEvent::Unauthorized => this.unauthorized(window, cx),
                 ChangeEvent::Refreshed => this.server_reachable(cx),
+                ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 ChangeEvent::OpenDiff(route) => {
                     this.navigate(Route::Diff(route.clone()), window, cx)
@@ -507,6 +522,7 @@ impl Shell {
             window,
             |this, _, ev: &DiffPageEvent, window, cx| match ev {
                 DiffPageEvent::Unauthorized => this.unauthorized(window, cx),
+                DiffPageEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 // Like PolyGerrit, every file is its own history entry.
                 DiffPageEvent::OpenFile(route) => {
                     this.navigate(Route::Diff(route.clone()), window, cx)
@@ -568,6 +584,7 @@ impl Shell {
     /// The server refused our credentials: back to the login page, with the
     /// server filled in.
     fn unauthorized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_reply(cx);
         if let Some(s) = self.session.clone() {
             self.set_session(None, window, cx);
             self.prefill = Some(LoginPrefill {
@@ -580,6 +597,63 @@ impl Shell {
         }
         self.nav.reset(Route::Login);
         self.show(window, cx);
+    }
+
+    // ---- reply dialog ----
+
+    /// Opens the reply dialog for `detail` on top of the current page.
+    fn open_reply(&mut self, detail: ChangeDetail, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(session), Some(outbox)) = (self.session.clone(), self.outbox.clone()) else {
+            return;
+        };
+        if self.reply.is_some() {
+            return;
+        }
+        let dialog = cx.new(|cx| ReplyDialog::new(session, outbox, detail, window, cx));
+        self.reply_subs.push(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, ev: &ReplyEvent, window, cx| match ev {
+                ReplyEvent::Close => this.close_reply(window, cx),
+                ReplyEvent::Unauthorized => this.unauthorized(window, cx),
+                ReplyEvent::Sent(sent) => this.reply_sent(sent, window, cx),
+            },
+        ));
+        self.reply = Some(dialog);
+        cx.notify();
+    }
+
+    /// Takes the dialog away, keeping what was typed as a draft. For
+    /// everything that replaces the page under it.
+    fn drop_reply(&mut self, cx: &mut Context<Self>) {
+        self.reply_subs.clear();
+        if let Some(dialog) = self.reply.take() {
+            dialog.update(cx, |d, cx| d.keep_text(cx));
+        }
+    }
+
+    fn close_reply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reply_subs.clear();
+        self.reply = None;
+        let handle = self.page.focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// The review went out: close the dialog and let the page show the
+    /// result.
+    fn reply_sent(&mut self, sent: &Sent, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_reply(window, cx);
+        match &self.page {
+            Page::Change(p) => p.update(cx, |p, cx| p.reply_sent(sent, cx)),
+            Page::Diff(p) => p.update(cx, |p, cx| p.reply_sent(sent, cx)),
+            _ => {}
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reply_for_test(&self) -> Option<Entity<ReplyDialog>> {
+        self.reply.clone()
     }
 
     // ---- actions ----
@@ -929,7 +1003,8 @@ impl Render for Shell {
                 .text_color(theme.foreground)
                 .child(self.render_title_bar(cx))
                 .child(div().flex_1().min_h_0().child(self.page.element()))
-                .when(self.help, |d| d.child(self.render_help(cx))),
+                .when(self.help, |d| d.child(self.render_help(cx)))
+                .children(self.reply.clone()),
         )
     }
 }

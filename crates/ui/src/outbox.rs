@@ -90,6 +90,12 @@ impl DraftOutbox {
         }));
     }
 
+    /// A review was published: the drafts of `change` became comments (or
+    /// were refused), so the listeners read them again and the counts too.
+    pub fn published(&mut self, change: ChangeNumber, cx: &mut Context<Self>) {
+        self.announce(change, cx);
+    }
+
     /// Tells the listeners that the drafts of `change` changed.
     fn announce(&mut self, change: ChangeNumber, cx: &mut Context<Self>) {
         cx.emit(OutboxEvent::Changed(change));
@@ -160,6 +166,37 @@ impl DraftOutbox {
             DraftRequest::Delete(id) => self.delete(change, id, cx),
             DraftRequest::Retry(id) => self.retry(change, id, cx),
         }
+    }
+
+    /// Makes the patch-set level message draft of the reply dialog hold
+    /// `text` (see `reply::message_step`): changed, created, or deleted when
+    /// the text is empty. The draft is looked up in the store, not in a
+    /// view, so a draft that was written a moment ago is found.
+    pub fn set_message(
+        &mut self,
+        change: ChangeNumber,
+        patch_set: model::PatchSetRef,
+        text: String,
+        unresolved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::reply::{MessageStep, message_step};
+        let syncer = self.session.syncer().clone();
+        cx.spawn(async move |this, cx| {
+            let step = cx
+                .background_spawn(async move {
+                    message_step(&syncer, change, &patch_set, &text, unresolved)
+                })
+                .await;
+            this.update(cx, |this, cx| match step {
+                Ok(Some(MessageStep::Save(save))) => this.save(save, cx),
+                Ok(Some(MessageStep::Delete(id))) => this.delete(change, id, cx),
+                Ok(None) => {}
+                Err(e) => log::warn!("saving the reply message of change {change}: {e}"),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Writes the draft locally, then uploads it. Without credentials (the

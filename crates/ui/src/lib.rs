@@ -12,6 +12,7 @@ mod login;
 mod nav;
 mod outbox;
 mod pages;
+mod reply;
 mod reviewed;
 mod row;
 mod session;

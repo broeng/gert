@@ -22,7 +22,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 mod thread_list;
-mod threads;
+pub(crate) mod threads;
 mod view;
 
 use std::{
@@ -52,7 +52,7 @@ use crate::{
     nav::{ChangeView, DiffRoute},
     outbox::DraftOutbox,
     pages::list::Status,
-    reviewed,
+    reply, reviewed,
     row::browser_url,
     session::{Session, is_unauthorized},
     settings::DiffSettings,
@@ -74,6 +74,8 @@ pub enum ChangeEvent {
     OpenDiff(DiffRoute),
     /// A refresh succeeded: the server is reachable.
     Refreshed,
+    /// `a`: open the reply dialog for this change.
+    Reply(Box<ChangeDetail>),
 }
 
 /// The file list of the current patch set pair.
@@ -1139,6 +1141,38 @@ impl ChangePage {
     fn page_up(&mut self, _: &ScrollPageUp, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll_page(false);
         cx.notify();
+    }
+
+    /// `a`: asks the shell for the reply dialog.
+    fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = reply::unavailable(&self.session) {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        match &self.detail {
+            Some(d) if d.current().is_some() => cx.emit(ChangeEvent::Reply(Box::new(d.clone()))),
+            _ => self
+                .hint
+                .say("The change is not loaded yet", false, cx, |p| &mut p.hint),
+        }
+    }
+
+    /// A review was posted from the dialog: take the change as the server
+    /// has it now (votes, attention set, log) and say so.
+    pub fn reply_sent(&mut self, sent: &reply::Sent, cx: &mut Context<Self>) {
+        match &sent.detail {
+            Some(d) => {
+                self.detail = Some(d.clone());
+                self.fetched_at = Some(Timestamp::now());
+                self.apply_selection(true, cx);
+            }
+            None => {
+                self.track.invalidate();
+                self.tick(cx);
+            }
+        }
+        let (note, warning) = sent.note();
+        self.hint.say(note, warning, cx, |p| &mut p.hint);
     }
 
     /// `r`: marks the file under the cursor reviewed, or clears the mark.

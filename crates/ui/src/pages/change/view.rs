@@ -924,6 +924,7 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::threads_all))
             .on_action(cx.listener(Self::new_patchset_comment_action))
             .on_action(cx.listener(Self::toggle_reviewed))
+            .on_action(cx.listener(Self::reply))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::page_up))
             .relative()

@@ -42,7 +42,7 @@ use crate::{
     hint::Hint,
     nav::DiffRoute,
     outbox::DraftOutbox,
-    reviewed,
+    reply, reviewed,
     session::{Session, is_unauthorized},
     settings::DiffSettings,
 };
@@ -52,6 +52,8 @@ pub enum DiffPageEvent {
     Unauthorized,
     /// Move to another file of the same comparison.
     OpenFile(DiffRoute),
+    /// `a`: open the reply dialog for this change.
+    Reply(Box<ChangeDetail>),
 }
 
 /// What the first background task brings back.
@@ -428,6 +430,33 @@ impl DiffPage {
     #[cfg(test)]
     pub(crate) fn hint_for_test(&self) -> Option<(String, bool)> {
         self.hint.current().map(|(t, e)| (t.to_owned(), e))
+    }
+
+    // ---- reply ----
+
+    /// `a`: asks the shell for the reply dialog.
+    fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = reply::unavailable(&self.session) {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        match &self.detail {
+            Some(d) if d.current().is_some() => cx.emit(DiffPageEvent::Reply(Box::new(d.clone()))),
+            _ => self
+                .hint
+                .say("The change is not loaded yet", false, cx, |p| &mut p.hint),
+        }
+    }
+
+    /// A review was posted from the dialog: take the change as the server
+    /// has it now and say so.
+    pub fn reply_sent(&mut self, sent: &reply::Sent, cx: &mut Context<Self>) {
+        if let Some(d) = &sent.detail {
+            self.detail = Some(d.clone());
+        }
+        let (note, warning) = sent.note();
+        self.hint.say(note, warning, cx, |p| &mut p.hint);
+        cx.notify();
     }
 
     // ---- reviewed mark ----
@@ -933,6 +962,7 @@ impl Render for DiffPage {
             .on_action(cx.listener(Self::prev_file))
             .on_action(cx.listener(Self::toggle_prefs))
             .on_action(cx.listener(Self::toggle_reviewed))
+            .on_action(cx.listener(Self::reply))
             .relative()
             .size_full()
             .child(self.render_header(cx))
