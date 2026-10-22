@@ -1162,6 +1162,7 @@ impl Render for DiffPage {
             .on_action(cx.listener(Self::next_file))
             .on_action(cx.listener(Self::prev_file))
             .on_action(cx.listener(Self::toggle_prefs))
+            .on_action(cx.listener(Self::prefs_syntax))
             .on_action(cx.listener(Self::toggle_reviewed))
             .on_action(cx.listener(Self::reply))
             .on_action(cx.listener(Self::open_actions))
