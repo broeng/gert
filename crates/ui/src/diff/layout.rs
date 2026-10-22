@@ -126,6 +126,9 @@ pub struct Cell {
     /// Parts of the line a comment thread is anchored at (a range
     /// location), byte ranges into `text`, sorted and not overlapping.
     pub comments: Vec<Range<usize>>,
+    /// URLs in `text` (byte ranges, sorted); Ctrl-click opens them. Lines
+    /// are never wrapped or split, so a URL always sits in one cell.
+    pub urls: Vec<Range<usize>>,
 }
 
 /// What the layout needs to know of a comment thread to place it.
@@ -811,8 +814,10 @@ impl Builder {
         kind: LineKind,
     ) -> Cell {
         let e = expand_line(line, marks, self.opts.tab_size, self.opts.show_tabs);
+        let urls = crate::links::find_urls(&e.text);
         Cell {
             number,
+            urls,
             text: e.text,
             marks: e.marks,
             tabs: e.tabs,
@@ -2201,5 +2206,40 @@ mod tests {
         let b = with_threads(&big_run(), &o, &[]);
         assert_eq!(a.rows(), b.rows());
         assert!(b.thread_rows().is_empty());
+    }
+
+    #[test]
+    fn cells_know_their_urls_in_both_modes() {
+        let url = "https://example.org/a/very/long/path?q=1&r=2#frag";
+        let line = format!("\t// see {url}.");
+        let long = format!("{url}{}", "x".repeat(500));
+        let d = diff(vec![common(&[&line]), changed(&["no link"], &[&long])]);
+        for mode in [DiffViewMode::SideBySide, DiffViewMode::Unified] {
+            let l = build(&d, &opts(mode));
+            let cells: Vec<&Cell> = l
+                .rows()
+                .iter()
+                .flat_map(|r| match r {
+                    Row::Side { left, right } => vec![left.as_ref(), right.as_ref()],
+                    Row::Unified { cell, .. } => vec![Some(cell)],
+                    _ => vec![],
+                })
+                .flatten()
+                .collect();
+            let with: Vec<Vec<&str>> = cells
+                .iter()
+                .filter(|c| !c.urls.is_empty())
+                .map(|c| c.urls.iter().map(|r| &c.text[r.clone()]).collect())
+                .collect();
+            // The tab is expanded before the ranges are taken, and a long
+            // line is not split.
+            assert!(with.contains(&vec![url]), "{mode:?}: {with:?}");
+            assert!(with.contains(&vec![long.as_str()]), "{mode:?}: {with:?}");
+            assert!(
+                cells
+                    .iter()
+                    .any(|c| &*c.text == "no link" && c.urls.is_empty())
+            );
+        }
     }
 }

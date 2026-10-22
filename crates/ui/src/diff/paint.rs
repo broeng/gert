@@ -36,6 +36,8 @@ pub struct Palette {
     pub unresolved: Hsla,
     pub resolved: Hsla,
     pub danger: Hsla,
+    /// URLs in code lines.
+    pub link: Hsla,
     pub card_fg: Hsla,
     alpha_row: f32,
     alpha_gutter: f32,
@@ -73,6 +75,7 @@ impl Palette {
             unresolved: t.warning,
             resolved: t.muted_foreground,
             danger: t.danger,
+            link: t.info,
             card_fg: t.foreground,
             alpha_row,
             alpha_gutter,
@@ -167,7 +170,7 @@ fn digits(mut n: u32) -> usize {
 }
 
 /// Highlight runs of a cell: intraline marks, the text comment threads are
-/// anchored at, and dimmed tab markers. Sorted and non-overlapping, as
+/// anchored at, URLs (underlined link colour) and dimmed tab markers. Sorted and non-overlapping, as
 /// `StyledText` wants. Where marks and comments overlap, the mark shows.
 pub fn line_highlights(cell: &Cell, p: &Palette) -> Vec<(Range<usize>, HighlightStyle)> {
     let mark = (cell.kind != LineKind::Common && !cell.due_to_rebase).then(|| HighlightStyle {
@@ -180,7 +183,7 @@ pub fn line_highlights(cell: &Cell, p: &Palette) -> Vec<(Range<usize>, Highlight
     };
     let marks: &[Range<usize>] = if mark.is_some() { &cell.marks } else { &[] };
     let comments = &cell.comments;
-    if cell.tabs.is_empty() && comments.is_empty() {
+    if cell.tabs.is_empty() && comments.is_empty() && cell.urls.is_empty() {
         return marks
             .iter()
             .map(|r| (r.clone(), mark.unwrap_or_default()))
@@ -191,6 +194,7 @@ pub fn line_highlights(cell: &Cell, p: &Palette) -> Vec<(Range<usize>, Highlight
         .iter()
         .chain(&cell.tabs)
         .chain(comments)
+        .chain(&cell.urls)
         .flat_map(|r| [r.start, r.end])
         .collect();
     cuts.sort_unstable();
@@ -202,16 +206,154 @@ pub fn line_highlights(cell: &Cell, p: &Palette) -> Vec<(Range<usize>, Highlight
             let in_mark = covers(marks, a);
             let in_tab = covers(&cell.tabs, a);
             let in_comment = covers(comments, a);
+            let in_url = covers(&cell.urls, a);
             let mut style = HighlightStyle::default();
             if in_mark {
                 style.background_color = mark.and_then(|m| m.background_color);
             } else if in_comment {
                 style.background_color = Some(p.comment_mark);
             }
+            if in_url {
+                style.color = Some(p.link);
+                style.underline = Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(p.link),
+                    wavy: false,
+                });
+            }
             if in_tab {
                 style.color = tab.color;
             }
-            (in_mark || in_tab || in_comment).then_some((a..b, style))
+            (in_mark || in_tab || in_comment || in_url).then_some((a..b, style))
         })
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
+mod tests {
+    use std::ops::Range;
+
+    use gpui_kit::{HighlightStyle, hsla};
+
+    use super::{Cell, LineKind, Palette, line_highlights};
+
+    fn palette() -> Palette {
+        let c = |h: f32| hsla(h, 0.5, 0.5, 1.);
+        Palette {
+            muted_fg: c(0.),
+            gutter_fg: c(0.1),
+            divider: c(0.),
+            ruler: c(0.),
+            filler_bg: c(0.),
+            skip_bg: c(0.),
+            cursor_bg: c(0.),
+            cursor_bar: c(0.),
+            removed: c(0.2),
+            added: c(0.3),
+            rebase: c(0.),
+            removed_mark: c(0.4),
+            added_mark: c(0.5),
+            comment_mark: c(0.6),
+            unresolved: c(0.),
+            resolved: c(0.),
+            danger: c(0.),
+            link: c(0.7),
+            card_fg: c(0.),
+            alpha_row: 0.2,
+            alpha_gutter: 0.4,
+        }
+    }
+
+    fn cell(text: &str, kind: LineKind) -> Cell {
+        Cell {
+            number: 1,
+            text: text.into(),
+            marks: Vec::new(),
+            tabs: Vec::new(),
+            kind,
+            due_to_rebase: false,
+            comments: Vec::new(),
+            urls: crate::links::find_urls(text),
+        }
+    }
+
+    fn runs(c: &Cell) -> Vec<(Range<usize>, HighlightStyle)> {
+        let out = line_highlights(c, &palette());
+        let mut last = 0;
+        for (r, _) in &out {
+            assert!(r.start >= last && r.start < r.end, "{out:?}");
+            last = r.end;
+        }
+        out
+    }
+
+    #[test]
+    fn lines_without_urls_are_unchanged() {
+        let mut c = cell("let x = 1;", LineKind::Added);
+        c.marks = vec![4..5];
+        let out = runs(&c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 4..5);
+        assert!(out[0].1.underline.is_none() && out[0].1.color.is_none());
+        assert!(runs(&cell("plain", LineKind::Common)).is_empty());
+    }
+
+    #[test]
+    fn a_url_is_underlined_in_the_link_colour() {
+        let out = runs(&cell("// https://a.org/x done", LineKind::Common));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, 3..18);
+        assert_eq!(out[0].1.color, Some(palette().link));
+        assert!(out[0].1.underline.is_some());
+    }
+
+    #[test]
+    fn a_url_inside_a_mark_keeps_the_mark_background() {
+        let mut c = cell("// https://a.org/x done", LineKind::Added);
+        c.marks = vec![0..23];
+        let out = runs(&c);
+        let p = palette();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].0, 0..3);
+        assert_eq!(out[0].1.background_color, Some(p.mark_bg(LineKind::Added)));
+        assert_eq!(out[0].1.color, None);
+        assert_eq!(out[1].0, 3..18);
+        assert_eq!(out[1].1.background_color, Some(p.mark_bg(LineKind::Added)));
+        assert_eq!(out[1].1.color, Some(p.link));
+        assert_eq!(out[2].0, 18..23);
+    }
+
+    #[test]
+    fn a_url_overlapping_a_comment_anchor_is_split() {
+        let mut c = cell("// https://a.org/x done", LineKind::Common);
+        c.comments = vec![10..21];
+        let out = runs(&c);
+        let p = palette();
+        let at = |i: usize| out.iter().find(|(r, _)| r.contains(&i)).map(|(_, s)| *s);
+        assert_eq!(at(5).and_then(|s| s.background_color), None);
+        assert_eq!(
+            at(12).and_then(|s| s.background_color),
+            Some(p.comment_mark)
+        );
+        assert_eq!(at(12).and_then(|s| s.color), Some(p.link));
+        assert_eq!(
+            at(19).and_then(|s| s.background_color),
+            Some(p.comment_mark)
+        );
+        assert_eq!(at(19).and_then(|s| s.color), None);
+    }
+
+    #[test]
+    fn a_tab_marker_before_a_url_stays_dimmed() {
+        let text = "\u{2192}   https://a.org/x";
+        let mut c = cell(text, LineKind::Common);
+        c.tabs = vec![0..3];
+        let out = runs(&c);
+        assert_eq!(out[0].0, 0..3);
+        assert_eq!(out[0].1.color, Some(palette().gutter_fg));
+        assert!(out[0].1.underline.is_none());
+        assert_eq!(out[1].0, 6..text.len());
+        assert_eq!(out[1].1.color, Some(palette().link));
+    }
 }
