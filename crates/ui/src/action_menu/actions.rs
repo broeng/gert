@@ -37,6 +37,8 @@ actions!(
         RemoveItem,
         /// Enter on a listed reviewer: between reviewers and CC.
         MoveItem,
+        /// Space on a checkbox row (the rebase options).
+        ToggleOption,
     ]
 );
 
@@ -49,6 +51,8 @@ pub const ACTION_MENU: &str = "ActionMenu";
 pub const REVIEWERS_STEP: &str = "ReviewersStep";
 /// A listed reviewer or CC that has the focus.
 pub const REVIEWER_ROW: &str = "ReviewerRow";
+/// A checkbox row of a confirmation that has the focus.
+pub const OPTION_ROW: &str = "OptionRow";
 /// A listed hashtag that has the focus.
 pub const HASHTAG_CHIP: &str = "HashtagChip";
 
@@ -124,6 +128,13 @@ pub fn entries() -> Vec<Entry> {
             MoveItem,
             REVIEWER_ROW,
             "On a listed reviewer: move between reviewers and CC",
+        ),
+        e(
+            "Space",
+            "space",
+            ToggleOption,
+            OPTION_ROW,
+            "On a checkbox (Tab to it): switch it",
         ),
         e(
             if cfg!(target_os = "macos") {

@@ -26,6 +26,28 @@ pub struct ActionInfo {
     pub enabled_options: Vec<String>,
 }
 
+impl ActionInfo {
+    /// Whether the server lists `option` among the options it can do for
+    /// this action (`rebase_on_behalf_of_uploader`, ...).
+    pub fn has_option(&self, option: &str) -> bool {
+        self.enabled_options.iter().any(|o| o == option)
+    }
+}
+
+/// The `enabled_options` entry of the rebase action that says the caller
+/// may rebase on behalf of the uploader.
+pub const REBASE_ON_BEHALF_OF_UPLOADER: &str = "rebase_on_behalf_of_uploader";
+
+/// What a rebase may be asked to do besides the base (`RebaseInput`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RebaseOptions {
+    /// Make a patch set with conflict markers instead of failing with a
+    /// conflict.
+    pub allow_conflicts: bool,
+    /// Keep the uploader as the author of the new patch set's upload.
+    pub on_behalf_of_uploader: bool,
+}
+
 /// Actions keyed by id.
 pub type Actions = BTreeMap<String, ActionInfo>;
 

@@ -21,7 +21,9 @@
 //!    `b` rebase, `a` abandon, `r` restore, `w` WIP / ready, `p` private)
 //!    picks. The mnemonics work only here.
 //! 2. A confirmation for submit, rebase, abandon, restore and WIP, with an
-//!    optional message (abandon, restore, WIP) or base (rebase). `Ctrl-Enter`
+//!    optional message (abandon, restore, WIP) or base and options (rebase:
+//!    allow conflicts, and on behalf of the uploader where the server offers
+//!    it; Tab to a checkbox, Space switches it). `Ctrl-Enter`
 //!    (`Cmd-Enter`) confirms, `Esc` goes back to the menu (and from the
 //!    menu closes the dialog). Ready and the private toggles run right
 //!    from the menu.
@@ -44,11 +46,15 @@ mod tags;
 #[cfg(test)]
 mod tests;
 
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::{ChangeDetail, ChangeNumber, ReviewerState, SubmitRequirementStatus, action_id};
+use model::{
+    ChangeDetail, ChangeNumber, REBASE_ON_BEHALF_OF_UPLOADER, RebaseOptions, ReviewerState,
+    SubmitRequirementStatus, action_id,
+};
 
 use reviewers::Reviewers;
 use tags::Tags;
@@ -238,10 +244,11 @@ impl Kind {
         change: ChangeNumber,
         message: Option<&str>,
         base: Option<&str>,
+        rebase: RebaseOptions,
     ) -> Result<Option<ChangeDetail>, sync::Error> {
         match self {
             Kind::Submit => syncer.submit(change).await,
-            Kind::Rebase => syncer.rebase(change, base).await,
+            Kind::Rebase => syncer.rebase(change, base, rebase).await,
             Kind::Abandon => syncer.abandon(change, message).await,
             Kind::Restore => syncer.restore(change, message).await,
             Kind::Wip => syncer.set_work_in_progress(change, true, message).await,
@@ -299,6 +306,13 @@ pub fn menu_entries(detail: &ChangeDetail) -> Vec<MenuEntry> {
         .collect()
 }
 
+/// A checkbox of the rebase confirmation.
+#[derive(Clone, Copy)]
+enum RebaseFlag {
+    Conflicts,
+    Behalf,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
     Menu,
@@ -319,6 +333,10 @@ pub struct ActionDialog {
     error: Option<String>,
     message: Entity<TextareaState>,
     base: Entity<InputState>,
+    /// The rebase checkboxes and their focus.
+    rebase: RebaseOptions,
+    conflicts_focus: FocusHandle,
+    behalf_focus: FocusHandle,
     rev: Reviewers,
     tags: Tags,
     /// A reviewer, topic or hashtag edit is under way.
@@ -419,6 +437,9 @@ impl ActionDialog {
             error: None,
             message,
             base,
+            rebase: RebaseOptions::default(),
+            conflicts_focus: cx.focus_handle(),
+            behalf_focus: cx.focus_handle(),
             rev,
             tags,
             busy: false,
@@ -601,6 +622,10 @@ impl ActionDialog {
         }
         if kind == Kind::Rebase {
             v.push(self.base.read(cx).focus_handle(cx));
+            v.push(self.conflicts_focus.clone());
+            if self.offers_behalf() {
+                v.push(self.behalf_focus.clone());
+            }
         }
         v.push(self.cancel_focus.clone());
         v.push(self.confirm_focus.clone());
@@ -659,6 +684,13 @@ impl ActionDialog {
         self.run(kind, message, base, window, cx);
     }
 
+    /// Whether the server lets this user rebase on behalf of the uploader.
+    fn offers_behalf(&self) -> bool {
+        self.detail
+            .action(action_id::REBASE)
+            .is_some_and(|a| a.has_option(REBASE_ON_BEHALF_OF_UPLOADER))
+    }
+
     fn run(
         &mut self,
         kind: Kind,
@@ -673,6 +705,10 @@ impl ActionDialog {
         let from = self.step;
         let syncer = self.session.syncer().clone();
         let change = self.number;
+        let rebase = RebaseOptions {
+            on_behalf_of_uploader: self.rebase.on_behalf_of_uploader && self.offers_behalf(),
+            ..self.rebase
+        };
         self.step = Step::Running(kind);
         self.error = None;
         self.message.update(cx, |i, cx| i.set_disabled(true, cx));
@@ -682,7 +718,7 @@ impl ActionDialog {
             let (result, fresh) = cx
                 .background_spawn(async move {
                     let result = kind
-                        .send(&syncer, change, message.as_deref(), base.as_deref())
+                        .send(&syncer, change, message.as_deref(), base.as_deref(), rebase)
                         .await;
                     // A refusal means our picture of the change is stale.
                     let fresh = match &result {
@@ -796,6 +832,11 @@ impl ActionDialog {
     #[cfg(test)]
     pub(crate) fn base_focus_for_test(&self, cx: &App) -> FocusHandle {
         self.base.read(cx).focus_handle(cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rebase_options_for_test(&self) -> RebaseOptions {
+        self.rebase
     }
 
     #[cfg(test)]
@@ -943,7 +984,66 @@ impl ActionDialog {
             .into_any_element()
     }
 
-    fn render_confirm(&self, kind: Kind, cx: &mut Context<Self>) -> AnyElement {
+    /// A checkbox row that Tab reaches and Space switches.
+    fn option_row(
+        &self,
+        flag: RebaseFlag,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (id, label, handle, checked) = match flag {
+            RebaseFlag::Conflicts => (
+                "rebase-conflicts",
+                "Allow conflicts",
+                &self.conflicts_focus,
+                self.rebase.allow_conflicts,
+            ),
+            RebaseFlag::Behalf => (
+                "rebase-behalf",
+                "On behalf of the uploader",
+                &self.behalf_focus,
+                self.rebase.on_behalf_of_uploader,
+            ),
+        };
+        let ring = if handle.is_focused(window) {
+            cx.theme().ring
+        } else {
+            cx.theme().transparent
+        };
+        h_flex()
+            .id(id)
+            .key_context(OPTION_ROW)
+            .track_focus(handle)
+            .on_action(cx.listener(move |this, _: &ToggleOption, _, cx| {
+                this.toggle_flag(flag);
+                cx.notify();
+            }))
+            .px_1()
+            .rounded_md()
+            .border_1()
+            .border_color(ring)
+            .child(
+                Checkbox::new(id)
+                    .label(label)
+                    .checked(checked)
+                    .tab_stop(false)
+                    .on_click(cx.listener(move |this, _: &bool, _, cx| {
+                        this.toggle_flag(flag);
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn toggle_flag(&mut self, flag: RebaseFlag) {
+        match flag {
+            RebaseFlag::Conflicts => self.rebase.allow_conflicts = !self.rebase.allow_conflicts,
+            RebaseFlag::Behalf => {
+                self.rebase.on_behalf_of_uploader = !self.rebase.on_behalf_of_uploader
+            }
+        }
+    }
+
+    fn render_confirm(&self, kind: Kind, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let intro = match kind {
             Kind::Submit => "Submit this change to its branch?",
@@ -974,12 +1074,27 @@ impl ActionDialog {
                 d.child(Textarea::new(&self.message).small())
             })
             .when(kind == Kind::Rebase, |d| {
-                d.child(Input::new(&self.base).small()).child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("Leave the base empty to rebase onto the branch tip."),
-                )
+                d.child(Input::new(&self.base).small())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Leave the base empty to rebase onto the branch tip."),
+                    )
+                    .child(self.option_row(RebaseFlag::Conflicts, window, cx))
+                    .child(
+                        div()
+                            .pl_6()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                "A rebase that conflicts then still creates a patch set, \
+                             with conflict markers in the files, instead of failing.",
+                            ),
+                    )
+                    .when(self.offers_behalf(), |d| {
+                        d.child(self.option_row(RebaseFlag::Behalf, window, cx))
+                    })
             })
             .into_any_element()
     }
@@ -1019,7 +1134,7 @@ impl Render for ActionDialog {
             Step::Reviewers => self.render_reviewers(window, cx),
             Step::Topic => self.render_topic(),
             Step::Hashtags => self.render_hashtags(window, cx),
-            Step::Confirm(k) | Step::Running(k) => self.render_confirm(k, cx),
+            Step::Confirm(k) | Step::Running(k) => self.render_confirm(k, window, cx),
         };
         let save_label = match step {
             Step::Topic => Some("Save topic"),

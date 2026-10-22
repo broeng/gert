@@ -83,7 +83,7 @@ fn each_action_hits_its_endpoint_and_refreshes() {
 
     assert!(block_on(syncer.submit(CHANGE)).unwrap().is_some());
     assert!(
-        block_on(syncer.rebase(CHANGE, Some("abc")))
+        block_on(syncer.rebase(CHANGE, Some("abc"), Default::default()))
             .unwrap()
             .is_some()
     );
@@ -129,6 +129,29 @@ fn each_action_hits_its_endpoint_and_refreshes() {
 }
 
 #[test]
+fn rebase_options_reach_the_server_and_the_change_is_refreshed() {
+    let http = routes("NEW", json!({}));
+    http.route_json("POST /changes/7/rebase", &change_json("NEW", json!({})));
+    let syncer = syncer_for(&http, signed_in());
+    let options = model::RebaseOptions {
+        allow_conflicts: true,
+        on_behalf_of_uploader: true,
+    };
+    assert!(
+        block_on(syncer.rebase(CHANGE, None, options))
+            .unwrap()
+            .is_some()
+    );
+    let sent = http.sent();
+    assert_eq!(sent[0].target, "/a/changes/7/rebase");
+    assert_eq!(
+        sent[0].body_text(),
+        r#"{"allow_conflicts":true,"on_behalf_of_uploader":true}"#
+    );
+    assert_eq!(sent[1].method, "GET");
+}
+
+#[test]
 fn refused_actions_leave_the_cache_alone() {
     let http = routes("NEW", json!({"submit": {"enabled": true}}));
     let syncer = syncer_for(&http, signed_in());
@@ -150,7 +173,7 @@ fn refused_actions_leave_the_cache_alone() {
         "{err:?}"
     );
     assert!(!err.is_unauthorized());
-    let err = block_on(syncer.rebase(CHANGE, None)).unwrap_err();
+    let err = block_on(syncer.rebase(CHANGE, None, Default::default())).unwrap_err();
     assert!(err.is_unauthorized());
 
     // No refresh was attempted and the cached detail is unchanged.
@@ -188,7 +211,7 @@ fn a_refusal_fetches_the_change_but_other_failures_do_not() {
     // 401, a transient 5xx and an unreachable server do not.
     let n = http.sent().len();
     for err in [
-        block_on(syncer.rebase(CHANGE, None)).unwrap_err(),
+        block_on(syncer.rebase(CHANGE, None, Default::default())).unwrap_err(),
         block_on(syncer.restore(CHANGE, None)).unwrap_err(),
         Error::Api(gerrit_api::Error::Http(gerrit_api::HttpError(
             "reset".into(),
