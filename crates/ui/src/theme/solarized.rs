@@ -7,7 +7,7 @@
 //! shadow (comments, secondary text), `base0` the body text and `base1` the
 //! emphasized text. The accents are shared; the `-1bg`/`-2bg` tints (diff
 //! rows and their refined parts) are per variant, copied from
-//! `solarized-palettes.el`, except the brighter added-row green.
+//! `solarized-palettes.el`.
 
 use gpui_kit::component::{ThemeConfig, ThemeMode};
 use gpui_kit::{Hsla, rgb};
@@ -50,11 +50,8 @@ pub struct Solarized {
     pub line: u32,
     pub red_1bg: u32,
     pub red_2bg: u32,
-    /// Added diff rows, and their gutters and refined parts. Not
-    /// solarized-emacs' green-1bg/-2bg, which read as dimmed olive: a more
-    /// saturated, glowing take on Solarized green (user preference).
-    pub added_bg: u32,
-    pub added_mark: u32,
+    pub green_1bg: u32,
+    pub green_2bg: u32,
     pub yellow_1bg: u32,
     pub yellow_2bg: u32,
 }
@@ -70,8 +67,8 @@ pub const DARK: Solarized = Solarized {
     line: 0x284b54,
     red_1bg: 0x2d2c31,
     red_2bg: 0x532725,
-    added_bg: 0x2d5514,
-    added_mark: 0x3f7010,
+    green_1bg: 0x1d3732,
+    green_2bg: 0x2f4321,
     yellow_1bg: 0x273532,
     yellow_2bg: 0x433e20,
 };
@@ -87,8 +84,8 @@ pub const LIGHT: Solarized = Solarized {
     line: 0xcccec4,
     red_1bg: 0xffdec8,
     red_2bg: 0xffb9a1,
-    added_bg: 0xe4f2b4,
-    added_mark: 0xc8e46e,
+    green_1bg: 0xefeac7,
+    green_2bg: 0xdbdb9c,
     yellow_1bg: 0xf8e8c6,
     yellow_2bg: 0xf1d49b,
 };
