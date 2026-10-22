@@ -47,6 +47,15 @@ pub fn window_options(title: &str, app_id: &str, size: Size<Pixels>, cx: &App) -
         titlebar: Some(titlebar),
         window_min_size: Some(MIN_SIZE),
         app_id: Some(app_id.to_owned()),
+        // The client-side frame's shadow inset is transparent pixels. On an
+        // opaque surface the GPU ignores alpha and shows them as a solid
+        // frame. Elsewhere the shell paints every pixel, so the bit is only
+        // needed where `window_border` draws a shadow.
+        window_background: if cfg!(target_os = "linux") {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
         ..TitleBar::window_options()
     }
 }
