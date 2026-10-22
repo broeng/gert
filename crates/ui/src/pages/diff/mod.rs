@@ -326,9 +326,10 @@ impl DiffPage {
                 self.error = None;
                 self.key = Some(key.clone());
                 self.shown = Some(key.clone());
+                let path = self.route.path.clone();
                 match &self.view {
                     Some(view) => view.update(cx, |v, cx| {
-                        v.set_diff(diff, cx);
+                        v.set_diff_for(&path, diff, cx);
                         v.set_status(None, cx);
                     }),
                     None => self.create_view(diff, cx),
@@ -361,8 +362,10 @@ impl DiffPage {
             (s.resolved(), s.font_family())
         };
         let can_comment = self.session.can_comment();
+        let path = self.route.path.clone();
         let view = cx.new(|cx| {
             let mut v = DiffView::new(diff, prefs, cx);
+            v.set_path(&path, cx);
             v.set_can_comment(can_comment, cx);
             v.set_sizing(DiffSizing::Fill, cx);
             v.set_font_family(font, cx);

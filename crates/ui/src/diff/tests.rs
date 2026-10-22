@@ -491,17 +491,29 @@ fn the_large_diff_scrolls_frame_by_frame(cx: &mut TestAppContext) {
         ..prefs(DiffViewMode::SideBySide)
     };
     let (window, view, _) = open_with(cx, fixture("large_diff.response.json"), all);
-    let t = Instant::now();
-    let frames = 200;
-    for _ in 0..frames {
-        press(cx, window, "space");
+    for colored in [false, true] {
+        if colored {
+            cx.update(|cx| view.update(cx, |v, cx| v.set_path("big.rs", cx)));
+            cx.run_until_parked();
+            cx.update(|cx| assert!(view.read(cx).syntax_for_test().is_some()));
+            press(cx, window, "g");
+            press(cx, window, "g");
+        }
+        let t = Instant::now();
+        let frames = 200;
+        for _ in 0..frames {
+            press(cx, window, "space");
+        }
+        let per_frame = t.elapsed() / frames;
+        eprintln!(
+            "large diff: {per_frame:?} per page-down frame (debug build, syntax {})",
+            if colored { "on" } else { "off" }
+        );
+        assert!(cursor(cx, &view) > 1_000);
+        // A debug build with the software test renderer: a guard against
+        // doing work per row on every frame, not a benchmark.
+        assert!(per_frame.as_millis() < 100, "{per_frame:?}");
     }
-    let per_frame = t.elapsed() / frames;
-    eprintln!("large diff: {per_frame:?} per page-down frame (debug build)");
-    assert!(cursor(cx, &view) > 1_000);
-    // A debug build with the software test renderer: a guard against doing
-    // work per row on every frame, not a benchmark.
-    assert!(per_frame.as_millis() < 100, "{per_frame:?}");
 }
 
 #[gpui_kit::test]
@@ -1106,3 +1118,141 @@ fn clicking_a_thread_header_toggles_it_and_retry_asks_the_owner(cx: &mut TestApp
 }
 
 mod editing;
+
+fn rust_diff() -> Diff {
+    Diff {
+        chunks: vec![
+            DiffChunk::Common {
+                lines: lines(&["// header", "fn main() {"]),
+            },
+            DiffChunk::Changed(ChangedChunk {
+                a: lines(&["\tlet x = 1;"]),
+                b: lines(&["\tlet x = \"two\";"]),
+                ..Default::default()
+            }),
+            DiffChunk::Common {
+                lines: lines(&["}"]),
+            },
+        ],
+        ..sample()
+    }
+}
+
+/// The names of the new-side spans of line `n`, with their text.
+fn new_names(view: &Entity<DiffView>, cx: &mut TestAppContext, n: u32) -> Vec<&'static str> {
+    cx.update(|cx| {
+        view.read(cx)
+            .syntax_for_test()
+            .and_then(|s| s.new.clone())
+            .map(|s| s.line(n).iter().map(|(_, name)| *name).collect())
+            .unwrap_or_default()
+    })
+}
+
+fn rust_view(cx: &mut TestAppContext, p: ResolvedDiffPreferences) -> Entity<DiffView> {
+    let (_, view, _) = open_with(cx, rust_diff(), p);
+    cx.update(|cx| view.update(cx, |v, cx| v.set_path("src/main.rs", cx)));
+    view
+}
+
+#[gpui_kit::test]
+fn a_rust_diff_is_colored_once_the_background_task_is_done(cx: &mut TestAppContext) {
+    let view = rust_view(cx, prefs(DiffViewMode::SideBySide));
+    // Plain until the job has run.
+    assert!(new_names(&view, cx, 2).is_empty());
+    cx.run_until_parked();
+    assert!(new_names(&view, cx, 2).contains(&"keyword"));
+    assert!(new_names(&view, cx, 1).contains(&"comment"));
+    assert!(new_names(&view, cx, 3).contains(&"string"));
+}
+
+#[gpui_kit::test]
+fn the_syntax_styles_of_a_tabbed_line_land_on_the_displayed_text(cx: &mut TestAppContext) {
+    use crate::diff::paint::SyntaxPaint;
+    let four = ResolvedDiffPreferences {
+        tab_size: 4,
+        show_tabs: false,
+        ..prefs(DiffViewMode::SideBySide)
+    };
+    let view = rust_view(cx, four);
+    cx.run_until_parked();
+    cx.update(|cx| {
+        use gpui_kit::component::ActiveTheme as _;
+        let v = view.read(cx);
+        let syntax = v.syntax_for_test().expect("colored").clone();
+        let paint = SyntaxPaint {
+            syntax,
+            theme: cx.theme().highlight_theme.clone(),
+            tab_size: 4,
+            show_tabs: false,
+        };
+        // Line 3 is `\tlet x = "two";` on the new side; with 4-wide tabs the
+        // keyword `let` starts at column 4 of the display text.
+        let cell = v
+            .layout()
+            .rows()
+            .iter()
+            .find_map(|r| match r {
+                Row::Side { right: Some(c), .. } if c.number == 3 => Some(c.clone()),
+                _ => None,
+            })
+            .expect("row of new line 3");
+        let runs = paint.runs(&cell, model::DiffSide::Right);
+        let kw = runs.iter().find(|(r, _)| r.start == 4).expect("let");
+        assert_eq!(&cell.text[kw.0.clone()], "let");
+        assert!(kw.1.color.is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn magic_files_and_unknown_languages_stay_plain(cx: &mut TestAppContext) {
+    let view = rust_view(cx, prefs(DiffViewMode::Unified));
+    cx.update(|cx| view.update(cx, |v, cx| v.set_diff_for("/COMMIT_MSG", rust_diff(), cx)));
+    cx.run_until_parked();
+    assert!(new_names(&view, cx, 2).is_empty());
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_diff_for("notes.unknownext", rust_diff(), cx)
+        })
+    });
+    cx.run_until_parked();
+    assert!(new_names(&view, cx, 2).is_empty());
+}
+
+#[gpui_kit::test]
+fn the_preference_switches_colors_off_and_on(cx: &mut TestAppContext) {
+    let off = ResolvedDiffPreferences {
+        syntax_highlighting: false,
+        ..prefs(DiffViewMode::SideBySide)
+    };
+    let view = rust_view(cx, off.clone());
+    cx.run_until_parked();
+    assert!(new_names(&view, cx, 2).is_empty());
+    let on = prefs(DiffViewMode::SideBySide);
+    cx.update(|cx| view.update(cx, |v, cx| v.set_preferences(on.clone(), cx)));
+    cx.run_until_parked();
+    assert!(new_names(&view, cx, 2).contains(&"keyword"));
+    cx.update(|cx| view.update(cx, |v, cx| v.set_preferences(off, cx)));
+    assert!(new_names(&view, cx, 2).is_empty());
+    // Other changes do not start another job, and coming back reuses the
+    // result without waiting.
+    cx.update(|cx| view.update(cx, |v, cx| v.set_preferences(on, cx)));
+    assert!(new_names(&view, cx, 2).contains(&"keyword"));
+}
+
+#[gpui_kit::test]
+fn a_new_diff_drops_the_old_colors_and_the_stale_job(cx: &mut TestAppContext) {
+    let view = rust_view(cx, prefs(DiffViewMode::SideBySide));
+    cx.run_until_parked();
+    assert!(!new_names(&view, cx, 2).is_empty());
+    // Replaced twice before any job runs: only the last one counts.
+    cx.update(|cx| {
+        view.update(cx, |v, cx| {
+            v.set_diff_for("src/main.rs", rust_diff(), cx);
+            v.set_diff_for("/COMMIT_MSG", rust_diff(), cx);
+        })
+    });
+    assert!(new_names(&view, cx, 2).is_empty());
+    cx.run_until_parked();
+    assert!(new_names(&view, cx, 2).is_empty());
+}

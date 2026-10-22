@@ -24,7 +24,8 @@ use super::{
         Anchor, Cell, Expansion, FoldRow, HiddenRow, Layout, LayoutOptions, LineKind, REVEAL_STEP,
         Row, ThreadSlot,
     },
-    paint::{Style, line_highlights},
+    paint::{Style, SyntaxPaint, line_highlights},
+    syntax::{DiffSyntax, highlight_diff},
 };
 
 /// How the widget takes its height.
@@ -71,8 +72,24 @@ pub struct ThreadContext {
     pub old_path: Option<String>,
 }
 
+/// Syntax highlighting of the current diff.
+enum Syntax {
+    /// Not computed (off, no path yet, or a carrier of threads).
+    Idle,
+    /// Computing in the background; dropping the task cancels it.
+    Pending(#[expect(dead_code, reason = "dropping the task cancels the job")] Task<()>),
+    /// Done; `None` when the file has nothing to color.
+    Ready(Option<DiffSyntax>),
+}
+
 pub struct DiffView {
     diff: Arc<Diff>,
+    /// The file the diff is of, for its language. Set by the owner.
+    path: Option<String>,
+    syntax: Syntax,
+    /// Bumped for every new highlight job, so a result that arrives for an
+    /// older diff or path is ignored.
+    syntax_gen: u64,
     prefs: ResolvedDiffPreferences,
     font_family: Option<SharedString>,
     sizing: DiffSizing,
@@ -174,6 +191,9 @@ impl DiffView {
         list.reset_with_uniform_height(layout.len(), row_height);
         Self {
             diff: Arc::new(diff),
+            path: None,
+            syntax: Syntax::Idle,
+            syntax_gen: 0,
             prefs,
             font_family: None,
             sizing: DiffSizing::Fill,
@@ -465,6 +485,64 @@ impl DiffView {
         self.diff = Arc::new(diff);
         self.hint = None;
         self.rebuild(keep, cx);
+        self.start_syntax(cx);
+    }
+
+    /// Like [`Self::set_diff`] for another file (or the first diff of a
+    /// view): `path` decides the language of the syntax colors.
+    pub fn set_diff_for(&mut self, path: &str, diff: Diff, cx: &mut Context<Self>) {
+        self.path = Some(path.to_owned());
+        self.set_diff(diff, cx);
+    }
+
+    /// Tells the view which file its diff is of, if it did not get the diff
+    /// with [`Self::set_diff_for`]. Colors the diff when the path is new.
+    pub fn set_path(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.path.as_deref() != Some(path) {
+            self.path = Some(path.to_owned());
+            self.start_syntax(cx);
+        }
+    }
+
+    /// The syntax colors to paint: computed, and the preference is on.
+    fn active_syntax(&self) -> Option<&DiffSyntax> {
+        match &self.syntax {
+            Syntax::Ready(Some(s)) if self.prefs.syntax_highlighting => Some(s),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn syntax_for_test(&self) -> Option<&DiffSyntax> {
+        self.active_syntax()
+    }
+
+    /// Starts highlighting the current diff in the background, replacing
+    /// (and so cancelling) any earlier job. The diff stays plain until the
+    /// result arrives.
+    fn start_syntax(&mut self, cx: &mut Context<Self>) {
+        self.syntax_gen += 1;
+        self.syntax = Syntax::Idle;
+        if !self.prefs.syntax_highlighting || self.threads_only {
+            return;
+        }
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let (diff, generation) = (self.diff.clone(), self.syntax_gen);
+        self.syntax = Syntax::Pending(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { highlight_diff(&path, &diff) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.syntax_gen == generation {
+                    this.syntax = Syntax::Ready(result);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Applies new preferences. Changing the view mode keeps the cursor on
@@ -472,7 +550,20 @@ impl DiffView {
     pub fn set_preferences(&mut self, prefs: ResolvedDiffPreferences, cx: &mut Context<Self>) {
         let old = LayoutOptions::from_prefs(&self.prefs);
         let mode_changed = prefs.view_mode != self.prefs.view_mode;
+        let syntax_toggled = prefs.syntax_highlighting != self.prefs.syntax_highlighting;
         self.prefs = prefs;
+        if syntax_toggled {
+            if !self.prefs.syntax_highlighting {
+                // Stop a running job; a finished result is kept for when
+                // the colors come back.
+                if matches!(self.syntax, Syntax::Pending(_)) {
+                    self.syntax_gen += 1;
+                    self.syntax = Syntax::Idle;
+                }
+            } else if matches!(self.syntax, Syntax::Idle) {
+                self.start_syntax(cx);
+            }
+        }
         if old == LayoutOptions::from_prefs(&self.prefs) {
             cx.notify();
             return;
@@ -957,9 +1048,14 @@ impl DiffView {
         let body = match row {
             Row::Side { left, right } => h_flex()
                 .size_full()
-                .child(cell_element(left.as_ref(), style.old_gutter, &style))
+                .child(cell_element(
+                    left.as_ref(),
+                    DiffSide::Left,
+                    style.old_gutter,
+                    &style,
+                ))
                 .child(
-                    cell_element(right.as_ref(), style.new_gutter, &style)
+                    cell_element(right.as_ref(), DiffSide::Right, style.new_gutter, &style)
                         .border_l_1()
                         .border_color(style.palette.divider),
                 )
@@ -968,7 +1064,17 @@ impl DiffView {
                 .size_full()
                 .child(number_element(*old, style.old_gutter, cell.kind, &style))
                 .child(number_element(*new, style.new_gutter, cell.kind, &style))
-                .child(text_pane(cell, &style))
+                .child(text_pane(
+                    cell,
+                    // One cell stands for both sides; common lines show the
+                    // new one.
+                    if cell.kind == LineKind::Removed {
+                        DiffSide::Left
+                    } else {
+                        DiffSide::Right
+                    },
+                    &style,
+                ))
                 .into_any_element(),
             Row::Fold(fold) => fold_element(fold, ix, &style, cx),
             Row::Hidden(hidden) => hidden_element(hidden, &style),
@@ -1056,7 +1162,7 @@ fn number_element(n: Option<u32>, width: Pixels, kind: LineKind, style: &Style) 
         .children(n.map(|n| n.to_string()))
 }
 
-fn text_pane(cell: &Cell, style: &Style) -> Div {
+fn text_pane(cell: &Cell, side: DiffSide, style: &Style) -> Div {
     let p = &style.palette;
     div()
         .relative()
@@ -1078,8 +1184,13 @@ fn text_pane(cell: &Cell, style: &Style) -> Div {
                 .bg(p.ruler)
         }))
         .when(!cell.text.is_empty(), |d| {
+            let syntax = style
+                .syntax
+                .as_ref()
+                .map(|s| s.runs(cell, side))
+                .unwrap_or_default();
             let text = StyledText::new(SharedString::from(cell.text.clone()))
-                .with_highlights(line_highlights(cell, p));
+                .with_highlights(line_highlights(cell, p, &syntax));
             if cell.urls.is_empty() {
                 return d.child(text);
             }
@@ -1103,7 +1214,7 @@ fn text_pane(cell: &Cell, style: &Style) -> Div {
 }
 
 /// One half of a side-by-side row; a blank filler without a cell.
-fn cell_element(cell: Option<&Cell>, gutter: Pixels, style: &Style) -> Div {
+fn cell_element(cell: Option<&Cell>, side: DiffSide, gutter: Pixels, style: &Style) -> Div {
     let p = &style.palette;
     match cell {
         Some(cell) => h_flex()
@@ -1112,7 +1223,7 @@ fn cell_element(cell: Option<&Cell>, gutter: Pixels, style: &Style) -> Div {
             .h_full()
             .overflow_hidden()
             .child(number_element(Some(cell.number), gutter, cell.kind, style))
-            .child(text_pane(cell, style)),
+            .child(text_pane(cell, side, style)),
         None => h_flex()
             .flex_1()
             .min_w_0()
@@ -1229,7 +1340,7 @@ impl Render for DiffView {
         };
         self.sync_list_hints(row_height, window, cx);
         self.viewport = self.list.viewport_bounds().size.height;
-        self.style = Some(Rc::new(Style::new(
+        let mut style = Style::new(
             self.font_family.clone(),
             self.prefs.line_length,
             self.prefs.hide_line_numbers,
@@ -1237,7 +1348,16 @@ impl Render for DiffView {
             self.layout.max_numbers(),
             window,
             cx,
-        )));
+        );
+        if let Some(syntax) = self.active_syntax() {
+            style.syntax = Some(SyntaxPaint {
+                syntax: syntax.clone(),
+                theme: cx.theme().highlight_theme.clone(),
+                tab_size: self.prefs.tab_size,
+                show_tabs: self.prefs.show_tabs,
+            });
+        }
+        self.style = Some(Rc::new(style));
         let list = list(
             self.list.clone(),
             cx.processor(|this, ix, _window, cx| this.render_row(ix, cx)),
