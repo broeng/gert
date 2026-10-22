@@ -783,7 +783,7 @@ fn refused(what: &str, message: &str) -> String {
 
 /// How a [`chip`] looks.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Look {
+pub(crate) enum Look {
     Plain,
     /// The chosen one of a group.
     Selected,
@@ -797,7 +797,7 @@ enum Look {
 /// `dimmed` only changes the look. These are not the component library's
 /// buttons: those keep their focus handle to themselves, and the dialog has
 /// to know which control has the focus to cycle through them.
-fn chip(
+pub(crate) fn chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     handle: &FocusHandle,

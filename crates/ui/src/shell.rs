@@ -13,6 +13,7 @@ use gpui_kit::*;
 use model::{ChangeDetail, ChangeNumber};
 
 use crate::{
+    action_menu::{ActionDialog, ActionEvent, Done},
     actions::{self, *},
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
@@ -76,6 +77,7 @@ pub fn init(cx: &mut App) {
     actions::bind_keys(cx);
     crate::diff::bind_keys(cx);
     crate::reply::actions::bind_keys(cx);
+    crate::action_menu::actions::bind_keys(cx);
 }
 
 pub struct Shell {
@@ -96,6 +98,9 @@ pub struct Shell {
     /// The reply dialog while it is open (modal; the pages keep their state).
     reply: Option<Entity<ReplyDialog>>,
     reply_subs: Vec<Subscription>,
+    /// The change action menu while it is open (modal, like the reply).
+    menu: Option<Entity<ActionDialog>>,
+    menu_subs: Vec<Subscription>,
     /// Shown in the title bar when nobody is signed in.
     app_name: SharedString,
     window_active: bool,
@@ -137,8 +142,9 @@ impl Shell {
         // that is still there, or to the page.
         subs.push(cx.on_focus_lost(window, |this, window, cx| {
             // The dialog is modal: the focus stays in it.
-            if let Some(dialog) = &this.reply {
-                let handle = dialog.focus_handle(cx);
+            let modal = this.reply.as_ref().map(|d| d.focus_handle(cx));
+            let modal = modal.or_else(|| this.menu.as_ref().map(|d| d.focus_handle(cx)));
+            if let Some(handle) = modal {
                 window.focus(&handle, cx);
                 return;
             }
@@ -169,6 +175,8 @@ impl Shell {
             help_scroll: ScrollHandle::new(),
             reply: None,
             reply_subs: Vec::new(),
+            menu: None,
+            menu_subs: Vec::new(),
             app_name: SharedString::default(),
             window_active: window.is_window_active(),
             credentials_task: None,
@@ -400,6 +408,7 @@ impl Shell {
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.page_subs.clear();
         self.drop_reply(cx);
+        self.drop_menu();
         let mut route = self.nav.current().clone();
         if self.session.is_none() && route != Route::Login {
             self.nav.reset(Route::Login);
@@ -498,6 +507,7 @@ impl Shell {
                 ChangeEvent::Unauthorized => this.unauthorized(window, cx),
                 ChangeEvent::Refreshed => this.server_reachable(cx),
                 ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
+                ChangeEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 ChangeEvent::OpenDiff(route) => {
                     this.navigate(Route::Diff(route.clone()), window, cx)
@@ -585,6 +595,7 @@ impl Shell {
     /// server filled in.
     fn unauthorized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.drop_reply(cx);
+        self.drop_menu();
         if let Some(s) = self.session.clone() {
             self.set_session(None, window, cx);
             self.prefill = Some(LoginPrefill {
@@ -649,6 +660,57 @@ impl Shell {
             Page::Diff(p) => p.update(cx, |p, cx| p.reply_sent(sent, cx)),
             _ => {}
         }
+    }
+
+    // ---- change action menu ----
+
+    /// Opens the action menu for `detail` on top of the current page.
+    fn open_menu(&mut self, detail: ChangeDetail, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if self.menu.is_some() || self.reply.is_some() {
+            return;
+        }
+        let dialog = cx.new(|cx| ActionDialog::new(session, detail, window, cx));
+        self.menu_subs.push(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, ev: &ActionEvent, window, cx| match ev {
+                ActionEvent::Close => this.close_menu(window, cx),
+                ActionEvent::Unauthorized => this.unauthorized(window, cx),
+                ActionEvent::Done(done) => this.action_done(done, window, cx),
+            },
+        ));
+        self.menu = Some(dialog);
+        cx.notify();
+    }
+
+    /// Takes the menu away for everything that replaces the page under it.
+    fn drop_menu(&mut self) {
+        self.menu_subs.clear();
+        self.menu = None;
+    }
+
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_menu();
+        let handle = self.page.focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// The server did the action: close the menu and let the page show the
+    /// result.
+    fn action_done(&mut self, done: &Done, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        if let Page::Change(p) = &self.page {
+            p.update(cx, |p, cx| p.action_done(done, cx));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn menu_for_test(&self) -> Option<Entity<ActionDialog>> {
+        self.menu.clone()
     }
 
     #[cfg(test)]
@@ -1004,7 +1066,8 @@ impl Render for Shell {
                 .child(self.render_title_bar(cx))
                 .child(div().flex_1().min_h_0().child(self.page.element()))
                 .when(self.help, |d| d.child(self.render_help(cx)))
-                .children(self.reply.clone()),
+                .children(self.reply.clone())
+                .children(self.menu.clone()),
         )
     }
 }

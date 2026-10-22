@@ -51,6 +51,9 @@ actions!(
         ScrollPageUp,
         /// `a`: open the reply dialog (message, votes, drafts, attention set).
         Reply,
+        /// `m` on the change page: open the change action menu (submit,
+        /// rebase, abandon, ...).
+        ChangeMenu,
         /// `r`: mark the file under the cursor (change page) or shown (diff
         /// page) as reviewed, or take the mark off again.
         ToggleReviewed,
@@ -82,7 +85,7 @@ pub const SEARCH_BAR: &str = "SearchBar";
 
 // Single-letter bindings must not fire while text is being typed; the text
 // input marks its key context "Input".
-const SHELL_KEYS: &str = "Shell && !Input && !ReplyDialog";
+const SHELL_KEYS: &str = "Shell && !Input && !ReplyDialog && !ActionDialog";
 const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
 const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
@@ -111,6 +114,10 @@ pub fn help_groups() -> Vec<HelpGroup> {
         g("In a diff", crate::diff::actions::entries()),
         g("Writing a comment", crate::diff::actions::editor_entries()),
         g("Reply dialog ( A )", crate::reply::actions::entries()),
+        g(
+            "Change actions ( M )",
+            crate::action_menu::actions::entries(),
+        ),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
     ]
 }
@@ -198,6 +205,11 @@ pub fn change_entries() -> Vec<Entry> {
             "A",
             KeyBinding::new("a", Reply, Some(k)),
             "Reply: message, votes, drafts, attention set",
+        ),
+        e(
+            "M",
+            KeyBinding::new("m", ChangeMenu, Some(k)),
+            "Change actions: submit, rebase, abandon, restore, WIP, private",
         ),
         e(
             "R",
@@ -450,6 +462,7 @@ mod tests {
             .chain(crate::diff::actions::entries())
             .chain(crate::diff::actions::editor_entries())
             .chain(crate::reply::actions::entries())
+            .chain(crate::action_menu::actions::entries())
             .collect()
     }
 

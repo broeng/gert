@@ -1,6 +1,7 @@
 //! GPUI views. Built on gpui-kit; no I/O in render, all network and SQLite
 //! work runs on the background executor.
 
+mod action_menu;
 mod actions;
 mod comments;
 pub mod diff;
