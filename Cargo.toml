@@ -56,3 +56,24 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "warn"
+
+# Syntax highlighting runs the regex engines over whole files; at opt-level 0
+# a 10k-line file takes seconds. Optimise just those crates in dev builds.
+[profile.dev.package.syntect]
+opt-level = 3
+[profile.dev.package.fancy-regex]
+opt-level = 3
+[profile.dev.package.regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
+opt-level = 3
+[profile.dev.package.aho-corasick]
+opt-level = 3
+[profile.dev.package.memchr]
+opt-level = 3
+[profile.dev.package.bit-set]
+opt-level = 3
+[profile.dev.package.bit-vec]
+opt-level = 3
