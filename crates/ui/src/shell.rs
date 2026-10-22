@@ -30,6 +30,7 @@ use crate::{
     row::server_label,
     session::{Env, SavedQuery, ServerSetup, Session, Startup, StartupPage},
     settings::{DiffSettings, FileFilters, PageLayout},
+    syntax_cache::SyntaxCache,
 };
 
 enum Page {
@@ -121,6 +122,9 @@ pub struct Shell {
     /// The file filter rules and their session toggles; the pages get it
     /// with the change and diff pages.
     filters: Entity<FileFilters>,
+    /// Syntax colors computed so far, and the worker that makes more; the
+    /// diff page gets it (the change page will, to queue its first file).
+    syntax: Entity<SyntaxCache>,
     prefs_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -204,6 +208,7 @@ impl Shell {
             settings: cx.new(|_| DiffSettings::new(diff)),
             layout: cx.new(|_| PageLayout::default()),
             filters: cx.new(|_| FileFilters::new(filters)),
+            syntax: cx.new(|_| SyntaxCache::new()),
             prefs_task: None,
             _subs: subs,
         };
@@ -640,7 +645,9 @@ impl Shell {
         let settings = self.settings.clone();
         let outbox = self.outbox_for(&session, cx);
         let filters = self.filters.clone();
-        let page = cx.new(|cx| DiffPage::new(session, settings, filters, route, outbox, cx));
+        let syntax = self.syntax.clone();
+        let page =
+            cx.new(|cx| DiffPage::new(session, settings, filters, syntax, route, outbox, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,

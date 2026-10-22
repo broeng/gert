@@ -123,7 +123,7 @@ impl ChangePage {
                 self.remeasure(Block::PatchSetComments);
                 cx.notify();
             }
-            DiffEvent::ModeChanged(_) => {}
+            DiffEvent::ModeChanged(_) | DiffEvent::Highlighted(_) => {}
         }
     }
 

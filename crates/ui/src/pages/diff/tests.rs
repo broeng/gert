@@ -22,6 +22,7 @@ use crate::{
     session::{SavedQuery, Startup},
     settings::{DiffSettings, FileFilters},
     shell::Shell,
+    syntax_cache::{Highlight, SyntaxCache},
     testing::{detail, file, summary, whole_file},
     tests::{URL, env_with, open, setup},
 };
@@ -99,6 +100,7 @@ struct Page {
     page: Entity<DiffPage>,
     settings: Entity<DiffSettings>,
     filters: Entity<FileFilters>,
+    syntax: Entity<SyntaxCache>,
     http: RouteHttpClient,
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -133,7 +135,7 @@ fn diff_page_route(
     http: RouteHttpClient,
     auth: gerrit_api::Auth,
 ) -> Page {
-    diff_page_ruled(cx, store, route, http, auth, Vec::new())
+    diff_page_ruled(cx, store, route, http, auth, Vec::new(), Vec::new())
 }
 
 /// Like [`diff_page_route`], with file filter rules from the start.
@@ -144,6 +146,7 @@ fn diff_page_ruled(
     http: RouteHttpClient,
     auth: gerrit_api::Auth,
     rules: Vec<FileFilter>,
+    seed: Vec<(DiffKey, Highlight)>,
 ) -> Page {
     let env = env_with(store, &http);
     let mut server = setup();
@@ -155,13 +158,23 @@ fn diff_page_ruled(
     let log = events.clone();
     let mut settings_out = None;
     let mut filters_out = None;
+    let mut syntax_out = None;
     let (window, page) = open(cx, |window, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
         settings_out = Some(settings.clone());
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
         let filters = cx.new(|_| FileFilters::new(rules));
         filters_out = Some(filters.clone());
-        let page = cx.new(|cx| DiffPage::new(session, settings, filters, route, outbox, cx));
+        let syntax = cx.new(|_| {
+            let mut c = SyntaxCache::new();
+            for (k, h) in seed {
+                c.insert(k, h);
+            }
+            c
+        });
+        syntax_out = Some(syntax.clone());
+        let page =
+            cx.new(|cx| DiffPage::new(session, settings, filters, syntax, route, outbox, cx));
         cx.subscribe(&page, move |_, ev: &super::DiffPageEvent, _| {
             let text = match ev {
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
@@ -187,6 +200,7 @@ fn diff_page_ruled(
         page,
         settings: settings_out.expect("settings"),
         filters: filters_out.expect("filters were created"),
+        syntax: syntax_out.expect("cache was created"),
         http,
         events,
     }
@@ -255,11 +269,13 @@ fn an_unknown_patch_set_is_an_error_not_a_blank_page(cx: &mut TestAppContext) {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
         let filters = cx.new(|_| FileFilters::new(Vec::new()));
+        let syntax = cx.new(|_| SyntaxCache::new());
         cx.new(|cx| {
             DiffPage::new(
                 session,
                 settings,
                 filters,
+                syntax,
                 DiffRoute {
                     target: PatchSetNumber(9),
                     ..route("src/a.rs")
@@ -962,6 +978,7 @@ fn filtered_page(cx: &mut TestAppContext, path: &str, rules: Vec<FileFilter>) ->
         http(),
         gerrit_api::Auth::Anonymous,
         rules,
+        Vec::new(),
     )
 }
 
@@ -1044,4 +1061,104 @@ fn the_prefetch_goes_to_the_next_unskipped_file(cx: &mut TestAppContext) {
         p.http.requested()
     );
     assert_eq!(requests(&p.http, "src%2Fc.rs/diff"), 1);
+}
+
+// ---- syntax cache ----
+
+fn rust_body() -> Vec<u8> {
+    let body = serde_json::json!({
+        "meta_a": {"name": "src/a.rs", "content_type": "text/x-rust", "lines": 3},
+        "meta_b": {"name": "src/a.rs", "content_type": "text/x-rust", "lines": 3},
+        "change_type": "MODIFIED",
+        "content": [
+            {"ab": ["// hello", "fn main() {"]},
+            {"a": ["    let x = 1;"], "b": ["    let x = \"two\";"]},
+            {"ab": ["}"]},
+        ],
+    });
+    format!(")]}}'\n{body}").into_bytes()
+}
+
+fn a_key() -> DiffKey {
+    DiffKey {
+        change: ChangeNumber(7),
+        base: None,
+        target: ps(3),
+        path: "src/a.rs".into(),
+        whitespace: Whitespace::IgnoreNone,
+    }
+}
+
+/// Stands for a result only the cache could have: a real job fills the sides.
+fn marker() -> crate::diff::syntax::DiffSyntax {
+    crate::diff::syntax::DiffSyntax::default()
+}
+
+fn view_syntax_is_marker(cx: &mut TestAppContext, p: &Page) -> bool {
+    cx.update(|cx| {
+        let v = p.page.read(cx).view_for_test().expect("view");
+        v.read(cx)
+            .syntax_for_test()
+            .is_some_and(|s| s.old.is_none() && s.new.is_none())
+    })
+}
+
+#[gpui_kit::test]
+fn a_cache_hit_is_the_views_syntax_with_no_job(cx: &mut TestAppContext) {
+    let p = diff_page_ruled(
+        cx,
+        seeded(),
+        route("src/a.rs"),
+        http_with(rust_body()),
+        gerrit_api::Auth::Anonymous,
+        Vec::new(),
+        vec![(a_key(), Some(marker()))],
+    );
+    // A job would have replaced the marker with real sides.
+    assert!(view_syntax_is_marker(cx, &p));
+}
+
+#[gpui_kit::test]
+fn a_cache_hit_for_a_refetched_diff_replaces_the_colors_at_once(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(rust_body()));
+    assert!(!view_syntax_is_marker(cx, &p));
+    // The colors of the diff with trailing whitespace ignored are known.
+    cx.update(|cx| {
+        p.syntax.update(cx, |c, _| {
+            c.insert(
+                DiffKey {
+                    whitespace: Whitespace::IgnoreTrailing,
+                    ..a_key()
+                },
+                Some(marker()),
+            )
+        });
+    });
+    press(cx, p.window, &[",", "w", "escape"]);
+    assert!(view_syntax_is_marker(cx, &p));
+}
+
+#[gpui_kit::test]
+fn a_miss_is_highlighted_by_the_view_and_stored(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(rust_body()));
+    cx.update(|cx| {
+        let got = p.syntax.update(cx, |c, _| c.get(&a_key()));
+        let colored = got.expect("stored").expect("rust is colored");
+        assert!(colored.new.is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_plain_file_is_stored_as_plain(cx: &mut TestAppContext) {
+    let p = diff_page_with(cx, seeded(), "/COMMIT_MSG", http_with(rust_body()));
+    cx.update(|cx| {
+        let key = DiffKey {
+            path: "/COMMIT_MSG".into(),
+            ..a_key()
+        };
+        assert_eq!(
+            p.syntax.update(cx, |c, _| c.get(&key).map(|h| h.is_none())),
+            Some(true)
+        );
+    });
 }
