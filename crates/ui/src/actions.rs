@@ -415,7 +415,7 @@ pub fn diff_page_entries() -> Vec<Entry> {
         e(
             "] / [",
             KeyBinding::new("]", NextFile, Some(k)),
-            "Next / previous file that is not hidden or dimmed",
+            "Next / previous file that is not hidden or dimmed; ] on the last file goes back to the change",
         ),
         e("", KeyBinding::new("[", PrevFile, Some(k)), ""),
         e(
