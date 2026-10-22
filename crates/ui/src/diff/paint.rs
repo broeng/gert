@@ -46,9 +46,9 @@ impl Palette {
         let t = cx.theme();
         let dark = t.is_dark();
         let (alpha_row, alpha_mark, alpha_gutter) = if dark {
-            (0.14, 0.38, 0.24)
+            (0.24, 0.55, 0.40)
         } else {
-            (0.10, 0.30, 0.20)
+            (0.22, 0.50, 0.38)
         };
         let (cursor, cursor_alpha) = if focused {
             (t.primary, if dark { 0.16 } else { 0.12 })
