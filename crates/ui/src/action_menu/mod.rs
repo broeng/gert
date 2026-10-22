@@ -757,6 +757,11 @@ impl ActionDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn focused_row_for_test(&self, window: &Window) -> Option<usize> {
+        self.rev.rows.iter().position(|h| h.is_focused(window))
+    }
+
+    #[cfg(test)]
     pub(crate) fn message_focus_for_test(&self, cx: &App) -> FocusHandle {
         self.message.read(cx).focus_handle(cx)
     }
