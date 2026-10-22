@@ -954,15 +954,35 @@ impl ChangePage {
             .author
             .as_ref()
             .map_or_else(|| "Gerrit".to_owned(), Account::display);
+        // Folded, as in the Gerrit web UI: the message on one line. A click
+        // on the entry folds it out; once out, the text itself does not
+        // fold it back, so that its links stay clickable.
+        let open = self.open_messages.contains(&m.id);
+        let text = v_flex()
+            .id(("change-message-text", ix))
+            .flex_1()
+            .min_w_0()
+            .text_sm()
+            .when(auto, |d| d.text_color(muted));
+        let text = if open {
+            text.children(message_lines(ix, m, theme.info))
+        } else {
+            text.cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_message(ix, cx)))
+                .child(div().truncate().child(one_line(&m.message)))
+        };
         h_flex()
             .gap_3()
             .items_start()
             .child(
                 v_flex()
+                    .id(("change-message-author", ix))
                     .w(px(150.))
                     .flex_none()
                     .items_start()
                     .gap_0p5()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_message(ix, cx)))
                     .child(
                         div()
                             .text_sm()
@@ -973,26 +993,27 @@ impl ChangePage {
                     )
                     .when(auto, |d| d.child(pill("auto", muted))),
             )
+            .child(text)
             .child(
                 v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .text_sm()
-                    .when(auto, |d| d.text_color(muted))
-                    .children(message_lines(ix, m, theme.info)),
-            )
-            .child(
-                v_flex()
+                    .id(("change-message-meta", ix))
                     .w(px(80.))
                     .flex_none()
                     .items_end()
                     .text_xs()
                     .text_color(muted)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_message(ix, cx)))
                     .when_some(m.revision, |d, n| d.child(format!("PS{n}")))
                     .child(relative(Timestamp::now(), m.date, &TimeZone::system())),
             )
             .into_any_element()
     }
+}
+
+/// The message folded to one line: its lines joined by spaces.
+fn one_line(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn message_lines(ix: usize, m: &ChangeMessage, link: Hsla) -> Vec<AnyElement> {

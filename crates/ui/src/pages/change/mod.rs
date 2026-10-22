@@ -149,6 +149,9 @@ pub struct ChangePage {
     jump: bool,
     inline: HashMap<String, Inline>,
     commit_open: bool,
+    /// Change log entries the user unfolded, by message id; the others show
+    /// as one line.
+    open_messages: HashSet<String>,
     list: ListState,
     blocks: Vec<Block>,
     focus: FocusHandle,
@@ -231,6 +234,7 @@ impl ChangePage {
             jump: true,
             inline: HashMap::new(),
             commit_open: true,
+            open_messages: HashSet::new(),
             list: ListState::new(1, ListAlignment::Top, px(300.)),
             blocks: vec![Block::Header],
             focus: cx.focus_handle(),
@@ -1123,6 +1127,23 @@ impl ChangePage {
     fn toggle_commit(&mut self, _: &ToggleCommit, _: &mut Window, cx: &mut Context<Self>) {
         self.commit_open = !self.commit_open;
         self.remeasure(Block::Header);
+        cx.notify();
+    }
+
+    /// Folds the change log entry `ix` out to all its lines, or back to one.
+    pub(super) fn toggle_message(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .detail
+            .as_ref()
+            .and_then(|d| d.messages.get(ix))
+            .map(|m| m.id.clone())
+        else {
+            return;
+        };
+        if !self.open_messages.remove(&id) {
+            self.open_messages.insert(id);
+        }
+        self.remeasure(Block::Message(ix));
         cx.notify();
     }
 
