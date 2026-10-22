@@ -7775,6 +7775,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "gerrit-api",
+ "globset",
  "gpui-kit",
  "http",
  "jiff",

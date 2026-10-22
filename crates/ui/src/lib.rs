@@ -7,6 +7,7 @@ mod card;
 mod comments;
 pub mod diff;
 mod diff_load;
+pub mod filters;
 mod hint;
 mod labels;
 mod links;
