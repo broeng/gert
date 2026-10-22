@@ -1443,7 +1443,7 @@ impl Render for ActionDialog {
             .flex()
             .items_center()
             .justify_center()
-            .bg(theme.overlay)
+            .bg(crate::theme::modal_backdrop(cx))
             .child(
                 v_flex()
                     .id("action-dialog")

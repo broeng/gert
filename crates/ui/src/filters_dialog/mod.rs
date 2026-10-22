@@ -1037,7 +1037,7 @@ impl Render for FiltersDialog {
             .flex()
             .items_center()
             .justify_center()
-            .bg(theme.overlay)
+            .bg(crate::theme::modal_backdrop(cx))
             .child(
                 v_flex()
                     .id("filters-dialog")

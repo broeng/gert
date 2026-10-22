@@ -58,3 +58,11 @@ pub fn vote_button(strong: bool, cx: &App) -> ButtonCustomVariant {
         .active(hsla(217. / 360., 0.80, 0.46, 1.))
         .foreground(hsla(0., 0., 1., 1.))
 }
+
+/// The scrim behind the modal dialogs (reply, change actions, filters).
+/// The theme's `overlay` token is 5% black, which hardly shows on a dark
+/// page, so the dialogs use this instead.
+pub fn modal_backdrop(cx: &App) -> Hsla {
+    let alpha = if cx.theme().is_dark() { 0.55 } else { 0.3 };
+    hsla(0., 0., 0., alpha)
+}
