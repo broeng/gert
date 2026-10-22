@@ -375,3 +375,62 @@ fn actions_refresh_the_cached_change() {
     let d = block_on(c.set_private(n, false)).unwrap().unwrap();
     assert!(!d.summary.is_private);
 }
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn reviewer_topic_and_hashtag_edits_refresh_the_cached_change() {
+    let f = alice();
+    let c = &f.syncer;
+    let n = new_change();
+    block_on(c.refresh_change(n)).expect("detail");
+
+    let found = block_on(c.suggest_reviewers(n, "bo")).expect("suggest");
+    assert!(found.iter().any(|s| s.reviewer_input() != ""), "{found:?}");
+    // Suggestions are not cached.
+    assert!(
+        c.cached_change(n)
+            .unwrap()
+            .unwrap()
+            .detail
+            .reviewers
+            .is_empty()
+    );
+
+    let added = block_on(c.add_reviewer(n, "carol", model::ReviewerState::Cc, false)).unwrap();
+    assert!(added.result.is_added(), "{:?}", added.result);
+    let d = added.detail.expect("refreshed");
+    assert!(d.cc.iter().any(|a| a.username.as_deref() == Some("carol")));
+    assert_eq!(c.cached_change(n).unwrap().unwrap().detail, d);
+
+    // An unknown account is not an error but is not added; cache unchanged.
+    let bad = block_on(c.add_reviewer(
+        n,
+        "nobody-by-that-name",
+        model::ReviewerState::Reviewer,
+        false,
+    ));
+    if let Ok(bad) = bad {
+        assert!(!bad.result.is_added() && bad.detail.is_none());
+    }
+    assert_eq!(c.cached_change(n).unwrap().unwrap().detail, d);
+
+    let d = block_on(c.remove_reviewer(n, "carol")).unwrap().unwrap();
+    assert!(d.cc.is_empty() && d.reviewers.is_empty());
+
+    let d = block_on(c.set_topic(n, Some("sync-topic")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.summary.topic.as_deref(), Some("sync-topic"));
+    let d = block_on(c.set_topic(n, None)).unwrap().unwrap();
+    assert_eq!(d.summary.topic, None);
+
+    let d = block_on(c.edit_hashtags(n, &["one".into()], &[]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.summary.hashtags, ["one"]);
+    let d = block_on(c.edit_hashtags(n, &[], &["one".into()]))
+        .unwrap()
+        .unwrap();
+    assert!(d.summary.hashtags.is_empty());
+    assert_eq!(c.cached_change(n).unwrap().unwrap().detail, d);
+}

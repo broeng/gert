@@ -28,7 +28,8 @@ use base64::Engine as _;
 use futures::{FutureExt, executor::block_on, future::BoxFuture};
 use gerrit_api::{Auth, ChangeQuery, DiffParams, Error, GerritClient, HttpClient, HttpError};
 use model::{
-    ChangeNumber, ChangeStatus, DiffChangeType, DiffChunk, FileStatus, PatchSetNumber, RevisionId,
+    ChangeNumber, ChangeStatus, DiffChangeType, DiffChunk, FileStatus, PatchSetNumber,
+    ReviewerState, RevisionId, SuggestedReviewer,
 };
 
 /// Blocking `ureq` behind the async trait; fine for tests.
@@ -1051,4 +1052,133 @@ fn submit_needs_approval_then_merges() {
             .action("submit")
             .is_none()
     );
+}
+
+fn has(accounts: &[model::Account], username: &str) -> bool {
+    accounts
+        .iter()
+        .any(|a| a.username.as_deref() == Some(username))
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn reviewers_are_suggested_added_moved_and_removed() {
+    let c = alice();
+    let (n, _) = new_change("reviewers");
+
+    let found = block_on(c.suggest_reviewers(n, "bo", 10)).expect("suggest");
+    println!("suggested: {found:?}");
+    assert!(
+        found.iter().any(|s| matches!(s,
+            SuggestedReviewer::Account(a) if a.username.as_deref() == Some("bob"))),
+        "{found:?}"
+    );
+    assert!(
+        block_on(c.suggest_reviewers(n, "zzzqqq", 10))
+            .unwrap()
+            .is_empty()
+    );
+
+    let r = block_on(c.add_reviewer(n, "carol", ReviewerState::Reviewer, false)).expect("add");
+    assert!(r.is_added(), "{r:?}");
+    assert!(has(&r.reviewers, "carol"), "{r:?}");
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(has(&d.reviewers, "carol") && !has(&d.cc, "carol"));
+
+    // The same call with CC moves her.
+    let r = block_on(c.add_reviewer(n, "carol", ReviewerState::Cc, false)).expect("move");
+    assert!(r.is_added(), "{r:?}");
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(has(&d.cc, "carol") && !has(&d.reviewers, "carol"), "{d:?}");
+
+    block_on(c.remove_reviewer(n, "carol")).expect("remove");
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(!has(&d.cc, "carol") && !has(&d.reviewers, "carol"));
+
+    // By account id, and with an email-like string that needs encoding.
+    let bob = block_on(user("bob").account_self()).unwrap();
+    let r =
+        block_on(c.add_reviewer(n, &bob.id.to_string(), ReviewerState::Reviewer, false)).unwrap();
+    assert!(r.is_added(), "{r:?}");
+    block_on(c.remove_reviewer(n, &bob.id.to_string())).expect("remove by id");
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn adding_an_unknown_account_reports_an_error() {
+    let c = alice();
+    let (n, _) = new_change("reviewers-unknown");
+    // Gerrit answers 400 with the result; the client turns that into one.
+    let r = block_on(c.add_reviewer(n, "nobody-by-that-name", ReviewerState::Reviewer, false))
+        .expect("a result");
+    println!("{r:?}");
+    assert!(!r.is_added() && r.error.is_some(), "{r:?}");
+    assert!(r.reviewers.is_empty() && r.ccs.is_empty());
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(d.reviewers.is_empty() && d.cc.is_empty());
+    // Removing someone who is not on the change is not a success either.
+    assert!(block_on(c.remove_reviewer(n, "carol")).is_err());
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn topic_is_set_and_cleared() {
+    let c = alice();
+    let (n, _) = new_change("topic");
+    assert_eq!(block_on(c.get_change(n)).unwrap().summary.topic, None);
+    block_on(c.set_topic(n, Some("my topic/1"))).expect("set");
+    assert_eq!(
+        block_on(c.get_change(n)).unwrap().summary.topic.as_deref(),
+        Some("my topic/1")
+    );
+    block_on(c.set_topic(n, Some("other"))).expect("replace");
+    assert_eq!(
+        block_on(c.get_change(n)).unwrap().summary.topic.as_deref(),
+        Some("other")
+    );
+    block_on(c.set_topic(n, None)).expect("clear");
+    assert_eq!(block_on(c.get_change(n)).unwrap().summary.topic, None);
+    // Clearing again is harmless.
+    block_on(c.set_topic(n, Some(" "))).expect("clear again");
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn hashtags_are_added_and_removed() {
+    let c = alice();
+    let (n, _) = new_change("hashtags");
+    let tags = block_on(c.edit_hashtags(n, &["alpha".into(), "beta".into()], &[])).expect("add");
+    assert_eq!(tags, ["alpha", "beta"]);
+    let d = block_on(c.get_change(n)).unwrap();
+    assert_eq!(d.summary.hashtags, ["alpha", "beta"]);
+    let tags = block_on(c.edit_hashtags(n, &["gamma".into()], &["alpha".into()])).expect("edit");
+    assert_eq!(tags, ["beta", "gamma"]);
+    let tags = block_on(c.edit_hashtags(n, &[], &["beta".into(), "gamma".into()])).expect("clear");
+    assert!(tags.is_empty());
+    assert!(
+        block_on(c.get_change(n))
+            .unwrap()
+            .summary
+            .hashtags
+            .is_empty()
+    );
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn reviewer_topic_and_hashtag_edits_are_refused_without_permission() {
+    let (n, _) = new_change("edits-refused");
+    let bob = user("bob");
+    // Bob neither owns the change nor has edit rights on topics.
+    let topic = block_on(bob.set_topic(n, Some("x")));
+    println!("bob topic: {topic:?}");
+    let anon = anon();
+    assert!(matches!(
+        block_on(anon.set_topic(n, Some("x"))),
+        Err(Error::Unauthorized)
+    ));
+    assert!(matches!(
+        block_on(anon.add_reviewer(n, "bob", ReviewerState::Cc, false)),
+        Err(Error::Unauthorized)
+    ));
 }
