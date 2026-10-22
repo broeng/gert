@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 futures.workspace = true
 gerrit-api.workspace = true
+globset.workspace = true
 gpui-kit.workspace = true
 jiff.workspace = true
 log.workspace = true
