@@ -16,6 +16,7 @@ use crate::{
     action_menu::{ActionDialog, ActionEvent, Done},
     actions::{self, *},
     filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
+    goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, parse_link},
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
     outbox::{DraftOutbox, OutboxEvent},
@@ -86,6 +87,7 @@ pub fn init(cx: &mut App) {
     crate::reply::actions::bind_keys(cx);
     crate::action_menu::actions::bind_keys(cx);
     crate::filters_dialog::actions::bind_keys(cx);
+    crate::goto::bind_keys(cx);
 }
 
 pub struct Shell {
@@ -114,6 +116,9 @@ pub struct Shell {
     /// The Manage filters dialog while it is open (modal, like the others).
     filters_dialog: Option<Entity<FiltersDialog>>,
     filters_dialog_subs: Vec<Subscription>,
+    /// The Go to dialog while it is open (modal, like the others).
+    goto: Option<Entity<GotoDialog>>,
+    goto_subs: Vec<Subscription>,
     /// Shown in the title bar when nobody is signed in.
     app_name: SharedString,
     window_active: bool,
@@ -167,6 +172,7 @@ impl Shell {
             let modal = this.reply.as_ref().map(|d| d.focus_handle(cx));
             let modal = modal.or_else(|| this.menu.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.filters_dialog.as_ref().map(|d| d.focus_handle(cx)));
+            let modal = modal.or_else(|| this.goto.as_ref().map(|d| d.focus_handle(cx)));
             if let Some(handle) = modal {
                 window.focus(&handle, cx);
                 return;
@@ -203,6 +209,8 @@ impl Shell {
             menu_subs: Vec::new(),
             filters_dialog: None,
             filters_dialog_subs: Vec::new(),
+            goto: None,
+            goto_subs: Vec::new(),
             app_name: SharedString::default(),
             window_active: window.is_window_active(),
             credentials_task: None,
@@ -468,6 +476,7 @@ impl Shell {
         self.drop_reply(cx);
         self.drop_menu();
         self.drop_filters_dialog();
+        self.drop_goto();
         let mut route = self.nav.current().clone();
         if self.session.is_none() && route != Route::Login {
             self.nav.reset(Route::Login);
@@ -905,6 +914,101 @@ impl Shell {
         cx.notify();
     }
 
+    // ---- go to a change ----
+
+    /// Opens the change a link from the web UI points at, like the browser
+    /// would. The current page stays behind it in the history. A link that
+    /// does not parse opens the Go to dialog on it, which says why. Does
+    /// nothing before a server is set up.
+    pub fn open_link(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            log::warn!("not opening {text}: no server is set up");
+            return;
+        };
+        match parse_link(text, &session.base_url) {
+            Ok(link) => self.open_change_link(&link, window, cx),
+            Err(e) => self.show_goto(text.trim().to_owned(), Some(e), window, cx),
+        }
+    }
+
+    fn open_change_link(&mut self, link: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
+        let (route, view) = link.route();
+        self.remember_selection(cx);
+        self.nav.push(route);
+        if view.is_some() {
+            self.nav.set_change_view(view);
+        }
+        self.show(window, cx);
+    }
+
+    /// `g`: the dialog, with the first line of the clipboard in it.
+    fn open_goto(&mut self, _: &OpenGoto, window: &mut Window, cx: &mut Context<Self>) {
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .and_then(|t| {
+                t.lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        self.show_goto(text, None, window, cx);
+    }
+
+    fn show_goto(
+        &mut self,
+        text: String,
+        error: Option<LinkError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let modal_open = self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.goto.is_some();
+        let Some(base_url) = self.session.as_ref().map(|s| s.base_url.clone()) else {
+            return;
+        };
+        if modal_open {
+            return;
+        }
+        if self.help {
+            self.toggle_help(&ToggleHelp, window, cx);
+        }
+        let dialog = cx.new(|cx| GotoDialog::new(base_url, text, error, window, cx));
+        self.goto_subs.push(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, ev: &GotoEvent, window, cx| match ev {
+                GotoEvent::Close => this.close_goto(window, cx),
+                GotoEvent::Open(link) => {
+                    this.drop_goto();
+                    this.open_change_link(link, window, cx);
+                }
+            },
+        ));
+        self.goto = Some(dialog);
+        cx.notify();
+    }
+
+    fn drop_goto(&mut self) {
+        self.goto_subs.clear();
+        self.goto = None;
+    }
+
+    fn close_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_goto();
+        let handle = self.page.focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn goto_for_test(&self) -> Option<Entity<GotoDialog>> {
+        self.goto.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn filters_for_test(&self) -> &Entity<FileFilters> {
         &self.filters
@@ -1289,6 +1393,7 @@ impl Render for Shell {
                     .on_action(cx.listener(Self::go_up))
                     .on_action(cx.listener(Self::open_settings))
                     .on_action(cx.listener(Self::focus_search))
+                    .on_action(cx.listener(Self::open_goto))
                     .on_action(cx.listener(Self::toggle_help))
                     .on_action(cx.listener(Self::dismiss))
                     .relative()
@@ -1302,7 +1407,8 @@ impl Render for Shell {
                     .when(self.help, |d| d.child(self.render_help(cx)))
                     .children(self.reply.clone())
                     .children(self.menu.clone())
-                    .children(self.filters_dialog.clone()),
+                    .children(self.filters_dialog.clone())
+                    .children(self.goto.clone()),
             )
     }
 }

@@ -24,6 +24,8 @@ actions!(
         Dismiss,
         /// `ctrl-,` / `cmd-,`: open the settings page.
         OpenSettings,
+        /// `g`: the Go to dialog (open a change from a link to it).
+        OpenGoto,
         // Settings page.
         /// `Enter` / `e`: edit the selected saved query.
         EditQuery,
@@ -130,7 +132,8 @@ pub const SEARCH_BAR: &str = "SearchBar";
 
 // Single-letter bindings must not fire while text is being typed; the text
 // input marks its key context "Input".
-const SHELL_KEYS: &str = "Shell && !Input && !ReplyDialog && !ActionDialog && !FiltersDialog";
+const SHELL_KEYS: &str =
+    "Shell && !Input && !ReplyDialog && !ActionDialog && !FiltersDialog && !GotoDialog";
 const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
 const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
@@ -142,7 +145,8 @@ const SETTINGS_EDIT: &str = "SettingsPage && Editing";
 /// the reply dialog's fields).
 const SETTINGS_FIELD: &str = "Editing > Input";
 /// Opening the settings works from anywhere but the modal dialogs.
-const SETTINGS_OPEN: &str = "Shell && !ReplyDialog && !ActionDialog && !FiltersDialog";
+const SETTINGS_OPEN: &str =
+    "Shell && !ReplyDialog && !ActionDialog && !FiltersDialog && !GotoDialog";
 
 /// All shell-level and list entries (what the help overlay called
 /// "everything" before the pages grew their own).
@@ -177,6 +181,7 @@ pub fn help_groups() -> Vec<HelpGroup> {
             crate::filters_dialog::actions::entries(),
         ),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
+        g("Go to a change ( G )", crate::goto::entries()),
     ]
 }
 
@@ -681,6 +686,11 @@ pub fn global_entries() -> Vec<Entry> {
             "Search",
         ),
         e(
+            "G",
+            KeyBinding::new("g", OpenGoto, Some(SHELL_KEYS)),
+            "Go to a change: paste a link to it from the web UI (the clipboard is filled in)",
+        ),
+        e(
             "?",
             KeyBinding::new("?", ToggleHelp, Some(SHELL_KEYS)),
             "Show or hide this help",
@@ -737,6 +747,7 @@ mod tests {
             .chain(crate::reply::actions::entries())
             .chain(crate::action_menu::actions::entries())
             .chain(crate::filters_dialog::actions::entries())
+            .chain(crate::goto::entries())
             .collect()
     }
 
