@@ -415,6 +415,34 @@ impl ActionDialog {
 
     // ---- rendering ----
 
+    /// The person's current votes, `CR +2  V +1`, coloured by sign.
+    fn vote_chips(
+        &self,
+        account: model::AccountId,
+        theme: &gpui_kit::component::Theme,
+    ) -> Option<Div> {
+        let votes = crate::labels::votes_of(&self.detail, account);
+        if votes.is_empty() {
+            return None;
+        }
+        Some(
+            h_flex()
+                .flex_none()
+                .gap_2()
+                .text_xs()
+                .children(votes.into_iter().map(|(label, value)| {
+                    let color = if value > 0 {
+                        theme.success
+                    } else {
+                        theme.danger
+                    };
+                    div()
+                        .text_color(color)
+                        .child(format!("{label} {}", crate::reply::plan::vote_text(value)))
+                })),
+        )
+    }
+
     pub(super) fn render_reviewers(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -480,6 +508,7 @@ impl ActionDialog {
                             d.child(div().text_xs().text_color(muted).child("CC"))
                         })
                         .child(div().min_w_0().flex_1().truncate().child(a.display()))
+                        .children(self.vote_chips(a.id, &theme))
                         .when_some(a.email.clone(), |d, e| {
                             d.child(
                                 div()
