@@ -62,6 +62,13 @@ impl SideSyntax {
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
+
+    #[cfg(test)]
+    pub(crate) fn blank_for_test(lines: usize) -> Self {
+        Self {
+            lines: vec![Vec::new(); lines],
+        }
+    }
 }
 
 /// Highlighting for both sides of a diff. A side is `None` when it does not
