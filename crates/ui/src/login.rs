@@ -123,11 +123,19 @@ pub(crate) mod tests {
     pub struct FakeBackend {
         pub saved: Mutex<Vec<Saved>>,
         pub fail: bool,
+        pub saved_queries: Mutex<Vec<Vec<SavedQuery>>>,
     }
 
     impl Backend for FakeBackend {
         fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
             Ok(None)
+        }
+        fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_queries.lock().unwrap().push(queries.to_vec());
+            Ok(queries.to_vec())
         }
         fn save_login(
             &self,

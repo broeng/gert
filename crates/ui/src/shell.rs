@@ -7,7 +7,7 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
-use gpui_kit::component::{TitleBar, window_border};
+use gpui_kit::component::{IconName, TitleBar, window_border};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use model::{ChangeDetail, ChangeNumber};
@@ -23,6 +23,7 @@ use crate::{
         diff::{DiffPage, DiffPageEvent},
         list::{ChangeListPage, ListEvent, ListKind},
         login::{LoginPage, LoginPrefill},
+        settings::{SettingsEvent, SettingsPage},
     },
     reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
@@ -35,6 +36,7 @@ enum Page {
     List(Entity<ChangeListPage>),
     Change(Entity<ChangePage>),
     Diff(Entity<DiffPage>),
+    Settings(Entity<SettingsPage>),
 }
 
 impl Page {
@@ -44,6 +46,7 @@ impl Page {
             Page::List(p) => p.focus_handle(cx),
             Page::Change(p) => p.focus_handle(cx),
             Page::Diff(p) => p.focus_handle(cx),
+            Page::Settings(p) => p.focus_handle(cx),
         }
     }
 
@@ -53,6 +56,7 @@ impl Page {
             Page::List(p) => p.clone().into_any_element(),
             Page::Change(p) => p.clone().into_any_element(),
             Page::Diff(p) => p.clone().into_any_element(),
+            Page::Settings(p) => p.clone().into_any_element(),
         }
     }
 
@@ -61,7 +65,7 @@ impl Page {
             Page::Login(_) => {}
             Page::List(p) => p.update(cx, |p, cx| p.set_window_active(active, cx)),
             Page::Change(p) => p.update(cx, |p, cx| p.set_window_active(active, cx)),
-            Page::Diff(_) => {}
+            Page::Diff(_) | Page::Settings(_) => {}
         }
     }
 }
@@ -408,6 +412,19 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn queries_for_test(&self) -> &[SavedQuery] {
+        &self.queries
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settings_page_for_test(&self) -> Option<Entity<SettingsPage>> {
+        match &self.page {
+            Page::Settings(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn settings(&self) -> &Entity<DiffSettings> {
         &self.settings
     }
@@ -446,6 +463,7 @@ impl Shell {
                 }];
                 self.list_page(session, ListKind::Search, spec, restore, active, window, cx)
             }
+            (Route::Settings, Some(_)) => self.settings_page(window, cx),
             (Route::Diff(route), Some(session)) => self.diff_page(session, route, window, cx),
             (Route::Change(n), Some(session)) => {
                 let view = self.nav.change_view().unwrap_or_default();
@@ -495,6 +513,24 @@ impl Shell {
             },
         ));
         Page::List(page)
+    }
+
+    fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Page {
+        let env = self.env.clone();
+        let queries = self.queries.clone();
+        let page = cx.new(|cx| SettingsPage::new(env, queries, window, cx));
+        self.page_subs.push(
+            cx.subscribe_in(
+                &page,
+                window,
+                |this, _, ev: &SettingsEvent, _, _| match ev {
+                    // The dashboard is built from this list when it is shown
+                    // again, from the cache for the queries it already knew.
+                    SettingsEvent::QueriesSaved(queries) => this.queries = queries.clone(),
+                },
+            ),
+        );
+        Page::Settings(page)
     }
 
     fn change_page(
@@ -808,6 +844,12 @@ impl Shell {
         }
     }
 
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_some() {
+            self.navigate(Route::Settings, window, cx);
+        }
+    }
+
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
         if self.session.is_some() {
             self.search.update(cx, |s, cx| s.focus(window, cx));
@@ -927,11 +969,21 @@ impl Shell {
                             .child(Input::new(&self.search).small()),
                     ))
                     .child(div().flex_1().h_full())
-                    .child(no_drag(div().child(
-                        Button::new("help").label("?").small().on_click(
-                            cx.listener(|this, _, w, cx| this.toggle_help(&ToggleHelp, w, cx)),
-                        ),
-                    )))
+                    .child(no_drag(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("settings")
+                                    .icon(IconName::Settings)
+                                    .small()
+                                    .on_click(cx.listener(|this, _, w, cx| {
+                                        this.open_settings(&OpenSettings, w, cx)
+                                    })),
+                            )
+                            .child(Button::new("help").label("?").small().on_click(
+                                cx.listener(|this, _, w, cx| this.toggle_help(&ToggleHelp, w, cx)),
+                            )),
+                    ))
             }
         };
         TitleBar::new().child(content)
@@ -1121,6 +1173,7 @@ impl Render for Shell {
                     .on_action(cx.listener(Self::go_back))
                     .on_action(cx.listener(Self::go_forward))
                     .on_action(cx.listener(Self::go_up))
+                    .on_action(cx.listener(Self::open_settings))
                     .on_action(cx.listener(Self::focus_search))
                     .on_action(cx.listener(Self::toggle_help))
                     .on_action(cx.listener(Self::dismiss))

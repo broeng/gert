@@ -33,6 +33,10 @@ pub trait Backend: Send + Sync + 'static {
         username: Option<&str>,
         password: Option<&str>,
     ) -> Result<Vec<SavedQuery>, BackendError>;
+
+    /// Writes the saved queries to the config file, keeping the rest of it
+    /// as it is. Returns the list now in effect.
+    fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError>;
 }
 
 /// The pieces every page needs, handed over by `app`.

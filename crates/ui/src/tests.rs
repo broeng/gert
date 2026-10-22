@@ -323,6 +323,10 @@ mod drafts {
             Ok(Some("secret".into()))
         }
 
+        fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+            Err(BackendError("not used".into()))
+        }
+
         fn save_login(
             &self,
             _: &str,
@@ -472,5 +476,192 @@ mod drafts {
         cx.run_until_parked();
         assert_eq!(uploads(&http), before + 1);
         assert_eq!(counts(cx, &shell), (0, 0));
+    }
+}
+
+// --- the settings page ---------------------------------------------------
+
+mod settings_page {
+    use std::sync::Arc;
+
+    use gerrit_api::fake::FakeHttpClient;
+    use gpui_kit::component::input::InputState;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext};
+    use model::ChangeNumber;
+
+    use super::{env_with, open, seeded, setup, spec};
+    use crate::{
+        login::tests::FakeBackend,
+        nav::Route,
+        session::{Env, Startup},
+        shell::Shell,
+    };
+
+    struct Fixture {
+        window: AnyWindowHandle,
+        shell: Entity<Shell>,
+        backend: Arc<FakeBackend>,
+    }
+
+    fn fixture(cx: &mut TestAppContext, fail: bool) -> Fixture {
+        let backend = Arc::new(FakeBackend {
+            fail,
+            ..Default::default()
+        });
+        let env = Env {
+            backend: backend.clone(),
+            ..env_with(
+                seeded(&[("status:open", &[1]), ("owner:self", &[2])]),
+                &FakeHttpClient::new(),
+            )
+        };
+        let startup = Startup {
+            env,
+            server: Some(setup()),
+            queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
+            diff: Default::default(),
+        };
+        let (window, shell) = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        Fixture {
+            window,
+            shell,
+            backend,
+        }
+    }
+
+    fn press(cx: &mut TestAppContext, f: &Fixture, key: &'static str) {
+        cx.update_window(f.window, |_, window, cx| window.press(key, cx))
+            .expect("press");
+        cx.run_until_parked();
+    }
+
+    fn open_settings(cx: &mut TestAppContext, f: &Fixture) {
+        press(
+            cx,
+            f,
+            if cfg!(target_os = "macos") {
+                "cmd-,"
+            } else {
+                "ctrl-,"
+            },
+        );
+    }
+
+    fn names(cx: &mut TestAppContext, f: &Fixture) -> Vec<String> {
+        cx.update(|cx| {
+            f.shell
+                .read(cx)
+                .queries_for_test()
+                .iter()
+                .map(|q| q.name.clone())
+                .collect()
+        })
+    }
+
+    fn type_into(
+        cx: &mut TestAppContext,
+        f: &Fixture,
+        input: &Entity<InputState>,
+        text: &'static str,
+    ) {
+        cx.update_window(f.window, |_, window, cx| {
+            input.update(cx, |s, cx| s.set_value(text, window, cx))
+        })
+        .expect("set value");
+    }
+
+    fn inputs(cx: &mut TestAppContext, f: &Fixture) -> (Entity<InputState>, Entity<InputState>) {
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            page.read(cx).inputs_for_test()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn the_key_opens_the_page_and_u_goes_back_to_the_dashboard(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Settings));
+        press(cx, &f, "u");
+        cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Dashboard));
+    }
+
+    #[gpui_kit::test]
+    fn moving_a_query_saves_it_and_the_dashboard_follows(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        press(cx, &f, "shift-j");
+        assert_eq!(names(cx, &f), ["Mine", "Open"]);
+        let saved = f.backend.saved_queries.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0][0].query, "owner:self");
+
+        // The dashboard shows the new order, rows straight from the cache.
+        press(cx, &f, "u");
+        cx.update(|cx| {
+            let list = f.shell.read(cx).list_page_for_test().expect("dashboard");
+            let list = list.read(cx);
+            assert_eq!(list.visible_rows(0)[0].number, ChangeNumber(2));
+            assert_eq!(list.visible_rows(1)[0].number, ChangeNumber(1));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn editing_adding_and_deleting(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+
+        // Edit the first row's name; an empty name is refused with a reason.
+        press(cx, &f, "e");
+        let (name, query) = inputs(cx, &f);
+        type_into(cx, &f, &name, "");
+        press(cx, &f, "enter");
+        assert!(f.backend.saved_queries.lock().unwrap().is_empty());
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            assert!(page.read(cx).editing_for_test());
+        });
+        type_into(cx, &f, &name, "Opened");
+        type_into(cx, &f, &query, "status:open project:x");
+        press(cx, &f, "enter");
+        assert_eq!(names(cx, &f), ["Opened", "Mine"]);
+
+        // Add a row; Escape cancels it.
+        press(cx, &f, "a");
+        press(cx, &f, "escape");
+        assert_eq!(names(cx, &f).len(), 2);
+        press(cx, &f, "a");
+        type_into(cx, &f, &name, "New");
+        type_into(cx, &f, &query, "is:wip");
+        press(cx, &f, "enter");
+        assert_eq!(names(cx, &f), ["Opened", "Mine", "New"]);
+
+        // Delete asks first; n keeps it, y removes it.
+        press(cx, &f, "d");
+        press(cx, &f, "n");
+        assert_eq!(names(cx, &f).len(), 3);
+        press(cx, &f, "d");
+        press(cx, &f, "y");
+        // The cursor was on the new row.
+        assert_eq!(names(cx, &f), ["Opened", "Mine"]);
+        assert_eq!(f.backend.saved_queries.lock().unwrap().len(), 3);
+    }
+
+    #[gpui_kit::test]
+    fn a_failed_save_changes_nothing_and_says_so(cx: &mut TestAppContext) {
+        let f = fixture(cx, true);
+        open_settings(cx, &f);
+        press(cx, &f, "shift-j");
+        assert_eq!(names(cx, &f), ["Open", "Mine"]);
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            let (text, error) = page.read(cx).hint_for_test().expect("hint");
+            assert!(error && text.contains("disk full"), "{text}");
+            assert_eq!(page.read(cx).queries_for_test().len(), 2);
+        });
     }
 }

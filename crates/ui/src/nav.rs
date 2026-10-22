@@ -9,6 +9,7 @@ pub enum Route {
     Login,
     Dashboard,
     Search(String),
+    Settings,
     Change(ChangeNumber),
     /// One file's diff, like PolyGerrit's `/c/proj/+/123/2..5/path`.
     Diff(DiffRoute),
@@ -171,7 +172,7 @@ impl NavState {
     pub fn up_target(&self) -> Option<Route> {
         match self.current() {
             Route::Login | Route::Dashboard => None,
-            Route::Search(_) => Some(Route::Dashboard),
+            Route::Search(_) | Route::Settings => Some(Route::Dashboard),
             Route::Diff(d) => Some(Route::Change(d.change)),
             Route::Change(_) => Some(
                 self.entries[..self.index]
