@@ -9,7 +9,7 @@ use crate::actions::Entry;
 actions!(
     action_menu,
     [
-        /// Esc: close the menu or the dialog.
+        /// Esc: go back to the menu, or close the dialog from the menu.
         CloseMenu,
         /// Ctrl-Enter / Cmd-Enter: run the action in a confirmation dialog.
         ConfirmAction,
@@ -141,7 +141,7 @@ pub fn entries() -> Vec<Entry> {
             "escape",
             CloseMenu,
             ACTION_DIALOG,
-            "Close the menu, or cancel",
+            "Close the menu, or go back to it from a step",
         ),
         e(
             "Tab / Shift-Tab",

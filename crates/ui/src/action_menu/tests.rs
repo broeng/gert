@@ -261,13 +261,17 @@ fn a_mnemonic_that_is_not_offered_does_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn escape_closes_the_menu_and_a_confirmation(cx: &mut TestAppContext) {
+fn escape_closes_the_menu_and_leaves_a_confirmation_for_the_menu(cx: &mut TestAppContext) {
     let f = dialog(cx, change(), |_| {});
     press(cx, &f, &["escape"]);
     assert_eq!(events(&f), ["close"]);
     let f = dialog(cx, change(), |_| {});
     press(cx, &f, &["s"]);
     assert_eq!(step(cx, &f), "Confirm(Submit)");
+    press(cx, &f, &["escape"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert!(events(&f).is_empty());
+    // The menu has the keyboard again.
     press(cx, &f, &["escape"]);
     assert_eq!(events(&f), ["close"]);
     assert!(writes(&f).is_empty());
@@ -424,7 +428,10 @@ fn a_409_keeps_the_dialog_with_the_servers_message(cx: &mut TestAppContext) {
         Some("Not rebased: Change is already up to date.")
     );
     assert!(events(&f).is_empty());
-    // It can be tried again, or cancelled.
+    // It can be tried again, or Esc goes back to the menu and closes.
+    press(cx, &f, &["escape"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert_eq!(error(cx, &f), None);
     press(cx, &f, &["escape"]);
     assert_eq!(events(&f), ["close"]);
 }

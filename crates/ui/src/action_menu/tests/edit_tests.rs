@@ -144,7 +144,11 @@ fn enter_adds_as_reviewer_and_the_step_stays_open(cx: &mut TestAppContext) {
     assert_eq!(names, [2, 4]);
     // The field is empty again and ready for the next person.
     assert!(suggestions(cx, &f).is_empty());
-    // Esc closes the dialog, and the page gets the detail.
+    // Esc goes back to the menu, a second one closes the dialog, and the
+    // page gets the detail.
+    press(cx, &f, &["escape"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert!(events(&f).is_empty());
     press(cx, &f, &["escape"]);
     assert_eq!(events(&f), ["done Reviewers detail=true"]);
 }
@@ -234,7 +238,7 @@ fn delete_on_a_listed_reviewer_removes_it(cx: &mut TestAppContext) {
     press(cx, &f, &["tab", "delete"]);
     assert_eq!(writes(&f), ["DELETE /a/changes/7/reviewers/2"]);
     assert_eq!(step(cx, &f), "Reviewers");
-    press(cx, &f, &["escape"]);
+    press(cx, &f, &["escape", "escape"]);
     assert_eq!(events(&f), ["done Reviewers detail=true"]);
 }
 
@@ -251,6 +255,8 @@ fn enter_on_a_listed_reviewer_moves_it_to_cc(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn closing_without_a_change_is_a_plain_close(cx: &mut TestAppContext) {
     let f = reviewers_step(cx);
+    press(cx, &f, &["escape"]);
+    assert_eq!(step(cx, &f), "Menu");
     press(cx, &f, &["escape"]);
     assert_eq!(events(&f), ["close"]);
 }
@@ -291,6 +297,18 @@ fn the_topic_is_prefilled_and_saved_or_cleared(cx: &mut TestAppContext) {
     press(cx, &f, &["t", "backspace", "backspace", "enter"]);
     assert_eq!(writes(&f), ["DELETE /a/changes/7/topic"]);
     assert_eq!(events(&f), ["done Topic detail=false"]);
+}
+
+#[gpui_kit::test]
+fn escape_in_the_topic_and_hashtag_steps_goes_back_to_the_menu(cx: &mut TestAppContext) {
+    let f = dialog(cx, hashtagged(), |_| {});
+    press(cx, &f, &["t", "escape"]);
+    assert_eq!(step(cx, &f), "Menu");
+    press(cx, &f, &["h", "escape"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert!(events(&f).is_empty());
+    press(cx, &f, &["escape"]);
+    assert_eq!(events(&f), ["close"]);
 }
 
 #[gpui_kit::test]

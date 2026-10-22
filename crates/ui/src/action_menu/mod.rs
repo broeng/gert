@@ -22,12 +22,13 @@
 //!    picks. The mnemonics work only here.
 //! 2. A confirmation for submit, rebase, abandon, restore and WIP, with an
 //!    optional message (abandon, restore, WIP) or base (rebase). `Ctrl-Enter`
-//!    (`Cmd-Enter`) confirms, `Esc` cancels. Ready and the private toggles
-//!    run right from the menu.
+//!    (`Cmd-Enter`) confirms, `Esc` goes back to the menu (and from the
+//!    menu closes the dialog). Ready and the private toggles run right
+//!    from the menu.
 //! 3. Reviewers (`v`), topic (`t`) and hashtags (`h`) are steps of their own
 //!    with text fields: see `reviewers` and `tags`. The reviewers step stays
-//!    open after each change; `Esc` closes the dialog and the page takes the
-//!    new detail.
+//!    open after each change; `Esc` goes back to the menu, and closing the
+//!    menu gives the page the new detail.
 //! 4. Running: the request goes out on the background executor and `Esc`
 //!    does not cancel it. A refused action (403, 409, ...) goes back to the
 //!    step it came from with the server's message; 401 goes to the login
@@ -535,21 +536,35 @@ impl ActionDialog {
 
     // ---- closing, focus ----
 
+    /// Esc: from a step back to the menu, from the menu out of the dialog.
     fn close_action(&mut self, _: &CloseMenu, _: &mut Window, cx: &mut Context<Self>) {
-        self.close(cx);
+        if self.step == Step::Menu {
+            self.close(cx);
+        } else {
+            self.back(cx);
+        }
+    }
+
+    /// Leaves a step for the menu, keeping what was typed. Not while an
+    /// action runs.
+    fn back(&mut self, cx: &mut Context<Self>) {
+        if self.running() || self.step == Step::Menu {
+            return;
+        }
+        self.step = Step::Menu;
+        self.error = None;
+        self.pending_focus = Some(self.focus.clone());
+        cx.notify();
     }
 
     /// Closes the dialog. Not while an action runs: the request is under
-    /// way and cannot be taken back.
+    /// way and cannot be taken back. If reviewers were changed on the way
+    /// the page is told, so it takes the new detail.
     pub fn close(&mut self, cx: &mut Context<Self>) {
         if self.running() {
             return;
         }
-        if self.step == Step::Reviewers {
-            self.close_reviewers(cx);
-        } else {
-            cx.emit(ActionEvent::Close);
-        }
+        self.close_reviewers(cx);
     }
 
     fn tab_order(&self, cx: &App) -> Vec<FocusHandle> {
@@ -963,9 +978,9 @@ impl Render for ActionDialog {
         };
         let running = self.running();
         let confirm_hint = if cfg!(target_os = "macos") {
-            "Cmd-Enter confirms, Esc cancels"
+            "Cmd-Enter confirms, Esc goes back"
         } else {
-            "Ctrl-Enter confirms, Esc cancels"
+            "Ctrl-Enter confirms, Esc goes back"
         };
         let body = match step {
             Step::Menu => self.render_menu(window, cx),
@@ -986,7 +1001,7 @@ impl Render for ActionDialog {
                 .items_center()
                 .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(
                     "Enter adds a reviewer, Shift-Enter a CC, Up/Down choose. \
-                     Tab to the list: Enter moves, Delete removes. Esc closes",
+                     Tab to the list: Enter moves, Delete removes. Esc goes back",
                 ))
                 .child(
                     chip(
@@ -1006,9 +1021,9 @@ impl Render for ActionDialog {
                 .items_center()
                 .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(
                     if step == Step::Hashtags {
-                        "Enter applies, Tab to a hashtag and Delete removes it, Esc cancels"
+                        "Enter applies, Tab to a hashtag and Delete removes it, Esc goes back"
                     } else {
-                        "Enter saves, Esc cancels"
+                        "Enter saves, Esc goes back"
                     },
                 ))
                 .child(
@@ -1021,7 +1036,7 @@ impl Render for ActionDialog {
                         window,
                         cx,
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
                 )
                 .child(
                     chip(
@@ -1066,7 +1081,7 @@ impl Render for ActionDialog {
                         window,
                         cx,
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
                 )
                 .child(
                     chip(
