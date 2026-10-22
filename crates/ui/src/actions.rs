@@ -553,14 +553,15 @@ pub fn list_entries() -> Vec<Entry> {
     ]
 }
 
-/// Entries of the settings page (the saved-queries editor).
+/// Entries of the settings page (saved queries, startup page, review flow and
+/// file filters).
 pub fn settings_entries() -> Vec<Entry> {
     let b = SETTINGS_BROWSE;
     vec![
         e(
             "j / k",
             KeyBinding::new("j", SelectNext, Some(b)),
-            "Next / previous saved query",
+            "Next / previous row",
         ),
         e("", KeyBinding::new("k", SelectPrev, Some(b)), ""),
         e("", KeyBinding::new("down", SelectNext, Some(b)), ""),
@@ -568,7 +569,7 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "Enter / e",
             KeyBinding::new("enter", EditQuery, Some(b)),
-            "Edit the query (Tab: other field, Enter: save, Esc: cancel)",
+            "Edit the query (Tab: other field, Enter: save, Esc: cancel); on a file filter: open the dialog on it",
         ),
         e("", KeyBinding::new("e", EditQuery, Some(b)), ""),
         e(
@@ -576,11 +577,15 @@ pub fn settings_entries() -> Vec<Entry> {
             KeyBinding::new("space", ToggleSetting, Some(b)),
             "Startup page: dashboard or search; advance after a vote: on or off",
         ),
-        e("a", KeyBinding::new("a", AddQuery, Some(b)), "Add a query"),
+        e(
+            "a",
+            KeyBinding::new("a", AddQuery, Some(b)),
+            "Add a query; in File filters: a new rule in the dialog",
+        ),
         e(
             "d",
             KeyBinding::new("d", DeleteQuery, Some(b)),
-            "Delete the query (y / Enter: yes, n / Esc: no)",
+            "Delete the query (y / Enter: yes, n / Esc: no); on a file filter: open the dialog on it",
         ),
         e(
             "Shift-J / Shift-K",

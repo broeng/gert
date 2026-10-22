@@ -83,6 +83,8 @@ pub struct FiltersContext {
     pub paths: Option<Vec<String>>,
     /// The name of the rule to put the cursor on first.
     pub select: Option<String>,
+    /// Start on a new rule, in the form.
+    pub start_adding: bool,
 }
 
 pub struct FiltersDialog {
@@ -223,6 +225,9 @@ impl FiltersDialog {
         };
         this.load_selected(window, cx);
         window.focus(&this.focus, cx);
+        if context.start_adding {
+            this.start_edit(this.rules.len(), window, cx);
+        }
         this
     }
 

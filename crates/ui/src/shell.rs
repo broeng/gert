@@ -545,19 +545,26 @@ impl Shell {
         let env = self.env.clone();
         let queries = self.queries.clone();
         let (start, layout) = (self.start_page.clone(), self.layout.clone());
-        let page = cx.new(|cx| SettingsPage::new(env, queries, start, layout, window, cx));
-        self.page_subs.push(
-            cx.subscribe_in(
-                &page,
-                window,
-                |this, _, ev: &SettingsEvent, _, _| match ev {
-                    // The dashboard is built from this list when it is shown
-                    // again, from the cache for the queries it already knew.
-                    SettingsEvent::QueriesSaved(queries) => this.queries = queries.clone(),
-                    SettingsEvent::StartupSaved(page) => this.start_page = page.clone(),
-                },
-            ),
-        );
+        let filters = self.filters.clone();
+        let page = cx.new(|cx| SettingsPage::new(env, queries, start, layout, filters, window, cx));
+        self.page_subs.push(cx.subscribe_in(
+            &page,
+            window,
+            |this, _, ev: &SettingsEvent, window, cx| match ev {
+                // The dashboard is built from this list when it is shown
+                // again, from the cache for the queries it already knew.
+                SettingsEvent::QueriesSaved(queries) => this.queries = queries.clone(),
+                SettingsEvent::StartupSaved(page) => this.start_page = page.clone(),
+                SettingsEvent::ManageFilters { select, add } => {
+                    let context = FiltersContext {
+                        select: select.clone(),
+                        start_adding: *add,
+                        ..Default::default()
+                    };
+                    this.open_filters_dialog(context, window, cx)
+                }
+            },
+        ));
         Page::Settings(page)
     }
 
@@ -596,6 +603,7 @@ impl Shell {
                         project: Some(project.clone()),
                         paths,
                         select: None,
+                        start_adding: false,
                     };
                     this.open_filters_dialog(context, window, cx)
                 }
@@ -886,6 +894,11 @@ impl Shell {
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filters_for_test(&self) -> &Entity<FileFilters> {
+        &self.filters
     }
 
     #[cfg(test)]
