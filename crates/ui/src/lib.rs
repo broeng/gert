@@ -33,4 +33,4 @@ mod tests;
 pub use login::{LoginError, LoginOutcome, LoginRequest};
 pub use session::{Backend, BackendError, Env, LocalDiff, SavedQuery, ServerSetup, Startup};
 pub use shell::{Shell, init};
-pub use window::{application, window_options};
+pub use window::{application, ensure_maximized, window_options};

@@ -4,7 +4,7 @@
 //! memory. Sign-in is pre-arranged as the user `alice`.
 //!
 //! ```text
-//! cargo run -p ui --example review [--dark|--light] [--unified] [--font NAME] [--files N] [--csd]
+//! cargo run -p ui --example review [--dark|--light] [--unified] [--font NAME] [--files N] [--changes N] [--chain N] [--csd]
 //!                                   [--drafts ok|fail|offline]
 //! ```
 //!
@@ -77,6 +77,51 @@ fn read(rel: &str) -> Vec<u8> {
         eprintln!("review: {}: {e}", path.display());
         std::process::exit(2);
     })
+}
+
+/// The query result with `n` changes: the fixture's three, then copies with
+/// new numbers (`--changes N`), to fill and overflow the window.
+fn many_changes(n: usize) -> Vec<u8> {
+    let body = read("example/query.json");
+    let text = String::from_utf8_lossy(&body);
+    let Ok(serde_json::Value::Array(base)) =
+        serde_json::from_str(text.trim_start_matches(")]}'")).map_err(|_| ())
+    else {
+        return body;
+    };
+    let mut out = base.clone();
+    for i in base.len()..n {
+        let mut c = base[i % base.len()].clone();
+        c["_number"] = serde_json::json!(20000 + i);
+        c["subject"] = serde_json::json!(format!("Generated change {i}"));
+        out.push(c);
+    }
+    format!(")]}}'\n{}", serde_json::Value::Array(out)).into_bytes()
+}
+
+/// The related list with `n` generated entries on top of the fixture's, so
+/// the box in the change header overflows (`--chain N`).
+fn long_chain(n: usize) -> Vec<u8> {
+    let body = read("example/related.json");
+    let text = String::from_utf8_lossy(&body);
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text.trim_start_matches(")]}'"))
+    else {
+        return body;
+    };
+    if let Some(list) = v["changes"].as_array_mut() {
+        for i in 0..n {
+            list.push(serde_json::json!({
+                "project": "platform/scheduler",
+                "change_id": format!("I{:040}", 30000 + i),
+                "commit": {"commit": format!("{:040}", 30000 + i), "subject": format!("Generated ancestor {i}")},
+                "_change_number": 30000 + i,
+                "_revision_number": 1,
+                "_current_revision_number": 1,
+                "status": "MERGED"
+            }));
+        }
+    }
+    format!(")]}}'\n{v}").into_bytes()
 }
 
 /// Routes: the longest matching fragment wins, so the per-file and
@@ -934,7 +979,7 @@ impl HttpClient for DraftServer {
     }
 }
 
-fn server(files: Option<usize>) -> RouteHttpClient {
+fn server(files: Option<usize>, changes: Option<usize>, chain: Option<usize>) -> RouteHttpClient {
     let http = RouteHttpClient::new();
     http.route("/changes/12345/comments", 200, comments());
     let sha3 = "3".repeat(40);
@@ -951,9 +996,17 @@ fn server(files: Option<usize>) -> RouteHttpClient {
         200,
         ex("general_preferences.json"),
     );
-    http.route("/changes/?q=", 200, ex("query.json"));
+    http.route(
+        "/changes/?q=",
+        200,
+        changes.map_or_else(|| ex("query.json"), many_changes),
+    );
     http.route("/changes/12345?", 200, ex("change.json"));
-    http.route("/related", 200, ex("related.json"));
+    http.route(
+        "/related",
+        200,
+        chain.map_or_else(|| ex("related.json"), long_chain),
+    );
     http.route(
         &format!("revisions/{sha3}/files"),
         200,
@@ -1022,6 +1075,8 @@ fn main() {
     let mut local = DiffPreferences::default();
     let mut font = None;
     let mut files = None;
+    let mut changes = None;
+    let mut chain = None;
     let mut csd = false;
     let mut drafts = Drafts::Ok;
     while let Some(arg) = args.next() {
@@ -1034,6 +1089,8 @@ fn main() {
             // buttons and the window frame on a compositor that draws its own.
             "--csd" => csd = true,
             "--files" => files = args.next().and_then(|n| n.parse().ok()),
+            "--changes" => changes = args.next().and_then(|n| n.parse().ok()),
+            "--chain" => chain = args.next().and_then(|n| n.parse().ok()),
             "--drafts" => {
                 drafts = match args.next().as_deref() {
                     Some("fail") => Drafts::Fail,
@@ -1050,7 +1107,7 @@ fn main() {
 
     let http = DraftServer::new(
         WholeFileDiffs {
-            inner: server(files),
+            inner: server(files, changes, chain),
         },
         drafts,
     );
@@ -1101,7 +1158,8 @@ fn main() {
             cx.new(|cx| Shell::new(startup, window, cx).with_app_name("review demo"))
         });
         match opened {
-            Ok(_) => {
+            Ok((window, _)) => {
+                ui::ensure_maximized(window, cx);
                 if let Some(m) = mode {
                     // The shell follows the system appearance as soon as the
                     // platform reports it; pin the requested one after that.
