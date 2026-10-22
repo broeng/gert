@@ -32,6 +32,7 @@ use model::{ChangeDetail, DiffKey, DiffViewMode, FileEntry, FilesKey, ResolvedDi
 use sync::Syncer;
 
 use crate::{
+    action_menu,
     actions::*,
     comments::{ChangeComments, CommentsEvent},
     diff::{
@@ -45,6 +46,7 @@ use crate::{
     reply, reviewed,
     session::{Session, is_unauthorized},
     settings::DiffSettings,
+    theme::chip_colors,
 };
 use prefs::{next_context, next_tab_size, next_whitespace, whitespace_label};
 
@@ -56,6 +58,8 @@ pub enum DiffPageEvent {
     UpToChange,
     /// `a`: open the reply dialog for this change.
     Reply(Box<ChangeDetail>),
+    /// `shift-a`: open the change action menu for this change.
+    Actions(Box<ChangeDetail>),
 }
 
 /// What the first background task brings back.
@@ -430,6 +434,11 @@ impl DiffPage {
     }
 
     #[cfg(test)]
+    pub(crate) fn detail_for_test(&self) -> Option<&ChangeDetail> {
+        self.detail.as_ref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn hint_for_test(&self) -> Option<(String, bool)> {
         self.hint.current().map(|(t, e)| (t.to_owned(), e))
     }
@@ -458,6 +467,77 @@ impl DiffPage {
         }
         let (note, warning) = sent.note();
         self.hint.say(note, warning, cx, |p| &mut p.hint);
+        cx.notify();
+    }
+
+    // ---- change actions ----
+
+    /// `shift-a`: asks the shell for the change action menu (`m` is the
+    /// unified / side-by-side toggle in the diff).
+    fn open_actions(&mut self, _: &ChangeMenu, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = action_menu::unavailable(&self.session) {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        match &self.detail {
+            Some(d) => cx.emit(DiffPageEvent::Actions(Box::new(d.clone()))),
+            None => self
+                .hint
+                .say("The change is not loaded yet", false, cx, |p| &mut p.hint),
+        }
+    }
+
+    /// An action went through: take the change as the server has it now
+    /// (the status chips follow) and say so.
+    ///
+    /// When the diff showed the current patch set and a new one has become
+    /// current (a rebase), the answer is the route of the same file in the
+    /// new patch set, which the shell opens: the page would otherwise keep
+    /// reviewing a patch set the change has moved on from, and the change
+    /// page does the same switch. A diff of an older patch set stays, with
+    /// a note about the new current one.
+    pub fn action_done(
+        &mut self,
+        done: &action_menu::Done,
+        cx: &mut Context<Self>,
+    ) -> Option<DiffRoute> {
+        let old_current = self.detail.as_ref().and_then(|d| d.current_patch_set);
+        let mut note = done.note();
+        let mut moved = None;
+        match &done.detail {
+            Some(d) => {
+                if let Some(new) = d.current_patch_set.filter(|n| Some(*n) != old_current) {
+                    if old_current == Some(self.route.target) {
+                        moved = Some(DiffRoute {
+                            target: new,
+                            thread: None,
+                            ..self.route.clone()
+                        });
+                    } else {
+                        note = format!("{note}; patchset {new} is now current");
+                    }
+                }
+                self.detail = Some(d.clone());
+            }
+            None => note = format!("{note}; could not refresh the change"),
+        }
+        if moved.is_none() {
+            self.hint.say(note, false, cx, |p| &mut p.hint);
+            cx.notify();
+        }
+        moved
+    }
+
+    /// A note under the header, for the shell after it rebuilt the page.
+    pub fn say(&mut self, note: String, cx: &mut Context<Self>) {
+        self.hint.say(note, false, cx, |p| &mut p.hint);
+        cx.notify();
+    }
+
+    /// The server refused an action and the change was fetched again: show
+    /// the chips as they are now (the dialog shows the error).
+    pub fn detail_refreshed(&mut self, detail: &ChangeDetail, cx: &mut Context<Self>) {
+        self.detail = Some(detail.clone());
         cx.notify();
     }
 
@@ -643,6 +723,10 @@ impl DiffPage {
             .detail
             .as_ref()
             .map_or_else(String::new, |d| d.summary.subject.clone());
+        let chips = self
+            .detail
+            .as_ref()
+            .map_or_else(Vec::new, |d| crate::row::chips(&d.summary));
         let pair = match self.route.base {
             Some(b) => format!("Patchset {b} \u{2192} {}", self.route.target),
             None => format!("Base \u{2192} Patchset {}", self.route.target),
@@ -688,6 +772,17 @@ impl DiffPage {
                             )
                             .child(div().font_semibold().min_w_0().truncate().child(subject)),
                     )
+                    .children(chips.into_iter().map(|chip| {
+                        let (fg, bg) = chip_colors(chip, cx);
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .text_color(fg)
+                            .bg(bg)
+                            .child(chip.text())
+                    }))
                     .child(div().text_color(muted).flex_none().child("\u{203A}"))
                     .child(
                         div()
@@ -980,6 +1075,7 @@ impl Render for DiffPage {
             .on_action(cx.listener(Self::toggle_prefs))
             .on_action(cx.listener(Self::toggle_reviewed))
             .on_action(cx.listener(Self::reply))
+            .on_action(cx.listener(Self::open_actions))
             .relative()
             .size_full()
             .child(self.render_header(cx))

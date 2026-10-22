@@ -150,6 +150,7 @@ fn diff_page_route(
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
                 super::DiffPageEvent::OpenFile(r) => format!("open {}", r.path),
                 super::DiffPageEvent::Reply(_) => "reply".to_owned(),
+                super::DiffPageEvent::Actions(_) => "actions".to_owned(),
                 super::DiffPageEvent::UpToChange => "up".to_owned(),
             };
             log.lock().expect("log").push(text);
@@ -804,4 +805,109 @@ fn a_only_hints_when_anonymous(cx: &mut TestAppContext) {
     assert!(p.events.lock().expect("log").is_empty());
     let note = cx.update(|cx| p.page.read(cx).hint_for_test());
     assert!(matches!(note, Some((t, false)) if t == "Sign in to reply"));
+}
+
+#[gpui_kit::test]
+fn shift_a_asks_for_the_action_menu_and_m_still_toggles_the_mode(cx: &mut TestAppContext) {
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http(),
+        signed_in(),
+    );
+    let mode = |cx: &mut TestAppContext, p: &Page| {
+        cx.update(|cx| p.settings.read(cx).resolved().view_mode)
+    };
+    let before = mode(cx, &p);
+    press(cx, p.window, &["m"]);
+    assert_ne!(mode(cx, &p), before);
+    assert!(p.events.lock().expect("log").is_empty());
+    press(cx, p.window, &["shift-a"]);
+    assert_eq!(*p.events.lock().expect("log"), ["actions"]);
+}
+
+#[gpui_kit::test]
+fn shift_a_only_hints_when_anonymous(cx: &mut TestAppContext) {
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http(),
+        gerrit_api::Auth::Anonymous,
+    );
+    press(cx, p.window, &["shift-a"]);
+    assert!(p.events.lock().expect("log").is_empty());
+    let note = cx.update(|cx| p.page.read(cx).hint_for_test());
+    assert!(matches!(note, Some((t, false)) if t == "Sign in to change this change"));
+}
+
+fn done(
+    kind: crate::action_menu::Kind,
+    detail: Option<model::ChangeDetail>,
+) -> crate::action_menu::Done {
+    crate::action_menu::Done { kind, detail }
+}
+
+#[gpui_kit::test]
+fn an_action_on_the_current_patch_set_moves_the_page_when_a_new_one_arrives(
+    cx: &mut TestAppContext,
+) {
+    use crate::action_menu::Kind;
+    let p = diff_page_route(
+        cx,
+        reviewed_store(&[]),
+        route("src/a.rs"),
+        http(),
+        signed_in(),
+    );
+    // A rebase: patch set 4 is current now.
+    let moved = cx.update(|cx| {
+        p.page.update(cx, |p, cx| {
+            p.action_done(&done(Kind::Rebase, Some(detail(7, 4, 4))), cx)
+        })
+    });
+    let mut want = route("src/a.rs");
+    want.target = PatchSetNumber(4);
+    assert_eq!(moved, Some(want));
+    // Something else changed: the chips follow, the page stays.
+    let mut abandoned = detail(7, 4, 4);
+    abandoned.summary.status = model::ChangeStatus::Abandoned;
+    let moved = cx.update(|cx| {
+        p.page.update(cx, |p, cx| {
+            p.action_done(&done(Kind::Abandon, Some(abandoned)), cx)
+        })
+    });
+    assert_eq!(moved, None);
+    cx.update(|cx| {
+        let page = p.page.read(cx);
+        let d = page.detail_for_test().expect("detail");
+        assert_eq!(d.summary.status, model::ChangeStatus::Abandoned);
+        assert_eq!(page.hint_for_test(), Some(("Abandoned".to_owned(), false)));
+    });
+}
+
+#[gpui_kit::test]
+fn an_older_patch_set_stays_and_the_note_names_the_current_one(cx: &mut TestAppContext) {
+    use crate::action_menu::Kind;
+    let mut older = route("src/a.rs");
+    older.target = PatchSetNumber(2);
+    let p = diff_page_route(cx, reviewed_store(&[]), older, http(), signed_in());
+    let moved = cx.update(|cx| {
+        p.page.update(cx, |p, cx| {
+            p.action_done(&done(Kind::Rebase, Some(detail(7, 4, 4))), cx)
+        })
+    });
+    assert_eq!(moved, None);
+    cx.update(|cx| {
+        let page = p.page.read(cx);
+        assert_eq!(
+            page.hint_for_test(),
+            Some(("Rebased; patchset 4 is now current".to_owned(), false))
+        );
+        assert_eq!(
+            page.detail_for_test().and_then(|d| d.current_patch_set),
+            Some(PatchSetNumber(4))
+        );
+    });
 }
