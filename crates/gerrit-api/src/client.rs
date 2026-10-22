@@ -449,6 +449,106 @@ impl GerritClient {
         .await
     }
 
+    /// `POST /changes/{n}/submit`: submits (merges) the change. A change
+    /// that is not submittable, or a merge that fails, is
+    /// [`Error::Conflict`] with the server's explanation. Returns the
+    /// change as the server reports it afterwards.
+    pub async fn submit(&self, change: ChangeNumber) -> Result<ChangeSummary, Error> {
+        self.change_action(change, "/submit", &serde_json::json!({}))
+            .await
+    }
+
+    /// `POST /changes/{n}/rebase`: rebases the current patch set onto
+    /// `base` (a commit SHA or change number; `None` for the tip of the
+    /// target branch). A conflict, or a change that is already up to date,
+    /// is [`Error::Conflict`] with the server's message.
+    pub async fn rebase(
+        &self,
+        change: ChangeNumber,
+        base: Option<&str>,
+    ) -> Result<ChangeSummary, Error> {
+        let body = wire::RebaseInput {
+            base: base
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .map(Into::into),
+        };
+        self.change_action(change, "/rebase", &body).await
+    }
+
+    /// `POST /changes/{n}/abandon` with an optional message.
+    pub async fn abandon(
+        &self,
+        change: ChangeNumber,
+        message: Option<&str>,
+    ) -> Result<ChangeSummary, Error> {
+        self.change_action(change, "/abandon", &message_input(message))
+            .await
+    }
+
+    /// `POST /changes/{n}/restore` with an optional message.
+    pub async fn restore(
+        &self,
+        change: ChangeNumber,
+        message: Option<&str>,
+    ) -> Result<ChangeSummary, Error> {
+        self.change_action(change, "/restore", &message_input(message))
+            .await
+    }
+
+    /// `POST /changes/{n}/wip` (`work_in_progress`) or `/ready`, with an
+    /// optional message.
+    pub async fn set_work_in_progress(
+        &self,
+        change: ChangeNumber,
+        work_in_progress: bool,
+        message: Option<&str>,
+    ) -> Result<(), Error> {
+        let path = if work_in_progress { "/wip" } else { "/ready" };
+        self.require_auth()?;
+        let bytes = serde_json::to_vec(&message_input(message))?;
+        self.send(
+            http::Method::POST,
+            &format!("/changes/{change}{path}"),
+            &[],
+            Some(bytes),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `POST /changes/{n}/private` or `DELETE /changes/{n}/private`: marks
+    /// the change private (or not).
+    pub async fn set_private(&self, change: ChangeNumber, private: bool) -> Result<(), Error> {
+        let path = format!("/changes/{change}/private");
+        if private {
+            self.require_auth()?;
+            self.send(http::Method::POST, &path, &[], Some(b"{}".to_vec()))
+                .await?;
+            Ok(())
+        } else {
+            self.write_empty(http::Method::DELETE, &path).await
+        }
+    }
+
+    /// A `POST` that answers with the changed `ChangeInfo`.
+    async fn change_action<B: serde::Serialize>(
+        &self,
+        change: ChangeNumber,
+        suffix: &str,
+        body: &B,
+    ) -> Result<ChangeSummary, Error> {
+        let v = self
+            .write_json(
+                http::Method::POST,
+                &format!("/changes/{change}{suffix}"),
+                body,
+            )
+            .await?;
+        let info: wire::ChangeInfo = serde_json::from_value(v)?;
+        Ok(convert::change_summary(&info)?)
+    }
+
     /// The signed-in user's diff settings: `GET /accounts/self/preferences.diff`,
     /// plus the diff view mode, which Gerrit keeps in
     /// `GET /accounts/self/preferences`. Anonymous access yields
@@ -467,6 +567,16 @@ impl GerritClient {
             Err(e) => return Err(e),
         };
         Ok(convert::diff_preferences(&diff, general.as_ref()))
+    }
+}
+
+/// The body of abandon, restore, wip and ready: a blank message is left out.
+fn message_input(message: Option<&str>) -> wire::MessageInput {
+    wire::MessageInput {
+        message: message
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(Into::into),
     }
 }
 
@@ -1865,5 +1975,121 @@ mod tests {
         let (_fake, c) = action_fake(ACTION_CHANGE);
         let d = block_on(c.get_change(ChangeNumber(5))).unwrap();
         assert!(d.change_actions.is_empty() && d.revision_actions.is_empty());
+    }
+
+    #[test]
+    fn abandon_and_restore_post_an_optional_message() {
+        let (fake, c) = action_fake(ACTION_CHANGE);
+        let s = block_on(c.abandon(ChangeNumber(5), Some(" gone "))).unwrap();
+        assert_eq!(s.status, ChangeStatus::Abandoned);
+        fake.push_response(200, xssi(ACTION_CHANGE));
+        block_on(c.restore(ChangeNumber(5), Some("back"))).unwrap();
+        fake.push_response(200, xssi(ACTION_CHANGE));
+        block_on(c.abandon(ChangeNumber(5), Some("  "))).unwrap();
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::POST);
+        assert_eq!(reqs[0].uri(), "https://h/a/changes/5/abandon");
+        assert_eq!(body_json(&reqs[0]), json!({"message": "gone"}));
+        assert_eq!(reqs[1].uri(), "https://h/a/changes/5/restore");
+        assert_eq!(body_json(&reqs[1]), json!({"message": "back"}));
+        assert_eq!(body_json(&reqs[2]), json!({}));
+    }
+
+    #[test]
+    fn submit_posts_an_empty_object() {
+        let (fake, c) = action_fake(ACTION_CHANGE);
+        block_on(c.submit(ChangeNumber(5))).unwrap();
+        let req = &fake.requests()[0];
+        assert_eq!(req.method(), http::Method::POST);
+        assert_eq!(req.uri(), "https://h/a/changes/5/submit");
+        assert_eq!(body_json(req), json!({}));
+    }
+
+    #[test]
+    fn rebase_sends_the_base_only_when_given() {
+        let (fake, c) = action_fake(ACTION_CHANGE);
+        block_on(c.rebase(ChangeNumber(5), None)).unwrap();
+        fake.push_response(200, xssi(ACTION_CHANGE));
+        block_on(c.rebase(ChangeNumber(5), Some("abc123"))).unwrap();
+        fake.push_response(200, xssi(ACTION_CHANGE));
+        block_on(c.rebase(ChangeNumber(5), Some(" "))).unwrap();
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].uri(), "https://h/a/changes/5/rebase");
+        assert_eq!(body_json(&reqs[0]), json!({}));
+        assert_eq!(body_json(&reqs[1]), json!({"base": "abc123"}));
+        assert_eq!(body_json(&reqs[2]), json!({}));
+    }
+
+    #[test]
+    fn wip_ready_and_private_use_their_endpoints() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, "");
+        fake.push_response(200, "");
+        fake.push_response(201, "");
+        fake.push_response(204, "");
+        let c = client(&fake, "https://h", basic());
+        block_on(c.set_work_in_progress(ChangeNumber(5), true, Some("later"))).unwrap();
+        block_on(c.set_work_in_progress(ChangeNumber(5), false, None)).unwrap();
+        block_on(c.set_private(ChangeNumber(5), true)).unwrap();
+        block_on(c.set_private(ChangeNumber(5), false)).unwrap();
+        let reqs = fake.requests();
+        let seen: Vec<_> = reqs
+            .iter()
+            .map(|r| (r.method().as_str(), r.uri().path()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("POST", "/a/changes/5/wip"),
+                ("POST", "/a/changes/5/ready"),
+                ("POST", "/a/changes/5/private"),
+                ("DELETE", "/a/changes/5/private"),
+            ]
+        );
+        assert_eq!(body_json(&reqs[0]), json!({"message": "later"}));
+        assert_eq!(body_json(&reqs[1]), json!({}));
+        assert!(reqs[3].body().is_empty());
+    }
+
+    #[test]
+    fn refused_actions_keep_401_403_and_409_apart() {
+        let fake = FakeHttpClient::new();
+        let c = client(&fake, "https://h", basic());
+        fake.push_response(409, "change is not submittable\n");
+        match block_on(c.submit(ChangeNumber(5))) {
+            Err(Error::Conflict { message }) => assert_eq!(message, "change is not submittable"),
+            other => panic!("{other:?}"),
+        }
+        fake.push_response(409, "The change could not be rebased due to a conflict\n");
+        assert!(matches!(
+            block_on(c.rebase(ChangeNumber(5), None)),
+            Err(Error::Conflict { message }) if message.contains("conflict")
+        ));
+        fake.push_response(403, "restore not permitted\n");
+        assert!(matches!(
+            block_on(c.restore(ChangeNumber(5), None)),
+            Err(Error::Forbidden { message }) if message == "restore not permitted"
+        ));
+        fake.push_response(401, "");
+        assert!(matches!(
+            block_on(c.set_private(ChangeNumber(5), true)),
+            Err(Error::Unauthorized)
+        ));
+        // Anonymous sessions never send a request.
+        let anon_fake = FakeHttpClient::new();
+        let anon = client(&anon_fake, "https://h", Auth::Anonymous);
+        assert!(matches!(
+            block_on(anon.submit(ChangeNumber(5))),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(anon.set_work_in_progress(ChangeNumber(5), true, None)),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(anon.set_private(ChangeNumber(5), true)),
+            Err(Error::Unauthorized)
+        ));
+        assert!(anon_fake.requests().is_empty());
     }
 }

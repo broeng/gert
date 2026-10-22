@@ -398,6 +398,20 @@ pub(crate) struct ReviewInput {
     pub remove_from_attention_set: Option<Vec<AttentionSetInput>>,
 }
 
+/// `AbandonInput` and `RestoreInput`, the part we send.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct MessageInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// `RebaseInput`, the part we send.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct RebaseInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
 /// The part of `ReviewResult` we read.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
@@ -552,6 +566,15 @@ mod tests {
             remove_from_attention_set: Some(vec![att]),
         };
         conforms_value(&spec, "ReviewInput", &review);
+        let msg = MessageInput {
+            message: Some("m".into()),
+        };
+        conforms_value(&spec, "AbandonInput", &msg);
+        conforms_value(&spec, "RestoreInput", &msg);
+        let rebase = RebaseInput {
+            base: Some("b".into()),
+        };
+        conforms_value(&spec, "RebaseInput", &rebase);
     }
 
     fn conforms_value<T: Serialize>(spec: &Value, schema: &str, value: &T) {
