@@ -27,6 +27,12 @@
 //! restore, WIP and ready, private and not private. Each POST changes the
 //! change and adds a message to its log; `--drafts fail` refuses them (403)
 //! and `offline` cannot reach the server (503).
+//!
+//! Reviewers (`v` in the menu), topic (`t`) and hashtags (`h`) work too: the
+//! autocomplete answers with the example people (matching name, username or
+//! email) and one large group, "Scheduler Team" (type `team`), that asks for
+//! confirmation; adding, moving and removing people, setting or clearing the
+//! topic and editing hashtags change the change as the page sees it.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -233,17 +239,28 @@ struct DraftState {
     wip: bool,
     private: bool,
     rebased: bool,
+    reviewers: Vec<u64>,
+    ccs: Vec<u64>,
+    topic: Option<String>,
+    hashtags: Vec<String>,
 }
 
 const ALICE: u64 = 1_000_001;
 
 /// The people of the example change: id, name and username.
-const PEOPLE: [(u64, &str, &str); 4] = [
+const PEOPLE: [(u64, &str, &str); 7] = [
     (1_000_001, "Alice Example", "alice"),
     (1_000_002, "Bob Reviewer", "bob"),
     (1_000_003, "Carol Maintainer", "carol"),
     (1_000_004, "Dave CC", "dave"),
+    (1_000_005, "Erin Engineer", "erin"),
+    (1_000_006, "Frank Fixer", "frank"),
+    (1_000_007, "Grace Gardner", "grace"),
 ];
+
+/// The large group of the autocomplete, and who is in it (for the example).
+const GROUP: (&str, &str) = ("grp-scheduler", "Scheduler Team");
+const GROUP_MEMBERS: [u64; 3] = [1_000_005, 1_000_006, 1_000_007];
 
 fn person(id: u64) -> serde_json::Value {
     let (_, name, user) = PEOPLE
@@ -313,6 +330,10 @@ impl DraftServer {
                 wip: false,
                 private: false,
                 rebased: false,
+                reviewers: vec![1_000_002, 1_000_003],
+                ccs: vec![1_000_004],
+                topic: Some("sched-heap".to_owned()),
+                hashtags: vec!["performance".to_owned(), "cleanup".to_owned()],
             }),
         }
     }
@@ -442,6 +463,135 @@ impl DraftServer {
                 }
             });
         }
+        self.edit(req, path, &mut state)
+    }
+
+    /// Reviewers, topic and hashtags: `suggest_reviewers`, `POST/DELETE
+    /// .../reviewers`, `PUT/DELETE .../topic`, `POST .../hashtags`.
+    fn edit(
+        &self,
+        req: &http::Request<Vec<u8>>,
+        path: &str,
+        state: &mut DraftState,
+    ) -> Option<BoxFuture<'static, Result<http::Response<Vec<u8>>, HttpError>>> {
+        use serde_json::{Value, json};
+        let rest = path.strip_prefix("/a/changes/12345/")?;
+        let method = req.method().clone();
+        let body: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
+        let is_write = method != http::Method::GET;
+        if is_write && matches!(self.mode, Drafts::Offline) {
+            return Some(Self::reply(503, b"unavailable".to_vec()));
+        }
+        if is_write && matches!(self.mode, Drafts::Fail) {
+            return Some(Self::reply(403, b"not allowed".to_vec()));
+        }
+        if method == http::Method::GET && rest == "suggest_reviewers" {
+            let q = req
+                .uri()
+                .query()
+                .unwrap_or_default()
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("q="))
+                .unwrap_or_default()
+                .replace("%20", " ")
+                .to_lowercase();
+            let mut out: Vec<Value> = PEOPLE
+                .iter()
+                .filter(|(id, name, user)| {
+                    *id != ALICE
+                        && (name.to_lowercase().contains(&q)
+                            || user.contains(&q)
+                            || format!("{user}@example.com").contains(&q))
+                })
+                .map(|(id, ..)| json!({"account": person(*id), "count": 1}))
+                .collect();
+            if !q.is_empty() && GROUP.1.to_lowercase().contains(&q) {
+                out.push(json!({"group": {"id": GROUP.0, "name": GROUP.1},
+                    "count": 150, "confirm": true}));
+            }
+            return Some(Self::json(200, &Value::Array(out)));
+        }
+        if method == http::Method::POST && rest == "reviewers" {
+            let input = body["reviewer"].as_str().unwrap_or_default().to_owned();
+            let cc = body["state"] == "CC";
+            let ids: Vec<u64> = if input == GROUP.0 {
+                if body["confirmed"] != true {
+                    return Some(Self::json(
+                        200,
+                        &json!({"input": input, "confirm": true, "error":
+                            format!("{} has 150 members. Are you sure you want to add them all?",
+                                GROUP.1)}),
+                    ));
+                }
+                GROUP_MEMBERS.to_vec()
+            } else {
+                let found = PEOPLE.iter().find(|(id, _, user)| {
+                    id.to_string() == input
+                        || *user == input
+                        || format!("{user}@example.com") == input
+                });
+                match found {
+                    Some((id, ..)) => vec![*id],
+                    None => {
+                        return Some(Self::json(
+                            200,
+                            &json!({"input": input, "error":
+                                format!("\"{input}\" is not a valid user or group")}),
+                        ));
+                    }
+                }
+            };
+            for id in &ids {
+                state.reviewers.retain(|r| r != id);
+                state.ccs.retain(|r| r != id);
+                if cc {
+                    state.ccs.push(*id);
+                } else {
+                    state.reviewers.push(*id);
+                }
+            }
+            let added: Vec<Value> = ids.iter().map(|i| person(*i)).collect();
+            let key = if cc { "ccs" } else { "reviewers" };
+            return Some(Self::json(200, &json!({"input": input, key: added})));
+        }
+        if method == http::Method::DELETE
+            && let Some(who) = rest.strip_prefix("reviewers/")
+        {
+            let before = state.reviewers.len() + state.ccs.len();
+            state.reviewers.retain(|r| r.to_string() != who);
+            state.ccs.retain(|r| r.to_string() != who);
+            return Some(if state.reviewers.len() + state.ccs.len() == before {
+                Self::reply(404, b"Reviewer not found".to_vec())
+            } else {
+                Self::reply(204, Vec::new())
+            });
+        }
+        if rest == "topic" && method == http::Method::PUT {
+            let topic = body["topic"].as_str().unwrap_or_default().trim().to_owned();
+            state.topic = (!topic.is_empty()).then(|| topic.clone());
+            return Some(Self::json(200, &json!(topic)));
+        }
+        if rest == "topic" && method == http::Method::DELETE {
+            state.topic = None;
+            return Some(Self::reply(204, Vec::new()));
+        }
+        if rest == "hashtags" && method == http::Method::POST {
+            let list = |k: &str| -> Vec<String> {
+                body[k]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            };
+            state.hashtags.retain(|h| !list("remove").contains(h));
+            for h in list("add") {
+                if !state.hashtags.contains(&h) {
+                    state.hashtags.push(h);
+                }
+            }
+            return Some(Self::json(200, &json!(state.hashtags)));
+        }
         None
     }
 
@@ -562,6 +712,12 @@ impl DraftServer {
         c["status"] = state.status.into();
         c["work_in_progress"] = state.wip.into();
         c["is_private"] = state.private.into();
+        c["reviewers"] = json!({
+            "REVIEWER": state.reviewers.iter().map(|i| person(*i)).collect::<Vec<_>>(),
+            "CC": state.ccs.iter().map(|i| person(*i)).collect::<Vec<_>>(),
+        });
+        c["topic"] = state.topic.clone().into();
+        c["hashtags"] = json!(state.hashtags);
         // What alice may do now (Gerrit leaves out `enabled` when false).
         let act = |label: &str| json!({"method": "POST", "label": label, "enabled": true});
         let mut change_actions = serde_json::Map::new();
@@ -596,6 +752,10 @@ impl DraftServer {
             } else {
                 change_actions.insert("private".into(), act("Mark private"));
             }
+        }
+        if state.status != "MERGED" {
+            change_actions.insert("topic".into(), act("Edit topic"));
+            change_actions.insert("hashtags".into(), act("Edit hashtags"));
         }
         c["actions"] = change_actions.into();
         if let Some(rev) =
