@@ -417,6 +417,21 @@ pub(crate) struct RebaseInput {
     pub on_behalf_of_uploader: Option<bool>,
 }
 
+/// `RevertInput`, the part we send.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct RevertInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// `CherryPickInput`, the part we send.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct CherryPickInput {
+    pub destination: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 /// `ReviewerInput`, the part we send.
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct ReviewerInput {
@@ -637,6 +652,15 @@ mod tests {
             on_behalf_of_uploader: Some(true),
         };
         conforms_value(&spec, "RebaseInput", &rebase);
+        let revert = RevertInput {
+            message: Some("m".into()),
+        };
+        conforms_value(&spec, "RevertInput", &revert);
+        let pick = CherryPickInput {
+            destination: "d".into(),
+            message: Some("m".into()),
+        };
+        conforms_value(&spec, "CherryPickInput", &pick);
         let reviewer = ReviewerInput {
             reviewer: "r".into(),
             state: "CC".into(),
