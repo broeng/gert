@@ -47,6 +47,7 @@ use crate::{
     reply, reviewed,
     session::{Session, is_unauthorized},
     settings::{DiffSettings, FileFilters},
+    syntax_cache::{Highlight, SyntaxCache},
     theme::chip_colors,
 };
 use prefs::{next_context, next_tab_size, next_whitespace, whitespace_label};
@@ -80,6 +81,9 @@ pub struct DiffPage {
     files: Vec<FileEntry>,
     /// The file filter rules and which are on, shared by all pages.
     filters: Entity<FileFilters>,
+    /// Finished syntax colors, shared by all pages: a hit is shown at once,
+    /// and the view's own result for a miss is stored here.
+    syntax: Entity<SyntaxCache>,
     /// The filter style of each entry of `files`.
     styles: Vec<FileStyle>,
     /// The files of this patch set the user marked reviewed.
@@ -124,6 +128,7 @@ impl DiffPage {
         session: Session,
         settings: Entity<DiffSettings>,
         filters: Entity<FileFilters>,
+        syntax: Entity<SyntaxCache>,
         route: DiffRoute,
         outbox: Entity<DraftOutbox>,
         cx: &mut Context<Self>,
@@ -138,6 +143,7 @@ impl DiffPage {
             files_key: None,
             files: Vec::new(),
             filters: filters.clone(),
+            syntax,
             styles: Vec::new(),
             reviewed: HashSet::new(),
             hint: Hint::default(),
@@ -327,12 +333,13 @@ impl DiffPage {
                 self.key = Some(key.clone());
                 self.shown = Some(key.clone());
                 let path = self.route.path.clone();
+                let cached = self.syntax.update(cx, |c, _| c.get(&key));
                 match &self.view {
                     Some(view) => view.update(cx, |v, cx| {
-                        v.set_diff_for(&path, diff, cx);
+                        v.set_diff_for_cached(&path, diff, cached, cx);
                         v.set_status(None, cx);
                     }),
-                    None => self.create_view(diff, cx),
+                    None => self.create_view(diff, cached, cx),
                 }
                 self.prefetch_next(&key, cx);
             }
@@ -356,7 +363,12 @@ impl DiffPage {
         }
     }
 
-    fn create_view(&mut self, diff: model::Diff, cx: &mut Context<Self>) {
+    fn create_view(
+        &mut self,
+        diff: model::Diff,
+        cached: Option<Highlight>,
+        cx: &mut Context<Self>,
+    ) {
         let (prefs, font) = {
             let s = self.settings.read(cx);
             (s.resolved(), s.font_family())
@@ -365,7 +377,7 @@ impl DiffPage {
         let path = self.route.path.clone();
         let view = cx.new(|cx| {
             let mut v = DiffView::new(diff, prefs, cx);
-            v.set_path(&path, cx);
+            v.set_path_cached(&path, cached, cx);
             v.set_can_comment(can_comment, cx);
             v.set_sizing(DiffSizing::Fill, cx);
             v.set_font_family(font, cx);
@@ -379,6 +391,13 @@ impl DiffPage {
                 });
             }
             DiffEvent::RowsChanged => {}
+            DiffEvent::Highlighted(result) => {
+                // The view's job is for the diff on screen.
+                if let Some(key) = this.shown.clone() {
+                    let result = result.clone();
+                    this.syntax.update(cx, |c, _| c.insert(key, result));
+                }
+            }
             DiffEvent::Draft(request) => {
                 let (change, request) = (this.route.change, request.clone());
                 let detail = this.detail.clone();

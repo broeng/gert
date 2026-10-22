@@ -116,6 +116,7 @@ fn main() {
                 DiffEvent::RowsChanged => eprintln!("rows changed"),
                 DiffEvent::ModeChanged(m) => eprintln!("mode: {m:?}"),
                 DiffEvent::Draft(req) => eprintln!("draft request {req:?}"),
+                DiffEvent::Highlighted(_) => {}
             })
             .detach();
             let focus = view.read(cx).focus_handle(cx);

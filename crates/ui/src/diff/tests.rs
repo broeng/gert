@@ -134,6 +134,7 @@ fn open_made(
             let text = match ev {
                 DiffEvent::RowsChanged => "rows".to_owned(),
                 DiffEvent::ModeChanged(m) => format!("mode {m:?}"),
+                DiffEvent::Highlighted(_) => return,
                 DiffEvent::Draft(DraftRequest::Retry(id)) => format!("retry {id:?}"),
                 DiffEvent::Draft(req) => format!("draft {req:?}"),
             };

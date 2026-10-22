@@ -60,6 +60,9 @@ pub enum DiffEvent {
     /// The user wrote, changed, deleted or retried a draft. The owner does
     /// the work (the view does no I/O); the drafts come back as threads.
     Draft(DraftRequest),
+    /// The view's own background job finished the syntax colors of the
+    /// current diff (`None`: nothing to color). The owner may cache them.
+    Highlighted(Option<DiffSyntax>),
 }
 
 /// Which file of which patch set pair the view shows: what decides where
@@ -488,6 +491,51 @@ impl DiffView {
         self.start_syntax(cx);
     }
 
+    /// Like [`Self::set_diff_for`] with colors the owner already has (`None`:
+    /// not known, compute them): a known result is used at once, with no job
+    /// and no plain frame first.
+    pub fn set_diff_for_cached(
+        &mut self,
+        path: &str,
+        diff: Diff,
+        cached: Option<Option<DiffSyntax>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.path = Some(path.to_owned());
+        let keep = self.keep_position();
+        self.diff = Arc::new(diff);
+        self.hint = None;
+        self.rebuild(keep, cx);
+        self.install_or_start_syntax(cached, cx);
+    }
+
+    /// Like [`Self::set_path`] with colors the owner already has.
+    pub fn set_path_cached(
+        &mut self,
+        path: &str,
+        cached: Option<Option<DiffSyntax>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.path = Some(path.to_owned());
+        self.install_or_start_syntax(cached, cx);
+    }
+
+    fn install_or_start_syntax(
+        &mut self,
+        cached: Option<Option<DiffSyntax>>,
+        cx: &mut Context<Self>,
+    ) {
+        match cached {
+            Some(result) if !self.threads_only => {
+                // Also cancels a job for the previous diff.
+                self.syntax_gen += 1;
+                self.syntax = Syntax::Ready(result);
+                cx.notify();
+            }
+            _ => self.start_syntax(cx),
+        }
+    }
+
     /// Like [`Self::set_diff`] for another file (or the first diff of a
     /// view): `path` decides the language of the syntax colors.
     pub fn set_diff_for(&mut self, path: &str, diff: Diff, cx: &mut Context<Self>) {
@@ -536,7 +584,8 @@ impl DiffView {
                 .await;
             this.update(cx, |this, cx| {
                 if this.syntax_gen == generation {
-                    this.syntax = Syntax::Ready(result);
+                    this.syntax = Syntax::Ready(result.clone());
+                    cx.emit(DiffEvent::Highlighted(result));
                     cx.notify();
                 }
             })

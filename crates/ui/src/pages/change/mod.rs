@@ -1061,6 +1061,7 @@ impl ChangePage {
                 }
                 cx.notify();
             }
+            DiffEvent::Highlighted(_) => {}
         }
     }
 
