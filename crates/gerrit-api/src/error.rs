@@ -120,6 +120,14 @@ mod tests {
     }
 
     #[test]
+    fn a_transport_error_shows_only_its_top_level_message() {
+        let chain = "error sending request for url (https://g.example/a/changes/): \
+                     client error (Connect): Connection refused (os error 111)";
+        let e = Error::Http(HttpError(chain.into()));
+        assert_eq!(e.to_string(), "transport error: error sending request");
+    }
+
+    #[test]
     fn only_transport_and_transient_failures_are_retryable() {
         let status = |code| Error::Status {
             code,

@@ -2221,6 +2221,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "http",
+ "log",
  "model",
  "serde",
  "serde_json",

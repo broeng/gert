@@ -487,6 +487,22 @@ fn a_server_that_cannot_be_reached_says_nothing_was_done(cx: &mut TestAppContext
     assert_eq!(step(cx, &f), "Confirm(Submit)");
 }
 
+#[test]
+fn a_transport_failure_is_described_without_the_request_chain() {
+    let chain = "error sending request for url (https://g.example/a/changes/7/submit): \
+                 client error (Connect): tcp connect error: Connection refused (os error 111)";
+    let e = sync::Error::Api(gerrit_api::Error::Http(gerrit_api::HttpError(chain.into())));
+    let text = super::describe(Kind::Submit, &e);
+    assert!(
+        text.starts_with("Not submitted: the server cannot be reached"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("g.example") && !text.contains("os error"),
+        "{text}"
+    );
+}
+
 const MERGED_JSON: &str = r#"{"_number":7,"project":"p","branch":"main","subject":"s","status":"MERGED","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000"}"#;
 
 #[gpui_kit::test]
