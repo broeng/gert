@@ -16,7 +16,14 @@
 //!   title bar draws minimize, maximize/restore and close, moves the window
 //!   when dragged, toggles maximize on a double click, and the
 //!   [`window_border`](gpui_kit::component::window_border) around the
-//!   root draws the frame and shadow and provides the resize edges.
+//!   root draws a 1px frame and provides the resize edges. The shell asks
+//!   for no shadow: a shadow is a transparent inset around the content, and
+//!   some drivers and compositors (NVIDIA's proprietary Wayland driver)
+//!   do not composite the surface's alpha, so the inset showed as a wide
+//!   opaque frame. Requesting a transparent window does not help, since
+//!   GPUI already treats client-decorated Wayland windows as transparent,
+//!   and it turns off subpixel text, which needs an opaque window. So the
+//!   window stays `Opaque` and the frame is exactly the 1px border.
 //! - **macOS:** native traffic lights over a transparent title bar; our bar
 //!   sits beside them and draws no buttons.
 //! - **Windows:** the buttons are drawn, but the OS hit-tests them through
@@ -47,15 +54,6 @@ pub fn window_options(title: &str, app_id: &str, size: Size<Pixels>, cx: &App) -
         titlebar: Some(titlebar),
         window_min_size: Some(MIN_SIZE),
         app_id: Some(app_id.to_owned()),
-        // The client-side frame's shadow inset is transparent pixels. On an
-        // opaque surface the GPU ignores alpha and shows them as a solid
-        // frame. Elsewhere the shell paints every pixel, so the bit is only
-        // needed where `window_border` draws a shadow.
-        window_background: if cfg!(target_os = "linux") {
-            WindowBackgroundAppearance::Transparent
-        } else {
-            WindowBackgroundAppearance::Opaque
-        },
         ..TitleBar::window_options()
     }
 }
