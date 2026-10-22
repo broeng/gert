@@ -17,6 +17,38 @@ use super::{
 };
 use crate::{actions::*, pages::list::Status, row::chips, theme::chip_colors, time_fmt::relative};
 
+/// The cards of the page. Consecutive blocks of one section are drawn as
+/// one card.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Files,
+    Comments,
+    Log,
+}
+
+impl Section {
+    fn of(b: Block) -> Option<Self> {
+        match b {
+            Block::Header => None,
+            Block::PatchSets | Block::FilesNotice | Block::File(_) => Some(Self::Files),
+            Block::ThreadsHeader
+            | Block::ThreadsNotice
+            | Block::Thread(_)
+            | Block::PatchSetComments => Some(Self::Comments),
+            Block::LogHeader | Block::Message(_) => Some(Self::Log),
+        }
+    }
+}
+
+/// The title bar at the top of a card.
+pub(super) fn card_title_bar(cx: &App) -> Div {
+    let theme = cx.theme();
+    div().px_3().py_2().rounded_t_md().bg(theme.secondary)
+}
+
+/// Width for 72 monospace columns, the card padding and border.
+const COMMIT_BASIS: f32 = 660.;
+
 const LABEL_ORDER: [&str; 2] = ["Code-Review", "Verified"];
 
 pub(super) fn pill(text: impl Into<SharedString>, fg: Hsla) -> Div {
@@ -91,7 +123,46 @@ impl ChangePage {
             Block::LogHeader => self.log_header(cx),
             Block::Message(i) => self.message(i, cx),
         };
-        div().w_full().px_4().py_1().child(inner).into_any_element()
+        let Some(section) = Section::of(block) else {
+            return div().w_full().px_4().py_1().child(inner).into_any_element();
+        };
+        let first = ix
+            .checked_sub(1)
+            .and_then(|p| self.blocks.get(p))
+            .is_none_or(|b| Section::of(*b) != Some(section));
+        let last = self
+            .blocks
+            .get(ix + 1)
+            .is_none_or(|b| Section::of(*b) != Some(section));
+        // The section is a card drawn row by row: the title bar on top
+        // with the rounded corners, side borders all the way, the bottom
+        // border and corners on the last row.
+        let theme = cx.theme();
+        let row = if first {
+            inner
+        } else {
+            div()
+                .px_2()
+                .py_1()
+                .border_t_1()
+                .border_color(theme.border.opacity(0.6))
+                .child(inner)
+                .into_any_element()
+        };
+        let card = div()
+            .w_full()
+            .border_x_1()
+            .border_color(theme.border)
+            .bg(theme.secondary.opacity(0.3))
+            .when(first, |d| d.border_t_1().rounded_t_md())
+            .when(last, |d| d.border_b_1().rounded_b_md())
+            .child(row);
+        div()
+            .w_full()
+            .px_4()
+            .when(first, |d| d.pt_3())
+            .child(card)
+            .into_any_element()
     }
 
     fn status_line(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -225,6 +296,17 @@ impl ChangePage {
                 .max_w_full()
                 .child(child)
         };
+        // The commit message needs ~72 monospace columns (plus padding) to
+        // not wrap in the middle; it keeps that width while there is room
+        // and shrinks or wraps only when the window is narrower.
+        let commit_column = |child: AnyElement| {
+            div()
+                .flex_grow(1.)
+                .flex_basis(px(COMMIT_BASIS))
+                .min_w(px(260.))
+                .max_w_full()
+                .child(child)
+        };
         v_flex()
             .gap_2()
             .child(bar)
@@ -235,9 +317,9 @@ impl ChangePage {
                     .flex_wrap()
                     .gap_x_4()
                     .gap_y_3()
-                    .child(column(340., info))
-                    .child(column(400., commit))
-                    .when_some(related, |d, r| d.child(column(340., r))),
+                    .child(column(320., info))
+                    .child(commit_column(commit))
+                    .when_some(related, |d, r| d.child(column(320., r))),
             )
             .into_any_element()
     }
@@ -513,53 +595,64 @@ impl ChangePage {
             .sum();
         let count = files.iter().filter(|f| !f.is_special()).count();
         v_flex()
-            .gap_1()
-            .pt_2()
             .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .flex_wrap()
-                    .child(section_title("Files", cx))
-                    .child(div().text_sm().text_color(muted).child("Compare"))
+                card_title_bar(cx)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .child(
-                        Button::new("base-ps")
-                            .label(format!("{base_text}  (b)"))
-                            .small()
-                            .outline()
-                            .on_click(
-                                cx.listener(|this, _, w, cx| this.next_base(&NextBase, w, cx)),
-                            ),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .flex_wrap()
+                            .child(section_title("Files", cx))
+                            .child(div().text_sm().text_color(muted).child("Compare"))
+                            .child(
+                                Button::new("base-ps")
+                                    .label(format!("{base_text}  (b)"))
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(|this, _, w, cx| {
+                                        this.next_base(&NextBase, w, cx)
+                                    })),
+                            )
+                            .child(div().text_sm().text_color(muted).child("with"))
+                            .child(
+                                Button::new("target-ps")
+                                    .label(format!("{target_text}  (t)"))
+                                    .small()
+                                    .outline()
+                                    .on_click(cx.listener(|this, _, w, cx| {
+                                        this.next_target(&NextTarget, w, cx)
+                                    })),
+                            )
+                            .child(div().flex_1())
+                            .when(self.files.loaded, |d| {
+                                d.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .child(format!("{count} files"))
+                                        .child(
+                                            div()
+                                                .text_color(theme.success)
+                                                .child(format!("+{ins}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(theme.danger)
+                                                .child(format!("\u{2212}{del}")),
+                                        ),
+                                )
+                            }),
                     )
-                    .child(div().text_sm().text_color(muted).child("with"))
-                    .child(
-                        Button::new("target-ps")
-                            .label(format!("{target_text}  (t)"))
-                            .small()
-                            .outline()
-                            .on_click(
-                                cx.listener(|this, _, w, cx| this.next_target(&NextTarget, w, cx)),
-                            ),
-                    )
-                    .child(div().flex_1())
-                    .when(self.files.loaded, |d| {
-                        d.child(
-                            h_flex()
-                                .gap_2()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(format!("{count} files"))
-                                .child(div().text_color(theme.success).child(format!("+{ins}")))
-                                .child(
-                                    div()
-                                        .text_color(theme.danger)
-                                        .child(format!("\u{2212}{del}")),
-                                ),
-                        )
+                    .when(!info.is_empty(), |d| {
+                        d.child(div().text_xs().text_color(muted).child(info))
                     }),
             )
-            .when(!info.is_empty(), |d| {
-                d.child(div().text_xs().text_color(muted).child(info))
+            .when(self.files.loaded && count > 0, |d| {
+                d.child(file_table_header(cx))
             })
             .into_any_element()
     }
@@ -589,6 +682,14 @@ impl ChangePage {
         let muted = theme.muted_foreground;
         let selected = ix == self.cursor;
         let reviewed = self.files.reviewed.contains(&f.path);
+        let max_change = self
+            .files
+            .list
+            .iter()
+            .filter(|f| !f.is_special() && !f.binary)
+            .map(|f| f.lines_inserted + f.lines_deleted)
+            .max()
+            .unwrap_or(0);
         let expanded = self.inline.contains_key(&f.path);
         let focused = self.focus_within_page_is_file_list();
         let (cursor_bg, cursor_bar) = if focused {
@@ -640,21 +741,19 @@ impl ChangePage {
                     .child(f.status.letter().to_owned()),
             )
             .child(file_path(&f, cx))
-            .child(div().flex_1())
             .child(super::thread_list::counts_cell(
                 self.counts.get(&f.path).copied(),
                 cx,
             ))
-            .when(reviewed, |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("\u{2713} reviewed"),
-                )
-            })
-            .child(file_size(&f, cx));
+            .child(
+                div()
+                    .w(px(REVIEWED_W))
+                    .flex_none()
+                    .text_center()
+                    .text_color(theme.success)
+                    .child(if reviewed { "\u{2713}" } else { "" }),
+            )
+            .child(file_size(&f, max_change, cx));
 
         let inline = self.inline.get(&f.path).map(|i| {
             let body: AnyElement = match (&i.view, &i.error) {
@@ -683,7 +782,10 @@ impl ChangePage {
                 .overflow_hidden()
                 .child(body)
         });
-        v_flex().child(row).children(inline).into_any_element()
+        v_flex()
+            .child(row)
+            .children(inline.map(|i| i.mr_2()))
+            .into_any_element()
     }
 
     fn focus_within_page_is_file_list(&self) -> bool {
@@ -771,8 +873,7 @@ impl ChangePage {
 
     fn log_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let n = self.detail.as_ref().map_or(0, |d| d.messages.len());
-        div()
-            .pt_2()
+        card_title_bar(cx)
             .child(section_title(&format!("Change log ({n})"), cx))
             .into_any_element()
     }
@@ -788,33 +889,42 @@ impl ChangePage {
             .author
             .as_ref()
             .map_or_else(|| "Gerrit".to_owned(), Account::display);
-        v_flex()
-            .gap_0p5()
-            .py_1()
-            .border_t_1()
-            .border_color(theme.border.opacity(0.6))
+        h_flex()
+            .gap_3()
+            .items_start()
             .child(
-                h_flex()
-                    .gap_2()
-                    .items_baseline()
-                    .text_xs()
-                    .text_color(muted)
+                v_flex()
+                    .w(px(150.))
+                    .flex_none()
+                    .items_start()
+                    .gap_0p5()
                     .child(
                         div()
                             .text_sm()
                             .font_semibold()
+                            .truncate()
                             .text_color(theme.foreground)
                             .child(who),
                     )
-                    .when_some(m.revision, |d, n| d.child(format!("PS{n}")))
-                    .child(relative(Timestamp::now(), m.date, &TimeZone::system()))
                     .when(auto, |d| d.child(pill("auto", muted))),
             )
             .child(
                 v_flex()
+                    .flex_1()
+                    .min_w_0()
                     .text_sm()
                     .when(auto, |d| d.text_color(muted))
                     .children(message_lines(m)),
+            )
+            .child(
+                v_flex()
+                    .w(px(80.))
+                    .flex_none()
+                    .items_end()
+                    .text_xs()
+                    .text_color(muted)
+                    .when_some(m.revision, |d, n| d.child(format!("PS{n}")))
+                    .child(relative(Timestamp::now(), m.date, &TimeZone::system())),
             )
             .into_any_element()
     }
@@ -882,6 +992,7 @@ fn file_path(f: &FileEntry, cx: &App) -> Div {
         _ => name,
     };
     div()
+        .flex_1()
         .min_w_0()
         .truncate()
         .text_color(if f.is_special() {
@@ -892,28 +1003,76 @@ fn file_path(f: &FileEntry, cx: &App) -> Div {
         .child(text)
 }
 
-fn file_size(f: &FileEntry, cx: &App) -> Div {
+const REVIEWED_W: f32 = 28.;
+const SIZE_W: f32 = 170.;
+const BAR_W: f32 = 56.;
+
+fn file_table_header(cx: &App) -> Div {
     let theme = cx.theme();
+    let cell = |text: &'static str| div().flex_none().child(text);
+    h_flex()
+        .px_3()
+        .py_1()
+        .gap_2()
+        .items_center()
+        .text_xs()
+        .font_semibold()
+        .text_color(theme.muted_foreground)
+        // Same left offsets as a file row: border, arrow, status letter.
+        .child(div().w(px(2. + 16. + 14. + 16.)).flex_none())
+        .child(div().flex_1().child("File"))
+        .child(
+            cell("Comments")
+                .w(px(super::thread_list::COUNTS_W))
+                .text_right(),
+        )
+        .child(cell("").w(px(REVIEWED_W)))
+        .child(cell("Size").w(px(SIZE_W)).text_right())
+}
+
+/// Lines added / removed and a bar of their proportions. The bar's length is
+/// log-scaled against the largest file, so small changes stay visible next
+/// to a huge one.
+fn file_size(f: &FileEntry, max_change: u32, cx: &App) -> Div {
+    let theme = cx.theme();
+    let cell = h_flex()
+        .flex_none()
+        .w(px(SIZE_W))
+        .gap_2()
+        .justify_end()
+        .items_center()
+        .text_xs();
     if f.binary {
-        return div()
-            .flex_none()
-            .text_xs()
+        return cell
             .text_color(theme.muted_foreground)
             .child(format!("binary, {}", size_text(f.size)));
     }
-    h_flex()
-        .flex_none()
-        .w(px(90.))
-        .gap_2()
-        .justify_end()
-        .text_xs()
+    let total = f.lines_inserted + f.lines_deleted;
+    let bar = if f.is_special() || total == 0 || max_change == 0 {
+        div().w(px(BAR_W)).flex_none()
+    } else {
+        let scale = (f64::from(total) + 1.).ln() / (f64::from(max_change) + 1.).ln();
+        let len = (f64::from(BAR_W) * scale).clamp(4., f64::from(BAR_W)) as f32;
+        let ins = len * f.lines_inserted as f32 / total as f32;
+        h_flex()
+            .w(px(BAR_W))
+            .flex_none()
+            .justify_end()
+            .child(div().h(px(8.)).w(px(ins)).bg(theme.success))
+            .child(div().h(px(8.)).w(px(len - ins)).bg(theme.danger))
+    };
+    cell.child(bar)
         .child(
             div()
+                .w(px(34.))
+                .text_right()
                 .text_color(theme.success)
                 .child(format!("+{}", f.lines_inserted)),
         )
         .child(
             div()
+                .w(px(34.))
+                .text_right()
                 .text_color(theme.danger)
                 .child(format!("\u{2212}{}", f.lines_deleted)),
         )

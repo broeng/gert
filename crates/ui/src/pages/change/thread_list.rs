@@ -284,9 +284,10 @@ impl ChangePage {
                 .selected(filter == f)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_filter(f, cx)))
         };
-        h_flex()
+        super::view::card_title_bar(cx)
+            .flex()
+            .flex_row()
             .gap_2()
-            .pt_2()
             .items_center()
             .flex_wrap()
             .child(section_title("Comments", cx))
@@ -395,7 +396,6 @@ impl ChangePage {
         let can_comment = self.session.can_comment();
         v_flex()
             .gap_1()
-            .pt_2()
             .child(
                 h_flex()
                     .gap_2()
@@ -434,11 +434,13 @@ impl ChangePage {
 /// The comment numbers of a file in the file list: unresolved threads
 /// prominent, then the comments and drafts the diff shows. A fixed-width
 /// cell, so the columns after it line up.
+pub(super) const COUNTS_W: f32 = 210.;
+
 pub(super) fn counts_cell(counts: Option<FileCommentCounts>, cx: &App) -> Div {
     let theme = cx.theme();
     let cell = h_flex()
         .flex_none()
-        .w(px(210.))
+        .w(px(COUNTS_W))
         .gap_1()
         .justify_end()
         .items_center()
