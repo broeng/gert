@@ -327,6 +327,7 @@ fn first_page_unchanged(cached: &CachedQuery, fresh: &[ChangeSummary], more: boo
     }
 }
 
+mod actions;
 mod comments;
 
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
