@@ -8,7 +8,7 @@
 //! carries.
 //!
 //! Focus: the page keeps the focus. `shift-n` / `shift-p` move the thread
-//! cursor (a different cursor from the file one, like the related changes'),
+//! cursor (a different cursor from the file one),
 //! `x` or a click opens the thread: its diff page, with the cursor on it, or
 //! for a patch-set level thread the card below the list, which takes the
 //! focus (so `c`, `q`, `d` and the editor keys of the diff apply) until

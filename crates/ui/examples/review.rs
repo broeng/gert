@@ -1002,6 +1002,11 @@ fn server(files: Option<usize>, changes: Option<usize>, chain: Option<usize>) ->
         changes.map_or_else(|| ex("query.json"), many_changes),
     );
     http.route("/changes/12345?", 200, ex("change.json"));
+    // Stepping through the relation chain (Shift-J) lands on these: they
+    // show the same detail under another number.
+    for n in [12340, 12347, 12348] {
+        http.route(&format!("/changes/{n}?"), 200, ex("change.json"));
+    }
     http.route(
         "/related",
         200,
