@@ -57,6 +57,10 @@ impl Backend for Demo {
         Ok(Some("demo".into()))
     }
 
+    fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+        Err(BackendError("the demo has no settings".into()))
+    }
+
     fn save_login(
         &self,
         _: &str,

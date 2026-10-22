@@ -22,6 +22,26 @@ actions!(
         BlurSearch,
         ToggleHelp,
         Dismiss,
+        /// `ctrl-,` / `cmd-,`: open the settings page.
+        OpenSettings,
+        // Settings page.
+        /// `Enter` / `e`: edit the selected saved query.
+        EditQuery,
+        /// `a`: add a saved query.
+        AddQuery,
+        /// `d`: delete the selected saved query (asks first).
+        DeleteQuery,
+        MoveQueryDown,
+        MoveQueryUp,
+        /// `y` / `Enter` while asked to delete.
+        ConfirmDelete,
+        /// `n` / `Esc` while asked to delete.
+        CancelDelete,
+        /// `Esc` while editing a saved query.
+        CancelEdit,
+        /// `Tab` / `Shift-Tab` while editing: the other field.
+        NextField,
+        PrevField,
         // Change page.
         /// Show or hide the inline diff of the file under the cursor.
         ToggleInline,
@@ -102,6 +122,14 @@ const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
 const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
 const DIFF_PREFS_KEYS: &str = "DiffPrefs && !Input";
+const SETTINGS_BROWSE: &str = "SettingsPage && Browsing";
+const SETTINGS_CONFIRM: &str = "SettingsPage && Confirming";
+const SETTINGS_EDIT: &str = "SettingsPage && Editing";
+/// As deep as the input's own context, to win over its Tab / Escape (like
+/// the reply dialog's fields).
+const SETTINGS_FIELD: &str = "Editing > Input";
+/// Opening the settings works from anywhere but the modal dialogs.
+const SETTINGS_OPEN: &str = "Shell && !ReplyDialog && !ActionDialog";
 
 /// All shell-level and list entries (what the help overlay called
 /// "everything" before the pages grew their own).
@@ -123,6 +151,7 @@ pub fn help_groups() -> Vec<HelpGroup> {
         g("Change lists", list_entries()),
         g("Change page", change_entries()),
         g("Diff page", diff_page_entries()),
+        g("Settings page", settings_entries()),
         g("In a diff", crate::diff::actions::entries()),
         g("Writing a comment", crate::diff::actions::editor_entries()),
         g("Reply dialog ( A )", crate::reply::actions::entries()),
@@ -458,9 +487,91 @@ pub fn list_entries() -> Vec<Entry> {
     ]
 }
 
+/// Entries of the settings page (the saved-queries editor).
+pub fn settings_entries() -> Vec<Entry> {
+    let b = SETTINGS_BROWSE;
+    vec![
+        e(
+            "j / k",
+            KeyBinding::new("j", SelectNext, Some(b)),
+            "Next / previous saved query",
+        ),
+        e("", KeyBinding::new("k", SelectPrev, Some(b)), ""),
+        e("", KeyBinding::new("down", SelectNext, Some(b)), ""),
+        e("", KeyBinding::new("up", SelectPrev, Some(b)), ""),
+        e(
+            "Enter / e",
+            KeyBinding::new("enter", EditQuery, Some(b)),
+            "Edit the query (Tab: other field, Enter: save, Esc: cancel)",
+        ),
+        e("", KeyBinding::new("e", EditQuery, Some(b)), ""),
+        e("a", KeyBinding::new("a", AddQuery, Some(b)), "Add a query"),
+        e(
+            "d",
+            KeyBinding::new("d", DeleteQuery, Some(b)),
+            "Delete the query (y / Enter: yes, n / Esc: no)",
+        ),
+        e(
+            "Shift-J / Shift-K",
+            KeyBinding::new("shift-j", MoveQueryDown, Some(b)),
+            "Move the query down / up",
+        ),
+        e("", KeyBinding::new("shift-k", MoveQueryUp, Some(b)), ""),
+        e(
+            "",
+            KeyBinding::new("y", ConfirmDelete, Some(SETTINGS_CONFIRM)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("enter", ConfirmDelete, Some(SETTINGS_CONFIRM)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("n", CancelDelete, Some(SETTINGS_CONFIRM)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("escape", CancelDelete, Some(SETTINGS_CONFIRM)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("escape", CancelEdit, Some(SETTINGS_EDIT)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("escape", CancelEdit, Some(SETTINGS_FIELD)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("tab", NextField, Some(SETTINGS_FIELD)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("shift-tab", PrevField, Some(SETTINGS_FIELD)),
+            "",
+        ),
+    ]
+}
+
 /// Entries that work on every page.
 pub fn global_entries() -> Vec<Entry> {
     vec![
+        e(
+            if cfg!(target_os = "macos") {
+                "Cmd-,"
+            } else {
+                "Ctrl-,"
+            },
+            KeyBinding::new("secondary-,", OpenSettings, Some(SETTINGS_OPEN)),
+            "Open the settings",
+        ),
         e(
             "u",
             KeyBinding::new("u", GoUp, Some(SHELL_KEYS)),
@@ -512,6 +623,7 @@ pub fn bind_keys(cx: &mut App) {
             .chain(change_entries())
             .chain(diff_page_entries())
             .chain(diff_prefs_entries())
+            .chain(settings_entries())
             .map(|e| e.binding),
     );
 }
@@ -520,6 +632,7 @@ pub fn bind_keys(cx: &mut App) {
 mod tests {
     use super::{
         Entry, change_entries, diff_page_entries, diff_prefs_entries, entries, help_groups,
+        settings_entries,
     };
 
     /// Every binding the app registers (see `bind_keys` here and in
@@ -530,6 +643,7 @@ mod tests {
             .chain(change_entries())
             .chain(diff_page_entries())
             .chain(diff_prefs_entries())
+            .chain(settings_entries())
             .chain(crate::diff::actions::entries())
             .chain(crate::diff::actions::editor_entries())
             .chain(crate::reply::actions::entries())

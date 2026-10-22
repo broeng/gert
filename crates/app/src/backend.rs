@@ -76,6 +76,20 @@ impl Backend for AppBackend {
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(queries_to_ui(&config.queries))
     }
+
+    fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+        let config = Config::update(&self.config_file, |c| {
+            c.queries = queries
+                .iter()
+                .map(|q| QueryConfig {
+                    name: q.name.clone(),
+                    query: q.query.clone(),
+                })
+                .collect();
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        Ok(queries_to_ui(&config.queries))
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +132,31 @@ mod tests {
         assert_eq!(queries.len(), 2);
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
         assert_eq!(cfg.server.unwrap().username, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_queries_keeps_the_comments_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("backend-queries-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let b = AppBackend {
+            config_file: dir.join("config.toml"),
+            keyring: Keyring,
+        };
+        std::fs::write(
+            &b.config_file,
+            "# mine\n[server]\nurl = \"https://g\" # prod\n\n[[queries]]\nname = \"A\"\nquery = \"x\"\n",
+        )
+        .unwrap();
+        let new = [SavedQuery {
+            name: "B".into(),
+            query: "y".into(),
+        }];
+        assert_eq!(b.save_queries(&new).unwrap(), new);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
+        assert!(text.contains("name = \"B\""), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

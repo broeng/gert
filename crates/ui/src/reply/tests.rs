@@ -944,6 +944,10 @@ mod from_the_shell {
             Ok(Some("secret".into()))
         }
 
+        fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+            Err(BackendError("not used".into()))
+        }
+
         fn save_login(
             &self,
             _: &str,
