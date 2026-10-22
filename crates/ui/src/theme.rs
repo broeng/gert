@@ -23,3 +23,14 @@ pub fn chip_colors(chip: Chip, cx: &App) -> (Hsla, Hsla) {
     };
     (fg, fg.opacity(0.15))
 }
+
+/// Background of the commit message card: a faded sticky-note yellow, so it
+/// stands out from the columns beside it. The theme has no such token, so
+/// light and dark get their own tint.
+pub fn commit_card_background(cx: &App) -> Hsla {
+    if cx.theme().is_dark() {
+        hsla(48. / 360., 0.25, 0.19, 1.)
+    } else {
+        hsla(50. / 360., 0.85, 0.90, 1.)
+    }
+}
