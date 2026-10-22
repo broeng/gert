@@ -59,6 +59,7 @@ use crate::{
     row::browser_url,
     session::{Session, is_unauthorized},
     settings::{DiffSettings, FileFilters, PageLayout},
+    syntax_cache::{SyntaxCache, ahead_paths, diff_key},
     tracker::Tracker,
 };
 use state::{Block, Content, PatchSel, step};
@@ -149,6 +150,10 @@ pub struct ChangePage {
     related_scroll: ScrollHandle,
     /// The file filter rules and which are on, shared by all pages.
     filters: Entity<FileFilters>,
+    /// The syntax worker's cache, shared by all pages.
+    syntax: Entity<SyntaxCache>,
+    /// What this page last asked the syntax worker to do.
+    queued: Vec<DiffKey>,
     /// The filter style of each entry of `files.list`.
     styles: Vec<FileStyle>,
     /// Indexes into `files.list` of the files the filters do not hide. The
@@ -218,6 +223,7 @@ impl ChangePage {
         settings: Entity<DiffSettings>,
         layout: Entity<PageLayout>,
         filters: Entity<FileFilters>,
+        syntax: Entity<SyntaxCache>,
         number: ChangeNumber,
         view: ChangeView,
         window_active: bool,
@@ -230,6 +236,8 @@ impl ChangePage {
             settings: settings.clone(),
             layout: layout.clone(),
             filters: filters.clone(),
+            syntax,
+            queued: Vec::new(),
             styles: Vec::new(),
             visible: Vec::new(),
             number,
@@ -632,6 +640,7 @@ impl ChangePage {
         self.files.loaded = true;
         self.files.error = None;
         self.compute_styles(cx);
+        self.queue_syntax(cx);
         self.cursor = self.cursor_on(keep.as_deref());
         let paths: HashSet<_> = self.files.list.iter().map(|f| f.path.as_str()).collect();
         self.inline.retain(|p, _| paths.contains(p.as_str()));
@@ -733,6 +742,7 @@ impl ChangePage {
     fn filters_changed(&mut self, cx: &mut Context<Self>) {
         let keep = self.cursor_path().map(str::to_owned);
         self.compute_styles(cx);
+        self.queue_syntax(cx);
         self.cursor = self.cursor_on(keep.as_deref());
         self.rebuild_blocks();
         cx.notify();
@@ -833,13 +843,34 @@ impl ChangePage {
     fn diff_key(&self, path: &str, cx: &App) -> Option<DiffKey> {
         let files = self.files.key.as_ref()?;
         let prefs = self.settings.read(cx).resolved();
-        Some(DiffKey {
-            change: files.change,
-            base: files.base.clone(),
-            target: files.target.clone(),
-            path: path.to_owned(),
-            whitespace: prefs.ignore_whitespace,
-        })
+        Some(diff_key(files, path, prefs.ignore_whitespace))
+    }
+
+    /// Has the syntax worker highlight the file `]` would open first (the
+    /// first one that is not hidden, dimmed or a magic file), so that its
+    /// colors are there by the time the diff page opens. Called whenever
+    /// the list, the filters, the whitespace option or the preference may
+    /// have changed; does nothing when the queue would be the same.
+    fn queue_syntax(&mut self, cx: &mut Context<Self>) {
+        let enabled = self.settings.read(cx).resolved().syntax_highlighting;
+        let keys: Vec<DiffKey> = match &self.files.key {
+            Some(files) if enabled && self.files.loaded => {
+                let whitespace = self.settings.read(cx).resolved().ignore_whitespace;
+                ahead_paths(&self.files.list, &self.styles, None)
+                    .into_iter()
+                    .take(1)
+                    .map(|p| diff_key(files, p, whitespace.clone()))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        if keys == self.queued {
+            return;
+        }
+        self.queued = keys.clone();
+        let session = self.session.clone();
+        self.syntax
+            .update(cx, |c, cx| c.set_queue(keys, &session, enabled, cx));
     }
 
     fn expand_inline(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -1078,6 +1109,7 @@ impl ChangePage {
                 v.set_font_family(font.clone(), cx);
             });
         }
+        self.queue_syntax(cx);
         let paths: Vec<String> = self.inline.keys().cloned().collect();
         for path in paths {
             let key = self.diff_key(&path, cx);

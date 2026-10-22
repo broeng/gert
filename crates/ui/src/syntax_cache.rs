@@ -14,12 +14,13 @@
 use std::collections::VecDeque;
 
 use gpui_kit::{AppContext as _, Context, Task};
-use model::DiffKey;
+use model::{DiffKey, FileEntry, FilesKey, Whitespace};
 use sync::Syncer;
 
 use crate::{
     diff::syntax::{DiffSyntax, highlight_diff},
     diff_load::load_diff,
+    filters::{FileStyle, skips},
     session::Session,
 };
 
@@ -65,7 +66,6 @@ impl Lru {
         self.entries.iter().position(|(k, _)| k == key)
     }
 
-    #[allow(dead_code, reason = "used by the queue worker, wired in by 8d")]
     fn contains(&self, key: &DiffKey) -> bool {
         self.position(key).is_some()
     }
@@ -96,13 +96,12 @@ impl Lru {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the queue is fed by the pages in 8d; until then only tests use it"
-)]
 pub struct SyntaxCache {
     lru: Lru,
     queue: VecDeque<DiffKey>,
+    /// The keys the last `set_queue` was given while enabled.
+    #[cfg(test)]
+    last_queue: Vec<DiffKey>,
     /// The worker; dropping it cancels the item in flight.
     worker: Option<Task<()>>,
 }
@@ -122,6 +121,8 @@ impl SyntaxCache {
         Self {
             lru: Lru::new(max_entries, max_lines),
             queue: VecDeque::new(),
+            #[cfg(test)]
+            last_queue: Vec::new(),
             worker: None,
         }
     }
@@ -144,7 +145,6 @@ impl SyntaxCache {
     /// false (the `syntax_highlighting` preference is off) the queue is just
     /// cleared. Callers pass the resolved preference, and call again when it
     /// turns on.
-    #[allow(dead_code, reason = "queued by the pages in 8d")]
     pub fn set_queue(
         &mut self,
         keys: Vec<DiffKey>,
@@ -154,6 +154,10 @@ impl SyntaxCache {
     ) {
         self.worker = None;
         self.queue.clear();
+        #[cfg(test)]
+        {
+            self.last_queue = if enabled { keys.clone() } else { Vec::new() };
+        }
         if !enabled || keys.is_empty() {
             return;
         }
@@ -185,7 +189,6 @@ impl SyntaxCache {
     }
 
     /// The next queued key that is not cached yet.
-    #[allow(dead_code, reason = "part of set_queue")]
     fn next_key(&mut self) -> Option<DiffKey> {
         while let Some(key) = self.queue.pop_front() {
             if !self.lru.contains(&key) {
@@ -195,15 +198,61 @@ impl SyntaxCache {
         None
     }
 
+    /// What the last `set_queue` was asked to do the work for (the worker
+    /// takes keys off the real queue as it goes).
+    #[cfg(test)]
+    pub(crate) fn last_queue_for_test(&self) -> &[DiffKey] {
+        &self.last_queue
+    }
+
     #[cfg(test)]
     pub(crate) fn queued_for_test(&self) -> usize {
         self.queue.len()
     }
 }
 
+/// The key of `path`'s diff in the comparison `files`.
+pub fn diff_key(files: &FilesKey, path: &str, whitespace: Whitespace) -> DiffKey {
+    DiffKey {
+        change: files.change,
+        base: files.base.clone(),
+        target: files.target.clone(),
+        path: path.to_owned(),
+        whitespace,
+    }
+}
+
+/// Whether the file is one of Gerrit's magic files (`/COMMIT_MSG`, ...),
+/// which have nothing to color.
+pub fn is_magic(path: &str) -> bool {
+    path.starts_with('/')
+}
+
+/// The files worth highlighting ahead, in the order `]` visits them: the
+/// ones after `shown` (or from the start without one), then the ones
+/// before it. Files `]` skips (hidden, dimmed), the magic files and
+/// `shown` itself are left out. `files` and `styles` are parallel.
+pub fn ahead_paths<'a>(
+    files: &'a [FileEntry],
+    styles: &[FileStyle],
+    shown: Option<&str>,
+) -> Vec<&'a str> {
+    let at = shown.and_then(|p| files.iter().position(|f| f.path == p));
+    let split = at.map_or(0, |i| i + 1);
+    let wanted = |(f, style): &(&FileEntry, &FileStyle)| {
+        !skips(style) && !is_magic(&f.path) && Some(f.path.as_str()) != shown
+    };
+    let after = files.iter().zip(styles).skip(split);
+    let before = files.iter().zip(styles).take(split);
+    after
+        .chain(before)
+        .filter(wanted)
+        .map(|(f, _)| f.path.as_str())
+        .collect()
+}
+
 /// Gets the diff (cache first, the network for a miss) and highlights it.
 /// Blocking: call from the background executor.
-#[allow(dead_code, reason = "part of set_queue")]
 async fn highlight_key(
     syncer: Syncer,
     key: DiffKey,

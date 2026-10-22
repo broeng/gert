@@ -585,10 +585,11 @@ impl Shell {
         let settings = self.settings.clone();
         let layout = self.layout.clone();
         let filters = self.filters.clone();
+        let syntax = self.syntax.clone();
         let outbox = self.outbox_for(&session, cx);
         let page = cx.new(|cx| {
             ChangePage::new(
-                session, settings, layout, filters, number, view, active, outbox, cx,
+                session, settings, layout, filters, syntax, number, view, active, outbox, cx,
             )
         });
         self.page_subs.push(cx.subscribe_in(

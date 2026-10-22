@@ -17,15 +17,17 @@ use crate::{
     outbox::DraftOutbox,
     session::Session,
     settings::{DiffSettings, FileFilters, PageLayout},
+    syntax_cache::SyntaxCache,
     testing::{detail, file, whole_file},
     tests::{URL, env_with, open, setup},
 };
 
-const NOW: &str = "2024-06-15T10:05:00Z";
 const PATHS: [&str; 4] = ["/COMMIT_MSG", "src/a.rs", "src/b.rs", "src/c.rs"];
 
+/// When the seeded rows were fetched: recent, because a diff fetch prunes
+/// old cache rows (the syntax worker fetches diffs on its own).
 fn ts() -> jiff::Timestamp {
-    NOW.parse().expect("timestamp")
+    jiff::Timestamp::now()
 }
 
 fn ps(n: u32) -> PatchSetRef {
@@ -78,6 +80,8 @@ struct Fixture {
     window: AnyWindowHandle,
     page: Entity<ChangePage>,
     filters: Entity<FileFilters>,
+    syntax: Entity<SyntaxCache>,
+    settings: Entity<DiffSettings>,
     http: RouteHttpClient,
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -145,18 +149,24 @@ fn page_in(
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
     let mut filters_out = None;
+    let mut syntax_out = None;
+    let mut settings_out = None;
     let (window, page) = open(cx, |window, cx| {
         let settings = cx.new(|_| DiffSettings::new(LocalDiff::default()));
+        settings_out = Some(settings.clone());
         let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
         let layout = cx.new(|_| PageLayout::default());
         let filters = cx.new(|_| FileFilters::new(Vec::new()));
         filters_out = Some(filters.clone());
+        let syntax = cx.new(|_| SyntaxCache::new());
+        syntax_out = Some(syntax.clone());
         let page = cx.new(|cx| {
             ChangePage::new(
                 session,
                 settings,
                 layout,
                 filters,
+                syntax,
                 ChangeNumber(7),
                 view,
                 true,
@@ -198,6 +208,8 @@ fn page_in(
         window,
         page,
         filters: filters_out.expect("filters were created"),
+        syntax: syntax_out.expect("syntax cache was created"),
+        settings: settings_out.expect("settings were created"),
         http,
         events,
     }
@@ -1391,4 +1403,55 @@ fn manage_filters_emits_an_event_with_the_project(cx: &mut TestAppContext) {
     press(cx, &f, &["f", "m"]);
     let events = f.events.lock().expect("log").clone();
     assert_eq!(events, ["manage filters platform/foo".to_owned()]);
+}
+
+// --- syntax highlighting ahead -------------------------------------------
+
+fn queued(cx: &mut TestAppContext, f: &Fixture) -> Vec<String> {
+    cx.update(|cx| {
+        f.syntax
+            .read(cx)
+            .last_queue_for_test()
+            .iter()
+            .map(|k| k.path.clone())
+            .collect()
+    })
+}
+
+fn set_syntax(cx: &mut TestAppContext, f: &Fixture, on: bool) {
+    f.settings.update(cx, |s, cx| {
+        s.update_session(|p| p.syntax_highlighting = Some(on), cx)
+    });
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn opening_queues_the_first_file_that_is_not_magic(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    assert_eq!(queued(cx, &f), ["src/a.rs"]);
+}
+
+#[gpui_kit::test]
+fn a_hidden_or_dimmed_first_file_moves_the_queue_on(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    set_rules(cx, &f, vec![rule("A", "src/a.rs", FilterAction::Hide)]);
+    assert_eq!(queued(cx, &f), ["src/b.rs"]);
+    set_rules(
+        cx,
+        &f,
+        vec![
+            rule("A", "src/a.rs", FilterAction::Dim),
+            rule("B", "src/b.rs", FilterAction::Dim),
+        ],
+    );
+    assert_eq!(queued(cx, &f), ["src/c.rs"]);
+}
+
+#[gpui_kit::test]
+fn nothing_is_queued_with_syntax_highlighting_off_until_it_is_on(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    set_syntax(cx, &f, false);
+    assert!(queued(cx, &f).is_empty());
+    set_syntax(cx, &f, true);
+    assert_eq!(queued(cx, &f), ["src/a.rs"]);
 }
