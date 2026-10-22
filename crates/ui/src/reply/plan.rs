@@ -5,8 +5,9 @@
 use std::collections::BTreeMap;
 
 use model::{
-    Account, AccountId, AttentionSetInput, ChangeDetail, ChangeStatus, Draft, DraftHandling,
-    DraftSync, Entry, LocalDraftId, PATCHSET_LEVEL_PATH, PatchSetNumber, ReviewInput, Thread,
+    Account, AccountId, AttentionSetInput, ChangeDetail, ChangeNumber, ChangeStatus, Draft,
+    DraftHandling, DraftSync, Entry, LocalDraftId, PATCHSET_LEVEL_PATH, PatchSetNumber,
+    RelatedChange, ReviewInput, Thread,
 };
 
 use crate::pages::change::threads::location_text;
@@ -190,6 +191,16 @@ pub fn voted_text(votes: &[(String, i32)]) -> String {
         .map(|(label, value)| format!("{label} {}", vote_text(*value)))
         .collect();
     format!("Voted {}", list.join(", "))
+}
+
+/// The change to go to after a vote: the child of `current` in the relation
+/// chain (the list is newest descendant first, so the row above), if it is
+/// open. `None` at the tip, for a closed child, or when `current` is not in
+/// the chain.
+pub fn advance_target(chain: &[RelatedChange], current: ChangeNumber) -> Option<ChangeNumber> {
+    let at = chain.iter().position(|c| c.number == current)?;
+    let child = chain.get(at.checked_sub(1)?)?;
+    (child.status == Some(ChangeStatus::New)).then_some(child.number)
 }
 
 // ---- attention set ----
@@ -848,5 +859,53 @@ mod tests {
             voted_text(&[("A".into(), 1), ("B".into(), -1)]),
             "Voted A +1, B -1"
         );
+    }
+
+    fn link(n: u64, status: Option<ChangeStatus>) -> RelatedChange {
+        RelatedChange {
+            project: "p".into(),
+            change_id: None,
+            number: ChangeNumber(n),
+            patch_set: PatchSetNumber(1),
+            current_patch_set: None,
+            status,
+            submittable: None,
+            work_in_progress: false,
+            commit: None,
+        }
+    }
+
+    #[test]
+    fn advance_goes_to_the_open_child() {
+        // Newest descendant first: 3 is the tip, 1 the root.
+        let open = Some(ChangeStatus::New);
+        let chain = [link(3, open.clone()), link(2, open.clone()), link(1, open)];
+        assert_eq!(
+            advance_target(&chain, ChangeNumber(1)),
+            Some(ChangeNumber(2))
+        );
+        assert_eq!(
+            advance_target(&chain, ChangeNumber(2)),
+            Some(ChangeNumber(3))
+        );
+        assert_eq!(advance_target(&chain, ChangeNumber(3)), None, "tip");
+        assert_eq!(
+            advance_target(&chain, ChangeNumber(9)),
+            None,
+            "not in chain"
+        );
+        assert_eq!(advance_target(&[], ChangeNumber(1)), None);
+    }
+
+    #[test]
+    fn advance_skips_a_closed_or_unknown_child() {
+        for status in [
+            Some(ChangeStatus::Merged),
+            Some(ChangeStatus::Abandoned),
+            None,
+        ] {
+            let chain = [link(2, status), link(1, Some(ChangeStatus::New))];
+            assert_eq!(advance_target(&chain, ChangeNumber(1)), None);
+        }
     }
 }

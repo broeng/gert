@@ -63,15 +63,38 @@ impl DiffSettings {
 
 /// Layout choices of the running session that every change page shares,
 /// so that stepping through a relation chain keeps the panel open. Not
-/// persisted.
-#[derive(Default)]
+/// persisted. Also holds the review flow choice that 3b will read from the
+/// config.
 pub struct PageLayout {
     /// The relation chain is wanted as a side panel (it still falls back
     /// to the box in a narrow window).
     related_panel: bool,
+    /// After a vote, go on to the next open change of the relation chain.
+    advance_after_vote: bool,
+}
+
+impl Default for PageLayout {
+    fn default() -> Self {
+        Self {
+            related_panel: false,
+            advance_after_vote: true,
+        }
+    }
 }
 
 impl PageLayout {
+    pub fn advance_after_vote(&self) -> bool {
+        self.advance_after_vote
+    }
+
+    #[allow(dead_code)] // The settings page (3b) calls it.
+    pub fn set_advance_after_vote(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.advance_after_vote != on {
+            self.advance_after_vote = on;
+            cx.notify();
+        }
+    }
+
     pub fn related_panel(&self) -> bool {
         self.related_panel
     }

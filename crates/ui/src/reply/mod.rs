@@ -88,6 +88,9 @@ pub struct Sent {
     pub unapplied: Vec<(String, i32)>,
     /// A part of the request that failed although the review was posted.
     pub warning: Option<String>,
+    /// The votes that were cast and took effect; empty for a reply that
+    /// changed none.
+    pub voted: Vec<(String, i32)>,
 }
 
 impl Sent {
@@ -574,7 +577,12 @@ impl ReplyDialog {
                     None => self.comments.update(cx, |c, cx| c.refresh(cx)),
                 }
                 self.outbox.update(cx, |o, cx| o.published(change, cx));
+                let voted = plan::applied_votes(
+                    &plan::labels_to_send(&self.votes),
+                    &outcome.unapplied_labels,
+                );
                 cx.emit(ReplyEvent::Sent(Box::new(Sent {
+                    voted,
                     detail: outcome.detail,
                     unapplied: outcome.unapplied_labels,
                     warning: outcome.result.error,

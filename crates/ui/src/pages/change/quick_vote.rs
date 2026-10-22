@@ -3,7 +3,7 @@
 //! relation chain after a vote (also after a vote in the reply dialog).
 
 use gpui_kit::*;
-use model::ReviewInput;
+use model::{ChangeNumber, ReviewInput};
 use sync::PublishOutcome;
 
 use super::{ChangeEvent, ChangePage};
@@ -132,14 +132,32 @@ impl ChangePage {
         cx.notify();
     }
 
-    /// A vote (`voted` is not empty) took effect: say `note`.
+    /// A vote (`voted` is not empty) took effect: go on to the child in the
+    /// relation chain if the setting says so, else say `note` here.
     pub(super) fn after_vote(
         &mut self,
-        _voted: &[(String, i32)],
+        voted: &[(String, i32)],
         note: String,
         cx: &mut Context<Self>,
     ) {
-        self.hint.say(note, false, cx, |p| &mut p.hint);
+        let target = self.advance_target(voted, cx);
+        match target {
+            Some(n) => cx.emit(ChangeEvent::Advance(
+                n,
+                format!("{note}, moved to change {n}"),
+            )),
+            None => self.hint.say(note, false, cx, |p| &mut p.hint),
+        }
+    }
+
+    /// Where a vote that cast `voted` leads: nowhere if it changed no vote,
+    /// the setting is off, or there is no open child.
+    pub(super) fn advance_target(&self, voted: &[(String, i32)], cx: &App) -> Option<ChangeNumber> {
+        if voted.is_empty() || !self.layout.read(cx).advance_after_vote() {
+            return None;
+        }
+        let chain = &self.related.as_ref()?.changes;
+        plan::advance_target(chain, self.number)
     }
 }
 
