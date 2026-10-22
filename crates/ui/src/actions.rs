@@ -393,7 +393,7 @@ pub fn global_entries() -> Vec<Entry> {
         e(
             "u",
             KeyBinding::new("u", GoUp, Some(SHELL_KEYS)),
-            "Up: to the list, or from a diff to its change",
+            "Up: from a diff to its change, from a change to its list",
         ),
         e(
             "Alt-Left / Alt-Right",
