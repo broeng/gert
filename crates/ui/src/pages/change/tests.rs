@@ -140,6 +140,7 @@ fn page_as(
                 ChangeEvent::Unauthorized => "unauthorized".to_owned(),
                 // Not what these tests are about (the shell retries drafts).
                 ChangeEvent::Refreshed => return,
+                ChangeEvent::Reply(_) => "reply".to_owned(),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::OpenDiff(d) => format!(
                     "diff {} {:?}..{} {}{}",

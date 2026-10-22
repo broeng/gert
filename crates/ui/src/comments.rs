@@ -82,6 +82,12 @@ impl ChangeComments {
         }));
     }
 
+    /// Takes comments that arrived another way (the answer to a posted
+    /// review) as if this entity had fetched them.
+    pub fn apply_view(&mut self, view: sync::CommentsView, cx: &mut Context<Self>) {
+        self.apply(view.threads(), cx);
+    }
+
     pub fn threads(&self) -> Arc<Vec<Thread>> {
         self.threads.clone()
     }

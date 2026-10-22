@@ -49,6 +49,8 @@ actions!(
         NewPatchSetComment,
         ScrollPageDown,
         ScrollPageUp,
+        /// `a`: open the reply dialog (message, votes, drafts, attention set).
+        Reply,
         /// `r`: mark the file under the cursor (change page) or shown (diff
         /// page) as reviewed, or take the mark off again.
         ToggleReviewed,
@@ -80,7 +82,7 @@ pub const SEARCH_BAR: &str = "SearchBar";
 
 // Single-letter bindings must not fire while text is being typed; the text
 // input marks its key context "Input".
-const SHELL_KEYS: &str = "Shell && !Input";
+const SHELL_KEYS: &str = "Shell && !Input && !ReplyDialog";
 const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
 const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
@@ -108,6 +110,7 @@ pub fn help_groups() -> Vec<HelpGroup> {
         g("Diff page", diff_page_entries()),
         g("In a diff", crate::diff::actions::entries()),
         g("Writing a comment", crate::diff::actions::editor_entries()),
+        g("Reply dialog ( A )", crate::reply::actions::entries()),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
     ]
 }
@@ -192,6 +195,11 @@ pub fn change_entries() -> Vec<Entry> {
             "New patch-set level comment",
         ),
         e(
+            "A",
+            KeyBinding::new("a", Reply, Some(k)),
+            "Reply: message, votes, drafts, attention set",
+        ),
+        e(
             "R",
             KeyBinding::new("r", ToggleReviewed, Some(k)),
             "Mark the file under the cursor reviewed / not reviewed",
@@ -239,6 +247,11 @@ pub fn diff_page_entries() -> Vec<Entry> {
             "Next / previous file",
         ),
         e("", KeyBinding::new("[", PrevFile, Some(k)), ""),
+        e(
+            "A",
+            KeyBinding::new("a", Reply, Some(k)),
+            "Reply: message, votes, attention set",
+        ),
         e(
             "R",
             KeyBinding::new("r", ToggleReviewed, Some(k)),
@@ -436,6 +449,7 @@ mod tests {
             .chain(diff_prefs_entries())
             .chain(crate::diff::actions::entries())
             .chain(crate::diff::actions::editor_entries())
+            .chain(crate::reply::actions::entries())
             .collect()
     }
 
