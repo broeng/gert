@@ -66,6 +66,9 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName)> {
 }
 
 fn run() -> anyhow::Result<()> {
+    // `gert <link>` opens the change a web UI link points at, like a
+    // browser would.
+    let link = std::env::args().nth(1);
     let (startup, advance_after_vote, theme) = startup()?;
     ui::application().run(move |cx| {
         gpui_kit::init(cx);
@@ -75,9 +78,13 @@ fn run() -> anyhow::Result<()> {
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
             cx.new(|cx| {
-                Shell::new(startup, window, cx)
+                let mut shell = Shell::new(startup, window, cx)
                     .with_app_name(APP_NAME)
-                    .with_advance_after_vote(advance_after_vote, cx)
+                    .with_advance_after_vote(advance_after_vote, cx);
+                if let Some(link) = &link {
+                    shell.open_link(link, window, cx);
+                }
+                shell
             })
         });
         match opened {
