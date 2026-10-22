@@ -446,14 +446,15 @@ impl ChangeListPage {
                 .truncate()
                 .child(SharedString::from(t.to_owned()))
         };
+        // pl: the rows' 2px selection border keeps the columns aligned.
         h_flex()
-            .px_3()
+            .pl(px(14.))
+            .pr_3()
             .py_1()
             .gap_2()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .border_t_1()
-            .border_l_2()
             .border_color(cx.theme().border.opacity(0.6))
             .child(th(W_NUM, "#"))
             .child(div().flex_1().min_w(px(W_SUBJECT_MIN)).child("Subject"))
