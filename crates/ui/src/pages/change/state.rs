@@ -234,6 +234,8 @@ mod tests {
             attention: Default::default(),
             permitted_labels: Default::default(),
             label_values: Default::default(),
+            change_actions: Default::default(),
+            revision_actions: Default::default(),
         }
     }
 

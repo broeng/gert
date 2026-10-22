@@ -204,7 +204,8 @@ impl GerritClient {
     }
 
     /// `GET /changes/{n}` with all patch sets and their commits, the change
-    /// log, submit requirements and detailed votes.
+    /// log, submit requirements, detailed votes and the actions the user may
+    /// run (`CURRENT_ACTIONS`, `CHANGE_ACTIONS`).
     pub async fn get_change(&self, number: ChangeNumber) -> Result<ChangeDetail, Error> {
         let params: Vec<_> = [
             ChangeOption::CurrentRevision,
@@ -215,6 +216,8 @@ impl GerritClient {
             ChangeOption::Submittable,
             ChangeOption::Messages,
             ChangeOption::SubmitRequirements,
+            ChangeOption::CurrentActions,
+            ChangeOption::ChangeActions,
         ]
         .into_iter()
         .map(|o| ("o", o.as_str().to_owned()))
@@ -948,7 +951,7 @@ mod tests {
             fake.requests()[0].uri().to_string(),
             "https://h/changes/5?o=CURRENT_REVISION&o=ALL_REVISIONS&o=ALL_COMMITS\
              &o=DETAILED_LABELS&o=DETAILED_ACCOUNTS&o=SUBMITTABLE&o=MESSAGES\
-             &o=SUBMIT_REQUIREMENTS"
+             &o=SUBMIT_REQUIREMENTS&o=CURRENT_ACTIONS&o=CHANGE_ACTIONS"
         );
     }
 
@@ -1803,5 +1806,64 @@ mod tests {
             "https://h/a/changes/5/revisions/0123abcd/files/src%2Fa%20b.rs/reviewed"
         );
         assert!(reqs[0].body().is_empty());
+    }
+
+    const ACTION_CHANGE: &str = r#"{
+        "project": "p", "branch": "main", "change_id": "I1", "subject": "s",
+        "status": "ABANDONED", "created": "2020-01-02 03:04:05.000000000",
+        "updated": "2020-01-03 03:04:05.500000000", "_number": 5,
+        "owner": {"_account_id": 1}}"#;
+
+    fn action_fake(response: &str) -> (FakeHttpClient, GerritClient) {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi(response));
+        let c = client(&fake, "https://h", basic());
+        (fake, c)
+    }
+
+    #[test]
+    fn get_change_reads_change_and_revision_actions() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{
+            "project": "p", "branch": "main", "change_id": "I1", "subject": "s",
+            "status": "NEW", "created": "2020-01-02 03:04:05.000000000",
+            "updated": "2020-01-03 03:04:05.500000000", "_number": 5,
+            "owner": {"_account_id": 1}, "current_revision": "bbb",
+            "actions": {
+                "abandon": {"method": "POST", "label": "Abandon", "title": "Abandon", "enabled": true},
+                "plugin~odd": {"enabled_options": ["a"], "future": 1}
+            },
+            "revisions": {
+                "bbb": {"_number": 2, "created": "2020-01-03 00:00:00.000000000",
+                    "actions": {
+                        "submit": {"method": "POST", "label": "Submit", "enabled": true},
+                        "rebase": {"method": "POST", "enabled_options": ["rebase"]}
+                    }},
+                "aaa": {"_number": 1, "created": "2020-01-02 00:00:00.000000000",
+                    "actions": {"submit": {"enabled": true}}}
+            }}"#,
+            ),
+        );
+        let c = client(&fake, "https://h", basic());
+        let d = block_on(c.get_change(ChangeNumber(5))).unwrap();
+        let uri = fake.requests()[0].uri().to_string();
+        assert!(uri.contains("o=CURRENT_ACTIONS") && uri.contains("o=CHANGE_ACTIONS"));
+        assert!(d.action("abandon").unwrap().enabled);
+        assert_eq!(d.action("submit").unwrap().label.as_deref(), Some("Submit"));
+        // Absent `enabled` means disabled; unknown ids are kept.
+        assert!(!d.action("rebase").unwrap().enabled);
+        assert_eq!(d.action("plugin~odd").unwrap().enabled_options, ["a"]);
+        // Only the current revision's actions count.
+        assert_eq!(d.revision_actions.len(), 2);
+    }
+
+    #[test]
+    fn change_without_actions_has_empty_maps() {
+        let (_fake, c) = action_fake(ACTION_CHANGE);
+        let d = block_on(c.get_change(ChangeNumber(5))).unwrap();
+        assert!(d.change_actions.is_empty() && d.revision_actions.is_empty());
     }
 }

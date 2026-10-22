@@ -5,6 +5,7 @@
 //! defaulted collection. Types here derive serde so `store` can persist them.
 
 mod account;
+mod action;
 mod change;
 mod comment;
 mod diff;
@@ -22,6 +23,7 @@ mod thread;
 mod timestamp;
 
 pub use account::Account;
+pub use action::{ActionInfo, Actions, action_id};
 pub use change::{
     AttentionEntry, ChangeDetail, ChangeStatus, ChangeSummary, LabelSummary, LabelVote,
 };

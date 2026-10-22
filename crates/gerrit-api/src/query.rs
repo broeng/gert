@@ -13,6 +13,10 @@ pub enum ChangeOption {
     Messages,
     SubmitRequirements,
     Submittable,
+    /// `actions` of the current revision.
+    CurrentActions,
+    /// `actions` of the change.
+    ChangeActions,
 }
 
 impl ChangeOption {
@@ -28,6 +32,8 @@ impl ChangeOption {
             Self::Messages => "MESSAGES",
             Self::SubmitRequirements => "SUBMIT_REQUIREMENTS",
             Self::Submittable => "SUBMITTABLE",
+            Self::CurrentActions => "CURRENT_ACTIONS",
+            Self::ChangeActions => "CHANGE_ACTIONS",
         }
     }
 }

@@ -20,6 +20,7 @@ const SCHEMAS: &[&str] = &[
     "CommitInfo",
     "GitPerson",
     "AttentionSetInfo",
+    "ActionInfo",
     "CommonFileInfo",
     "FileMeta",
     "ContentEntry",

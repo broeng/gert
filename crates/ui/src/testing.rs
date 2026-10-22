@@ -71,6 +71,8 @@ pub fn detail(number: u64, n: u32, current: u32) -> ChangeDetail {
         attention: Default::default(),
         permitted_labels: Default::default(),
         label_values: Default::default(),
+        change_actions: Default::default(),
+        revision_actions: Default::default(),
     }
 }
 
