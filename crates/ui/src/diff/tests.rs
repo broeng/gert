@@ -482,6 +482,7 @@ fn paging_and_scrolling_follow_the_cursor(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[ignore = "timing guard, flaky under a parallel cargo test; run with --ignored"]
 fn the_large_diff_scrolls_frame_by_frame(cx: &mut TestAppContext) {
     // Each key press moves the cursor and draws a frame of variable-height
     // rows, so this times what scrolling a 10k-line diff costs per frame.
