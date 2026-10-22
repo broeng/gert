@@ -959,7 +959,7 @@ fn rebase_reports_noop_and_conflicts_and_works_otherwise() {
     // Nothing to do on a change that is based on the branch tip.
     let file = unique_file("rebase-conflict");
     let (a, _) = new_change_file("rebase a", &file, "from a\n");
-    match block_on(c.rebase(a, None)) {
+    match block_on(c.rebase(a, None, Default::default())) {
         Err(Error::Conflict { message }) => {
             println!("no-op rebase: {message}");
             assert!(message.to_lowercase().contains("up to date"), "{message}");
@@ -977,7 +977,7 @@ fn rebase_reports_noop_and_conflicts_and_works_otherwise() {
 
     // A adds the same file with other content: a conflict, reported with
     // the server's message, and the change stays as it was.
-    match block_on(c.rebase(a, None)) {
+    match block_on(c.rebase(a, None, Default::default())) {
         Err(Error::Conflict { message }) => {
             println!("conflicting rebase: {message}");
             assert!(!message.is_empty());
@@ -1003,7 +1003,7 @@ fn rebase_onto_a_moved_branch_makes_a_new_patch_set() {
 
     let before = block_on(c.get_change(a)).unwrap();
     assert!(before.action("rebase").is_some_and(|x| x.enabled));
-    let s = block_on(c.rebase(a, None)).expect("rebase");
+    let s = block_on(c.rebase(a, None, Default::default())).expect("rebase");
     assert_eq!(s.status, ChangeStatus::New);
     let after = block_on(c.get_change(a)).unwrap();
     assert_eq!(

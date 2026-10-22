@@ -410,6 +410,11 @@ pub(crate) struct MessageInput {
 pub(crate) struct RebaseInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Only sent when true; servers before 3.5 ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_conflicts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of_uploader: Option<bool>,
 }
 
 /// `ReviewerInput`, the part we send.
@@ -628,6 +633,8 @@ mod tests {
         conforms_value(&spec, "RestoreInput", &msg);
         let rebase = RebaseInput {
             base: Some("b".into()),
+            allow_conflicts: Some(true),
+            on_behalf_of_uploader: Some(true),
         };
         conforms_value(&spec, "RebaseInput", &rebase);
         let reviewer = ReviewerInput {

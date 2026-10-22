@@ -378,6 +378,71 @@ fn rebase_with_an_empty_base_goes_onto_the_branch_tip(cx: &mut TestAppContext) {
     assert_eq!(body_of(&f, "/changes/7/rebase"), json!({}));
 }
 
+/// Rebasable, and the server also offers rebasing on behalf of the uploader.
+fn rebasable_for_others() -> ChangeDetail {
+    let mut d = rebasable();
+    if let Some(a) = d.revision_actions.get_mut("rebase") {
+        a.enabled_options = vec!["rebase".into(), "rebase_on_behalf_of_uploader".into()];
+    }
+    d
+}
+
+#[gpui_kit::test]
+fn allow_conflicts_is_a_checkbox_that_tab_and_space_reach(cx: &mut TestAppContext) {
+    let f = dialog(cx, rebasable(), |http| {
+        http.route("POST /a/changes/7/rebase", 200, CHANGE_OK);
+    });
+    // Base field, then the checkbox; there is no "on behalf" row here, so
+    // the next Tab is already past the options.
+    press(cx, &f, &["b", "tab", "space", CONFIRM]);
+    assert_eq!(
+        body_of(&f, "/changes/7/rebase"),
+        json!({"allow_conflicts": true})
+    );
+}
+
+#[gpui_kit::test]
+fn on_behalf_of_the_uploader_shows_only_where_the_server_offers_it(cx: &mut TestAppContext) {
+    let f = dialog(cx, rebasable_for_others(), |http| {
+        http.route("POST /a/changes/7/rebase", 200, CHANGE_OK);
+    });
+    // Conflicts stay off, only "on behalf" is switched on.
+    press(cx, &f, &["b", "tab", "tab", "space", CONFIRM]);
+    assert_eq!(
+        body_of(&f, "/changes/7/rebase"),
+        json!({"on_behalf_of_uploader": true})
+    );
+
+    // Not offered: a second Tab leaves the options, Space there does
+    // nothing to them and the request carries no option.
+    let f = dialog(cx, rebasable(), |http| {
+        http.route("POST /a/changes/7/rebase", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["b", "tab", "tab", "space"]);
+    cx.update(|cx| {
+        assert!(
+            !f.dialog
+                .read(cx)
+                .rebase_options_for_test()
+                .on_behalf_of_uploader
+        )
+    });
+}
+
+#[gpui_kit::test]
+fn the_rebase_options_are_clicked_or_toggled_and_both_are_sent(cx: &mut TestAppContext) {
+    let f = dialog(cx, rebasable_for_others(), |http| {
+        http.route("POST /a/changes/7/rebase", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["b"]);
+    type_text(cx, &f, "9");
+    press(cx, &f, &["tab", "space", "tab", "space", CONFIRM]);
+    assert_eq!(
+        body_of(&f, "/changes/7/rebase"),
+        json!({"base": "9", "allow_conflicts": true, "on_behalf_of_uploader": true})
+    );
+}
+
 #[gpui_kit::test]
 fn private_runs_from_the_menu_without_a_dialog(cx: &mut TestAppContext) {
     let f = dialog(cx, change(), |http| {

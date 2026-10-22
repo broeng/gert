@@ -466,17 +466,22 @@ impl GerritClient {
     /// `POST /changes/{n}/rebase`: rebases the current patch set onto
     /// `base` (a commit SHA or change number; `None` for the tip of the
     /// target branch). A conflict, or a change that is already up to date,
-    /// is [`Error::Conflict`] with the server's message.
+    /// is [`Error::Conflict`] with the server's message, unless
+    /// `options.allow_conflicts` asks for a patch set with conflict
+    /// markers. Options that are off are left out of the request.
     pub async fn rebase(
         &self,
         change: ChangeNumber,
         base: Option<&str>,
+        options: model::RebaseOptions,
     ) -> Result<ChangeSummary, Error> {
         let body = wire::RebaseInput {
             base: base
                 .map(str::trim)
                 .filter(|b| !b.is_empty())
                 .map(Into::into),
+            allow_conflicts: options.allow_conflicts.then_some(true),
+            on_behalf_of_uploader: options.on_behalf_of_uploader.then_some(true),
         };
         self.change_action(change, "/rebase", &body).await
     }
@@ -2130,16 +2135,35 @@ mod tests {
     #[test]
     fn rebase_sends_the_base_only_when_given() {
         let (fake, c) = action_fake(ACTION_CHANGE);
-        block_on(c.rebase(ChangeNumber(5), None)).unwrap();
+        let off = model::RebaseOptions::default();
+        block_on(c.rebase(ChangeNumber(5), None, off)).unwrap();
         fake.push_response(200, xssi(ACTION_CHANGE));
-        block_on(c.rebase(ChangeNumber(5), Some("abc123"))).unwrap();
+        block_on(c.rebase(ChangeNumber(5), Some("abc123"), off)).unwrap();
         fake.push_response(200, xssi(ACTION_CHANGE));
-        block_on(c.rebase(ChangeNumber(5), Some(" "))).unwrap();
+        block_on(c.rebase(ChangeNumber(5), Some(" "), off)).unwrap();
         let reqs = fake.requests();
         assert_eq!(reqs[0].uri(), "https://h/a/changes/5/rebase");
         assert_eq!(body_json(&reqs[0]), json!({}));
         assert_eq!(body_json(&reqs[1]), json!({"base": "abc123"}));
         assert_eq!(body_json(&reqs[2]), json!({}));
+    }
+
+    #[test]
+    fn rebase_options_are_sent_only_when_on() {
+        let (fake, c) = action_fake(ACTION_CHANGE);
+        let opts = |allow_conflicts, on_behalf_of_uploader| model::RebaseOptions {
+            allow_conflicts,
+            on_behalf_of_uploader,
+        };
+        block_on(c.rebase(ChangeNumber(5), None, opts(true, false))).unwrap();
+        fake.push_response(200, xssi(ACTION_CHANGE));
+        block_on(c.rebase(ChangeNumber(5), Some("abc"), opts(true, true))).unwrap();
+        let reqs = fake.requests();
+        assert_eq!(body_json(&reqs[0]), json!({"allow_conflicts": true}));
+        assert_eq!(
+            body_json(&reqs[1]),
+            json!({"base": "abc", "allow_conflicts": true, "on_behalf_of_uploader": true})
+        );
     }
 
     #[test]
@@ -2184,7 +2208,7 @@ mod tests {
         }
         fake.push_response(409, "The change could not be rebased due to a conflict\n");
         assert!(matches!(
-            block_on(c.rebase(ChangeNumber(5), None)),
+            block_on(c.rebase(ChangeNumber(5), None, Default::default())),
             Err(Error::Conflict { message }) if message.contains("conflict")
         ));
         fake.push_response(403, "restore not permitted\n");

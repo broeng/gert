@@ -24,7 +24,7 @@ mod thread;
 mod timestamp;
 
 pub use account::Account;
-pub use action::{ActionInfo, Actions, action_id};
+pub use action::{ActionInfo, Actions, REBASE_ON_BEHALF_OF_UPLOADER, RebaseOptions, action_id};
 pub use change::{
     AttentionEntry, ChangeDetail, ChangeStatus, ChangeSummary, LabelSummary, LabelVote,
 };

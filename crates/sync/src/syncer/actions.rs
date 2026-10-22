@@ -31,8 +31,9 @@ impl Syncer {
         &self,
         change: ChangeNumber,
         base: Option<&str>,
+        options: model::RebaseOptions,
     ) -> Result<Option<ChangeDetail>, Error> {
-        self.client.rebase(change, base).await?;
+        self.client.rebase(change, base, options).await?;
         Ok(self.refresh_after_action(change, "rebase").await)
     }
 
