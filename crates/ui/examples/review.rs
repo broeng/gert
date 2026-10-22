@@ -46,6 +46,7 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use model::{DiffPreferences, DiffViewMode};
 use store::Store;
+use ui::filters::FileFilter;
 use ui::{
     Backend, BackendError, Env, LocalDiff, SavedQuery, ServerSetup, Shell, Startup, StartupPage,
 };
@@ -61,6 +62,10 @@ impl Backend for Demo {
 
     fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
         Err(BackendError("the demo has no settings".into()))
+    }
+
+    fn save_filters(&self, f: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
+        Ok(f.to_vec())
     }
 
     fn save_startup_page(&self, p: &StartupPage) -> Result<StartupPage, BackendError> {
@@ -1158,6 +1163,7 @@ fn main() {
             font_family: font,
         },
         start_page: Default::default(),
+        filters: Vec::new(),
     };
 
     ui::application().run(move |cx| {

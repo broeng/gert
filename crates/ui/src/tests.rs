@@ -180,6 +180,7 @@ fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) 
         queries: vec![spec("Open", "status:open")],
         diff: Default::default(),
         start_page: Default::default(),
+        filters: Vec::new(),
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -212,6 +213,7 @@ fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
         queries: vec![spec("Open", "status:open")],
         diff: Default::default(),
         start_page: Default::default(),
+        filters: Vec::new(),
     };
     let (_window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -287,6 +289,7 @@ fn cached_server_diff_preferences_sit_under_the_local_overrides(cx: &mut TestApp
             font_family: Some("Iosevka".into()),
         },
         start_page: Default::default(),
+        filters: Vec::new(),
     };
     let (_window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -312,6 +315,7 @@ mod drafts {
 
     use super::{env_with, open, seeded, setup, spec};
     use crate::{
+        filters::FileFilter,
         outbox::DraftOutbox,
         pages::list::ListEvent,
         session::{Backend, BackendError, SavedQuery, ServerSetup, Startup, StartupPage},
@@ -328,6 +332,10 @@ mod drafts {
 
         fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
             Err(BackendError("not used".into()))
+        }
+
+        fn save_filters(&self, f: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
+            Ok(f.to_vec())
         }
 
         fn save_startup_page(&self, p: &StartupPage) -> Result<StartupPage, BackendError> {
@@ -424,6 +432,7 @@ mod drafts {
             queries: vec![spec("Open", "status:open")],
             diff: Default::default(),
             start_page: Default::default(),
+            filters: Vec::new(),
         };
         let started = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
@@ -538,6 +547,7 @@ mod settings_page {
             queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
             diff: Default::default(),
             start_page,
+            filters: Vec::new(),
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))

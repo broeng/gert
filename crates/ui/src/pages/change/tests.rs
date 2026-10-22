@@ -488,6 +488,7 @@ fn shell_with_many_files(
         }],
         diff: LocalDiff::default(),
         start_page: Default::default(),
+        filters: Vec::new(),
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| crate::shell::Shell::new(startup, window, cx))

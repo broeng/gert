@@ -437,6 +437,7 @@ fn shell_flow(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Shell>, Route
         }],
         diff: LocalDiff::default(),
         start_page: Default::default(),
+        filters: Vec::new(),
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))

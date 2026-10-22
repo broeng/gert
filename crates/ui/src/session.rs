@@ -6,6 +6,8 @@ use gerrit_api::{Auth, GerritClient, HttpClient};
 use store::{ServerId, Store};
 use sync::Syncer;
 
+use crate::filters::FileFilter;
+
 /// A named Gerrit query shown as a dashboard section.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedQuery {
@@ -47,6 +49,10 @@ pub trait Backend: Send + Sync + 'static {
     /// as it is. Returns the list now in effect.
     fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError>;
 
+    /// Writes the file filters (`[[filters]]`) to the config file, keeping
+    /// the rest of it as it is. Returns the list now in effect.
+    fn save_filters(&self, filters: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError>;
+
     /// Writes the startup page (`[startup]`). Returns what is now in effect.
     fn save_startup_page(&self, page: &StartupPage) -> Result<StartupPage, BackendError>;
 
@@ -86,6 +92,8 @@ pub struct Startup {
     /// `None` when there is no config yet: start on the login page.
     pub server: Option<ServerSetup>,
     pub queries: Vec<SavedQuery>,
+    /// The file filter rules (`[[filters]]`).
+    pub filters: Vec<FileFilter>,
     pub diff: LocalDiff,
     /// The page to open once a server is set up.
     pub start_page: StartupPage,
