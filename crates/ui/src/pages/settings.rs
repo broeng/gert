@@ -1,6 +1,11 @@
-//! The settings page: the saved queries of the dashboard, the startup page
-//! and the review flow (advance after a vote). The cursor walks the query
-//! rows, then the startup row, then the advance row.
+//! The settings page: the saved queries of the dashboard, the startup page,
+//! the review flow (advance after a vote) and the file filters. The cursor
+//! walks the query rows, then the startup row, then the advance row, then
+//! the filter rows (one empty-state row when there are none).
+//!
+//! The filters are edited in the Manage filters dialog, which the shell
+//! opens when the page emits [`SettingsEvent::ManageFilters`]; the page only
+//! lists the rules and follows [`FileFilters`] when the dialog saves.
 //!
 //! Every committed change is written straight away through the backend
 //! (the config file), off the main thread. The list shown is the one the
@@ -18,9 +23,10 @@ use gpui_kit::*;
 use crate::{
     actions::*,
     card,
+    filters::{FileFilter, FilterAction},
     hint::Hint,
     session::{Env, SavedQuery, StartupPage},
-    settings::PageLayout,
+    settings::{FileFilters, PageLayout},
 };
 
 /// What the page tells the shell.
@@ -29,6 +35,9 @@ pub enum SettingsEvent {
     QueriesSaved(Vec<SavedQuery>),
     /// The startup page was written.
     StartupSaved(StartupPage),
+    /// Open the Manage filters dialog: on the rule `select`, or on a new
+    /// rule when `add` is set.
+    ManageFilters { select: Option<String>, add: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +105,19 @@ pub(crate) fn without<T: Clone>(list: &[T], index: usize) -> Vec<T> {
     out
 }
 
+fn rule_name(rule: &FileFilter) -> String {
+    rule.name.clone()
+}
+
+/// Where a rule applies, for its row.
+fn scope_text(rule: &FileFilter) -> String {
+    if rule.projects.is_empty() {
+        "all projects".to_owned()
+    } else {
+        rule.projects.join(", ")
+    }
+}
+
 pub struct SettingsPage {
     env: Env,
     queries: Vec<SavedQuery>,
@@ -106,6 +128,10 @@ pub struct SettingsPage {
     startup_input: Entity<InputState>,
     start_page: StartupPage,
     layout: Entity<PageLayout>,
+    filters: Entity<FileFilters>,
+    /// The names of the rules on screen, to keep the cursor on its rule when
+    /// the list changes under it.
+    filter_names: Vec<String>,
     /// Why the row being edited cannot be saved.
     invalid: Option<&'static str>,
     /// A save is in flight: keys that change the list wait.
@@ -131,6 +157,7 @@ impl SettingsPage {
         queries: Vec<SavedQuery>,
         start_page: StartupPage,
         layout: Entity<PageLayout>,
+        filters: Entity<FileFilters>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -138,7 +165,7 @@ impl SettingsPage {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Query, e.g. is:open"));
         let startup_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Query, e.g. is:open owner:self"));
-        let subs = [&name, &query, &startup_input]
+        let mut subs: Vec<Subscription> = [&name, &query, &startup_input]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, ev: &InputEvent, window, cx| {
@@ -148,6 +175,11 @@ impl SettingsPage {
                 })
             })
             .collect();
+        // The dialog saves into the shared rules; the section follows.
+        subs.push(cx.observe(&filters, |this, filters, cx| {
+            this.follow_filters(&filters, cx)
+        }));
+        let filter_names = filters.read(cx).rules().iter().map(rule_name).collect();
         Self {
             env,
             queries,
@@ -158,6 +190,8 @@ impl SettingsPage {
             startup_input,
             start_page,
             layout,
+            filters,
+            filter_names,
             invalid: None,
             busy: false,
             hint: Hint::default(),
@@ -189,6 +223,17 @@ impl SettingsPage {
     }
 
     #[cfg(test)]
+    pub(crate) fn cursor_for_test(&self) -> usize {
+        self.cursor
+    }
+
+    /// The names of the rules listed, in order.
+    #[cfg(test)]
+    pub(crate) fn filter_names_for_test(&self) -> &[String] {
+        &self.filter_names
+    }
+
+    #[cfg(test)]
     pub(crate) fn hint_for_test(&self) -> Option<(String, bool)> {
         self.hint.current().map(|(t, e)| (t.to_owned(), e))
     }
@@ -207,6 +252,27 @@ impl SettingsPage {
         self.queries.len() + 1
     }
 
+    /// The first filter row (the empty-state row when there are no rules).
+    fn filters_row(&self) -> usize {
+        self.queries.len() + 2
+    }
+
+    /// The last row the cursor can be on.
+    fn last_row(&self) -> usize {
+        self.filters_row() + self.filter_names.len().saturating_sub(1)
+    }
+
+    /// The rule the cursor is on, if it is on one.
+    fn filter_under_cursor(&self) -> Option<usize> {
+        self.cursor
+            .checked_sub(self.filters_row())
+            .filter(|i| *i < self.filter_names.len())
+    }
+
+    fn in_filters(&self) -> bool {
+        self.cursor >= self.filters_row()
+    }
+
     /// Whether a key may change the list now.
     fn can_change(&self) -> bool {
         !self.busy
@@ -222,7 +288,7 @@ impl SettingsPage {
 
     fn select(&mut self, to: usize, cx: &mut Context<Self>) {
         if self.mode == Mode::Browsing {
-            self.cursor = to.min(self.advance_row());
+            self.cursor = to.min(self.last_row());
             cx.notify();
         }
     }
@@ -233,7 +299,9 @@ impl SettingsPage {
         if !self.can_change() {
             return;
         }
-        if self.cursor < self.queries.len() {
+        if self.in_filters() {
+            self.manage_filters(self.filter_under_cursor(), self.filter_names.is_empty(), cx);
+        } else if self.cursor < self.queries.len() {
             self.start_edit(self.cursor, window, cx);
         } else if self.cursor == self.startup_row() {
             self.start_startup_edit(window, cx);
@@ -272,9 +340,38 @@ impl SettingsPage {
     }
 
     fn add_query(&mut self, _: &AddQuery, window: &mut Window, cx: &mut Context<Self>) {
-        if self.can_change() {
+        if self.in_filters() {
+            self.manage_filters(None, true, cx);
+        } else if self.can_change() {
             self.start_edit(self.queries.len(), window, cx);
         }
+    }
+
+    // ---- file filters ----
+
+    /// Asks the shell for the dialog, on rule `index` or on a new rule.
+    fn manage_filters(&mut self, index: Option<usize>, add: bool, cx: &mut Context<Self>) {
+        if self.mode != Mode::Browsing {
+            return;
+        }
+        cx.emit(SettingsEvent::ManageFilters {
+            select: index.and_then(|i| self.filter_names.get(i).cloned()),
+            add,
+        });
+    }
+
+    /// The rules changed (the dialog saved): list them again and keep the
+    /// cursor on its rule, or clamp it when that rule is gone.
+    fn follow_filters(&mut self, filters: &Entity<FileFilters>, cx: &mut Context<Self>) {
+        let names: Vec<String> = filters.read(cx).rules().iter().map(rule_name).collect();
+        if let Some(old) = self.filter_under_cursor()
+            && let Some(at) = names.iter().position(|n| *n == self.filter_names[old])
+        {
+            self.cursor = self.filters_row() + at;
+        }
+        self.filter_names = names;
+        self.cursor = self.cursor.min(self.last_row());
+        cx.notify();
     }
 
     fn start_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -357,7 +454,14 @@ impl SettingsPage {
     // ---- delete ----
 
     fn delete_query(&mut self, _: &DeleteQuery, _: &mut Window, cx: &mut Context<Self>) {
-        if self.can_change() && self.mode == Mode::Browsing && self.cursor < self.queries.len() {
+        // The dialog asks before it deletes a rule; the page has no path of
+        // its own for that.
+        if let Some(i) = self.filter_under_cursor() {
+            self.manage_filters(Some(i), false, cx);
+        } else if self.can_change()
+            && self.mode == Mode::Browsing
+            && self.cursor < self.queries.len()
+        {
             self.mode = Mode::Confirming(self.cursor);
             cx.notify();
         }
@@ -908,6 +1012,160 @@ impl SettingsPage {
         )
     }
 
+    /// What the rule does: the word, with a swatch and "bold" for a highlight.
+    fn render_effect(&self, action: &FilterAction, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        match action {
+            FilterAction::Hide => div().child("hide").into_any_element(),
+            FilterAction::Dim => div().child("dim").into_any_element(),
+            FilterAction::Highlight { color, bold } => h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(
+                    div()
+                        .size_3()
+                        .flex_none()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(color.map_or(theme.foreground, Hsla::from)),
+                )
+                .child(div().when(*bold, |d| d.font_bold()).child("highlight"))
+                .when(*bold, |d| {
+                    d.child(div().text_color(theme.muted_foreground).child("bold"))
+                })
+                .into_any_element(),
+        }
+    }
+
+    fn render_filter_row(&self, i: usize, rule: &FileFilter, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let selected = self.filters_row() + i == self.cursor && self.mode == Mode::Browsing;
+        let globs = rule.globs.join(", ");
+        h_flex()
+            .id(("filter-row", i))
+            .px_3()
+            .py_1p5()
+            .gap_3()
+            .items_center()
+            .when(selected, |d| d.bg(theme.list_active))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let at = this.filters_row() + i;
+                this.select(at, cx)
+            }))
+            .child(
+                div()
+                    .w(px(200.))
+                    .flex_none()
+                    .truncate()
+                    .child(rule.name.clone()),
+            )
+            .child(
+                div()
+                    .w(px(150.))
+                    .flex_none()
+                    .child(self.render_effect(&rule.action, cx)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(theme.mono_font_family.clone())
+                    .text_color(theme.muted_foreground)
+                    .child(globs),
+            )
+            .child(
+                div()
+                    .w(px(160.))
+                    .flex_none()
+                    .truncate()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(scope_text(rule)),
+            )
+            .child(
+                div()
+                    .w(px(90.))
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme.warning)
+                    .when(!rule.enabled, |d| d.child("off by default")),
+            )
+            .child(
+                Button::new(("filter-edit", i))
+                    .label("Edit")
+                    .small()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.cursor = this.filters_row() + i;
+                        this.manage_filters(Some(i), false, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_filters(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let rules = self.filters.read(cx).rules().to_vec();
+        let n = rules.len();
+        let mut body = v_flex().w_full().child(card::frame(
+            card::title_bar(cx)
+                .child(div().font_semibold().child("File filters"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Hide, dim or highlight files in the file lists and diffs. Enter edits, a adds."),
+                ),
+            true,
+            n == 0,
+            cx,
+        ));
+        if n == 0 {
+            let selected = self.cursor == self.filters_row() && self.mode == Mode::Browsing;
+            body = body.child(card::frame(
+                card::row_separator(cx).child(
+                    div()
+                        .id("filter-row-empty")
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .when(selected, |d| d.bg(theme.list_active))
+                        .child("No file filters. Press a to add one."),
+                ),
+                false,
+                true,
+                cx,
+            ));
+        }
+        for (i, rule) in rules.iter().enumerate() {
+            let row = self.render_filter_row(i, rule, cx);
+            body = body.child(card::frame(
+                card::row_separator(cx).child(row),
+                false,
+                i + 1 == n,
+                cx,
+            ));
+        }
+        v_flex()
+            .gap_2()
+            .child(body)
+            .child(
+                div().px_4().child(
+                    Button::new("add-filter")
+                        .label("Add a filter (a)")
+                        .small()
+                        .disabled(self.mode != Mode::Browsing)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cursor = this.filters_row();
+                            this.manage_filters(None, true, cx)
+                        })),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn render_hint(&self, cx: &App) -> Option<impl IntoElement> {
         let (text, error) = self.hint.current()?;
         let theme = cx.theme();
@@ -932,6 +1190,7 @@ impl Render for SettingsPage {
         let queries = self.render_queries(cx);
         let startup = self.render_startup(cx);
         let review = self.render_review(cx);
+        let filters = self.render_filters(cx);
         v_flex()
             .id("settings")
             .key_context(self.key_context())
@@ -968,7 +1227,8 @@ impl Render for SettingsPage {
                             .child(div().px_4().text_xl().font_semibold().child("Settings"))
                             .child(queries)
                             .child(startup)
-                            .child(review),
+                            .child(review)
+                            .child(filters),
                     )
                     .vertical_scrollbar(&self.scroll),
             )
@@ -983,7 +1243,8 @@ impl Render for SettingsPage {
                     .text_color(theme.muted_foreground)
                     .child(
                         "j / k: select    Enter / e: edit    a: add    d: delete    \
-                         Shift-J / Shift-K: move    Space: toggle    u: back to the dashboard",
+                         Shift-J / Shift-K: move    Space: toggle    u: back to the dashboard    \
+                         (file filters: Enter / e / d open the dialog)",
                     ),
             )
     }

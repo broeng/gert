@@ -513,6 +513,7 @@ mod settings_page {
 
     use super::{env_with, open, seeded, setup, spec};
     use crate::{
+        filters::{FileFilter, FilterAction},
         login::tests::FakeBackend,
         nav::Route,
         session::{Env, Startup, StartupPage},
@@ -530,6 +531,15 @@ mod settings_page {
     }
 
     fn fixture_at(cx: &mut TestAppContext, fail: bool, start_page: StartupPage) -> Fixture {
+        fixture_with(cx, fail, start_page, Vec::new())
+    }
+
+    fn fixture_with(
+        cx: &mut TestAppContext,
+        fail: bool,
+        start_page: StartupPage,
+        filters: Vec<FileFilter>,
+    ) -> Fixture {
         let backend = Arc::new(FakeBackend {
             fail,
             ..Default::default()
@@ -547,7 +557,7 @@ mod settings_page {
             queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
             diff: Default::default(),
             start_page,
-            filters: Vec::new(),
+            filters,
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
@@ -796,5 +806,148 @@ mod settings_page {
         cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Dashboard));
         let f = fixture(cx, false);
         cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Dashboard));
+    }
+
+    fn rule(name: &str, action: FilterAction) -> FileFilter {
+        FileFilter {
+            name: name.into(),
+            globs: vec![format!("*.{name}")],
+            projects: Vec::new(),
+            action,
+            enabled: true,
+        }
+    }
+
+    fn two_rules() -> Vec<FileFilter> {
+        vec![
+            rule("gen", FilterAction::Dim),
+            rule("lock", FilterAction::Hide),
+        ]
+    }
+
+    fn page_state(cx: &mut TestAppContext, f: &Fixture) -> (usize, Vec<String>) {
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            let page = page.read(cx);
+            (
+                page.cursor_for_test(),
+                page.filter_names_for_test().to_vec(),
+            )
+        })
+    }
+
+    /// The dialog's cursor and mode, if it is open.
+    fn dialog_state(cx: &mut TestAppContext, f: &Fixture) -> Option<(usize, &'static str)> {
+        cx.update(|cx| {
+            let d = f.shell.read(cx).filters_dialog_for_test()?;
+            let d = d.read(cx);
+            Some((d.cursor_for_test(), d.mode_for_test()))
+        })
+    }
+
+    /// Cursor on the first filter row: 2 queries, startup, advance.
+    fn to_filters(cx: &mut TestAppContext, f: &Fixture) {
+        for _ in 0..4 {
+            press(cx, f, "j");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_filter_rows_follow_the_cursor_after_the_other_rows(cx: &mut TestAppContext) {
+        let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
+        open_settings(cx, &f);
+        assert_eq!(page_state(cx, &f).1, ["gen", "lock"]);
+        to_filters(cx, &f);
+        assert_eq!(page_state(cx, &f).0, 4);
+        press(cx, &f, "j");
+        press(cx, &f, "j");
+        // The last rule is the last row.
+        assert_eq!(page_state(cx, &f).0, 5);
+        press(cx, &f, "k");
+        assert_eq!(page_state(cx, &f).0, 4);
+    }
+
+    #[gpui_kit::test]
+    fn enter_and_d_on_a_rule_open_the_dialog_on_it(cx: &mut TestAppContext) {
+        let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
+        open_settings(cx, &f);
+        to_filters(cx, &f);
+        press(cx, &f, "j");
+        press(cx, &f, "enter");
+        assert_eq!(dialog_state(cx, &f), Some((1, "browsing")));
+        press(cx, &f, "escape");
+        assert_eq!(dialog_state(cx, &f), None);
+        // Focus is back on the page: the cursor still works.
+        press(cx, &f, "k");
+        assert_eq!(page_state(cx, &f).0, 4);
+        press(cx, &f, "d");
+        // Deleting is the dialog's business, with its confirmation.
+        assert_eq!(dialog_state(cx, &f), Some((0, "browsing")));
+        press(cx, &f, "escape");
+        press(cx, &f, "e");
+        assert_eq!(dialog_state(cx, &f), Some((0, "browsing")));
+    }
+
+    #[gpui_kit::test]
+    fn a_adds_a_rule_in_the_filters_and_a_query_elsewhere(cx: &mut TestAppContext) {
+        let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
+        open_settings(cx, &f);
+        // On a query row: a new query, no dialog.
+        press(cx, &f, "a");
+        assert_eq!(dialog_state(cx, &f), None);
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            assert!(page.read(cx).editing_for_test());
+        });
+        press(cx, &f, "escape");
+        // In the filters section: the dialog, on a new rule.
+        to_filters(cx, &f);
+        press(cx, &f, "a");
+        assert_eq!(dialog_state(cx, &f), Some((2, "adding")));
+    }
+
+    #[gpui_kit::test]
+    fn without_rules_one_row_says_so_and_enter_adds(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        to_filters(cx, &f);
+        press(cx, &f, "j");
+        assert_eq!(page_state(cx, &f), (4, Vec::new()));
+        press(cx, &f, "enter");
+        assert_eq!(dialog_state(cx, &f), Some((0, "adding")));
+    }
+
+    #[gpui_kit::test]
+    fn the_section_follows_the_shared_rules(cx: &mut TestAppContext) {
+        let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
+        open_settings(cx, &f);
+        to_filters(cx, &f);
+        press(cx, &f, "j");
+        // A reorder keeps the cursor on its rule.
+        let filters = cx.update(|cx| f.shell.read(cx).filters_for_test().clone());
+        cx.update(|cx| {
+            filters.update(cx, |ff, cx| {
+                ff.set_rules(
+                    vec![
+                        rule("lock", FilterAction::Hide),
+                        rule("gen", FilterAction::Dim),
+                    ],
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(page_state(cx, &f), (4, vec!["lock".into(), "gen".into()]));
+        // Removing the rule under the cursor clamps it.
+        cx.update(|cx| {
+            filters.update(cx, |ff, cx| {
+                ff.set_rules(vec![rule("gen", FilterAction::Dim)], cx)
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(page_state(cx, &f), (4, vec!["gen".into()]));
+        cx.update(|cx| filters.update(cx, |ff, cx| ff.set_rules(Vec::new(), cx)));
+        cx.run_until_parked();
+        assert_eq!(page_state(cx, &f), (4, Vec::new()));
     }
 }
