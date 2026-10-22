@@ -338,6 +338,8 @@ impl Render for GotoDialog {
             .inset_0()
             .occlude()
             .flex()
+            // Not stretched to the bottom: as tall as its content.
+            .items_start()
             .justify_center()
             .pt(px(120.))
             .bg(crate::theme::modal_backdrop(cx))
@@ -349,7 +351,6 @@ impl Render for GotoDialog {
                     .on_action(cx.listener(Self::close))
                     .w(px(640.))
                     .max_w_full()
-                    .h_auto()
                     .gap_2()
                     .p_4()
                     .rounded_lg()
