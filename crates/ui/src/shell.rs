@@ -533,9 +533,12 @@ impl Shell {
             |this, _, ev: &DiffPageEvent, window, cx| match ev {
                 DiffPageEvent::Unauthorized => this.unauthorized(window, cx),
                 DiffPageEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
-                // Like PolyGerrit, every file is its own history entry.
+                // Like PolyGerrit, stepping through files does not stack
+                // history entries: Back from any file leads to the change.
+                DiffPageEvent::UpToChange => this.go_up(&GoUp, window, cx),
                 DiffPageEvent::OpenFile(route) => {
-                    this.navigate(Route::Diff(route.clone()), window, cx)
+                    this.nav.replace(Route::Diff(route.clone()));
+                    this.show(window, cx)
                 }
             },
         ));

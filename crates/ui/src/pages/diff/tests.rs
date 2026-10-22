@@ -150,6 +150,7 @@ fn diff_page_route(
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
                 super::DiffPageEvent::OpenFile(r) => format!("open {}", r.path),
                 super::DiffPageEvent::Reply(_) => "reply".to_owned(),
+                super::DiffPageEvent::UpToChange => "up".to_owned(),
             };
             log.lock().expect("log").push(text);
         })
@@ -453,7 +454,7 @@ fn enter_opens_the_diff_page_and_u_returns_with_the_cursor_on_that_file(cx: &mut
     assert_eq!(current_route(cx, &shell), Route::Change(ChangeNumber(7)));
     press(cx, window, &["j", "j", "enter"]);
     assert_eq!(current_route(cx, &shell), Route::Diff(route("src/b.rs")));
-    // [ and ] move between files; every file is a history entry.
+    // [ and ] move between files without adding history entries.
     press(cx, window, &["]"]);
     assert_eq!(current_route(cx, &shell), Route::Diff(route("src/c.rs")));
     press(cx, window, &["]"]);
@@ -464,9 +465,23 @@ fn enter_opens_the_diff_page_and_u_returns_with_the_cursor_on_that_file(cx: &mut
         let page: Entity<ChangePage> = shell.read(cx).change_page_for_test().expect("change page");
         assert_eq!(page.read(cx).cursor_path(), Some("src/c.rs"));
     });
-    // Forward goes back into the diff history.
+    // Forward goes back into the diff, on the file last viewed.
     press(cx, window, &["alt-right"]);
-    assert_eq!(current_route(cx, &shell), Route::Diff(route("src/b.rs")));
+    assert_eq!(current_route(cx, &shell), Route::Diff(route("src/c.rs")));
+}
+
+#[gpui_kit::test]
+fn back_after_stepping_through_files_leads_to_the_change(cx: &mut TestAppContext) {
+    let (window, shell, _http) = shell_flow(cx);
+    press(cx, window, &["j", "enter", "j", "j", "enter"]);
+    press(cx, window, &["]"]);
+    press(cx, window, &["["]);
+    press(cx, window, &["["]);
+    assert_eq!(current_route(cx, &shell), Route::Diff(route("src/a.rs")));
+    press(cx, window, &["alt-left"]);
+    assert_eq!(current_route(cx, &shell), Route::Change(ChangeNumber(7)));
+    press(cx, window, &["alt-left"]);
+    assert_eq!(current_route(cx, &shell), Route::Dashboard);
 }
 
 #[gpui_kit::test]
