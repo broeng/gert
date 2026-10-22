@@ -3,20 +3,21 @@
 use std::collections::BTreeMap;
 
 use model::{
-    Account, AccountId, ActionInfo, Actions, AttentionEntry, ChangeDetail, ChangeMessage,
-    ChangeNumber, ChangeStatus, ChangeSummary, ChangedChunk, Comment, CommentRange, Commit,
-    CommitParent, ContextLine, Diff, DiffChangeType, DiffChunk, DiffContext, DiffFileMeta,
+    Account, AccountId, ActionInfo, Actions, AddReviewerResult, AttentionEntry, ChangeDetail,
+    ChangeMessage, ChangeNumber, ChangeStatus, ChangeSummary, ChangedChunk, Comment, CommentRange,
+    Commit, CommitParent, ContextLine, Diff, DiffChangeType, DiffChunk, DiffContext, DiffFileMeta,
     DiffPreferences, DiffViewMode, DraftHandling, DraftInput, DraftReceipt, ExpressionResult,
     ExpressionStatus, FileEntry, FileStatus, GitPerson, IntralineEdit, IntralineStatus,
     LabelSummary, LabelValue, LabelVote, Location, PatchSetNumber, RelatedChange, ReviewInput,
     ReviewResult, Revision, RevisionId, RevisionKind, Side, SubmitRequirement,
-    SubmitRequirementStatus, Timestamp, TimestampParseError, Whitespace, file_order,
-    parse_gerrit_timestamp,
+    SubmitRequirementStatus, SuggestedGroup, SuggestedReviewer, Timestamp, TimestampParseError,
+    Whitespace, file_order, parse_gerrit_timestamp,
 };
 
 use crate::wire::{
     self, AccountInfo, ApprovalInfo, ChangeInfo, ChangeMessageInfo, CommitInfo, LabelInfo,
-    RevisionInfo, Status, SubmitRequirementExpressionInfo, SubmitRequirementResultInfo,
+    ReviewerResult, RevisionInfo, Status, SubmitRequirementExpressionInfo,
+    SubmitRequirementResultInfo, SuggestedReviewerInfo,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -59,6 +60,44 @@ pub(crate) fn account(a: &AccountInfo) -> Result<Account, ConversionError> {
         email: a.email.clone(),
         username: a.username.clone(),
         display_name: a.display_name.clone(),
+    })
+}
+
+/// The reviewer autocomplete. An entry with neither an account nor a group
+/// is skipped, and so is an account that cannot be converted (no id): one
+/// odd suggestion must not fail the list.
+pub(crate) fn suggested_reviewers(items: &[SuggestedReviewerInfo]) -> Vec<SuggestedReviewer> {
+    items
+        .iter()
+        .filter_map(|s| {
+            if let Some(a) = &s.account {
+                return account(a).ok().map(SuggestedReviewer::Account);
+            }
+            let g = s.group.as_ref()?;
+            Some(SuggestedReviewer::Group {
+                group: SuggestedGroup {
+                    id: g.id.clone()?,
+                    name: g.name.clone(),
+                },
+                count: s.count,
+                confirm: s.confirm.unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn add_reviewer_result(
+    r: &ReviewerResult,
+) -> Result<AddReviewerResult, ConversionError> {
+    let accounts = |v: &Option<Vec<AccountInfo>>| -> Result<Vec<Account>, ConversionError> {
+        v.iter().flatten().map(account).collect()
+    };
+    Ok(AddReviewerResult {
+        input: r.input.clone().unwrap_or_default(),
+        error: r.error.clone().filter(|e| !e.trim().is_empty()),
+        confirm: r.confirm.unwrap_or(false),
+        reviewers: accounts(&r.reviewers)?,
+        ccs: accounts(&r.ccs)?,
     })
 }
 

@@ -2,8 +2,9 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use base64::Engine as _;
 use model::{
-    Account, ChangeDetail, ChangeNumber, ChangeSummary, Comment, Diff, DiffPreferences, DraftInput,
-    DraftReceipt, FileEntry, PatchSetNumber, RelatedChange, ReviewInput, ReviewResult, RevisionId,
+    Account, AddReviewerResult, ChangeDetail, ChangeNumber, ChangeSummary, Comment, Diff,
+    DiffPreferences, DraftInput, DraftReceipt, FileEntry, PatchSetNumber, RelatedChange,
+    ReviewInput, ReviewResult, ReviewerState, RevisionId, SuggestedReviewer,
 };
 use serde_json::Value;
 
@@ -529,6 +530,111 @@ impl GerritClient {
         } else {
             self.write_empty(http::Method::DELETE, &path).await
         }
+    }
+
+    /// `GET /changes/{n}/suggest_reviewers?q=..&n=..`: accounts and groups
+    /// matching `query`, at most `limit` of them. Read-only.
+    pub async fn suggest_reviewers(
+        &self,
+        change: ChangeNumber,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<SuggestedReviewer>, Error> {
+        let v = self
+            .get_json(
+                &format!("/changes/{change}/suggest_reviewers"),
+                &[("q", query.to_owned()), ("n", limit.to_string())],
+            )
+            .await?;
+        let items: Vec<wire::SuggestedReviewerInfo> = serde_json::from_value(v)?;
+        Ok(convert::suggested_reviewers(&items))
+    }
+
+    /// `POST /changes/{n}/reviewers`: adds `reviewer` (an account id, name,
+    /// email or username, or a group UUID) as a reviewer or CC. Adding
+    /// someone who is already on the change moves them to `state`.
+    ///
+    /// The server answers 200 even when it added nobody; its `error` and
+    /// `confirm` are in the result (see [`AddReviewerResult::is_added`]).
+    /// Pass `confirmed` to repeat the request after a `confirm`.
+    pub async fn add_reviewer(
+        &self,
+        change: ChangeNumber,
+        reviewer: &str,
+        state: ReviewerState,
+        confirmed: bool,
+    ) -> Result<AddReviewerResult, Error> {
+        let body = wire::ReviewerInput {
+            reviewer: reviewer.trim().to_owned(),
+            state: state.as_wire().to_owned(),
+            confirmed: confirmed.then_some(true),
+        };
+        let v = self
+            .write_json(
+                http::Method::POST,
+                &format!("/changes/{change}/reviewers"),
+                &body,
+            )
+            .await?;
+        let r: wire::ReviewerResult = serde_json::from_value(v)?;
+        Ok(convert::add_reviewer_result(&r)?)
+    }
+
+    /// `DELETE /changes/{n}/reviewers/{account}`: removes a reviewer or CC.
+    /// `reviewer` is an account id, email or username.
+    pub async fn remove_reviewer(&self, change: ChangeNumber, reviewer: &str) -> Result<(), Error> {
+        self.write_empty(
+            http::Method::DELETE,
+            &format!(
+                "/changes/{change}/reviewers/{}",
+                encode_component(reviewer.trim())
+            ),
+        )
+        .await
+    }
+
+    /// `PUT /changes/{n}/topic`, or `DELETE` for a blank (or `None`) topic.
+    pub async fn set_topic(&self, change: ChangeNumber, topic: Option<&str>) -> Result<(), Error> {
+        let path = format!("/changes/{change}/topic");
+        match topic.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(topic) => {
+                self.require_auth()?;
+                let body = serde_json::to_vec(&wire::TopicInput {
+                    topic: topic.to_owned(),
+                })?;
+                self.send(http::Method::PUT, &path, &[], Some(body)).await?;
+                Ok(())
+            }
+            None => self.write_empty(http::Method::DELETE, &path).await,
+        }
+    }
+
+    /// `POST /changes/{n}/hashtags`: adds and removes hashtags and returns
+    /// the change's hashtags afterwards. Blank entries are dropped.
+    pub async fn edit_hashtags(
+        &self,
+        change: ChangeNumber,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<Vec<String>, Error> {
+        let clean = |v: &[String]| -> Vec<String> {
+            v.iter()
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty())
+                .collect()
+        };
+        let body = wire::HashtagsInput {
+            add: clean(add),
+            remove: clean(remove),
+        };
+        let v = self
+            .write_json(
+                http::Method::POST,
+                &format!("/changes/{change}/hashtags"),
+                &body,
+            )
+            .await?;
+        Ok(serde_json::from_value(v)?)
     }
 
     /// A `POST` that answers with the changed `ChangeInfo`.
@@ -2088,6 +2194,191 @@ mod tests {
         ));
         assert!(matches!(
             block_on(anon.set_private(ChangeNumber(5), true)),
+            Err(Error::Unauthorized)
+        ));
+        assert!(anon_fake.requests().is_empty());
+    }
+
+    #[test]
+    fn suggest_reviewers_sends_q_and_n_and_keeps_groups() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"[{"account":{"_account_id":3,"name":"Bob","email":"b@x"},"count":1},
+                    {"group":{"id":"abc","name":"Joiners"},"count":50,"confirm":true},
+                    {"count":2},
+                    {"group":{"name":"no id"}}]"#,
+            ),
+        );
+        let c = client(&fake, "https://h", basic());
+        let got = block_on(c.suggest_reviewers(ChangeNumber(5), "b o&", 7)).unwrap();
+        let req = &fake.requests()[0];
+        assert_eq!(req.method(), http::Method::GET);
+        assert_eq!(
+            req.uri(),
+            "https://h/a/changes/5/suggest_reviewers?q=b%20o%26&n=7"
+        );
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].reviewer_input(), "3");
+        match &got[1] {
+            SuggestedReviewer::Group {
+                group,
+                count,
+                confirm,
+            } => {
+                assert_eq!(
+                    (group.id.as_str(), *count, *confirm),
+                    ("abc", Some(50), true)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_reviewer_posts_state_and_surfaces_error_and_confirm() {
+        let fake = FakeHttpClient::new();
+        let c = client(&fake, "https://h", basic());
+        fake.push_response(
+            200,
+            xssi(r#"{"input":"bob","reviewers":[{"_account_id":3,"name":"Bob"}]}"#),
+        );
+        let r = block_on(c.add_reviewer(ChangeNumber(5), " bob ", ReviewerState::Reviewer, false))
+            .unwrap();
+        assert!(r.is_added());
+        assert_eq!(r.reviewers[0].id.0, 3);
+        fake.push_response(
+            200,
+            xssi(r#"{"input":"zed","error":"Account 'zed' not found"}"#),
+        );
+        let r = block_on(c.add_reviewer(ChangeNumber(5), "zed", ReviewerState::Cc, false)).unwrap();
+        assert!(!r.is_added());
+        assert_eq!(r.error.as_deref(), Some("Account 'zed' not found"));
+        fake.push_response(
+            200,
+            xssi(r#"{"input":"grp","confirm":true,"error":"has 50 members"}"#),
+        );
+        let r = block_on(c.add_reviewer(ChangeNumber(5), "grp", ReviewerState::Reviewer, false))
+            .unwrap();
+        assert!(r.confirm && !r.is_added());
+        fake.push_response(200, xssi(r#"{"input":"grp","reviewers":[]}"#));
+        block_on(c.add_reviewer(ChangeNumber(5), "grp", ReviewerState::Reviewer, true)).unwrap();
+
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::POST);
+        assert_eq!(reqs[0].uri(), "https://h/a/changes/5/reviewers");
+        assert_eq!(
+            body_json(&reqs[0]),
+            json!({"reviewer": "bob", "state": "REVIEWER"})
+        );
+        assert_eq!(
+            body_json(&reqs[1]),
+            json!({"reviewer": "zed", "state": "CC"})
+        );
+        assert_eq!(
+            body_json(&reqs[3]),
+            json!({"reviewer": "grp", "state": "REVIEWER", "confirmed": true})
+        );
+    }
+
+    #[test]
+    fn remove_reviewer_deletes_with_an_encoded_account() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(204, "");
+        fake.push_response(204, "");
+        let c = client(&fake, "https://h", basic());
+        block_on(c.remove_reviewer(ChangeNumber(5), "3")).unwrap();
+        block_on(c.remove_reviewer(ChangeNumber(5), "a+b@x.org")).unwrap();
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::DELETE);
+        assert_eq!(reqs[0].uri(), "https://h/a/changes/5/reviewers/3");
+        assert_eq!(
+            reqs[1].uri(),
+            "https://h/a/changes/5/reviewers/a%2Bb%40x.org"
+        );
+        assert!(reqs[0].body().is_empty());
+    }
+
+    #[test]
+    fn topic_is_put_or_deleted_when_blank() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi(r#""my topic""#));
+        fake.push_response(204, "");
+        fake.push_response(204, "");
+        fake.push_response(204, "");
+        let c = client(&fake, "https://h", basic());
+        block_on(c.set_topic(ChangeNumber(5), Some(" my topic "))).unwrap();
+        block_on(c.set_topic(ChangeNumber(5), None)).unwrap();
+        block_on(c.set_topic(ChangeNumber(5), Some("  "))).unwrap();
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::PUT);
+        assert_eq!(reqs[0].uri(), "https://h/a/changes/5/topic");
+        assert_eq!(body_json(&reqs[0]), json!({"topic": "my topic"}));
+        assert_eq!(reqs[1].method(), http::Method::DELETE);
+        assert_eq!(reqs[2].method(), http::Method::DELETE);
+        assert!(reqs[1].body().is_empty());
+    }
+
+    #[test]
+    fn hashtags_post_add_and_remove_and_return_the_list() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi(r#"["a","b"]"#));
+        fake.push_response(200, xssi("[]"));
+        let c = client(&fake, "https://h", basic());
+        let tags = block_on(c.edit_hashtags(
+            ChangeNumber(5),
+            &["a".into(), " ".into(), " b ".into()],
+            &["old".into()],
+        ))
+        .unwrap();
+        assert_eq!(tags, ["a", "b"]);
+        block_on(c.edit_hashtags(ChangeNumber(5), &[], &["a".into()])).unwrap();
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::POST);
+        assert_eq!(reqs[0].uri(), "https://h/a/changes/5/hashtags");
+        assert_eq!(
+            body_json(&reqs[0]),
+            json!({"add": ["a", "b"], "remove": ["old"]})
+        );
+        assert_eq!(body_json(&reqs[1]), json!({"remove": ["a"]}));
+    }
+
+    #[test]
+    fn reviewer_topic_and_hashtag_refusals_and_anonymous() {
+        let fake = FakeHttpClient::new();
+        let c = client(&fake, "https://h", basic());
+        fake.push_response(403, "not allowed\n");
+        assert!(matches!(
+            block_on(c.remove_reviewer(ChangeNumber(5), "3")),
+            Err(Error::Forbidden { .. })
+        ));
+        fake.push_response(409, "topic is frozen\n");
+        assert!(matches!(
+            block_on(c.set_topic(ChangeNumber(5), Some("t"))),
+            Err(Error::Conflict { message }) if message == "topic is frozen"
+        ));
+        fake.push_response(403, "no\n");
+        assert!(matches!(
+            block_on(c.edit_hashtags(ChangeNumber(5), &["a".into()], &[])),
+            Err(Error::Forbidden { .. })
+        ));
+        let anon_fake = FakeHttpClient::new();
+        let anon = client(&anon_fake, "https://h", Auth::Anonymous);
+        assert!(matches!(
+            block_on(anon.add_reviewer(ChangeNumber(5), "bob", ReviewerState::Cc, false)),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(anon.remove_reviewer(ChangeNumber(5), "3")),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(anon.set_topic(ChangeNumber(5), None)),
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            block_on(anon.edit_hashtags(ChangeNumber(5), &[], &[])),
             Err(Error::Unauthorized)
         ));
         assert!(anon_fake.requests().is_empty());
