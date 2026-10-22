@@ -41,6 +41,7 @@ use store::CachedFileList;
 use sync::PollPolicy;
 
 use crate::{
+    action_menu,
     actions::*,
     comments::{ChangeComments, CommentsEvent},
     diff::{
@@ -76,6 +77,8 @@ pub enum ChangeEvent {
     Refreshed,
     /// `a`: open the reply dialog for this change.
     Reply(Box<ChangeDetail>),
+    /// `m`: open the change action menu for this change.
+    Actions(Box<ChangeDetail>),
 }
 
 /// The file list of the current patch set pair.
@@ -1173,6 +1176,44 @@ impl ChangePage {
         }
         let (note, warning) = sent.note();
         self.hint.say(note, warning, cx, |p| &mut p.hint);
+    }
+
+    /// `m`: asks the shell for the change action menu.
+    fn open_actions(&mut self, _: &ChangeMenu, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = action_menu::unavailable(&self.session) {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        match &self.detail {
+            Some(d) if action_menu::menu_entries(d).is_empty() => self.hint.say(
+                "There is nothing you can do with this change",
+                false,
+                cx,
+                |p| &mut p.hint,
+            ),
+            Some(d) => cx.emit(ChangeEvent::Actions(Box::new(d.clone()))),
+            None => self
+                .hint
+                .say("The change is not loaded yet", false, cx, |p| &mut p.hint),
+        }
+    }
+
+    /// An action went through: take the change as the server has it now
+    /// (a new current patch set after a rebase or a submit moves the file
+    /// list along) and say so.
+    pub fn action_done(&mut self, done: &action_menu::Done, cx: &mut Context<Self>) {
+        match &done.detail {
+            Some(d) => {
+                self.detail = Some(d.clone());
+                self.fetched_at = Some(Timestamp::now());
+                self.apply_selection(true, cx);
+            }
+            None => {
+                self.track.invalidate();
+                self.tick(cx);
+            }
+        }
+        self.hint.say(done.note(), false, cx, |p| &mut p.hint);
     }
 
     /// `r`: marks the file under the cursor reviewed, or clears the mark.

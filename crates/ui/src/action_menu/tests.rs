@@ -1,0 +1,686 @@
+//! The change action menu on GPUI's `TestAppContext` with a path-routed
+//! fake server that sees the method and body of every request.
+
+use std::sync::{Arc, Mutex};
+
+use gerrit_api::{Auth, fake::RouteHttpClient};
+use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext};
+use model::{ActionInfo, ChangeDetail};
+use serde_json::{Value, json};
+use store::Store;
+
+use super::{ActionDialog, ActionEvent, Kind, menu_entries};
+use crate::{
+    session::Session,
+    testing::detail,
+    tests::{URL, env_with, open, setup},
+};
+
+/// What the server answers to submit, rebase, abandon and restore: the
+/// change.
+const CHANGE_OK: &str = concat!(
+    ")]}'\n",
+    r#"{"_number":7,"project":"p","branch":"main","subject":"s","status":"NEW","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000"}"#
+);
+
+const CONFIRM: &str = if cfg!(target_os = "macos") {
+    "cmd-enter"
+} else {
+    "ctrl-enter"
+};
+
+fn act(label: &str, enabled: bool, title: Option<&str>) -> ActionInfo {
+    ActionInfo {
+        method: Some("POST".into()),
+        label: Some(label.into()),
+        title: title.map(str::to_owned),
+        enabled,
+        enabled_options: vec![],
+    }
+}
+
+/// Change 7 as bob sees it: he may submit, rebase (not now: it is at the
+/// branch tip), abandon, mark WIP and mark private.
+pub(crate) fn change() -> ChangeDetail {
+    let mut d = detail(7, 3, 3);
+    d.revision_actions.insert(
+        "submit".into(),
+        act("Submit", true, Some("Submit patch set 3")),
+    );
+    d.revision_actions.insert(
+        "rebase".into(),
+        act("Rebase", false, Some("Change is already up to date")),
+    );
+    d.revision_actions
+        .insert("cherrypick".into(), act("Cherry Pick", true, None));
+    d.change_actions
+        .insert("abandon".into(), act("Abandon", true, None));
+    d.change_actions
+        .insert("wip".into(), act("WIP", true, None));
+    d.change_actions
+        .insert("private".into(), act("Mark private", true, None));
+    d.change_actions
+        .insert("topic".into(), act("Edit topic", true, None));
+    d
+}
+
+/// Like [`change`], but rebasing is possible.
+fn rebasable() -> ChangeDetail {
+    let mut d = change();
+    d.revision_actions
+        .insert("rebase".into(), act("Rebase", true, None));
+    d
+}
+
+struct Fx {
+    window: AnyWindowHandle,
+    dialog: Entity<ActionDialog>,
+    http: RouteHttpClient,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+fn dialog(
+    cx: &mut TestAppContext,
+    detail: ChangeDetail,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fx {
+    let mut store = Store::open_in_memory().expect("store");
+    assert_eq!(store.server_id(URL).expect("server"), setup().server);
+    let http = RouteHttpClient::new();
+    routes(&http);
+    let env = env_with(store, &http);
+    let mut server = setup();
+    server.username = Some("bob".into());
+    let auth = Auth::Basic {
+        username: "bob".into(),
+        password: "p".into(),
+    };
+    let session = Session::new(&env, &server, Some(auth)).expect("session");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let log = events.clone();
+    let (window, dialog) = open(cx, |window, cx| {
+        let dialog = cx.new(|cx| ActionDialog::new(session, detail, window, cx));
+        cx.subscribe(&dialog, move |_, ev: &ActionEvent, _| {
+            let text = match ev {
+                ActionEvent::Close => "close".to_owned(),
+                ActionEvent::Unauthorized => "unauthorized".to_owned(),
+                ActionEvent::Done(d) => {
+                    format!("done {:?} detail={}", d.kind, d.detail.is_some())
+                }
+            };
+            log.lock().expect("log").push(text);
+        })
+        .detach();
+        dialog
+    });
+    cx.run_until_parked();
+    Fx {
+        window,
+        dialog,
+        http,
+        events,
+    }
+}
+
+fn press(cx: &mut TestAppContext, f: &Fx, keys: &[&'static str]) {
+    for k in keys {
+        cx.update_window(f.window, |_, window, cx| window.press(k, cx))
+            .expect("press");
+        cx.run_until_parked();
+    }
+}
+
+fn type_text(cx: &mut TestAppContext, f: &Fx, text: &str) {
+    cx.update_window(f.window, |_, window, cx| window.input(text, cx))
+        .expect("input");
+    cx.run_until_parked();
+}
+
+fn events(f: &Fx) -> Vec<String> {
+    f.events.lock().expect("log").clone()
+}
+
+fn step(cx: &mut TestAppContext, f: &Fx) -> String {
+    cx.update(|cx| f.dialog.read(cx).step_for_test())
+}
+
+fn error(cx: &mut TestAppContext, f: &Fx) -> Option<String> {
+    cx.update(|cx| f.dialog.read(cx).error_for_test().map(str::to_owned))
+}
+
+fn writes(f: &Fx) -> Vec<String> {
+    f.http
+        .sent()
+        .into_iter()
+        .filter(|r| r.method != "GET")
+        .map(|r| format!("{} {}", r.method, r.target))
+        .collect()
+}
+
+fn body_of(f: &Fx, target_end: &str) -> Value {
+    let found: Vec<_> = f
+        .http
+        .sent()
+        .into_iter()
+        .filter(|r| r.method != "GET" && r.target.ends_with(target_end))
+        .collect();
+    assert_eq!(found.len(), 1, "{target_end}: {:?}", f.http.sent());
+    serde_json::from_slice(&found[0].body).expect("a JSON body")
+}
+
+#[test]
+fn the_menu_lists_what_the_server_offers_in_menu_order() {
+    let entries = menu_entries(&change());
+    let shown: Vec<_> = entries
+        .iter()
+        .map(|e| (e.kind, e.label.as_str(), e.enabled, e.reason.as_deref()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (Kind::Submit, "Submit", true, Some("Submit patch set 3")),
+            (
+                Kind::Rebase,
+                "Rebase",
+                false,
+                Some("Change is already up to date")
+            ),
+            (Kind::Abandon, "Abandon", true, None),
+            (Kind::Wip, "WIP", true, None),
+            (Kind::Private, "Mark private", true, None),
+        ],
+        "restore, ready and the actions the menu does not know are absent"
+    );
+}
+
+#[test]
+fn a_missing_label_falls_back_and_the_other_toggles_show() {
+    let mut d = detail(7, 1, 1);
+    d.change_actions.insert(
+        "ready".into(),
+        ActionInfo {
+            enabled: true,
+            ..Default::default()
+        },
+    );
+    d.change_actions
+        .insert("private.delete".into(), act(" ", true, None));
+    d.change_actions
+        .insert("restore".into(), act("Restore", true, None));
+    let shown: Vec<_> = menu_entries(&d)
+        .into_iter()
+        .map(|e| (e.kind, e.label))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (Kind::Restore, "Restore".to_owned()),
+            (Kind::Ready, "Ready for review".to_owned()),
+            (Kind::Unprivate, "Unmark private".to_owned()),
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn j_k_and_the_arrows_move_the_selection_and_wrap(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |_| {});
+    let sel = |cx: &mut TestAppContext| cx.update(|cx| f.dialog.read(cx).selected_for_test());
+    assert_eq!(sel(cx), 0);
+    press(cx, &f, &["j", "down", "j"]);
+    assert_eq!(sel(cx), 3);
+    press(cx, &f, &["k", "up"]);
+    assert_eq!(sel(cx), 1);
+    press(cx, &f, &["k", "k"]);
+    assert_eq!(sel(cx), 4);
+    // The menu has no text fields: nothing was typed anywhere.
+    assert_eq!(step(cx, &f), "Menu");
+}
+
+#[gpui_kit::test]
+fn a_disabled_entry_does_nothing_when_picked(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |_| {});
+    press(cx, &f, &["b"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert_eq!(cx.update(|cx| f.dialog.read(cx).selected_for_test()), 1);
+    press(cx, &f, &["enter"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert!(writes(&f).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_mnemonic_that_is_not_offered_does_nothing(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |_| {});
+    // No restore and no ready on this change.
+    press(cx, &f, &["r"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert!(events(&f).is_empty());
+}
+
+#[gpui_kit::test]
+fn escape_closes_the_menu_and_a_confirmation(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |_| {});
+    press(cx, &f, &["escape"]);
+    assert_eq!(events(&f), ["close"]);
+    let f = dialog(cx, change(), |_| {});
+    press(cx, &f, &["s"]);
+    assert_eq!(step(cx, &f), "Confirm(Submit)");
+    press(cx, &f, &["escape"]);
+    assert_eq!(events(&f), ["close"]);
+    assert!(writes(&f).is_empty());
+}
+
+#[gpui_kit::test]
+fn submit_asks_then_posts_and_reports_the_refreshed_change(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 200, CHANGE_OK);
+        http.route_json(
+            "GET /a/changes/7?",
+            r#"{"_number":7,"project":"p","branch":"main","subject":"s","status":"MERGED","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000"}"#,
+        );
+    });
+    press(cx, &f, &["s"]);
+    assert_eq!(step(cx, &f), "Confirm(Submit)");
+    assert!(writes(&f).is_empty(), "nothing goes out before the confirm");
+    press(cx, &f, &["enter"]);
+    assert_eq!(writes(&f), ["POST /a/changes/7/submit"]);
+    assert_eq!(events(&f), ["done Submit detail=true"]);
+}
+
+#[gpui_kit::test]
+fn a_failed_refresh_still_counts_as_done(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["s", CONFIRM]);
+    assert_eq!(events(&f), ["done Submit detail=false"]);
+}
+
+#[gpui_kit::test]
+fn abandon_sends_the_typed_message(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/abandon", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["a"]);
+    assert_eq!(step(cx, &f), "Confirm(Abandon)");
+    // The message field has the focus: letters are text, not mnemonics.
+    let focused = cx
+        .update_window(f.window, |_, w, cx| {
+            f.dialog.read(cx).message_focus_for_test(cx).is_focused(w)
+        })
+        .expect("window");
+    assert!(focused);
+    type_text(cx, &f, "superseded by 8 ");
+    press(cx, &f, &[CONFIRM]);
+    assert_eq!(
+        body_of(&f, "/changes/7/abandon"),
+        json!({"message": "superseded by 8"})
+    );
+    assert_eq!(events(&f), ["done Abandon detail=false"]);
+}
+
+#[gpui_kit::test]
+fn abandon_without_a_message_sends_none(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/abandon", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["a", CONFIRM]);
+    assert_eq!(body_of(&f, "/changes/7/abandon"), json!({}));
+}
+
+#[gpui_kit::test]
+fn wip_takes_a_message_too(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/wip", 200, "");
+    });
+    press(cx, &f, &["w"]);
+    assert_eq!(step(cx, &f), "Confirm(Wip)");
+    type_text(cx, &f, "needs tests");
+    press(cx, &f, &[CONFIRM]);
+    assert_eq!(
+        body_of(&f, "/changes/7/wip"),
+        json!({"message": "needs tests"})
+    );
+}
+
+#[gpui_kit::test]
+fn rebase_sends_the_base_and_enter_confirms_from_the_field(cx: &mut TestAppContext) {
+    let f = dialog(cx, rebasable(), |http| {
+        http.route("POST /a/changes/7/rebase", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["b"]);
+    assert_eq!(step(cx, &f), "Confirm(Rebase)");
+    let focused = cx
+        .update_window(f.window, |_, w, cx| {
+            f.dialog.read(cx).base_focus_for_test(cx).is_focused(w)
+        })
+        .expect("window");
+    assert!(focused);
+    type_text(cx, &f, "1234");
+    press(cx, &f, &["enter"]);
+    assert_eq!(body_of(&f, "/changes/7/rebase"), json!({"base": "1234"}));
+}
+
+#[gpui_kit::test]
+fn rebase_with_an_empty_base_goes_onto_the_branch_tip(cx: &mut TestAppContext) {
+    let f = dialog(cx, rebasable(), |http| {
+        http.route("POST /a/changes/7/rebase", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["b", CONFIRM]);
+    assert_eq!(body_of(&f, "/changes/7/rebase"), json!({}));
+}
+
+#[gpui_kit::test]
+fn private_runs_from_the_menu_without_a_dialog(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/private", 201, "");
+    });
+    press(cx, &f, &["p"]);
+    assert_eq!(writes(&f), ["POST /a/changes/7/private"]);
+    assert_eq!(events(&f), ["done Private detail=false"]);
+}
+
+#[gpui_kit::test]
+fn ready_runs_from_the_menu_and_unmarking_private_deletes(cx: &mut TestAppContext) {
+    let both = || {
+        let mut d = detail(7, 1, 1);
+        d.change_actions
+            .insert("ready".into(), act("Ready for review", true, None));
+        d.change_actions
+            .insert("private.delete".into(), act("Unmark private", true, None));
+        d
+    };
+    let routes = |http: &RouteHttpClient| {
+        http.route("POST /a/changes/7/ready", 200, "");
+        http.route("DELETE /a/changes/7/private", 204, "");
+    };
+    let f = dialog(cx, both(), routes);
+    press(cx, &f, &["w"]);
+    assert_eq!(writes(&f), ["POST /a/changes/7/ready"]);
+    assert_eq!(body_of(&f, "/changes/7/ready"), json!({}));
+    assert_eq!(events(&f), ["done Ready detail=false"]);
+    let f = dialog(cx, both(), routes);
+    press(cx, &f, &["p"]);
+    assert_eq!(writes(&f), ["DELETE /a/changes/7/private"]);
+    assert_eq!(events(&f), ["done Unprivate detail=false"]);
+}
+
+#[gpui_kit::test]
+fn a_409_keeps_the_dialog_with_the_servers_message(cx: &mut TestAppContext) {
+    let f = dialog(cx, rebasable(), |http| {
+        http.route(
+            "POST /a/changes/7/rebase",
+            409,
+            "Change is already up to date.\n",
+        );
+    });
+    press(cx, &f, &["b", CONFIRM]);
+    assert_eq!(step(cx, &f), "Confirm(Rebase)");
+    assert_eq!(
+        error(cx, &f).as_deref(),
+        Some("Not rebased: Change is already up to date.")
+    );
+    assert!(events(&f).is_empty());
+    // It can be tried again, or cancelled.
+    press(cx, &f, &["escape"]);
+    assert_eq!(events(&f), ["close"]);
+}
+
+#[gpui_kit::test]
+fn a_direct_action_that_fails_shows_its_error_in_the_menu(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/private", 403, "not allowed here\n");
+    });
+    press(cx, &f, &["p"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert_eq!(
+        error(cx, &f).as_deref(),
+        Some("Not marked private: not allowed here")
+    );
+    // Moving on clears it.
+    press(cx, &f, &["j"]);
+    assert_eq!(error(cx, &f), None);
+}
+
+#[gpui_kit::test]
+fn a_403_with_no_message_says_so(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 403, "");
+    });
+    press(cx, &f, &["s", CONFIRM]);
+    let e = error(cx, &f).expect("error");
+    assert!(e.starts_with("Not submitted: ") && e.contains("403"), "{e}");
+    assert!(events(&f).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_401_goes_to_the_login_flow(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 401, "");
+    });
+    press(cx, &f, &["s", CONFIRM]);
+    assert_eq!(events(&f), ["unauthorized"]);
+}
+
+#[gpui_kit::test]
+fn a_server_that_cannot_be_reached_says_nothing_was_done(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 503, "down");
+    });
+    press(cx, &f, &["s", CONFIRM]);
+    let e = error(cx, &f).expect("error");
+    assert!(
+        e.starts_with("Not submitted: the server cannot be reached") && e.contains("Nothing"),
+        "{e}"
+    );
+    assert_eq!(step(cx, &f), "Confirm(Submit)");
+}
+
+#[gpui_kit::test]
+fn escape_does_not_cancel_a_running_action(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["s"]);
+    // Confirm and Esc without letting the request finish in between.
+    cx.update_window(f.window, |_, window, cx| {
+        window.press(CONFIRM, cx);
+        window.press("escape", cx);
+    })
+    .expect("press");
+    assert_eq!(step(cx, &f), "Running(Submit)");
+    cx.run_until_parked();
+    assert_eq!(events(&f), ["done Submit detail=false"]);
+}
+
+#[gpui_kit::test]
+fn tab_cycles_through_the_controls_of_a_confirmation(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |_| {});
+    press(cx, &f, &["a"]);
+    let is = |cx: &mut TestAppContext, which: u8| {
+        cx.update_window(f.window, |_, w, cx| {
+            let d = f.dialog.read(cx);
+            match which {
+                0 => d.message_focus_for_test(cx).is_focused(w),
+                _ => d.confirm_focus_for_test().is_focused(w),
+            }
+        })
+        .expect("window")
+    };
+    assert!(is(cx, 0));
+    press(cx, &f, &["tab", "tab"]);
+    assert!(is(cx, 1));
+    press(cx, &f, &["tab"]);
+    assert!(is(cx, 0));
+    press(cx, &f, &["shift-tab", "shift-tab"]);
+    // message -> confirm -> cancel
+    assert!(!is(cx, 0) && !is(cx, 1));
+}
+
+mod in_the_shell {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext};
+    use model::ChangeNumber;
+    use store::Store;
+
+    use super::change;
+    use crate::{
+        nav::Route,
+        session::{Backend, BackendError, SavedQuery, ServerSetup, Startup},
+        shell::Shell,
+        testing::summary,
+        tests::{URL, env_with, open, setup},
+    };
+
+    struct Keyring;
+
+    impl Backend for Keyring {
+        fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
+            Ok(Some("secret".into()))
+        }
+
+        fn save_login(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Vec<SavedQuery>, BackendError> {
+            Err(BackendError("not used".into()))
+        }
+    }
+
+    /// The change page of change 7, opened from a dashboard row.
+    fn on_the_change(
+        cx: &mut TestAppContext,
+        username: Option<&str>,
+        detail: model::ChangeDetail,
+        http: &gerrit_api::fake::RouteHttpClient,
+    ) -> (AnyWindowHandle, Entity<Shell>) {
+        let mut store = Store::open_in_memory().expect("store");
+        let server = store.server_id(URL).expect("server");
+        let now = jiff::Timestamp::now();
+        store
+            .save_query_page(server, "status:open", &[summary(7)], false, now)
+            .expect("query");
+        store
+            .save_change_detail(server, &detail, now)
+            .expect("detail");
+        let mut env = env_with(store, http);
+        env.backend = std::sync::Arc::new(Keyring);
+        let startup = Startup {
+            env,
+            server: Some(ServerSetup {
+                username: username.map(str::to_owned),
+                ..setup()
+            }),
+            queries: vec![SavedQuery {
+                name: "Open".into(),
+                query: "status:open".into(),
+            }],
+            diff: Default::default(),
+        };
+        let (window, shell) = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        press(cx, window, "enter");
+        cx.update(|cx| assert_eq!(shell.read(cx).route(), &Route::Change(ChangeNumber(7))));
+        (window, shell)
+    }
+
+    fn press(cx: &mut TestAppContext, window: AnyWindowHandle, key: &'static str) {
+        cx.update_window(window, |_, w, cx| w.press(key, cx))
+            .expect("press");
+        cx.run_until_parked();
+    }
+
+    fn hint(cx: &mut TestAppContext, shell: &Entity<Shell>) -> Option<(String, bool)> {
+        let page = cx
+            .update(|cx| shell.read(cx).change_page_for_test())
+            .expect("page");
+        cx.update(|cx| page.read(cx).hint_for_test())
+    }
+
+    #[gpui_kit::test]
+    fn m_opens_the_menu_over_the_page_and_escape_gives_the_page_back(cx: &mut TestAppContext) {
+        let (window, shell) = on_the_change(cx, Some("bob"), change(), &Default::default());
+        press(cx, window, "m");
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_some()));
+        // The keys of the shell and the page do nothing behind it.
+        press(cx, window, "?");
+        press(cx, window, "u");
+        cx.update(|cx| {
+            assert!(!shell.read(cx).help_open_for_test());
+            assert_eq!(shell.read(cx).route(), &Route::Change(ChangeNumber(7)));
+            assert!(shell.read(cx).reply_for_test().is_none());
+        });
+        press(cx, window, "escape");
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_none()));
+        // The page has the focus again: its keys work (`a` is the reply).
+        press(cx, window, "a");
+        cx.update(|cx| assert!(shell.read(cx).reply_for_test().is_some()));
+    }
+
+    #[gpui_kit::test]
+    fn a_mnemonic_is_not_the_pages_key(cx: &mut TestAppContext) {
+        // `a` replies on the page and abandons in the menu.
+        let (window, shell) = on_the_change(cx, Some("bob"), change(), &Default::default());
+        press(cx, window, "m");
+        press(cx, window, "a");
+        cx.update(|cx| {
+            assert!(shell.read(cx).reply_for_test().is_none());
+            let menu = shell.read(cx).menu_for_test().expect("menu");
+            assert_eq!(menu.read(cx).step_for_test(), "Confirm(Abandon)");
+        });
+    }
+
+    const BEFORE: &str = r#"{"_number":7,"project":"p","branch":"main","subject":"Subject","status":"NEW","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000","current_revision":"sha3","revisions":{"sha3":{"_number":3,"actions":{"rebase":{"method":"POST","label":"Rebase","enabled":true}}}}}"#;
+    const AFTER: &str = r#"{"_number":7,"project":"p","branch":"main","subject":"Rebased subject","status":"NEW","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000","current_revision":"sha4","revisions":{"sha4":{"_number":4}}}"#;
+
+    #[gpui_kit::test]
+    fn a_done_action_closes_the_menu_and_the_page_takes_the_change(cx: &mut TestAppContext) {
+        let http = gerrit_api::fake::RouteHttpClient::new();
+        http.route_json("GET /a/changes/7?", BEFORE);
+        http.route("POST /a/changes/7/rebase", 200, super::CHANGE_OK);
+        let (window, shell) = on_the_change(cx, Some("bob"), change(), &http);
+        press(cx, window, "m");
+        press(cx, window, "b");
+        // From now on the server has the rebased change.
+        http.route_json("GET /a/changes/7?", AFTER);
+        press(cx, window, super::CONFIRM);
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_none()));
+        assert_eq!(hint(cx, &shell), Some(("Rebased".to_owned(), false)));
+        let page = cx
+            .update(|cx| shell.read(cx).change_page_for_test())
+            .expect("page");
+        cx.update(|cx| {
+            let d = page.read(cx).detail().expect("detail");
+            assert_eq!(d.summary.subject, "Rebased subject");
+            assert_eq!(d.current_patch_set.map(|p| p.0), Some(4));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn anonymous_sessions_get_a_hint_and_no_menu(cx: &mut TestAppContext) {
+        let (window, shell) = on_the_change(cx, None, change(), &Default::default());
+        press(cx, window, "m");
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_none()));
+        assert_eq!(
+            hint(cx, &shell),
+            Some(("Sign in to change this change".to_owned(), false))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_change_with_nothing_to_do_gets_a_hint(cx: &mut TestAppContext) {
+        let (window, shell) = on_the_change(
+            cx,
+            Some("bob"),
+            crate::testing::detail(7, 3, 3),
+            &Default::default(),
+        );
+        press(cx, window, "m");
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_none()));
+        assert!(matches!(hint(cx, &shell), Some((_, false))));
+    }
+}
