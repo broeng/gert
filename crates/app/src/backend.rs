@@ -93,7 +93,14 @@ impl Backend for AppBackend {
 
     fn save_filters(&self, filters: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
         let config = Config::update(&self.config_file, |c| {
-            c.filters = filters.iter().map(FilterConfig::from_filter).collect();
+            // The rules the loader ignores stay in the file, after the ones
+            // the UI manages; they are still ignored on the next load.
+            let ignored = c.ignored_filters();
+            c.filters = filters
+                .iter()
+                .map(FilterConfig::from_filter)
+                .chain(ignored)
+                .collect();
         })
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(config.file_filters())
@@ -225,6 +232,43 @@ mod tests {
         assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
         assert!(text.contains("name = \"A\""), "{text}");
         assert!(text.contains("action = \"dim\""), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_filters_keeps_the_tables_the_loader_ignores() {
+        use ui::filters::FilterAction;
+        let dir = std::env::temp_dir().join(format!("backend-ignored-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let b = AppBackend {
+            config_file: dir.join("config.toml"),
+            keyring: Keyring,
+        };
+        std::fs::write(
+            &b.config_file,
+            "[[filters]]\nname = \"Gen\"\nglobs = [\"a\"]\naction = \"dim\"\n\n\
+             # my experiment, not working yet\n[[filters]]\nname = \"Odd\"\n\
+             globs = [\"b\"]\naction = \"explode\"\n",
+        )
+        .unwrap();
+        let new = [FileFilter {
+            name: "Other".into(),
+            globs: vec!["*.lock".into()],
+            projects: Vec::new(),
+            action: FilterAction::Hide,
+            enabled: true,
+        }];
+        assert_eq!(b.save_filters(&new).unwrap(), new);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(text.contains("# my experiment"), "{text}");
+        assert!(text.contains("action = \"explode\""), "{text}");
+        assert!(text.contains("name = \"Other\""), "{text}");
+        assert!(!text.contains("name = \"Gen\""), "{text}");
+        // Saving the same list again changes nothing.
+        let before = text.clone();
+        b.save_filters(&new).unwrap();
+        assert_eq!(std::fs::read_to_string(&b.config_file).unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
