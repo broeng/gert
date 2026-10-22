@@ -1044,34 +1044,44 @@ fn prefill_from(setup: &ServerSetup, notice: String) -> LoginPrefill {
     }
 }
 
+/// Half-width of the resize hit band around the window edge. The band is
+/// centered on the edge, so this many pixels of it are inside the window.
+const RESIZE_HIT_SIZE: Pixels = px(6.);
+
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        // The border draws the frame, shadow and resize edges of a
-        // client-decorated window and is transparent otherwise.
-        window_border().child(
-            div()
-                .id("shell")
-                .key_context(SHELL)
-                .track_focus(&self.focus)
-                .on_action(cx.listener(Self::go_back))
-                .on_action(cx.listener(Self::go_forward))
-                .on_action(cx.listener(Self::go_up))
-                .on_action(cx.listener(Self::focus_search))
-                .on_action(cx.listener(Self::toggle_help))
-                .on_action(cx.listener(Self::dismiss))
-                .relative()
-                .size_full()
-                .flex()
-                .flex_col()
-                .bg(theme.background)
-                .text_color(theme.foreground)
-                .child(self.render_title_bar(cx))
-                .child(div().flex_1().min_h_0().child(self.page.element()))
-                .when(self.help, |d| d.child(self.render_help(cx)))
-                .children(self.reply.clone())
-                .children(self.menu.clone()),
-        )
+        // The border draws the frame and resize edges of a client-decorated
+        // window and is transparent otherwise. There is no shadow inset on
+        // Linux (see the `window` module docs), so the 1px frame is the
+        // window edge and half of the resize hit band lies outside the
+        // window: `RESIZE_HIT_SIZE` is the width of the usable half.
+        window_border()
+            .shadow_size(px(0.))
+            .resize_hit_size(RESIZE_HIT_SIZE)
+            .child(
+                div()
+                    .id("shell")
+                    .key_context(SHELL)
+                    .track_focus(&self.focus)
+                    .on_action(cx.listener(Self::go_back))
+                    .on_action(cx.listener(Self::go_forward))
+                    .on_action(cx.listener(Self::go_up))
+                    .on_action(cx.listener(Self::focus_search))
+                    .on_action(cx.listener(Self::toggle_help))
+                    .on_action(cx.listener(Self::dismiss))
+                    .relative()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .bg(theme.background)
+                    .text_color(theme.foreground)
+                    .child(self.render_title_bar(cx))
+                    .child(div().flex_1().min_h_0().child(self.page.element()))
+                    .when(self.help, |d| d.child(self.render_help(cx)))
+                    .children(self.reply.clone())
+                    .children(self.menu.clone()),
+            )
     }
 }
 
