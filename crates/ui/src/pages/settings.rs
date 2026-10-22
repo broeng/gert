@@ -63,11 +63,7 @@ pub(crate) fn validate(name: &str, query: &str) -> Result<SavedQuery, &'static s
 
 /// `list` with row `index` moved by `delta` places, and where it ended up;
 /// `None` at the ends of the list.
-pub(crate) fn moved(
-    list: &[SavedQuery],
-    index: usize,
-    delta: isize,
-) -> Option<(Vec<SavedQuery>, usize)> {
+pub(crate) fn moved<T: Clone>(list: &[T], index: usize, delta: isize) -> Option<(Vec<T>, usize)> {
     let to = index
         .checked_add_signed(delta)
         .filter(|t| *t < list.len())?;
@@ -82,7 +78,7 @@ pub(crate) fn moved(
 
 /// `list` with row `index` replaced by `q`, or `q` appended when `index` is
 /// past the end.
-pub(crate) fn with_query(list: &[SavedQuery], index: usize, q: SavedQuery) -> Vec<SavedQuery> {
+pub(crate) fn with_query<T: Clone>(list: &[T], index: usize, q: T) -> Vec<T> {
     let mut out = list.to_vec();
     match out.get_mut(index) {
         Some(slot) => *slot = q,
@@ -92,7 +88,7 @@ pub(crate) fn with_query(list: &[SavedQuery], index: usize, q: SavedQuery) -> Ve
 }
 
 /// `list` without row `index`.
-pub(crate) fn without(list: &[SavedQuery], index: usize) -> Vec<SavedQuery> {
+pub(crate) fn without<T: Clone>(list: &[T], index: usize) -> Vec<T> {
     let mut out = list.to_vec();
     if index < out.len() {
         out.remove(index);
@@ -1032,7 +1028,7 @@ mod tests {
         assert_eq!((names(&up), at), (vec!["a", "c", "b"], 1));
         assert!(moved(&l, 0, -1).is_none());
         assert!(moved(&l, 2, 1).is_none());
-        assert!(moved(&[], 0, 1).is_none());
+        assert!(moved::<SavedQuery>(&[], 0, 1).is_none());
     }
 
     #[test]
