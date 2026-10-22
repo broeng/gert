@@ -96,10 +96,18 @@ impl ActionDialog {
         cx.notify();
         self.task = Some(cx.spawn(async move |this, cx| {
             let sent = edit.clone();
-            let result = cx
-                .background_spawn(async move { sent.send(&syncer, change).await })
+            let (result, fresh) = cx
+                .background_spawn(async move {
+                    let result = sent.send(&syncer, change).await;
+                    // A refusal means our picture of the change is stale.
+                    let fresh = match &result {
+                        Err(e) => syncer.refresh_after_refusal(change, e).await,
+                        Ok(_) => None,
+                    };
+                    (result, fresh)
+                })
                 .await;
-            this.update(cx, |this, cx| this.finished_edit(edit, result, cx))
+            this.update(cx, |this, cx| this.finished_edit(edit, result, fresh, cx))
                 .ok();
         }));
     }
@@ -108,6 +116,7 @@ impl ActionDialog {
         &mut self,
         edit: Edit,
         result: Result<Outcome, sync::Error>,
+        fresh: Option<ChangeDetail>,
         cx: &mut Context<Self>,
     ) {
         self.busy = false;
@@ -117,6 +126,7 @@ impl ActionDialog {
             Err(e) if is_unauthorized(&e) => cx.emit(ActionEvent::Unauthorized),
             Err(e) => {
                 self.error = Some(describe(kind, &e));
+                self.take_fresh(fresh, cx);
                 self.refocus_step(cx);
             }
             Ok(out) => match edit {
