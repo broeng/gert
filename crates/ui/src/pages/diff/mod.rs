@@ -740,14 +740,18 @@ impl DiffPage {
         }
     }
 
-    /// The next / previous file that is neither hidden nor dimmed.
+    /// The next / previous file that is neither hidden nor dimmed. `]` on
+    /// the last one goes back up to the change (`[` on the first does
+    /// nothing).
     fn step_file(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(from) = self.position() else {
             return;
         };
         let skipped = |i: usize| self.styles.get(i).is_some_and(skips);
-        if let Some(i) = next_unskipped(self.files.len(), from, forward, skipped) {
-            self.go_to(i, cx);
+        match next_unskipped(self.files.len(), from, forward, skipped) {
+            Some(i) => self.go_to(i, cx),
+            None if forward => cx.emit(DiffPageEvent::UpToChange),
+            None => {}
         }
     }
 

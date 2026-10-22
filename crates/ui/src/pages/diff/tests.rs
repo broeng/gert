@@ -326,7 +326,7 @@ fn an_unknown_patch_set_is_an_error_not_a_blank_page(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn brackets_ask_for_the_neighbouring_files_and_stop_at_the_ends(cx: &mut TestAppContext) {
+fn brackets_ask_for_the_neighbouring_files_and_the_last_one_goes_up(cx: &mut TestAppContext) {
     let p = diff_page(cx, seeded(), "src/a.rs");
     press(cx, p.window, &["]"]);
     press(cx, p.window, &["["]);
@@ -334,10 +334,11 @@ fn brackets_ask_for_the_neighbouring_files_and_stop_at_the_ends(cx: &mut TestApp
         *p.events.lock().expect("log"),
         ["open src/b.rs", "open /COMMIT_MSG"]
     );
-    // The last and first file have no neighbour in that direction.
+    // `]` on the last file goes up to the change; `[` on the first file
+    // has nowhere to go.
     let last = diff_page(cx, seeded(), "src/c.rs");
     press(cx, last.window, &["]"]);
-    assert!(last.events.lock().expect("log").is_empty());
+    assert_eq!(opened(&last), ["up"]);
     let first = diff_page(cx, seeded(), "/COMMIT_MSG");
     press(cx, first.window, &["["]);
     assert!(first.events.lock().expect("log").is_empty());
@@ -529,8 +530,6 @@ fn enter_opens_the_diff_page_and_u_returns_with_the_cursor_on_that_file(cx: &mut
     // [ and ] move between files without adding history entries.
     press(cx, window, &["]"]);
     assert_eq!(current_route(cx, &shell), Route::Diff(route("src/c.rs")));
-    press(cx, window, &["]"]);
-    assert_eq!(current_route(cx, &shell), Route::Diff(route("src/c.rs")));
     press(cx, window, &["u"]);
     assert_eq!(current_route(cx, &shell), Route::Change(ChangeNumber(7)));
     cx.update(|cx| {
@@ -540,6 +539,21 @@ fn enter_opens_the_diff_page_and_u_returns_with_the_cursor_on_that_file(cx: &mut
     // Forward goes back into the diff, on the file last viewed.
     press(cx, window, &["alt-right"]);
     assert_eq!(current_route(cx, &shell), Route::Diff(route("src/c.rs")));
+}
+
+#[gpui_kit::test]
+fn right_bracket_on_the_last_file_returns_to_the_change_with_the_cursor_on_it(
+    cx: &mut TestAppContext,
+) {
+    let (window, shell, _http) = shell_flow(cx);
+    press(cx, window, &["j", "enter", "j", "j", "j", "enter"]);
+    assert_eq!(current_route(cx, &shell), Route::Diff(route("src/c.rs")));
+    press(cx, window, &["]"]);
+    assert_eq!(current_route(cx, &shell), Route::Change(ChangeNumber(7)));
+    cx.update(|cx| {
+        let page = shell.read(cx).change_page_for_test().expect("change page");
+        assert_eq!(page.read(cx).cursor_path(), Some("src/c.rs"));
+    });
 }
 
 #[gpui_kit::test]
@@ -1028,9 +1042,10 @@ fn brackets_skip_hidden_and_dimmed_files(cx: &mut TestAppContext) {
     let p = filtered_page(cx, "src/c.rs", rules.clone());
     press(cx, p.window, &["["]);
     assert_eq!(opened(&p), ["open /COMMIT_MSG"]);
-    // Past the last unskipped file there is nowhere to go.
+    // Past the last unskipped file `]` goes up.
+    let p = filtered_page(cx, "src/c.rs", rules.clone());
     press(cx, p.window, &["]"]);
-    assert_eq!(opened(&p), ["open /COMMIT_MSG"]);
+    assert_eq!(opened(&p), ["up"]);
     // A skipped file can be shown (from a comment); `]` goes on from it.
     let p = filtered_page(cx, "src/a.rs", rules);
     press(cx, p.window, &["]"]);
@@ -1291,4 +1306,11 @@ fn with_highlighting_off_nothing_is_queued_and_the_next_diff_is_prefetched(
     });
     cx.run_until_parked();
     assert!(queued(cx, &p).is_empty());
+}
+
+#[gpui_kit::test]
+fn the_last_file_that_is_not_skipped_counts_as_the_last(cx: &mut TestAppContext) {
+    let p = filtered_page(cx, "src/b.rs", vec![rule("Gen", "c.rs", FilterAction::Dim)]);
+    press(cx, p.window, &["]"]);
+    assert_eq!(opened(&p), ["up"]);
 }
