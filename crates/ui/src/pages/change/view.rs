@@ -831,6 +831,7 @@ impl ChangePage {
                 .child(div().flex_1())
                 .children(related_pills(c, cx))
         });
+        let scroll = self.related_scroll.clone();
         Some(
             v_flex()
                 .gap_1()
@@ -841,6 +842,10 @@ impl ChangePage {
                         .max_h(px(220.))
                         .overflow_y_scroll()
                         .track_scroll(&self.related_scroll)
+                        .on_scroll_wheel(move |ev, window, cx| {
+                            let delta = ev.delta.pixel_delta(window.line_height()).y;
+                            keep_wheel_while_scrollable(&scroll, delta, cx);
+                        })
                         .py_1()
                         .rounded_md()
                         .border_1()
@@ -1058,6 +1063,27 @@ fn file_size(f: &FileEntry, max_change: u32, cx: &App) -> Div {
         )
 }
 
+/// Called after the scroll box applied a wheel event of `delta` (vertical,
+/// in pixels) to its offset. Stops the event from also scrolling the page
+/// behind the box, unless the box did not overflow or already sat at the
+/// end the wheel pushed against: then the page gets it, as in a browser.
+fn keep_wheel_while_scrollable(scroll: &ScrollHandle, delta: Pixels, cx: &mut App) {
+    // GPUI clamps the offset only when it paints the next frame, so what
+    // the box applied is undone here to see where it stood before.
+    let before = scroll.offset().y - delta;
+    if wheel_stays_in_box(before, delta, scroll.max_offset().y) {
+        cx.stop_propagation();
+    }
+}
+
+/// `offset` is where the box stood before the wheel moved the content by
+/// `delta` (at most 0, down to `-max`).
+fn wheel_stays_in_box(offset: Pixels, delta: Pixels, max: Pixels) -> bool {
+    let at_start = offset >= px(0.);
+    let at_end = offset <= -max;
+    max > px(0.) && delta != px(0.) && !(delta > px(0.) && at_start) && !(delta < px(0.) && at_end)
+}
+
 fn related_subject(c: &RelatedChange) -> String {
     c.commit
         .as_ref()
@@ -1135,5 +1161,28 @@ impl Render for ChangePage {
                 .size_full(),
             )
             .vertical_scrollbar(&self.list)
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::wheel_stays_in_box;
+    use gpui_kit::px;
+
+    #[test]
+    fn the_wheel_stays_in_the_box_until_it_pushes_against_an_end() {
+        let stays =
+            |offset: f32, delta: f32, max: f32| wheel_stays_in_box(px(offset), px(delta), px(max));
+        // Mid-way: both directions stay.
+        assert!(stays(-20., -10., 100.));
+        assert!(stays(-20., 10., 100.));
+        // At the top, down stays and up goes on to the page.
+        assert!(stays(0., -10., 100.));
+        assert!(!stays(0., 10., 100.));
+        // At the bottom, the other way round.
+        assert!(stays(-100., 10., 100.));
+        assert!(!stays(-100., -10., 100.));
+        // A box that does not overflow never keeps the wheel.
+        assert!(!stays(0., -10., 0.));
     }
 }
