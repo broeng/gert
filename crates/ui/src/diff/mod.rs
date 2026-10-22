@@ -11,6 +11,7 @@
 pub mod actions;
 pub mod layout;
 mod paint;
+pub mod syntax;
 mod view;
 
 #[cfg(test)]
