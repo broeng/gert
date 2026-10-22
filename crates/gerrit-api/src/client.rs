@@ -85,6 +85,7 @@ impl GerritClient {
         body: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, Error> {
         let url = self.url(path, query);
+        let verb = method.clone();
         let mut builder = http::Request::builder()
             .method(method)
             .uri(url)
@@ -104,7 +105,10 @@ impl GerritClient {
             .body(body.unwrap_or_default())
             .map_err(|e| Error::InvalidUrl(e.to_string()))?;
 
-        let resp = self.http.send(req).await?;
+        let resp = self.http.send(req).await.inspect_err(|e| {
+            // The error's `Display` is the short form for the UI.
+            log::warn!("{verb} {path} failed: {}", e.0);
+        })?;
         let code = resp.status().as_u16();
         let body = resp.into_body();
         match code {
