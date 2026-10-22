@@ -569,13 +569,25 @@ impl GerritClient {
             state: state.as_wire().to_owned(),
             confirmed: confirmed.then_some(true),
         };
-        let v = self
+        let v = match self
             .write_json(
                 http::Method::POST,
                 &format!("/changes/{change}/reviewers"),
                 &body,
             )
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            // Gerrit 3.x answers an unknown account with 400 and the
+            // result as the body; that is a result, not a failed request.
+            Err(Error::BadRequest { message }) => {
+                serde_json::from_slice(strip_xssi(message.as_bytes()))
+                    .ok()
+                    .filter(|v: &Value| v.get("error").is_some())
+                    .ok_or(Error::BadRequest { message })?
+            }
+            Err(e) => return Err(e),
+        };
         let r: wire::ReviewerResult = serde_json::from_value(v)?;
         Ok(convert::add_reviewer_result(&r)?)
     }
@@ -2255,6 +2267,19 @@ mod tests {
         let r = block_on(c.add_reviewer(ChangeNumber(5), "zed", ReviewerState::Cc, false)).unwrap();
         assert!(!r.is_added());
         assert_eq!(r.error.as_deref(), Some("Account 'zed' not found"));
+        // Gerrit 3.x reports an unknown account as 400 with the result.
+        fake.push_response(
+            400,
+            xssi(r#"{"input":"q","error":"Account 'q' not found"}"#),
+        );
+        let r =
+            block_on(c.add_reviewer(ChangeNumber(5), "q", ReviewerState::Reviewer, false)).unwrap();
+        assert_eq!(r.error.as_deref(), Some("Account 'q' not found"));
+        fake.push_response(400, "some other problem\n");
+        assert!(matches!(
+            block_on(c.add_reviewer(ChangeNumber(5), "q", ReviewerState::Reviewer, false)),
+            Err(Error::BadRequest { .. })
+        ));
         fake.push_response(
             200,
             xssi(r#"{"input":"grp","confirm":true,"error":"has 50 members"}"#),
@@ -2277,7 +2302,7 @@ mod tests {
             json!({"reviewer": "zed", "state": "CC"})
         );
         assert_eq!(
-            body_json(&reqs[3]),
+            body_json(&reqs[5]),
             json!({"reviewer": "grp", "state": "REVIEWER", "confirmed": true})
         );
     }
