@@ -3,6 +3,7 @@
 
 mod action_menu;
 mod actions;
+mod card;
 mod comments;
 pub mod diff;
 mod diff_load;

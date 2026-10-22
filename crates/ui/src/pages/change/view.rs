@@ -40,11 +40,7 @@ impl Section {
     }
 }
 
-/// The title bar at the top of a card.
-pub(super) fn card_title_bar(cx: &App) -> Div {
-    let theme = cx.theme();
-    div().px_3().py_2().rounded_t_md().bg(theme.secondary)
-}
+pub(super) use crate::card::title_bar as card_title_bar;
 
 /// Width for 72 monospace columns, the card padding and border.
 const COMMIT_BASIS: f32 = 660.;
@@ -137,32 +133,16 @@ impl ChangePage {
         // The section is a card drawn row by row: the title bar on top
         // with the rounded corners, side borders all the way, the bottom
         // border and corners on the last row.
-        let theme = cx.theme();
         let row = if first {
             inner
         } else {
-            div()
+            crate::card::row_separator(cx)
                 .px_2()
                 .py_1()
-                .border_t_1()
-                .border_color(theme.border.opacity(0.6))
                 .child(inner)
                 .into_any_element()
         };
-        let card = div()
-            .w_full()
-            .border_x_1()
-            .border_color(theme.border)
-            .bg(theme.secondary.opacity(0.3))
-            .when(first, |d| d.border_t_1().rounded_t_md())
-            .when(last, |d| d.border_b_1().rounded_b_md())
-            .child(row);
-        div()
-            .w_full()
-            .px_4()
-            .when(first, |d| d.pt_3())
-            .child(card)
-            .into_any_element()
+        crate::card::frame(row, first, last, cx).into_any_element()
     }
 
     fn status_line(&self, cx: &mut Context<Self>) -> AnyElement {

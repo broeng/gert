@@ -430,12 +430,12 @@ impl ChangeListPage {
     // ---- rendering ----
 
     /// Index of a row among the scroll container's children: every section
-    /// contributes a header and then its rows (or one placeholder).
+    /// contributes a title bar, a column header and then its rows (or one placeholder).
     fn child_index(&self, section: usize, row: usize) -> usize {
         let before: usize = (0..section)
-            .map(|s| 1 + self.visible_rows(s).len().max(1))
+            .map(|s| 2 + self.visible_rows(s).len().max(1))
             .sum();
-        before + 1 + row
+        before + 2 + row
     }
 
     fn render_header(&self, cols: &[String], cx: &App) -> impl IntoElement {
@@ -452,8 +452,9 @@ impl ChangeListPage {
             .gap_2()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .border_t_1()
+            .border_l_2()
+            .border_color(cx.theme().border.opacity(0.6))
             .child(th(W_NUM, "#"))
             .child(div().flex_1().min_w(px(W_SUBJECT_MIN)).child("Subject"))
             .child(th(W_OWNER, "Owner").flex_shrink(1.).min_w_0())
@@ -612,10 +613,10 @@ impl ChangeListPage {
                 None => div().into_any_element(),
             },
         };
-        h_flex()
-            .px_3()
-            .pt_3()
-            .pb_1()
+        crate::card::title_bar(cx)
+            .flex()
+            .flex_row()
+            .items_center()
             .gap_2()
             .child(div().font_semibold().child(s.spec.name.clone()))
             .child(
@@ -700,8 +701,11 @@ impl Render for ChangeListPage {
             .overflow_y_scroll()
             .track_scroll(&self.scroll);
         for i in 0..self.sections.len() {
-            body = body.child(self.render_section_header(i, now, cx));
             let rows: Vec<ChangeSummary> = self.visible_rows(i).to_vec();
+            let title = self.render_section_header(i, now, cx).into_any_element();
+            body = body.child(crate::card::frame(title, true, false, cx));
+            let head = self.render_header(&cols, cx).into_any_element();
+            body = body.child(crate::card::frame(head, false, false, cx));
             if rows.is_empty() {
                 let s = &self.sections[i];
                 let text = if s.loaded
@@ -711,22 +715,26 @@ impl Render for ChangeListPage {
                 } else {
                     "Loading\u{2026}"
                 };
-                body = body.child(
-                    div()
+                body = body.child(crate::card::frame(
+                    crate::card::row_separator(cx)
                         .px_3()
                         .py_1()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(text),
-                );
+                    false,
+                    true,
+                    cx,
+                ));
             }
             for (r, c) in rows.iter().enumerate() {
-                body = body.child(self.render_row(
-                    (i, r),
-                    c,
-                    &cols,
-                    now,
-                    selected == Some((i, r)),
+                let row = self
+                    .render_row((i, r), c, &cols, now, selected == Some((i, r)), cx)
+                    .into_any_element();
+                body = body.child(crate::card::frame(
+                    crate::card::row_separator(cx).child(row),
+                    false,
+                    r + 1 == rows.len(),
                     cx,
                 ));
             }
@@ -744,7 +752,6 @@ impl Render for ChangeListPage {
             .on_action(cx.listener(Self::prev_page))
             .on_action(cx.listener(Self::refresh_action))
             .size_full()
-            .child(self.render_header(&cols, cx))
             .child(
                 div()
                     .relative()
