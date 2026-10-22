@@ -52,6 +52,8 @@ pub enum DiffPageEvent {
     Unauthorized,
     /// Move to another file of the same comparison.
     OpenFile(DiffRoute),
+    /// The breadcrumb was clicked: same as `u`.
+    UpToChange,
     /// `a`: open the reply dialog for this change.
     Reply(Box<ChangeDetail>),
 }
@@ -667,12 +669,32 @@ impl DiffPage {
                 h_flex()
                     .gap_2()
                     .items_baseline()
+                    .min_w_0()
+                    .child(
+                        h_flex()
+                            .id("diff-up-to-change")
+                            .gap_2()
+                            .items_baseline()
+                            .min_w_0()
+                            .cursor_pointer()
+                            .rounded_sm()
+                            .hover(|d| d.bg(theme.list_hover))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DiffPageEvent::UpToChange)))
+                            .child(
+                                div()
+                                    .text_color(theme.link)
+                                    .flex_none()
+                                    .child(format!("Change {}:", self.route.change)),
+                            )
+                            .child(div().font_semibold().min_w_0().truncate().child(subject)),
+                    )
+                    .child(div().text_color(muted).flex_none().child("\u{203A}"))
                     .child(
                         div()
-                            .text_color(muted)
-                            .child(format!("#{}", self.route.change)),
-                    )
-                    .child(div().font_semibold().min_w_0().truncate().child(subject)),
+                            .flex_none()
+                            .font_family(theme.mono_font_family.clone())
+                            .child(self.path_label()),
+                    ),
             )
             .child(
                 h_flex()
@@ -680,11 +702,6 @@ impl DiffPage {
                     .items_baseline()
                     .flex_wrap()
                     .text_sm()
-                    .child(
-                        div()
-                            .font_family(theme.mono_font_family.clone())
-                            .child(self.path_label()),
-                    )
                     .when(self.reviewed.contains(&self.route.path), |d| {
                         d.child(
                             div()

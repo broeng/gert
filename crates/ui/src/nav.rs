@@ -129,6 +129,19 @@ impl NavState {
         self.index += 1;
     }
 
+    /// Swaps the current page for `route` without adding a history entry,
+    /// dropping the forward history. Stepping through the files of a diff
+    /// uses it, so that Back from any file leads to the page before the
+    /// first one, like PolyGerrit.
+    pub fn replace(&mut self, route: Route) {
+        self.entries.truncate(self.index + 1);
+        self.entries[self.index] = Entry {
+            route,
+            selected: None,
+            change_view: None,
+        };
+    }
+
     /// Forgets all history and starts over at `route` (login, logout).
     pub fn reset(&mut self, route: Route) {
         *self = Self::new(route);
@@ -293,6 +306,23 @@ mod tests {
             Some("a.rs")
         );
         assert!(nav.can_go_forward());
+    }
+
+    #[test]
+    fn replacing_a_diff_keeps_back_and_up_on_the_change() {
+        let mut nav = NavState::new(Route::Dashboard);
+        nav.push(c(7));
+        nav.push(d(7, "a.rs"));
+        nav.replace(d(7, "b.rs"));
+        nav.replace(d(7, "c.rs"));
+        assert_eq!(nav.current(), &d(7, "c.rs"));
+        assert!(!nav.can_go_forward());
+        assert_eq!(nav.up_target(), Some(c(7)));
+        assert!(nav.back());
+        assert_eq!(nav.current(), &c(7));
+        // Forward returns to the file last viewed.
+        assert!(nav.forward());
+        assert_eq!(nav.current(), &d(7, "c.rs"));
     }
 
     #[test]
