@@ -8,6 +8,7 @@ mod comments;
 pub mod diff;
 mod diff_load;
 pub mod filters;
+mod filters_dialog;
 mod hint;
 mod labels;
 mod links;

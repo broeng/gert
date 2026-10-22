@@ -1093,6 +1093,30 @@ fn server(files: Option<usize>, changes: Option<usize>, chain: Option<usize>) ->
     http
 }
 
+/// Three file filters for the example change: one of each effect.
+fn demo_filters() -> Vec<FileFilter> {
+    use ui::filters::FilterAction;
+    let rule = |name: &str, glob: &str, action| FileFilter {
+        name: name.into(),
+        globs: vec![glob.into()],
+        projects: Vec::new(),
+        action,
+        enabled: true,
+    };
+    vec![
+        rule("Heap", "heap.rs", FilterAction::Hide),
+        rule("Manifest", "Cargo.toml", FilterAction::Dim),
+        rule(
+            "Tests",
+            "tests/**",
+            FilterAction::Highlight {
+                color: Some(rgb(0xe5a50a)),
+                bold: true,
+            },
+        ),
+    ]
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut mode = None;
@@ -1163,7 +1187,7 @@ fn main() {
             font_family: font,
         },
         start_page: Default::default(),
-        filters: Vec::new(),
+        filters: demo_filters(),
     };
 
     ui::application().run(move |cx| {

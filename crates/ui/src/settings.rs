@@ -129,8 +129,6 @@ impl FileFilters {
     }
 
     /// All rules, in config order.
-    // The Manage filters dialog edits the list (M7 batch 7c).
-    #[allow(dead_code)]
     pub fn rules(&self) -> &[FileFilter] {
         &self.rules
     }
@@ -164,7 +162,6 @@ impl FileFilters {
 
     /// Replaces the rules (after an edit was saved). Session toggles are
     /// kept for the names that still exist.
-    #[allow(dead_code)]
     pub fn set_rules(&mut self, rules: Vec<FileFilter>, cx: &mut Context<Self>) {
         self.overrides
             .retain(|name, _| rules.iter().any(|r| &r.name == name));

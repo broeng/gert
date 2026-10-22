@@ -869,7 +869,7 @@ pub(crate) fn chip(
 }
 
 /// A tick box with a label, focusable like a [`chip`].
-fn check(
+pub(crate) fn check(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     checked: bool,

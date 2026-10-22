@@ -361,6 +361,11 @@ impl ChangePage {
         self.files.list.get(ix).map(|f| f.path.as_str())
     }
 
+    /// The paths of all the files of the change, hidden ones too.
+    pub(crate) fn changed_paths(&self) -> Vec<String> {
+        self.files.list.iter().map(|f| f.path.clone()).collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn files_key(&self) -> Option<&FilesKey> {
         self.files.key.as_ref()

@@ -15,6 +15,7 @@ use model::{ChangeDetail, ChangeNumber};
 use crate::{
     action_menu::{ActionDialog, ActionEvent, Done},
     actions::{self, *},
+    filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
     outbox::{DraftOutbox, OutboxEvent},
@@ -82,6 +83,7 @@ pub fn init(cx: &mut App) {
     crate::diff::bind_keys(cx);
     crate::reply::actions::bind_keys(cx);
     crate::action_menu::actions::bind_keys(cx);
+    crate::filters_dialog::actions::bind_keys(cx);
 }
 
 pub struct Shell {
@@ -107,6 +109,9 @@ pub struct Shell {
     /// The change action menu while it is open (modal, like the reply).
     menu: Option<Entity<ActionDialog>>,
     menu_subs: Vec<Subscription>,
+    /// The Manage filters dialog while it is open (modal, like the others).
+    filters_dialog: Option<Entity<FiltersDialog>>,
+    filters_dialog_subs: Vec<Subscription>,
     /// Shown in the title bar when nobody is signed in.
     app_name: SharedString,
     window_active: bool,
@@ -115,7 +120,6 @@ pub struct Shell {
     layout: Entity<PageLayout>,
     /// The file filter rules and their session toggles; the pages get it
     /// with the change and diff pages.
-    #[allow(dead_code)] // handed to the pages in the next batch
     filters: Entity<FileFilters>,
     prefs_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
@@ -157,6 +161,7 @@ impl Shell {
             // The dialog is modal: the focus stays in it.
             let modal = this.reply.as_ref().map(|d| d.focus_handle(cx));
             let modal = modal.or_else(|| this.menu.as_ref().map(|d| d.focus_handle(cx)));
+            let modal = modal.or_else(|| this.filters_dialog.as_ref().map(|d| d.focus_handle(cx)));
             if let Some(handle) = modal {
                 window.focus(&handle, cx);
                 return;
@@ -191,6 +196,8 @@ impl Shell {
             reply_subs: Vec::new(),
             menu: None,
             menu_subs: Vec::new(),
+            filters_dialog: None,
+            filters_dialog_subs: Vec::new(),
             app_name: SharedString::default(),
             window_active: window.is_window_active(),
             credentials_task: None,
@@ -454,6 +461,7 @@ impl Shell {
         self.page_subs.clear();
         self.drop_reply(cx);
         self.drop_menu();
+        self.drop_filters_dialog();
         let mut route = self.nav.current().clone();
         if self.session.is_none() && route != Route::Login {
             self.nav.reset(Route::Login);
@@ -579,9 +587,17 @@ impl Shell {
                 ChangeEvent::Refreshed => this.server_reachable(cx),
                 ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 ChangeEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
-                // The Manage filters dialog is opened from here once it exists.
                 ChangeEvent::ManageFilters { project } => {
-                    log::debug!("manage file filters (project {project})")
+                    let paths = match &this.page {
+                        Page::Change(p) => Some(p.read(cx).changed_paths()),
+                        _ => None,
+                    };
+                    let context = FiltersContext {
+                        project: Some(project.clone()),
+                        paths,
+                        select: None,
+                    };
+                    this.open_filters_dialog(context, window, cx)
                 }
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 // Like stepping through files: Back leaves the walk.
@@ -690,6 +706,7 @@ impl Shell {
     fn unauthorized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.drop_reply(cx);
         self.drop_menu();
+        self.drop_filters_dialog();
         if let Some(s) = self.session.clone() {
             self.set_session(None, window, cx);
             self.prefill = Some(LoginPrefill {
@@ -711,7 +728,7 @@ impl Shell {
         let (Some(session), Some(outbox)) = (self.session.clone(), self.outbox.clone()) else {
             return;
         };
-        if self.reply.is_some() {
+        if self.reply.is_some() || self.menu.is_some() || self.filters_dialog.is_some() {
             return;
         }
         let dialog = cx.new(|cx| ReplyDialog::new(session, outbox, detail, window, cx));
@@ -763,7 +780,7 @@ impl Shell {
         let Some(session) = self.session.clone() else {
             return;
         };
-        if self.menu.is_some() || self.reply.is_some() {
+        if self.menu.is_some() || self.reply.is_some() || self.filters_dialog.is_some() {
             return;
         }
         let dialog = cx.new(|cx| ActionDialog::new(session, detail, window, cx));
@@ -828,6 +845,52 @@ impl Shell {
             }
             _ => {}
         }
+    }
+
+    // ---- manage filters dialog ----
+
+    /// Opens the Manage filters dialog on top of the current page. The
+    /// change page passes its project and files (for the match preview); the
+    /// settings page passes neither, and may name the rule to start on.
+    pub(crate) fn open_filters_dialog(
+        &mut self,
+        context: FiltersContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reply.is_some() || self.menu.is_some() || self.filters_dialog.is_some() {
+            return;
+        }
+        let env = self.env.clone();
+        let filters = self.filters.clone();
+        let dialog = cx.new(|cx| FiltersDialog::new(env, filters, context, window, cx));
+        self.filters_dialog_subs.push(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, ev: &FiltersEvent, window, cx| match ev {
+                FiltersEvent::Close => this.close_filters_dialog(window, cx),
+            },
+        ));
+        self.filters_dialog = Some(dialog);
+        cx.notify();
+    }
+
+    /// Takes the dialog away for everything that replaces the page under it.
+    fn drop_filters_dialog(&mut self) {
+        self.filters_dialog_subs.clear();
+        self.filters_dialog = None;
+    }
+
+    fn close_filters_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_filters_dialog();
+        let handle = self.page.focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filters_dialog_for_test(&self) -> Option<Entity<FiltersDialog>> {
+        self.filters_dialog.clone()
     }
 
     #[cfg(test)]
@@ -1216,7 +1279,8 @@ impl Render for Shell {
                     .child(div().flex_1().min_h_0().child(self.page.element()))
                     .when(self.help, |d| d.child(self.render_help(cx)))
                     .children(self.reply.clone())
-                    .children(self.menu.clone()),
+                    .children(self.menu.clone())
+                    .children(self.filters_dialog.clone()),
             )
     }
 }
