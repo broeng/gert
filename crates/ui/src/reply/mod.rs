@@ -41,7 +41,8 @@
 //! dialog does the cycling itself, so focus never leaves it, and so the
 //! message field gives Tab up instead of indenting), `Space` / `Enter`
 //! press the focused control, `Left` / `Right` pick the previous / next
-//! value of the focused vote.
+//! value of the focused vote. Tab stops once per vote row, on the value the
+//! review would leave (the user's current vote, or 0).
 
 pub mod actions;
 pub(crate) mod plan;
@@ -404,7 +405,14 @@ impl ReplyDialog {
             return Vec::new();
         }
         let mut v = vec![self.input_focus.clone(), self.resolved_focus.clone()];
-        v.extend(self.vote_focus.iter().flatten().cloned());
+        // One stop per vote row, on the value the review would leave;
+        // Left / Right move from there.
+        v.extend(
+            self.votes
+                .iter()
+                .zip(&self.vote_focus)
+                .filter_map(|(row, handles)| handles.get(row.focus_index()).cloned()),
+        );
         if self.unuploaded() > 0 {
             v.push(self.upload_focus.clone());
         }
@@ -577,7 +585,8 @@ impl ReplyDialog {
                 // The send wrote the message draft and may have uploaded
                 // some: show the drafts as they are now.
                 self.outbox.update(cx, |o, cx| o.published(change, cx));
-                self.error = Some(describe(&e));
+                let listed: Vec<_> = self.drafts().iter().map(|d| d.id).collect();
+                self.error = Some(describe(&e, &listed));
             }
         }
         cx.notify();
@@ -742,10 +751,23 @@ fn put_text(input: &Entity<TextareaState>, text: &str, window: &mut Window, cx: 
     });
 }
 
-/// A failed send, in words for the dialog.
-fn describe(e: &sync::Error) -> String {
+/// A failed send, in words for the dialog. `listed` are the drafts the
+/// dialog shows in its list (with the "Upload drafts" button); the
+/// message's own draft is not among them.
+fn describe(e: &sync::Error, listed: &[model::LocalDraftId]) -> String {
     use gerrit_api::Error as Api;
     match e {
+        sync::Error::DraftsNotUploaded(list)
+            if list.iter().all(|d| !listed.contains(&d.local_id)) =>
+        {
+            // Only the message is missing on the server. There is no list
+            // and no button for it, and Send uploads it again.
+            let why = list.first().map_or("", |d| d.reason.as_str());
+            format!(
+                "Not sent: the message could not be uploaded ({why}). Nothing was posted; \
+                 your text is kept as a draft. Send again, or wait until you are online."
+            )
+        }
         sync::Error::DraftsNotUploaded(list) => {
             let first = list.first().map_or(String::new(), |d| {
                 format!(" ({} on patch set {}: {})", d.path, d.patch_set, d.reason)
