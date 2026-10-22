@@ -30,8 +30,12 @@ pub struct Palette {
     pub skip_bg: Hsla,
     pub cursor_bg: Hsla,
     pub cursor_bar: Hsla,
-    removed: Hsla,
-    added: Hsla,
+    /// Changed rows (`diff-removed`/`diff-added`), their gutters, and the
+    /// refined parts inside them (`diff-refine-*`).
+    removed_row: Hsla,
+    added_row: Hsla,
+    removed_gutter: Hsla,
+    added_gutter: Hsla,
     rebase: Hsla,
     removed_mark: Hsla,
     added_mark: Hsla,
@@ -44,19 +48,14 @@ pub struct Palette {
     /// URLs in code lines.
     pub link: Hsla,
     pub card_fg: Hsla,
-    alpha_row: f32,
-    alpha_gutter: f32,
 }
 
 impl Palette {
     pub fn new(focused: bool, cx: &App) -> Self {
         let t = cx.theme();
         let dark = t.is_dark();
-        let (alpha_row, alpha_mark, alpha_gutter) = if dark {
-            (0.24, 0.55, 0.40)
-        } else {
-            (0.22, 0.50, 0.38)
-        };
+        let sol = crate::theme::palette(cx);
+        let c = crate::theme::solarized::color;
         let (cursor, cursor_alpha) = if focused {
             (t.primary, if dark { 0.16 } else { 0.12 })
         } else {
@@ -71,27 +70,19 @@ impl Palette {
             skip_bg: t.muted_foreground.opacity(0.10),
             cursor_bg: cursor.opacity(cursor_alpha),
             cursor_bar: cursor,
-            removed: t.danger,
-            added: t.success,
+            removed_row: c(sol.red_1bg),
+            added_row: c(sol.green_1bg),
+            removed_gutter: c(sol.red_2bg),
+            added_gutter: c(sol.green_2bg),
             rebase: t.muted_foreground,
-            removed_mark: t.danger.opacity(alpha_mark),
-            added_mark: t.success.opacity(alpha_mark),
-            comment_mark: t.warning.opacity(if dark { 0.30 } else { 0.35 }),
+            removed_mark: c(sol.red_2bg),
+            added_mark: c(sol.green_2bg),
+            comment_mark: c(sol.yellow_2bg),
             unresolved: t.warning,
             resolved: t.muted_foreground,
             danger: t.danger,
             link: t.info,
             card_fg: t.foreground,
-            alpha_row,
-            alpha_gutter,
-        }
-    }
-
-    fn tint(&self, kind: LineKind) -> Option<Hsla> {
-        match kind {
-            LineKind::Common => None,
-            LineKind::Removed => Some(self.removed),
-            LineKind::Added => Some(self.added),
         }
     }
 
@@ -100,15 +91,19 @@ impl Palette {
             // Changes that only exist because of the rebase: a neutral tint.
             return self.rebase.opacity(0.08);
         }
-        self.tint(kind)
-            .map_or_else(|| hsla(0., 0., 0., 0.), |c| c.opacity(self.alpha_row))
+        match kind {
+            LineKind::Common => hsla(0., 0., 0., 0.),
+            LineKind::Removed => self.removed_row,
+            LineKind::Added => self.added_row,
+        }
     }
 
     pub fn gutter_bg(&self, kind: LineKind) -> Hsla {
-        self.tint(kind).map_or_else(
-            || self.skip_bg.opacity(0.5),
-            |c| c.opacity(self.alpha_gutter),
-        )
+        match kind {
+            LineKind::Common => self.skip_bg.opacity(0.5),
+            LineKind::Removed => self.removed_gutter,
+            LineKind::Added => self.added_gutter,
+        }
     }
 
     fn mark_bg(&self, kind: LineKind) -> Hsla {
@@ -320,8 +315,10 @@ mod tests {
             skip_bg: c(0.),
             cursor_bg: c(0.),
             cursor_bar: c(0.),
-            removed: c(0.2),
-            added: c(0.3),
+            removed_row: c(0.2),
+            added_row: c(0.3),
+            removed_gutter: c(0.2),
+            added_gutter: c(0.3),
             rebase: c(0.),
             removed_mark: c(0.4),
             added_mark: c(0.5),
@@ -331,8 +328,6 @@ mod tests {
             danger: c(0.),
             link: c(0.7),
             card_fg: c(0.),
-            alpha_row: 0.2,
-            alpha_gutter: 0.4,
         }
     }
 

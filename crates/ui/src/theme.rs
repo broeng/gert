@@ -1,10 +1,40 @@
-//! Theme-derived colors for markers and chips.
+//! The app's theme (Solarized, see [`solarized`]) and theme-derived colors
+//! for markers and chips.
 
-use gpui_kit::component::ActiveTheme as _;
+pub mod solarized;
+
+use std::rc::Rc;
+
 use gpui_kit::component::button::ButtonCustomVariant;
+use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::*;
 
 use crate::{labels::Mark, row::Chip};
+use solarized::Solarized;
+
+/// Replaces gpui-kit's default light and dark themes with Solarized, and
+/// applies the one for the current mode. Following the system appearance
+/// (`Theme::sync_system_appearance`) then switches between the two.
+pub fn install(cx: &mut App) {
+    let (dark, light) = match (solarized::DARK.config(), solarized::LIGHT.config()) {
+        (Ok(dark), Ok(light)) => (dark, light),
+        (Err(err), _) | (_, Err(err)) => {
+            log::error!("the Solarized theme does not parse, keeping the default: {err}");
+            return;
+        }
+    };
+    Theme::update(cx, |theme| {
+        theme.dark_theme = Rc::new(dark);
+        theme.light_theme = Rc::new(light);
+    });
+    let mode = cx.theme().mode;
+    Theme::change(mode, None, cx);
+}
+
+/// The Solarized variant of the active mode.
+pub fn palette(cx: &App) -> &'static Solarized {
+    Solarized::for_dark(cx.theme().is_dark())
+}
 
 pub fn mark_color(mark: &Mark, cx: &App) -> Hsla {
     match mark {
@@ -25,21 +55,17 @@ pub fn chip_colors(chip: Chip, cx: &App) -> (Hsla, Hsla) {
     (fg, fg.opacity(0.15))
 }
 
-/// Background of the commit message card: a faded sticky-note yellow, so it
-/// stands out from the columns beside it. The theme has no such token, so
-/// light and dark get their own tint.
+/// Background of the commit message card: Solarized's faint yellow
+/// (`yellow-1bg`, the tooltip face), so it stands out from the columns
+/// beside it.
 pub fn commit_card_background(cx: &App) -> Hsla {
-    if cx.theme().is_dark() {
-        hsla(48. / 360., 0.25, 0.19, 1.)
-    } else {
-        hsla(50. / 360., 0.85, 0.90, 1.)
-    }
+    solarized::color(palette(cx).yellow_1bg)
 }
 
-/// The blue of the quick-vote buttons: a plain blue, since the theme's
-/// `info` leans teal. The same blue reads well on light and dark backgrounds.
+/// The blue of the quick-vote buttons: Solarized blue, which reads well on
+/// light and dark backgrounds.
 pub fn vote_blue() -> Hsla {
-    hsla(217. / 360., 0.80, 0.58, 1.)
+    solarized::color(solarized::BLUE)
 }
 
 /// Style of the quick-vote buttons. The button paints its idle background at
@@ -47,16 +73,17 @@ pub fn vote_blue() -> Hsla {
 /// hover. A `strong` button sets `vote_blue` as its idle background itself,
 /// and hovers a little lighter.
 pub fn vote_button(strong: bool, cx: &App) -> ButtonCustomVariant {
+    let blue = vote_blue();
     let hover = if strong {
-        hsla(217. / 360., 0.80, 0.64, 1.)
+        hsla(blue.h, blue.s, blue.l + 0.06, 1.)
     } else {
-        vote_blue()
+        blue
     };
     ButtonCustomVariant::new(cx)
-        .color(hsla(217. / 360., 0.80, 0.52, 1.))
+        .color(blue)
         .hover(hover)
-        .active(hsla(217. / 360., 0.80, 0.46, 1.))
-        .foreground(hsla(0., 0., 1., 1.))
+        .active(solarized::color(solarized::BLUE_D))
+        .foreground(solarized::color(solarized::ON_ACCENT))
 }
 
 /// The scrim behind the modal dialogs (reply, change actions, filters).
