@@ -14,8 +14,15 @@
 //! Change 12345 has comments (including a patch-set level thread) and two
 //! drafts of alice's. The fake server keeps drafts in memory: you can write,
 //! edit and delete them, and they are listed again after a refresh.
+//!
+//! It also takes a reply (`a`): `POST .../review` applies the votes to the
+//! change (alice may vote on Code-Review and Verified), publishes the drafts
+//! as comments, adds a change message and moves the attention set; the
+//! reviewed marks (`r`) are kept too. With `--drafts fail` or `offline` the
+//! review is refused (403) or not reachable (503), as the draft writes are.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -193,6 +200,8 @@ enum Drafts {
 /// goes to `inner`.
 struct DraftServer {
     inner: WholeFileDiffs,
+    /// `change.json`, which replies change.
+    change: serde_json::Value,
     mode: Drafts,
     state: Mutex<DraftState>,
 }
@@ -201,6 +210,37 @@ struct DraftState {
     next: u32,
     /// Drafts in creation order: the id and the `CommentInfo`.
     drafts: Vec<(String, serde_json::Value)>,
+    /// Comments that alice published with a reply, with their path.
+    published: Vec<(String, serde_json::Value)>,
+    /// Alice's votes after a reply.
+    votes: BTreeMap<String, i64>,
+    /// The attention set: account id, name, reason. Alice and carol to
+    /// begin with, so that a reply has something to change.
+    attention: Vec<(u64, String, String)>,
+    /// Change messages added by replies.
+    messages: Vec<serde_json::Value>,
+    /// Files of patch set 3 that alice marked reviewed.
+    reviewed: BTreeSet<String>,
+}
+
+const ALICE: u64 = 1_000_001;
+
+/// The people of the example change: id, name and username.
+const PEOPLE: [(u64, &str, &str); 4] = [
+    (1_000_001, "Alice Example", "alice"),
+    (1_000_002, "Bob Reviewer", "bob"),
+    (1_000_003, "Carol Maintainer", "carol"),
+    (1_000_004, "Dave CC", "dave"),
+];
+
+fn person(id: u64) -> serde_json::Value {
+    let (_, name, user) = PEOPLE
+        .iter()
+        .copied()
+        .find(|(i, ..)| *i == id)
+        .unwrap_or((id, "Someone", "someone"));
+    serde_json::json!({"_account_id": id, "name": name, "username": user,
+        "email": format!("{user}@example.com")})
 }
 
 impl DraftServer {
@@ -227,10 +267,37 @@ impl DraftServer {
                     "message": "File-level draft: rename this module?", "unresolved": true}),
             ),
         ];
+        let attention = vec![
+            (ALICE, "Alice Example".to_owned(), "Bob replied".to_owned()),
+            (
+                1_000_003,
+                "Carol Maintainer".to_owned(),
+                "Review requested".to_owned(),
+            ),
+        ];
+        let change = String::from_utf8(read("example/change.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(t.trim_start_matches(")]}'\n")).ok())
+            .unwrap_or_else(|| {
+                eprintln!("review: example/change.json is not JSON");
+                std::process::exit(2);
+            });
         Self {
             inner,
+            change,
             mode,
-            state: Mutex::new(DraftState { next: 1, drafts }),
+            state: Mutex::new(DraftState {
+                next: 1,
+                drafts,
+                published: Vec::new(),
+                votes: BTreeMap::new(),
+                attention,
+                messages: Vec::new(),
+                reviewed: ["src/sched/heap.rs", "src/lib.rs"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            }),
         }
     }
 
@@ -262,6 +329,205 @@ impl DraftServer {
     }
 }
 
+/// The ids of the example change, patch set 3's revision.
+const REVIEW_PATH: &str = "/revisions/3333333333333333333333333333333333333333/review";
+
+impl DraftServer {
+    /// Everything about the change itself that depends on what alice did:
+    /// its detail, the comments, the review, the reviewed marks. `None` for
+    /// requests that are not about those.
+    fn other(
+        &self,
+        req: &http::Request<Vec<u8>>,
+        path: &str,
+    ) -> Option<BoxFuture<'static, Result<http::Response<Vec<u8>>, HttpError>>> {
+        use serde_json::{Value, json};
+        let method = req.method().clone();
+        let query = req.uri().query().unwrap_or_default().to_owned();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
+        if method == http::Method::GET && path.ends_with("/changes/12345") {
+            let mut c = self.change.clone();
+            Self::apply_to_change(&mut c, &state);
+            return Some(Self::json(200, &c));
+        }
+        if method == http::Method::GET && path.ends_with("/changes/12345/comments") {
+            let mut by_path: serde_json::Map<String, Value> =
+                serde_json::from_str(comments().trim_start_matches(")]}'\n")).ok()?;
+            for (p, c) in &state.published {
+                if let Value::Array(list) = by_path.entry(p.clone()).or_insert_with(|| json!([])) {
+                    list.push(c.clone());
+                }
+            }
+            return Some(Self::json(200, &Value::Object(by_path)));
+        }
+        if path.contains("/revisions/3333333333333333333333333333333333333333/files") {
+            if method == http::Method::GET && query == "reviewed" {
+                let list: Vec<_> = state.reviewed.iter().cloned().collect();
+                return Some(Self::json(200, &json!(list)));
+            }
+            if let Some((_, rest)) = path.split_once("/files/")
+                && let Some(file) = rest.strip_suffix("/reviewed")
+            {
+                let file = file.replace("%2F", "/");
+                return Some(match (&self.mode, &method) {
+                    (Drafts::Offline, _) => Self::reply(503, b"unavailable".to_vec()),
+                    (Drafts::Fail, _) => Self::reply(403, b"not allowed".to_vec()),
+                    (_, &http::Method::PUT) => {
+                        state.reviewed.insert(file);
+                        Self::reply(201, Vec::new())
+                    }
+                    _ => {
+                        state.reviewed.remove(&file);
+                        Self::reply(204, Vec::new())
+                    }
+                });
+            }
+        }
+        if method == http::Method::POST && path.ends_with(REVIEW_PATH) {
+            return Some(match self.mode {
+                Drafts::Offline => Self::reply(503, b"unavailable".to_vec()),
+                Drafts::Fail => Self::reply(403, b"Vote on Code-Review is not permitted".to_vec()),
+                Drafts::Ok => {
+                    let body: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
+                    let result = Self::post_review(&mut state, &body);
+                    Self::json(200, &result)
+                }
+            });
+        }
+        None
+    }
+
+    /// The labels alice may vote on and the values they have.
+    fn permitted() -> BTreeMap<&'static str, Vec<i64>> {
+        BTreeMap::from([
+            ("Code-Review", vec![-2, -1, 0, 1, 2]),
+            ("Verified", vec![-1, 0, 1]),
+        ])
+    }
+
+    /// The change as the server has it after alice's replies so far.
+    fn apply_to_change(c: &mut serde_json::Value, state: &DraftState) {
+        use serde_json::json;
+        let permitted = Self::permitted();
+        // Gerrit writes the values as signed strings with a blank for 0.
+        let text = |v: &i64| match *v {
+            0 => " 0".to_owned(),
+            v => format!("{v:+}"),
+        };
+        let strings: BTreeMap<_, Vec<String>> = permitted
+            .iter()
+            .map(|(label, values)| (*label, values.iter().map(text).collect()))
+            .collect();
+        c["permitted_labels"] = json!(strings);
+        if let Some(labels) = c["labels"].as_object_mut() {
+            for (label, vote) in &state.votes {
+                let Some(info) = labels.get_mut(label) else {
+                    continue;
+                };
+                let mut all = info["all"].as_array().cloned().unwrap_or_default();
+                all.retain(|a| a["_account_id"] != ALICE);
+                let mut mine = person(ALICE);
+                mine["value"] = (*vote).into();
+                mine["date"] = "2024-06-15 12:00:00.000000000".into();
+                all.push(mine);
+                info["all"] = all.into();
+            }
+        }
+        let mut set = serde_json::Map::new();
+        for (id, _, reason) in &state.attention {
+            set.insert(
+                id.to_string(),
+                json!({"account": person(*id), "last_update": "2024-06-15 11:00:00.000000000",
+                    "reason": reason}),
+            );
+        }
+        c["attention_set"] = set.into();
+        if let Some(messages) = c["messages"].as_array_mut() {
+            messages.extend(state.messages.iter().cloned());
+        }
+    }
+
+    /// Applies a `ReviewInput` the way Gerrit does: unknown labels and
+    /// values are dropped with a 200, the drafts become comments, and the
+    /// message lists the votes.
+    fn post_review(state: &mut DraftState, body: &serde_json::Value) -> serde_json::Value {
+        use serde_json::json;
+        let permitted = Self::permitted();
+        let mut applied = serde_json::Map::new();
+        if let Some(labels) = body["labels"].as_object() {
+            for (label, value) in labels {
+                let Some(v) = value.as_i64() else { continue };
+                if permitted
+                    .get(label.as_str())
+                    .is_some_and(|ok| ok.contains(&v))
+                {
+                    state.votes.insert(label.clone(), v);
+                    applied.insert(label.clone(), v.into());
+                }
+            }
+        }
+        let tick = state.messages.len() + 1;
+        let now = format!("2024-06-15 12:{:02}:00.000000000", tick % 60);
+        let mut texts = Vec::new();
+        let mut count = 0;
+        if body["drafts"] != "KEEP" {
+            for (id, mut c) in std::mem::take(&mut state.drafts) {
+                let path = c["path"].as_str().unwrap_or_default().to_owned();
+                if let Some(o) = c.as_object_mut() {
+                    o.remove("path");
+                }
+                c["author"] = person(ALICE);
+                c["updated"] = now.clone().into();
+                if path == "/PATCHSET_LEVEL" {
+                    texts.push(c["message"].as_str().unwrap_or_default().to_owned());
+                } else {
+                    count += 1;
+                }
+                c["id"] = format!("published-{id}").into();
+                state.published.push((path, c));
+            }
+        }
+        let ids = |key: &str| -> Vec<u64> {
+            body[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a["user"].as_str()?.parse().ok())
+                .collect()
+        };
+        for id in ids("remove_from_attention_set") {
+            state.attention.retain(|(i, ..)| *i != id);
+        }
+        for id in ids("add_to_attention_set") {
+            if !state.attention.iter().any(|(i, ..)| *i == id) {
+                let name = person(id)["name"].as_str().unwrap_or("Someone").to_owned();
+                state
+                    .attention
+                    .push((id, name, "Alice Example replied".to_owned()));
+            }
+        }
+        let mut summary = String::from("Patch Set 3:");
+        for (label, v) in &applied {
+            summary.push_str(&format!(" {label}{v:+}"));
+        }
+        for t in texts {
+            summary.push_str(&format!("\n\n{t}"));
+        }
+        if count > 0 {
+            summary.push_str(&format!(
+                "\n\n({count} comment{})",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+        state.messages.push(json!({
+            "id": format!("reply-{tick}"), "author": person(ALICE), "date": now,
+            "message": summary, "_revision_number": 3,
+        }));
+        json!({"labels": applied})
+    }
+}
+
 impl HttpClient for DraftServer {
     fn send(
         &self,
@@ -269,6 +535,9 @@ impl HttpClient for DraftServer {
     ) -> BoxFuture<'static, Result<http::Response<Vec<u8>>, HttpError>> {
         use serde_json::{Value, json};
         let path = req.uri().path().to_owned();
+        if let Some(answer) = self.other(&req, &path) {
+            return answer;
+        }
         let Some((head, tail)) = path
             .split_once("/changes/12345/")
             .and_then(|(_, rest)| rest.split_once("drafts"))
