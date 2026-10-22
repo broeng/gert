@@ -64,15 +64,21 @@ pub(super) fn pill(text: impl Into<SharedString>, fg: Hsla) -> Div {
         .child(text.into())
 }
 
-fn lines_of(text: &str, empty_pad: bool) -> Vec<Div> {
+/// One div per line, URLs in them clickable. `id` must be unique on the page.
+fn lines_of(id: impl Into<ElementId>, text: &str, empty_pad: bool, link: Hsla) -> Vec<AnyElement> {
+    let id = id.into();
     text.trim_end()
         .lines()
-        .map(|l| {
-            div().child(if l.is_empty() && empty_pad {
-                " ".to_owned()
-            } else {
-                l.to_owned()
-            })
+        .enumerate()
+        .map(|(i, l)| {
+            let line = if l.is_empty() && empty_pad { " " } else { l };
+            div()
+                .child(crate::links::linked_line(
+                    (id.clone(), format!("line-{i}")),
+                    line,
+                    link,
+                ))
+                .into_any_element()
         })
         .collect()
 }
@@ -541,8 +547,10 @@ impl ChangePage {
                         .font_family(theme.mono_font_family.clone())
                         .text_sm()
                         .children(lines_of(
+                            "commit-message",
                             message.as_deref().unwrap_or("(not available)"),
                             true,
+                            theme.info,
                         )),
                 )
             })
@@ -939,7 +947,7 @@ impl ChangePage {
                     .min_w_0()
                     .text_sm()
                     .when(auto, |d| d.text_color(muted))
-                    .children(message_lines(m)),
+                    .children(message_lines(ix, m, theme.info)),
             )
             .child(
                 v_flex()
@@ -955,8 +963,8 @@ impl ChangePage {
     }
 }
 
-fn message_lines(m: &ChangeMessage) -> Vec<Div> {
-    lines_of(&m.message, true)
+fn message_lines(ix: usize, m: &ChangeMessage, link: Hsla) -> Vec<AnyElement> {
+    lines_of(("change-message", ix), &m.message, true, link)
 }
 
 pub(super) fn section_title(text: &str, cx: &App) -> Div {

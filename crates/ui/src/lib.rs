@@ -9,6 +9,7 @@ pub mod diff;
 mod diff_load;
 mod hint;
 mod labels;
+mod links;
 mod list_model;
 mod login;
 mod nav;

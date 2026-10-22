@@ -324,11 +324,16 @@ fn entry(
         (draft, view.editor.as_ref()),
         (Some(d), Some(ed)) if ed.key == EditKey::Draft(d.local_id)
     );
-    let lines = e.message().lines().map(|line| {
+    let link = gpui_kit::component::ActiveTheme::theme(&**cx).info;
+    let lines = e.message().lines().enumerate().map(|(i, line)| {
         if line.trim().is_empty() {
             div().h(px(6.))
         } else {
-            div().child(line.to_owned())
+            div().child(crate::links::linked_line(
+                (SharedString::from(format!("thread-{ix}-{k}")), i),
+                line,
+                link,
+            ))
         }
     });
     v_flex()
