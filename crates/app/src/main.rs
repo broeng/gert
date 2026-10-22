@@ -71,7 +71,8 @@ fn run() -> anyhow::Result<()> {
             cx.new(|cx| Shell::new(startup, window, cx).with_app_name(APP_NAME))
         });
         match opened {
-            Ok(_) => {
+            Ok((window, _)) => {
+                ui::ensure_maximized(window, cx);
                 cx.on_window_closed(|cx, _| {
                     if cx.windows().is_empty() {
                         cx.quit();

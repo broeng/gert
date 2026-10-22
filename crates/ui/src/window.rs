@@ -43,17 +43,49 @@ pub fn application() -> Application {
     gpui_kit::application().with_assets(gpui_kit::assets::Assets)
 }
 
-/// Options of the main window: centered, `size` big, `title` as its title
-/// and `app_id` as the Wayland app id / X11 class, and set up for our own
-/// [`TitleBar`] (see the module docs).
+/// Options of the main window: maximized, `size` big when restored and
+/// centered then, `title` as its title and `app_id` as the Wayland app id /
+/// X11 class, and set up for our own [`TitleBar`] (see the module docs).
 pub fn window_options(title: &str, app_id: &str, size: Size<Pixels>, cx: &App) -> WindowOptions {
     let mut titlebar = TitleBar::title_bar_options();
     titlebar.title = Some(title.to_owned().into());
     WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size, cx)),
+        window_bounds: Some(WindowBounds::Maximized(
+            WindowBounds::centered(size, cx).get_bounds(),
+        )),
         titlebar: Some(titlebar),
         window_min_size: Some(MIN_SIZE),
         app_id: Some(app_id.to_owned()),
         ..TitleBar::window_options()
     }
+}
+
+/// How long the window manager gets to maximize a new window before
+/// [`ensure_maximized`] asks again.
+const MAXIMIZE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Asks again for maximizing a window that was opened with
+/// [`WindowBounds::Maximized`] but is not maximized after a moment.
+///
+/// GPUI asks for it while it creates the window: on Wayland that is
+/// `xdg_toplevel.set_maximized` right after the first commit, which
+/// compositors honour. On X11 it is an `_NET_WM_STATE` client message sent
+/// *before* the window is mapped, which EWMH says a window manager need not
+/// look at. A window manager that did not maximize (or never does, like a
+/// tiling one) is not harmed by a second request; one that did is left
+/// alone, since it is maximized by then.
+pub fn ensure_maximized(window: AnyWindowHandle, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(MAXIMIZE_GRACE).await;
+        cx.update(|cx| {
+            window
+                .update(cx, |_, window, _| {
+                    if !window.is_maximized() && !window.is_fullscreen() {
+                        window.zoom_window();
+                    }
+                })
+                .ok();
+        });
+    })
+    .detach();
 }
