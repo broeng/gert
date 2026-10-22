@@ -1,4 +1,4 @@
-//! The change action menu (`m`): submit, rebase, abandon, restore, work in
+//! The change action menu (`m`; `shift-a` on the diff page): submit, rebase, abandon, restore, work in
 //! progress / ready for review and private, each as a second step with a
 //! confirmation where it needs one.
 //!

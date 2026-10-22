@@ -264,6 +264,14 @@ pub fn diff_page_entries() -> Vec<Entry> {
             KeyBinding::new("a", Reply, Some(k)),
             "Reply: message, votes, attention set",
         ),
+        // `m` toggles side-by-side / unified in the diff, and `shift-m` is
+        // its older alias, so the menu gets `shift-a` ("actions"), which
+        // nothing in the diff uses (`a` is the reply dialog).
+        e(
+            "Shift-A",
+            KeyBinding::new("shift-a", ChangeMenu, Some(k)),
+            "Change actions: submit, rebase, abandon, restore, WIP, private, reviewers",
+        ),
         e(
             "R",
             KeyBinding::new("r", ToggleReviewed, Some(k)),

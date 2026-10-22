@@ -1,6 +1,6 @@
 //! Actions and key bindings of the change action menu and its dialogs. The
 //! keys apply inside the dialog's key contexts only; the page key that
-//! opens it (`m`) is in [`crate::actions`].
+//! opens it (`m` on the change page, `shift-a` on the diff page) is in [`crate::actions`].
 
 use gpui_kit::*;
 

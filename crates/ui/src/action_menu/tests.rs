@@ -748,6 +748,136 @@ mod in_the_shell {
         });
     }
 
+    /// The diff page of `src/a.rs` of change 7, patch set 3, opened from the
+    /// change page (its file list is cached).
+    fn on_the_diff(
+        cx: &mut TestAppContext,
+        http: &gerrit_api::fake::RouteHttpClient,
+    ) -> (AnyWindowHandle, Entity<Shell>) {
+        let mut store = Store::open_in_memory().expect("store");
+        let server = store.server_id(URL).expect("server");
+        let now = jiff::Timestamp::now();
+        let key = model::FilesKey {
+            change: ChangeNumber(7),
+            base: None,
+            target: model::PatchSetRef {
+                number: model::PatchSetNumber(3),
+                sha: "sha3".into(),
+            },
+        };
+        let files = [crate::testing::file(
+            "src/a.rs",
+            model::FileStatus::Modified,
+        )];
+        store
+            .save_file_list(server, &key, &files, None, now)
+            .expect("files");
+        store
+            .save_query_page(server, "status:open", &[summary(7)], false, now)
+            .expect("query");
+        store
+            .save_change_detail(server, &change(), now)
+            .expect("detail");
+        http.route("/diff", 200, crate::testing::whole_file());
+        let mut env = env_with(store, http);
+        env.backend = std::sync::Arc::new(Keyring);
+        let startup = Startup {
+            env,
+            server: Some(ServerSetup {
+                username: Some("bob".into()),
+                ..setup()
+            }),
+            queries: vec![SavedQuery {
+                name: "Open".into(),
+                query: "status:open".into(),
+            }],
+            diff: Default::default(),
+        };
+        let (window, shell) = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        press(cx, window, "enter");
+        press(cx, window, "j");
+        press(cx, window, "enter");
+        cx.update(|cx| assert!(matches!(shell.read(cx).route(), Route::Diff(_))));
+        cx.update_window(window, |_, w, cx| w.render_frame(cx))
+            .expect("frame");
+        cx.run_until_parked();
+        (window, shell)
+    }
+
+    fn diff_route(cx: &mut TestAppContext, shell: &Entity<Shell>) -> crate::nav::DiffRoute {
+        match cx.update(|cx| shell.read(cx).route().clone()) {
+            Route::Diff(r) => r,
+            other => panic!("not a diff: {other:?}"),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn on_the_diff_page_shift_a_opens_the_menu_and_a_rebase_moves_to_the_new_patch_set(
+        cx: &mut TestAppContext,
+    ) {
+        let http = gerrit_api::fake::RouteHttpClient::new();
+        http.route_json("GET /a/changes/7?", BEFORE);
+        http.route("POST /a/changes/7/rebase", 200, super::CHANGE_OK);
+        let (window, shell) = on_the_diff(cx, &http);
+        let before = diff_route(cx, &shell);
+        assert_eq!(before.target, model::PatchSetNumber(3));
+        press(cx, window, "shift-a");
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_some()));
+        press(cx, window, "b");
+        http.route_json("GET /a/changes/7?", AFTER);
+        press(cx, window, super::CONFIRM);
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_none()));
+        // The same file, now in the new current patch set.
+        let after = diff_route(cx, &shell);
+        assert_eq!(after.path, before.path);
+        assert_eq!(after.target, model::PatchSetNumber(4));
+        let page = cx
+            .update(|cx| shell.read(cx).diff_page_for_test())
+            .expect("diff page");
+        cx.update(|cx| {
+            let page = page.read(cx);
+            assert_eq!(
+                page.hint_for_test(),
+                Some(("Rebased; showing the new patchset".to_owned(), false))
+            );
+            let d = page.detail_for_test().expect("detail");
+            assert_eq!(d.summary.subject, "Rebased subject");
+        });
+        // Back in the history, the change page shows the new detail too.
+        press(cx, window, "u");
+        let page = cx
+            .update(|cx| shell.read(cx).change_page_for_test())
+            .expect("change page");
+        cx.update(|cx| {
+            let d = page.read(cx).detail().expect("detail");
+            assert_eq!(d.current_patch_set.map(|p| p.0), Some(4));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_action_updates_the_diff_page_but_keeps_the_menu(cx: &mut TestAppContext) {
+        let http = gerrit_api::fake::RouteHttpClient::new();
+        http.route_json("GET /a/changes/7?", BEFORE);
+        http.route("POST /a/changes/7/rebase", 409, "change is not open\n");
+        let (window, shell) = on_the_diff(cx, &http);
+        press(cx, window, "shift-a");
+        press(cx, window, "b");
+        http.route_json("GET /a/changes/7?", AFTER);
+        press(cx, window, super::CONFIRM);
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_some()));
+        let page = cx
+            .update(|cx| shell.read(cx).diff_page_for_test())
+            .expect("diff page");
+        cx.update(|cx| {
+            let d = page.read(cx).detail_for_test().expect("detail");
+            assert_eq!(d.summary.subject, "Rebased subject");
+        });
+        assert_eq!(diff_route(cx, &shell).target, model::PatchSetNumber(3));
+    }
+
     #[gpui_kit::test]
     fn anonymous_sessions_get_a_hint_and_no_menu(cx: &mut TestAppContext) {
         let (window, shell) = on_the_change(cx, None, change(), &Default::default());

@@ -533,6 +533,7 @@ impl Shell {
             |this, _, ev: &DiffPageEvent, window, cx| match ev {
                 DiffPageEvent::Unauthorized => this.unauthorized(window, cx),
                 DiffPageEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
+                DiffPageEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 // Like PolyGerrit, stepping through files does not stack
                 // history entries: Back from any file leads to the change.
                 DiffPageEvent::UpToChange => this.go_up(&GoUp, window, cx),
@@ -683,11 +684,11 @@ impl Shell {
                 ActionEvent::Close => this.close_menu(window, cx),
                 ActionEvent::Unauthorized => this.unauthorized(window, cx),
                 ActionEvent::Done(done) => this.action_done(done, window, cx),
-                ActionEvent::Refreshed(detail) => {
-                    if let Page::Change(p) = &this.page {
-                        p.update(cx, |p, cx| p.detail_refreshed(detail, cx));
-                    }
-                }
+                ActionEvent::Refreshed(detail) => match &this.page {
+                    Page::Change(p) => p.update(cx, |p, cx| p.detail_refreshed(detail, cx)),
+                    Page::Diff(p) => p.update(cx, |p, cx| p.detail_refreshed(detail, cx)),
+                    _ => {}
+                },
             },
         ));
         self.menu = Some(dialog);
@@ -711,8 +712,21 @@ impl Shell {
     /// result.
     fn action_done(&mut self, done: &Done, window: &mut Window, cx: &mut Context<Self>) {
         self.close_menu(window, cx);
-        if let Page::Change(p) = &self.page {
-            p.update(cx, |p, cx| p.action_done(done, cx));
+        match &self.page {
+            Page::Change(p) => p.update(cx, |p, cx| p.action_done(done, cx)),
+            Page::Diff(p) => {
+                if let Some(route) = p.update(cx, |p, cx| p.action_done(done, cx)) {
+                    // A new current patch set: the same file there. The page
+                    // is built again from the cache the action refreshed.
+                    self.nav.replace(Route::Diff(route));
+                    self.show(window, cx);
+                    if let Page::Diff(p) = &self.page {
+                        let note = format!("{}; showing the new patchset", done.note());
+                        p.update(cx, |p, cx| p.say(note, cx));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
