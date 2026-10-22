@@ -553,7 +553,7 @@ fn a_server_that_cannot_be_reached_says_nothing_was_done(cx: &mut TestAppContext
 }
 
 #[test]
-fn a_transport_failure_is_described_without_the_request_chain() {
+fn a_transport_failure_is_described_with_its_cause_but_without_the_url() {
     let chain = "error sending request for url (https://g.example/a/changes/7/submit): \
                  client error (Connect): tcp connect error: Connection refused (os error 111)";
     let e = sync::Error::Api(gerrit_api::Error::Http(gerrit_api::HttpError(chain.into())));
@@ -563,7 +563,11 @@ fn a_transport_failure_is_described_without_the_request_chain() {
         "{text}"
     );
     assert!(
-        !text.contains("g.example") && !text.contains("os error"),
+        !text.contains("g.example") && !text.contains("tcp connect error"),
+        "{text}"
+    );
+    assert!(
+        text.contains("error sending request: Connection refused (os error 111)"),
         "{text}"
     );
 }

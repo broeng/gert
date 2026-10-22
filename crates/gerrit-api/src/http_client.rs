@@ -13,17 +13,35 @@ use futures::future::BoxFuture;
 pub struct HttpError(pub String);
 
 impl HttpError {
-    /// The first sentence of the chain without the request URL, e.g.
-    /// `error sending request`. The URL is the user's own server and the
-    /// rest is for the log.
+    /// The top-level message plus the root cause, without the request URL,
+    /// e.g. `error sending request: Connection refused (os error 111)` or
+    /// `error sending request: invalid peer certificate: UnknownIssuer`.
+    /// The URL is the user's own server and the layers in between
+    /// (`client error (Connect)`, `tcp connect error`) say nothing a user
+    /// can act on; the whole chain is for the log.
     pub fn short(&self) -> String {
         let first = self.0.lines().next().unwrap_or_default();
-        let top = first.split(": ").next().unwrap_or(first);
+        let mut parts = first.split(": ");
+        let top = parts.next().unwrap_or(first);
         let top = top.split(" for url").next().unwrap_or(top).trim();
-        if top.is_empty() {
-            self.0.trim().to_owned()
-        } else {
-            top.to_owned()
+        let causes: Vec<&str> = parts.collect();
+        // Everything after the connector's own wrapper is the cause: one
+        // io/TLS/DNS error, which may itself contain ": " (a rustls error
+        // reads `invalid peer certificate: UnknownIssuer`).
+        let from = causes
+            .iter()
+            .rposition(|c| c.starts_with("client error"))
+            .map_or(0, |i| i + 1);
+        let cause = causes[from..]
+            .iter()
+            .copied()
+            .filter(|c| *c != "tcp connect error")
+            .collect::<Vec<_>>()
+            .join(": ");
+        match (top.is_empty(), cause.is_empty()) {
+            (true, _) => self.0.trim().to_owned(),
+            (false, true) => top.to_owned(),
+            (false, false) => format!("{top}: {cause}"),
         }
     }
 }
@@ -42,15 +60,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_short_form_is_the_top_level_message_without_url_or_causes() {
-        let e = HttpError(
+    fn the_short_form_is_the_top_level_message_plus_the_root_cause() {
+        let refused = HttpError(
             "error sending request for url (https://gerrit.example/a/changes/?q=x): \
              client error (Connect): tcp connect error: Connection refused (os error 111)"
                 .into(),
         );
-        assert_eq!(e.short(), "error sending request");
-        assert_eq!(e.to_string(), "error sending request");
-        assert!(e.0.contains("os error 111"));
+        assert_eq!(
+            refused.short(),
+            "error sending request: Connection refused (os error 111)"
+        );
+        assert_eq!(refused.to_string(), refused.short());
+        assert!(refused.0.contains("https://gerrit.example"));
+        assert!(!refused.short().contains("gerrit.example"));
+
+        let dns = HttpError(
+            "error sending request for url (https://x.example/): client error (Connect): \
+             dns error: failed to lookup address information: Name or service not known"
+                .into(),
+        );
+        assert_eq!(
+            dns.short(),
+            "error sending request: dns error: failed to lookup address information: \
+             Name or service not known"
+        );
+
+        let tls = HttpError(
+            "error sending request for url (https://x.example/): client error (Connect): \
+             invalid peer certificate: UnknownIssuer"
+                .into(),
+        );
+        assert_eq!(
+            tls.short(),
+            "error sending request: invalid peer certificate: UnknownIssuer"
+        );
+    }
+
+    #[test]
+    fn the_short_form_copes_with_plain_messages() {
+        assert_eq!(
+            HttpError("error sending request for url (https://x/)".into()).short(),
+            "error sending request"
+        );
         assert_eq!(
             HttpError("connection refused".into()).short(),
             "connection refused"

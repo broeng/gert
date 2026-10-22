@@ -120,11 +120,14 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_error_shows_only_its_top_level_message() {
+    fn a_transport_error_shows_its_top_level_message_and_root_cause() {
         let chain = "error sending request for url (https://g.example/a/changes/): \
                      client error (Connect): Connection refused (os error 111)";
         let e = Error::Http(HttpError(chain.into()));
-        assert_eq!(e.to_string(), "transport error: error sending request");
+        assert_eq!(
+            e.to_string(),
+            "transport error: error sending request: Connection refused (os error 111)"
+        );
     }
 
     #[test]
