@@ -5,8 +5,11 @@
 //! the prefetch) and the diff come from the cache first. A diff is keyed by
 //! revision SHA and immutable, so a cached one is shown without any request;
 //! only a miss is fetched, on the background executor, with a "loading"
-//! placeholder until it arrives. Once a diff is shown, the next file's diff
-//! is prefetched in the background.
+//! placeholder until it arrives. Once a diff is shown, the syntax worker
+//! fetches and highlights the other files in the order `]` visits them
+//! (skipping hidden, dimmed and magic files). Only where the worker does not
+//! cover the file `]` goes to (highlighting is off, or it is a magic file)
+//! is that file's diff prefetched instead.
 //!
 //! Diffs are always requested as whole files (the server ignores `context`).
 //! Folding unchanged lines and opening folds happen in the view, so a
@@ -47,10 +50,20 @@ use crate::{
     reply, reviewed,
     session::{Session, is_unauthorized},
     settings::{DiffSettings, FileFilters},
-    syntax_cache::{Highlight, SyntaxCache},
+    syntax_cache::{Highlight, SyntaxCache, ahead_paths, diff_key, is_magic},
     theme::chip_colors,
 };
 use prefs::{next_context, next_tab_size, next_whitespace, whitespace_label};
+
+/// The inputs of the work done for the files after the shown one, to tell
+/// when it has to be done again.
+#[derive(PartialEq)]
+struct AheadState {
+    keys: Vec<DiffKey>,
+    enabled: bool,
+    /// The file `]` goes to.
+    next: Option<String>,
+}
 
 pub enum DiffPageEvent {
     Unauthorized,
@@ -104,6 +117,8 @@ pub struct DiffPage {
     prefs_focus: FocusHandle,
     task: Option<Task<()>>,
     prefetch: Option<Task<()>>,
+    /// What the files ahead were last set up for (see `ahead`).
+    ahead_state: Option<AheadState>,
     /// The change's comment threads, shown in the diff.
     comments: Entity<ChangeComments>,
     outbox: Entity<DraftOutbox>,
@@ -158,6 +173,7 @@ impl DiffPage {
             prefs_focus: cx.focus_handle(),
             task: None,
             prefetch: None,
+            ahead_state: None,
             comments: comments.clone(),
             outbox,
             want_thread,
@@ -167,6 +183,7 @@ impl DiffPage {
             .push(cx.observe(&settings, |this, _, cx| this.settings_changed(cx)));
         this._subs.push(cx.observe(&filters, |this, _, cx| {
             this.restyle(cx);
+            this.ahead(cx);
             cx.notify();
         }));
         this._subs
@@ -214,14 +231,7 @@ impl DiffPage {
     }
 
     fn make_key(&self, files: &FilesKey, cx: &App) -> DiffKey {
-        let prefs = self.prefs(cx);
-        DiffKey {
-            change: files.change,
-            base: files.base.clone(),
-            target: files.target.clone(),
-            path: self.route.path.clone(),
-            whitespace: prefs.ignore_whitespace,
-        }
+        diff_key(files, &self.route.path, self.prefs(cx).ignore_whitespace)
     }
 
     /// Everything, from the cache where possible.
@@ -341,7 +351,7 @@ impl DiffPage {
                     }),
                     None => self.create_view(diff, cached, cx),
                 }
-                self.prefetch_next(&key, cx);
+                self.ahead(cx);
             }
             Err(LoadError::Unauthorized) => cx.emit(DiffPageEvent::Unauthorized),
             Err(e) => {
@@ -442,6 +452,50 @@ impl DiffPage {
         }
     }
 
+    /// Gets the files after the shown one ready, in the order `]` visits
+    /// them: the syntax worker fetches and highlights the next unskipped
+    /// files, then the earlier ones. Where the worker does not cover the
+    /// file `]` goes to (syntax highlighting is off, or that is a magic
+    /// file, which is never highlighted), its diff is just prefetched. Does
+    /// nothing when nothing it depends on changed since the last call.
+    fn ahead(&mut self, cx: &mut Context<Self>) {
+        let (Some(files), Some(shown)) = (self.files_key.clone(), self.shown.clone()) else {
+            return;
+        };
+        let prefs = self.prefs(cx);
+        let enabled = prefs.syntax_highlighting;
+        let next = self.position().and_then(|from| {
+            let skipped = |i: usize| self.styles.get(i).is_some_and(skips);
+            next_unskipped(self.files.len(), from, true, skipped)
+        });
+        let next = next.and_then(|i| self.files.get(i)).map(|f| f.path.clone());
+        let keys: Vec<DiffKey> = if enabled {
+            ahead_paths(&self.files, &self.styles, Some(&self.route.path))
+                .into_iter()
+                .map(|p| diff_key(&files, p, prefs.ignore_whitespace.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let state = AheadState {
+            keys,
+            enabled,
+            next,
+        };
+        if self.ahead_state.as_ref() == Some(&state) {
+            return;
+        }
+        let session = self.session.clone();
+        let keys = state.keys.clone();
+        self.syntax
+            .update(cx, |c, cx| c.set_queue(keys, &session, enabled, cx));
+        let covered = enabled && state.next.as_deref().is_some_and(|p| !is_magic(p));
+        if !covered && state.next.is_some() {
+            self.prefetch_next(&shown, cx);
+        }
+        self.ahead_state = Some(state);
+    }
+
     /// Fetches the next file's diff in the background so that `]` is
     /// instant.
     fn prefetch_next(&mut self, shown: &DiffKey, cx: &mut Context<Self>) {
@@ -484,6 +538,7 @@ impl DiffPage {
             });
         }
         self.fetch(cx);
+        self.ahead(cx);
         cx.notify();
     }
 
