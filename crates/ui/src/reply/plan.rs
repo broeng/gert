@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use model::{
-    Account, AccountId, AttentionSetInput, ChangeDetail, ChangeStatus, Draft, DraftSync, Entry,
-    LocalDraftId, PATCHSET_LEVEL_PATH, PatchSetNumber, ReviewInput, Thread,
+    Account, AccountId, AttentionSetInput, ChangeDetail, ChangeStatus, Draft, DraftHandling,
+    DraftSync, Entry, LocalDraftId, PATCHSET_LEVEL_PATH, PatchSetNumber, ReviewInput, Thread,
 };
 
 use crate::pages::change::threads::location_text;
@@ -121,6 +121,75 @@ pub fn labels_to_send(rows: &[VoteRow]) -> BTreeMap<String, i32> {
         .filter(|r| r.changed())
         .map(|r| (r.label.clone(), r.selected))
         .collect()
+}
+
+/// One quick-vote button: a label at the highest value the user may give.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickButton {
+    pub label: String,
+    pub value: i32,
+    /// The user has this vote already: the button stays (so that the
+    /// positions, and the keys, do not move) but does nothing.
+    pub applied: bool,
+}
+
+impl QuickButton {
+    /// `Code-Review +2`.
+    pub fn text(&self) -> String {
+        format!("{} {}", self.label, vote_text(self.value))
+    }
+}
+
+/// The quick-vote buttons, in the order of the reply dialog's rows. None for
+/// anonymous sessions (`me` is `None`) and for closed changes. A label whose
+/// highest permitted value is not positive (a veto-only label) has no
+/// button: a quick vote is for approving.
+pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>) -> Vec<QuickButton> {
+    if me.is_none() || detail.summary.status != ChangeStatus::New {
+        return Vec::new();
+    }
+    vote_rows(detail, me)
+        .into_iter()
+        .filter_map(|row| {
+            let max = row.choices.iter().map(|c| c.value).max()?;
+            (max > 0).then_some(QuickButton {
+                applied: row.current == max,
+                label: row.label,
+                value: max,
+            })
+        })
+        .collect()
+}
+
+/// The review of a quick vote: that label only. No message, and the drafts
+/// stay drafts (the default would publish them all).
+pub fn quick_vote_input(vote: &QuickButton) -> ReviewInput {
+    ReviewInput {
+        labels: BTreeMap::from([(vote.label.clone(), vote.value)]),
+        drafts: DraftHandling::Keep,
+        ..ReviewInput::default()
+    }
+}
+
+/// The votes of a posted review that took effect: those that were sent and
+/// that the server did not drop.
+pub fn applied_votes(
+    sent: &BTreeMap<String, i32>,
+    unapplied: &[(String, i32)],
+) -> Vec<(String, i32)> {
+    sent.iter()
+        .filter(|(label, value)| !unapplied.iter().any(|(l, v)| l == *label && v == *value))
+        .map(|(label, value)| (label.clone(), *value))
+        .collect()
+}
+
+/// `Voted Code-Review +2, Verified +1`.
+pub fn voted_text(votes: &[(String, i32)]) -> String {
+    let list: Vec<_> = votes
+        .iter()
+        .map(|(label, value)| format!("{label} {}", vote_text(*value)))
+        .collect();
+    format!("Voted {}", list.join(", "))
 }
 
 // ---- attention set ----
@@ -700,5 +769,84 @@ mod tests {
         );
         assert_eq!(input.message, None);
         assert_eq!(input.drafts, model::DraftHandling::PublishAllRevisions);
+    }
+
+    // ---- quick votes ----
+
+    fn qv(d: &ChangeDetail, me: &str) -> Vec<(String, i32, bool)> {
+        quick_votes(d, Some(me))
+            .into_iter()
+            .map(|q| (q.label, q.value, q.applied))
+            .collect()
+    }
+
+    #[test]
+    fn quick_votes_are_the_maximum_per_label_in_dialog_order() {
+        let mut d = change();
+        with_labels(&mut d);
+        assert_eq!(
+            qv(&d, "bob"),
+            [
+                ("Code-Review".into(), 2, false),
+                ("Verified".into(), 1, false)
+            ]
+        );
+        assert_eq!(quick_votes(&d, Some("bob"))[0].text(), "Code-Review +2");
+    }
+
+    #[test]
+    fn an_existing_maximum_vote_is_applied_not_hidden() {
+        let mut d = change();
+        with_labels(&mut d);
+        d.votes.get_mut("Code-Review").unwrap()[1].value = 2; // bob
+        assert_eq!(
+            qv(&d, "bob"),
+            [
+                ("Code-Review".into(), 2, true),
+                ("Verified".into(), 1, false)
+            ]
+        );
+        // Carol has -1: not applied.
+        assert!(!qv(&d, "carol")[0].2);
+    }
+
+    #[test]
+    fn no_quick_votes_when_anonymous_closed_or_veto_only() {
+        let mut d = change();
+        with_labels(&mut d);
+        d.permitted_labels.insert("Blocked".to_owned(), vec![-1, 0]);
+        assert_eq!(quick_votes(&d, Some("bob")).len(), 2, "no button for -1/0");
+        assert!(quick_votes(&d, None).is_empty());
+        d.summary.status = ChangeStatus::Merged;
+        assert!(quick_votes(&d, Some("bob")).is_empty());
+        d.summary.status = ChangeStatus::Abandoned;
+        assert!(quick_votes(&d, Some("bob")).is_empty());
+    }
+
+    #[test]
+    fn a_quick_vote_sends_only_its_label_and_keeps_drafts() {
+        let input = quick_vote_input(&QuickButton {
+            label: "Code-Review".into(),
+            value: 2,
+            applied: false,
+        });
+        assert_eq!(input.labels, BTreeMap::from([("Code-Review".into(), 2)]));
+        assert_eq!(input.message, None);
+        assert_eq!(input.drafts, DraftHandling::Keep);
+        assert!(input.add_to_attention_set.is_empty());
+    }
+
+    #[test]
+    fn applied_votes_leave_out_what_the_server_dropped() {
+        let sent = BTreeMap::from([("Code-Review".to_owned(), 2), ("Verified".to_owned(), 1)]);
+        assert_eq!(applied_votes(&sent, &[]).len(), 2);
+        let applied = applied_votes(&sent, &[("Verified".into(), 1)]);
+        assert_eq!(applied, [("Code-Review".to_owned(), 2)]);
+        assert!(applied_votes(&BTreeMap::new(), &[]).is_empty());
+        assert_eq!(voted_text(&applied), "Voted Code-Review +2");
+        assert_eq!(
+            voted_text(&[("A".into(), 1), ("B".into(), -1)]),
+            "Voted A +1, B -1"
+        );
     }
 }

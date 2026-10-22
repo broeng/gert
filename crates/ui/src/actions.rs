@@ -74,6 +74,14 @@ actions!(
     ]
 );
 
+/// `shift-v` and `v 1` .. `v 9` on the change page: cast the quick vote
+/// of the header button at `position` (0 is the first).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = ui, no_json)]
+pub struct QuickVote {
+    pub position: usize,
+}
+
 /// Key context of the root view.
 pub const SHELL: &str = "Shell";
 /// Key context of the dashboard and search result pages.
@@ -231,6 +239,56 @@ pub fn change_entries() -> Vec<Entry> {
             "Shift-L",
             KeyBinding::new("shift-l", ToggleRelatedPanel, Some(k)),
             "Show the relation chain as a side panel / back in the box",
+        ),
+        e(
+            "Shift-V, V 1 to V 9",
+            KeyBinding::new("shift-v", QuickVote { position: 0 }, Some(k)),
+            "Quick vote: the first button of the header (normally Code-Review +2) / the button with that number",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 1", QuickVote { position: 0 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 2", QuickVote { position: 1 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 3", QuickVote { position: 2 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 4", QuickVote { position: 3 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 5", QuickVote { position: 4 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 6", QuickVote { position: 5 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 7", QuickVote { position: 6 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 8", QuickVote { position: 7 }, Some(k)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("v 9", QuickVote { position: 8 }, Some(k)),
+            "",
         ),
         e(
             "Space / Shift-Space",
