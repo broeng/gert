@@ -1,6 +1,7 @@
-//! The change action menu (`m`; `shift-a` on the diff page): submit, rebase, abandon, restore, work in
-//! progress / ready for review and private, each as a second step with a
-//! confirmation where it needs one.
+//! The change action menu (`m`; `shift-a` on the diff page): submit, rebase,
+//! abandon, restore, work in progress / ready for review, private, revert
+//! and cherry-pick, each as a second step with a confirmation where it
+//! needs one.
 //!
 //! Like the reply dialog it is a modal overlay owned by the shell: the page
 //! asks for it with an event and takes the result back with `action_done`.
@@ -18,15 +19,18 @@
 //! # Steps
 //!
 //! 1. The menu: `j`/`k`/arrows move, `Enter` or the mnemonic (`s` submit,
-//!    `b` rebase, `a` abandon, `r` restore, `w` WIP / ready, `p` private)
-//!    picks. The mnemonics work only here.
+//!    `b` rebase, `a` abandon, `r` restore, `w` WIP / ready, `p` private,
+//!    `e` revert, `c` cherry-pick) picks. The mnemonics work only here.
 //! 2. A confirmation for submit, rebase, abandon, restore and WIP, with an
 //!    optional message (abandon, restore, WIP) or base and options (rebase:
 //!    allow conflicts, and on behalf of the uploader where the server offers
 //!    it; Tab to a checkbox, Space switches it). `Ctrl-Enter`
 //!    (`Cmd-Enter`) confirms, `Esc` goes back to the menu (and from the
 //!    menu closes the dialog). Ready and the private toggles run right
-//!    from the menu.
+//!    from the menu. Revert asks for the new change's commit message
+//!    (prefilled like Gerrit's default) and cherry-pick for the destination
+//!    branch (a plain field) and the message (prefilled with the change's);
+//!    both open the new change when the server made it.
 //! 3. Reviewers (`v`), topic (`t`) and hashtags (`h`) are steps of their own
 //!    with text fields: see `reviewers` and `tags`. The reviewers step stays
 //!    open after each change; `Esc` goes back to the menu, and closing the
@@ -53,7 +57,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use model::{
     ChangeDetail, ChangeNumber, REBASE_ON_BEHALF_OF_UPLOADER, RebaseOptions, ReviewerState,
-    SubmitRequirementStatus, action_id,
+    RevisionId, SubmitRequirementStatus, action_id,
 };
 
 use reviewers::Reviewers;
@@ -84,13 +88,27 @@ pub struct Done {
     /// The change as the server has it now; `None` if only fetching it
     /// failed (the action went through).
     pub detail: Option<ChangeDetail>,
+    /// For revert and cherry-pick: the new change, which `detail` is then
+    /// the detail of. The shell opens it instead of updating the page.
+    pub opened: Option<ChangeNumber>,
 }
 
 impl Done {
     /// The note for the page.
     pub fn note(&self) -> String {
-        self.kind.past().to_owned()
+        match self.opened {
+            Some(n) => format!("{} as change #{n}", self.kind.past()),
+            None => self.kind.past().to_owned(),
+        }
     }
+}
+
+/// What the user typed for an action.
+#[derive(Default)]
+struct Args {
+    message: Option<String>,
+    base: Option<String>,
+    destination: Option<String>,
 }
 
 /// Why the menu cannot open now, as a note for the user.
@@ -115,6 +133,8 @@ pub enum Kind {
     Ready,
     Private,
     Unprivate,
+    Revert,
+    CherryPick,
     /// Steps with their own fields, not run from the menu.
     Reviewers,
     Topic,
@@ -122,7 +142,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    const ALL: [Kind; 11] = [
+    const ALL: [Kind; 13] = [
         Kind::Submit,
         Kind::Rebase,
         Kind::Abandon,
@@ -131,6 +151,8 @@ impl Kind {
         Kind::Ready,
         Kind::Private,
         Kind::Unprivate,
+        Kind::Revert,
+        Kind::CherryPick,
         Kind::Reviewers,
         Kind::Topic,
         Kind::Hashtags,
@@ -147,6 +169,8 @@ impl Kind {
             Kind::Ready => action_id::READY,
             Kind::Private => action_id::PRIVATE,
             Kind::Unprivate => action_id::PRIVATE_DELETE,
+            Kind::Revert => action_id::REVERT,
+            Kind::CherryPick => action_id::CHERRYPICK,
             Kind::Reviewers => "",
             Kind::Topic => action_id::TOPIC,
             Kind::Hashtags => action_id::HASHTAGS,
@@ -164,6 +188,8 @@ impl Kind {
             Kind::Ready => "Ready for review",
             Kind::Private => "Mark private",
             Kind::Unprivate => "Unmark private",
+            Kind::Revert => "Revert",
+            Kind::CherryPick => "Cherry-pick",
             Kind::Reviewers => "Reviewers and CC",
             Kind::Topic => "Edit topic",
             Kind::Hashtags => "Edit hashtags",
@@ -179,6 +205,8 @@ impl Kind {
             Kind::Restore => 'r',
             Kind::Wip | Kind::Ready => 'w',
             Kind::Private | Kind::Unprivate => 'p',
+            Kind::Revert => 'e',
+            Kind::CherryPick => 'c',
             Kind::Reviewers => 'v',
             Kind::Topic => 't',
             Kind::Hashtags => 'h',
@@ -196,6 +224,8 @@ impl Kind {
             Kind::Ready => "Marked ready for review",
             Kind::Private => "Marked private",
             Kind::Unprivate => "Marked not private",
+            Kind::Revert => "Revert created",
+            Kind::CherryPick => "Cherry-pick created",
             Kind::Reviewers => "Reviewers changed",
             Kind::Topic => "Topic changed",
             Kind::Hashtags => "Hashtags changed",
@@ -213,6 +243,8 @@ impl Kind {
             Kind::Ready => "Not marked ready for review",
             Kind::Private => "Not marked private",
             Kind::Unprivate => "Not marked not private",
+            Kind::Revert => "Not reverted",
+            Kind::CherryPick => "Not cherry-picked",
             Kind::Reviewers => "Reviewers not changed",
             Kind::Topic => "Topic not changed",
             Kind::Hashtags => "Hashtags not changed",
@@ -238,25 +270,42 @@ impl Kind {
         matches!(self, Kind::Abandon | Kind::Restore | Kind::Wip)
     }
 
+    /// Sends the action. The detail is the changed change's, or for revert
+    /// and cherry-pick the new one, whose number is the second part.
     async fn send(
         self,
         syncer: &sync::Syncer,
         change: ChangeNumber,
-        message: Option<&str>,
-        base: Option<&str>,
+        revision: Option<RevisionId>,
+        args: Args,
         rebase: RebaseOptions,
-    ) -> Result<Option<ChangeDetail>, sync::Error> {
+    ) -> Result<(Option<ChangeDetail>, Option<ChangeNumber>), sync::Error> {
+        let message = args.message.as_deref();
+        let plain = |d| Ok((d, None));
+        let created = |c: sync::NewChange| Ok((c.detail, Some(c.number)));
         match self {
-            Kind::Submit => syncer.submit(change).await,
-            Kind::Rebase => syncer.rebase(change, base, rebase).await,
-            Kind::Abandon => syncer.abandon(change, message).await,
-            Kind::Restore => syncer.restore(change, message).await,
-            Kind::Wip => syncer.set_work_in_progress(change, true, message).await,
-            Kind::Ready => syncer.set_work_in_progress(change, false, None).await,
-            Kind::Private => syncer.set_private(change, true).await,
-            Kind::Unprivate => syncer.set_private(change, false).await,
+            Kind::Submit => plain(syncer.submit(change).await?),
+            Kind::Rebase => plain(syncer.rebase(change, args.base.as_deref(), rebase).await?),
+            Kind::Abandon => plain(syncer.abandon(change, message).await?),
+            Kind::Restore => plain(syncer.restore(change, message).await?),
+            Kind::Wip => plain(syncer.set_work_in_progress(change, true, message).await?),
+            Kind::Ready => plain(syncer.set_work_in_progress(change, false, None).await?),
+            Kind::Private => plain(syncer.set_private(change, true).await?),
+            Kind::Unprivate => plain(syncer.set_private(change, false).await?),
+            Kind::Revert => created(syncer.revert(change, message).await?),
+            Kind::CherryPick => {
+                // `confirm` checked both.
+                let (Some(revision), Some(destination)) = (revision, args.destination) else {
+                    return plain(None);
+                };
+                created(
+                    syncer
+                        .cherry_pick(change, &revision, &destination, message)
+                        .await?,
+                )
+            }
             // Steps: their edits go through `edit::Edit`.
-            Kind::Reviewers | Kind::Topic | Kind::Hashtags => Ok(None),
+            Kind::Reviewers | Kind::Topic | Kind::Hashtags => plain(None),
         }
     }
 }
@@ -333,6 +382,13 @@ pub struct ActionDialog {
     error: Option<String>,
     message: Entity<TextareaState>,
     base: Entity<InputState>,
+    /// Revert's and cherry-pick's commit message, and cherry-pick's
+    /// destination branch.
+    commit_message: Entity<TextareaState>,
+    destination: Entity<InputState>,
+    /// Whose prefill `commit_message` holds, so going back and in again
+    /// keeps what was typed.
+    prefilled: Option<Kind>,
     /// The rebase checkboxes and their focus.
     rebase: RebaseOptions,
     conflicts_focus: FocusHandle,
@@ -375,6 +431,14 @@ impl ActionDialog {
         });
         let base = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Base: change number or commit SHA (optional)")
+        });
+        let commit_message = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(6, 14)
+                .placeholder("Commit message")
+        });
+        let destination = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Destination branch, e.g. stable-1.0")
         });
         let rev = Reviewers::new(window, cx);
         let tags = Tags::new(window, cx);
@@ -426,6 +490,26 @@ impl ActionDialog {
                     this.confirm(window, cx);
                 }
             }),
+            cx.subscribe_in(
+                &destination,
+                window,
+                |this, _, ev: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = ev {
+                        this.confirm(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &commit_message,
+                window,
+                |this, _, ev: &InputEvent, window, cx| match ev {
+                    InputEvent::PressEnter {
+                        secondary: true, ..
+                    } => this.confirm(window, cx),
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                },
+            ),
         ];
         let this = Self {
             number: detail.summary.number,
@@ -437,6 +521,9 @@ impl ActionDialog {
             error: None,
             message,
             base,
+            commit_message,
+            destination,
+            prefilled: None,
             rebase: RebaseOptions::default(),
             conflicts_focus: cx.focus_handle(),
             behalf_focus: cx.focus_handle(),
@@ -517,15 +604,24 @@ impl ActionDialog {
         }
         if kind.confirms() {
             self.step = Step::Confirm(kind);
+            if matches!(kind, Kind::Revert | Kind::CherryPick) && self.prefilled != Some(kind) {
+                self.prefilled = Some(kind);
+                let text = self.default_message(kind);
+                self.commit_message
+                    .update(cx, |i, cx| i.set_value(String::new(), window, cx));
+                crate::reply::put_text(&self.commit_message, &text, window, cx);
+            }
             let target = match kind {
                 k if k.takes_message() => self.message.read(cx).focus_handle(cx),
                 Kind::Rebase => self.base.read(cx).focus_handle(cx),
+                Kind::Revert => self.commit_message.read(cx).focus_handle(cx),
+                Kind::CherryPick => self.destination.read(cx).focus_handle(cx),
                 _ => self.confirm_focus.clone(),
             };
             self.pending_focus = Some(target);
             cx.notify();
         } else {
-            self.run(kind, None, None, window, cx);
+            self.run(kind, Args::default(), window, cx);
         }
     }
 
@@ -543,6 +639,17 @@ impl ActionDialog {
     }
     fn pick_wip(&mut self, _: &PickWip, window: &mut Window, cx: &mut Context<Self>) {
         self.pick_key('w', window, cx);
+    }
+    fn pick_revert(&mut self, _: &PickRevert, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_key('e', window, cx);
+    }
+    fn pick_cherry_pick(
+        &mut self,
+        _: &PickCherryPick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pick_key('c', window, cx);
     }
     fn pick_private(&mut self, _: &PickPrivate, window: &mut Window, cx: &mut Context<Self>) {
         self.pick_key('p', window, cx);
@@ -620,6 +727,14 @@ impl ActionDialog {
         if kind.takes_message() {
             v.push(self.message.read(cx).focus_handle(cx));
         }
+        match kind {
+            Kind::Revert => v.push(self.commit_message.read(cx).focus_handle(cx)),
+            Kind::CherryPick => {
+                v.push(self.destination.read(cx).focus_handle(cx));
+                v.push(self.commit_message.read(cx).focus_handle(cx));
+            }
+            _ => {}
+        }
         if kind == Kind::Rebase {
             v.push(self.base.read(cx).focus_handle(cx));
             v.push(self.conflicts_focus.clone());
@@ -674,14 +789,60 @@ impl ActionDialog {
             let t = s.trim();
             (!t.is_empty()).then(|| t.to_owned())
         };
-        let message = kind
-            .takes_message()
-            .then(|| text(self.message.read(cx).value().as_ref()))
-            .flatten();
+        let creates = matches!(kind, Kind::Revert | Kind::CherryPick);
+        let message = if creates {
+            text(self.commit_message.read(cx).value().as_ref())
+        } else {
+            kind.takes_message()
+                .then(|| text(self.message.read(cx).value().as_ref()))
+                .flatten()
+        };
         let base = (kind == Kind::Rebase)
             .then(|| text(self.base.read(cx).value().as_ref()))
             .flatten();
-        self.run(kind, message, base, window, cx);
+        let destination = (kind == Kind::CherryPick)
+            .then(|| text(self.destination.read(cx).value().as_ref()))
+            .flatten();
+        if kind == Kind::CherryPick && destination.is_none() {
+            self.error = Some("Enter the branch to cherry-pick to.".to_owned());
+            self.pending_focus = Some(self.destination.read(cx).focus_handle(cx));
+            cx.notify();
+            return;
+        }
+        if kind == Kind::CherryPick && self.detail.current_revision.is_none() {
+            self.error = Some("The change has no current patch set loaded.".to_owned());
+            cx.notify();
+            return;
+        }
+        let args = Args {
+            message,
+            base,
+            destination,
+        };
+        self.run(kind, args, window, cx);
+    }
+
+    /// What Gerrit's own revert and cherry-pick dialogs start from.
+    fn default_message(&self, kind: Kind) -> String {
+        let summary = &self.detail.summary;
+        match kind {
+            Kind::Revert => {
+                let sha = self
+                    .detail
+                    .current_revision
+                    .as_ref()
+                    .map_or("", |r| r.as_str());
+                format!(
+                    "Revert \"{}\"\n\nThis reverts commit {sha}.\n\nReason for revert: ",
+                    summary.subject
+                )
+            }
+            _ => self
+                .detail
+                .commit_message
+                .clone()
+                .unwrap_or_else(|| summary.subject.clone()),
+        }
     }
 
     /// Whether the server lets this user rebase on behalf of the uploader.
@@ -691,35 +852,26 @@ impl ActionDialog {
             .is_some_and(|a| a.has_option(REBASE_ON_BEHALF_OF_UPLOADER))
     }
 
-    fn run(
-        &mut self,
-        kind: Kind,
-        message: Option<String>,
-        base: Option<String>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn run(&mut self, kind: Kind, args: Args, _: &mut Window, cx: &mut Context<Self>) {
         if self.running() {
             return;
         }
         let from = self.step;
         let syncer = self.session.syncer().clone();
         let change = self.number;
+        let revision = self.detail.current_revision.clone();
         let rebase = RebaseOptions {
             on_behalf_of_uploader: self.rebase.on_behalf_of_uploader && self.offers_behalf(),
             ..self.rebase
         };
         self.step = Step::Running(kind);
         self.error = None;
-        self.message.update(cx, |i, cx| i.set_disabled(true, cx));
-        self.base.update(cx, |i, cx| i.set_disabled(true, cx));
+        self.set_fields_disabled(true, cx);
         cx.notify();
         self.task = Some(cx.spawn(async move |this, cx| {
             let (result, fresh) = cx
                 .background_spawn(async move {
-                    let result = kind
-                        .send(&syncer, change, message.as_deref(), base.as_deref(), rebase)
-                        .await;
+                    let result = kind.send(&syncer, change, revision, args, rebase).await;
                     // A refusal means our picture of the change is stale.
                     let fresh = match &result {
                         Err(e) => syncer.refresh_after_refusal(change, e).await,
@@ -737,14 +889,17 @@ impl ActionDialog {
         &mut self,
         kind: Kind,
         from: Step,
-        result: Result<Option<ChangeDetail>, sync::Error>,
+        result: Result<(Option<ChangeDetail>, Option<ChangeNumber>), sync::Error>,
         fresh: Option<ChangeDetail>,
         cx: &mut Context<Self>,
     ) {
-        self.message.update(cx, |i, cx| i.set_disabled(false, cx));
-        self.base.update(cx, |i, cx| i.set_disabled(false, cx));
+        self.set_fields_disabled(false, cx);
         match result {
-            Ok(detail) => cx.emit(ActionEvent::Done(Box::new(Done { kind, detail }))),
+            Ok((detail, opened)) => cx.emit(ActionEvent::Done(Box::new(Done {
+                kind,
+                detail,
+                opened,
+            }))),
             Err(e) if is_unauthorized(&e) => cx.emit(ActionEvent::Unauthorized),
             Err(e) => {
                 self.step = from;
@@ -832,6 +987,11 @@ impl ActionDialog {
     #[cfg(test)]
     pub(crate) fn base_focus_for_test(&self, cx: &App) -> FocusHandle {
         self.base.read(cx).focus_handle(cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit_message_for_test(&self, cx: &App) -> String {
+        self.commit_message.read(cx).value().to_string()
     }
 
     #[cfg(test)]
@@ -1051,6 +1211,8 @@ impl ActionDialog {
             Kind::Abandon => "Abandon this change?",
             Kind::Restore => "Restore this abandoned change?",
             Kind::Wip => "Mark this change work in progress?",
+            Kind::Revert => "Create a new change that reverts this one. Its commit message:",
+            Kind::CherryPick => "Copy this change onto another branch as a new change.",
             _ => "",
         };
         v_flex()
@@ -1072,6 +1234,20 @@ impl ActionDialog {
             })
             .when(kind.takes_message(), |d| {
                 d.child(Textarea::new(&self.message).small())
+            })
+            .when(kind == Kind::CherryPick, |d| {
+                d.child(Input::new(&self.destination).small()).child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "This change is on {}. The commit message of the new change:",
+                            self.detail.summary.branch
+                        )),
+                )
+            })
+            .when(matches!(kind, Kind::Revert | Kind::CherryPick), |d| {
+                d.child(Textarea::new(&self.commit_message).small())
             })
             .when(kind == Kind::Rebase, |d| {
                 d.child(Input::new(&self.base).small())
@@ -1286,6 +1462,8 @@ impl Render for ActionDialog {
                     .on_action(cx.listener(Self::pick_restore))
                     .on_action(cx.listener(Self::pick_wip))
                     .on_action(cx.listener(Self::pick_private))
+                    .on_action(cx.listener(Self::pick_revert))
+                    .on_action(cx.listener(Self::pick_cherry_pick))
                     .on_action(cx.listener(Self::pick_reviewers))
                     .on_action(cx.listener(Self::pick_topic))
                     .on_action(cx.listener(Self::pick_hashtags))

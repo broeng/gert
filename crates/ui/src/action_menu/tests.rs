@@ -107,7 +107,11 @@ fn dialog(
                 ActionEvent::Unauthorized => "unauthorized".to_owned(),
                 ActionEvent::Refreshed(d) => format!("refreshed {:?}", d.summary.status),
                 ActionEvent::Done(d) => {
-                    format!("done {:?} detail={}", d.kind, d.detail.is_some())
+                    let opened = d
+                        .opened
+                        .map(|n| format!(" opened=#{n}"))
+                        .unwrap_or_default();
+                    format!("done {:?} detail={}{opened}", d.kind, d.detail.is_some())
                 }
             };
             log.lock().expect("log").push(text);
@@ -190,10 +194,11 @@ fn the_menu_lists_what_the_server_offers_in_menu_order() {
             (Kind::Abandon, "Abandon", true, None),
             (Kind::Wip, "WIP", true, None),
             (Kind::Private, "Mark private", true, None),
+            (Kind::CherryPick, "Cherry Pick", true, None),
             (Kind::Reviewers, "Reviewers and CC", true, None),
             (Kind::Topic, "Edit topic", true, None),
         ],
-        "restore, ready, hashtags and the actions the menu does not know are absent"
+        "restore, ready, revert, hashtags and the actions the menu does not know are absent"
     );
 }
 
@@ -236,7 +241,7 @@ fn j_k_and_the_arrows_move_the_selection_and_wrap(cx: &mut TestAppContext) {
     press(cx, &f, &["k", "up"]);
     assert_eq!(sel(cx), 1);
     press(cx, &f, &["k", "k"]);
-    assert_eq!(sel(cx), 6);
+    assert_eq!(sel(cx), 7);
     // The menu has no text fields: nothing was typed anywhere.
     assert_eq!(step(cx, &f), "Menu");
 }
@@ -476,6 +481,142 @@ fn ready_runs_from_the_menu_and_unmarking_private_deletes(cx: &mut TestAppContex
     press(cx, &f, &["p"]);
     assert_eq!(writes(&f), ["DELETE /a/changes/7/private"]);
     assert_eq!(events(&f), ["done Unprivate detail=false"]);
+}
+
+/// Change 7, merged, which bob may revert and cherry-pick.
+fn merged() -> ChangeDetail {
+    let mut d = change();
+    d.summary.subject = "Fix the thing".into();
+    d.change_actions
+        .insert("revert".into(), act("Revert", true, None));
+    d
+}
+
+/// What the server answers to a revert or cherry-pick: the new change 12.
+const NEW_CHANGE: &str = concat!(
+    ")]}'\n",
+    r#"{"_number":12,"project":"p","branch":"stable","subject":"Revert","status":"NEW","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000"}"#
+);
+
+/// Change 7 with its current revision, as a re-fetch returns it.
+const WITH_REVISION: &str = concat!(
+    ")]}'\n",
+    r#"{"_number":7,"project":"p","branch":"main","subject":"s","status":"MERGED","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000","current_revision":"sha3","revisions":{"sha3":{"_number":3,"actions":{"cherrypick":{"method":"POST","label":"Cherry Pick","enabled":true}}}}}"#
+);
+
+#[gpui_kit::test]
+fn revert_asks_for_a_prefilled_message_and_opens_the_new_change(cx: &mut TestAppContext) {
+    let f = dialog(cx, merged(), |http| {
+        http.route("POST /a/changes/7/revert", 200, NEW_CHANGE);
+        http.route("GET /a/changes/12?", 200, NEW_CHANGE);
+        http.route("GET /a/changes/7?", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["e"]);
+    assert_eq!(step(cx, &f), "Confirm(Revert)");
+    let text = cx.update(|cx| f.dialog.read(cx).commit_message_for_test(cx));
+    assert_eq!(
+        text,
+        "Revert \"Fix the thing\"\n\nThis reverts commit sha3.\n\nReason for revert: "
+    );
+    // The cursor is at the end: the reason is typed right there.
+    type_text(cx, &f, "it broke the build");
+    press(cx, &f, &[CONFIRM]);
+    assert_eq!(writes(&f), ["POST /a/changes/7/revert"]);
+    assert_eq!(
+        body_of(&f, "/changes/7/revert"),
+        json!({"message": "Revert \"Fix the thing\"\n\nThis reverts commit sha3.\n\nReason for revert: it broke the build"})
+    );
+    assert_eq!(events(&f), ["done Revert detail=true opened=#12"]);
+}
+
+#[gpui_kit::test]
+fn revert_is_hidden_without_the_action_and_greyed_with_the_servers_title(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |_| {});
+    press(cx, &f, &["e"]);
+    assert_eq!(step(cx, &f), "Menu");
+    let mut d = merged();
+    d.change_actions.insert(
+        "revert".into(),
+        act("Revert", false, Some("Change is not merged")),
+    );
+    let entry = menu_entries(&d)
+        .into_iter()
+        .find(|e| e.kind == Kind::Revert)
+        .expect("revert");
+    assert!(!entry.enabled);
+    assert_eq!(entry.reason.as_deref(), Some("Change is not merged"));
+    let f = dialog(cx, d, |_| {});
+    press(cx, &f, &["e"]);
+    assert_eq!(step(cx, &f), "Menu");
+    assert!(writes(&f).is_empty());
+}
+
+#[gpui_kit::test]
+fn cherry_pick_needs_a_branch_and_sends_the_message(cx: &mut TestAppContext) {
+    let f = dialog(cx, merged(), |http| {
+        http.route(
+            "POST /a/changes/7/revisions/sha3/cherrypick",
+            200,
+            NEW_CHANGE,
+        );
+        http.route("GET /a/changes/12?", 200, NEW_CHANGE);
+        http.route("GET /a/changes/7?", 200, CHANGE_OK);
+    });
+    press(cx, &f, &["c"]);
+    assert_eq!(step(cx, &f), "Confirm(CherryPick)");
+    let text = cx.update(|cx| f.dialog.read(cx).commit_message_for_test(cx));
+    assert_eq!(text, "Subject\n\nBody of the message");
+    // No branch: nothing is sent.
+    press(cx, &f, &[CONFIRM]);
+    assert!(writes(&f).is_empty());
+    assert_eq!(
+        error(cx, &f).as_deref(),
+        Some("Enter the branch to cherry-pick to.")
+    );
+    type_text(cx, &f, "stable-1.0");
+    press(cx, &f, &["enter"]);
+    assert_eq!(
+        body_of(&f, "/changes/7/revisions/sha3/cherrypick"),
+        json!({"destination": "stable-1.0", "message": "Subject\n\nBody of the message"})
+    );
+    assert_eq!(events(&f), ["done CherryPick detail=true opened=#12"]);
+}
+
+#[gpui_kit::test]
+fn a_cherry_pick_conflict_or_bad_branch_keeps_the_step_with_the_servers_text(
+    cx: &mut TestAppContext,
+) {
+    let f = dialog(cx, merged(), |http| {
+        http.route(
+            "POST /a/changes/7/revisions/sha3/cherrypick",
+            409,
+            "Cherry pick failed: merge conflict in a.rs\n",
+        );
+        http.route("GET /a/changes/7?", 200, WITH_REVISION);
+    });
+    press(cx, &f, &["c"]);
+    type_text(cx, &f, "stable");
+    press(cx, &f, &[CONFIRM]);
+    assert_eq!(step(cx, &f), "Confirm(CherryPick)");
+    assert_eq!(
+        error(cx, &f).as_deref(),
+        Some("Not cherry-picked: Cherry pick failed: merge conflict in a.rs")
+    );
+    assert!(events(&f).iter().all(|e| e.starts_with("refreshed")));
+    f.http.route(
+        "POST /a/changes/7/revisions/sha3/cherrypick",
+        400,
+        "Branch nope not found\n",
+    );
+    press(cx, &f, &[CONFIRM]);
+    assert_eq!(
+        error(cx, &f).as_deref(),
+        Some("Not cherry-picked: Branch nope not found")
+    );
+    // Esc goes back to the menu; what was typed stays when coming back.
+    press(cx, &f, &["escape", "c"]);
+    assert_eq!(step(cx, &f), "Confirm(CherryPick)");
+    assert_eq!(error(cx, &f), None);
 }
 
 #[gpui_kit::test]
@@ -772,6 +913,33 @@ mod in_the_shell {
         // The page has the focus again: its keys work (`a` is the reply).
         press(cx, window, "a");
         cx.update(|cx| assert!(shell.read(cx).reply_for_test().is_some()));
+    }
+
+    #[gpui_kit::test]
+    fn a_revert_opens_the_new_change_and_says_so(cx: &mut TestAppContext) {
+        let http = gerrit_api::fake::RouteHttpClient::new();
+        http.route("POST /a/changes/7/revert", 200, super::NEW_CHANGE);
+        http.route("GET /a/changes/12?", 200, super::NEW_CHANGE);
+        http.route(
+            "GET /a/changes/7?",
+            200,
+            concat!(
+                ")]}'\n",
+                r#"{"_number":7,"project":"p","branch":"main","subject":"s","status":"MERGED","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000","current_revision":"sha3","revisions":{"sha3":{"_number":3}},"actions":{"revert":{"method":"POST","label":"Revert","enabled":true}}}"#
+            ),
+        );
+        let (window, shell) = on_the_change(cx, Some("bob"), super::merged(), &http);
+        press(cx, window, "m");
+        press(cx, window, "e");
+        press(cx, window, super::CONFIRM);
+        cx.update(|cx| {
+            assert!(shell.read(cx).menu_for_test().is_none());
+            assert_eq!(shell.read(cx).route(), &Route::Change(ChangeNumber(12)));
+        });
+        assert_eq!(
+            hint(cx, &shell).map(|h| h.0).as_deref(),
+            Some("Revert created as change #12")
+        );
     }
 
     #[gpui_kit::test]

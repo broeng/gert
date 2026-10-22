@@ -1208,6 +1208,12 @@ impl ChangePage {
         self.hint.say(done.note(), false, cx, |p| &mut p.hint);
     }
 
+    /// A note under the header, for the shell after it opened the page.
+    pub fn say(&mut self, note: String, cx: &mut Context<Self>) {
+        self.hint.say(note, false, cx, |p| &mut p.hint);
+        cx.notify();
+    }
+
     /// The server refused an action and the change was fetched again: show
     /// it as it is now, without a note (the dialog shows the error).
     pub fn detail_refreshed(&mut self, detail: &ChangeDetail, cx: &mut Context<Self>) {

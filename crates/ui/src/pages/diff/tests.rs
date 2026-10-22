@@ -846,7 +846,11 @@ fn done(
     kind: crate::action_menu::Kind,
     detail: Option<model::ChangeDetail>,
 ) -> crate::action_menu::Done {
-    crate::action_menu::Done { kind, detail }
+    crate::action_menu::Done {
+        kind,
+        detail,
+        opened: None,
+    }
 }
 
 #[gpui_kit::test]
