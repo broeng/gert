@@ -1208,6 +1208,15 @@ impl ChangePage {
         self.hint.say(done.note(), false, cx, |p| &mut p.hint);
     }
 
+    /// The server refused an action and the change was fetched again: show
+    /// it as it is now, without a note (the dialog shows the error).
+    pub fn detail_refreshed(&mut self, detail: &ChangeDetail, cx: &mut Context<Self>) {
+        self.detail = Some(detail.clone());
+        self.fetched_at = Some(Timestamp::now());
+        self.apply_selection(true, cx);
+        cx.notify();
+    }
+
     /// `r`: marks the file under the cursor reviewed, or clears the mark.
     /// The mark changes on screen at once; if the request fails it goes
     /// back and a note says why.

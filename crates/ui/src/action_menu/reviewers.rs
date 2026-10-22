@@ -170,7 +170,7 @@ impl ActionDialog {
         cx.notify();
     }
 
-    fn sync_rows(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_rows(&mut self, cx: &mut Context<Self>) {
         let n = people(&self.detail).len();
         self.rev.rows = (0..n).map(|_| cx.focus_handle()).collect();
     }

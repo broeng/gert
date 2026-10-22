@@ -105,6 +105,7 @@ fn dialog(
             let text = match ev {
                 ActionEvent::Close => "close".to_owned(),
                 ActionEvent::Unauthorized => "unauthorized".to_owned(),
+                ActionEvent::Refreshed(d) => format!("refreshed {:?}", d.summary.status),
                 ActionEvent::Done(d) => {
                     format!("done {:?} detail={}", d.kind, d.detail.is_some())
                 }
@@ -486,6 +487,63 @@ fn a_server_that_cannot_be_reached_says_nothing_was_done(cx: &mut TestAppContext
     assert_eq!(step(cx, &f), "Confirm(Submit)");
 }
 
+const MERGED_JSON: &str = r#"{"_number":7,"project":"p","branch":"main","subject":"s","status":"MERGED","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000"}"#;
+
+#[gpui_kit::test]
+fn a_refused_action_fetches_the_change_and_shows_its_state(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 409, "change is merged\n");
+        http.route_json("GET /a/changes/7?", MERGED_JSON);
+    });
+    press(cx, &f, &["s", CONFIRM]);
+    // The step stays open with the error, and the page is told the state.
+    assert_eq!(step(cx, &f), "Confirm(Submit)");
+    assert_eq!(
+        error(cx, &f).as_deref(),
+        Some("Not submitted: change is merged")
+    );
+    assert_eq!(events(&f), ["refreshed Merged"]);
+    assert_eq!(
+        cx.update(|cx| f.dialog.read(cx).detail_for_test().summary.status.clone()),
+        model::ChangeStatus::Merged
+    );
+    // The menu no longer offers what the server does not.
+    press(cx, &f, &["escape"]);
+    press(cx, &f, &["s"]);
+    assert_eq!(step(cx, &f), "Menu");
+}
+
+#[gpui_kit::test]
+fn a_403_on_a_reviewer_edit_fetches_the_change_too(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("DELETE /a/changes/7/reviewers/2", 403, "no\n");
+        http.route_json("GET /a/changes/7?", MERGED_JSON);
+    });
+    press(cx, &f, &["v", "tab", "delete"]);
+    assert_eq!(step(cx, &f), "Reviewers");
+    assert_eq!(events(&f), ["refreshed Merged"]);
+    // Bob is not on the change the server has.
+    assert!(cx.update(|cx| f.dialog.read(cx).detail_for_test().reviewers.is_empty()));
+}
+
+#[gpui_kit::test]
+fn an_unreachable_server_or_a_401_fetches_nothing(cx: &mut TestAppContext) {
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 503, "down");
+        http.route_json("GET /a/changes/7?", MERGED_JSON);
+    });
+    press(cx, &f, &["s", CONFIRM]);
+    assert!(events(&f).is_empty());
+    assert!(f.http.requested().iter().all(|r| !r.starts_with("GET")));
+    let f = dialog(cx, change(), |http| {
+        http.route("POST /a/changes/7/submit", 401, "");
+        http.route_json("GET /a/changes/7?", MERGED_JSON);
+    });
+    press(cx, &f, &["s", CONFIRM]);
+    assert_eq!(events(&f), ["unauthorized"]);
+    assert!(f.http.requested().iter().all(|r| !r.starts_with("GET")));
+}
+
 #[gpui_kit::test]
 fn escape_does_not_cancel_a_running_action(cx: &mut TestAppContext) {
     let f = dialog(cx, change(), |http| {
@@ -667,6 +725,26 @@ mod in_the_shell {
             let d = page.read(cx).detail().expect("detail");
             assert_eq!(d.summary.subject, "Rebased subject");
             assert_eq!(d.current_patch_set.map(|p| p.0), Some(4));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_action_keeps_the_menu_and_the_page_follows_the_server(cx: &mut TestAppContext) {
+        let http = gerrit_api::fake::RouteHttpClient::new();
+        http.route_json("GET /a/changes/7?", BEFORE);
+        http.route("POST /a/changes/7/rebase", 409, "change is not open\n");
+        let (window, shell) = on_the_change(cx, Some("bob"), change(), &http);
+        press(cx, window, "m");
+        press(cx, window, "b");
+        http.route_json("GET /a/changes/7?", AFTER);
+        press(cx, window, super::CONFIRM);
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_some()));
+        let page = cx
+            .update(|cx| shell.read(cx).change_page_for_test())
+            .expect("page");
+        cx.update(|cx| {
+            let d = page.read(cx).detail().expect("detail");
+            assert_eq!(d.summary.subject, "Rebased subject");
         });
     }
 

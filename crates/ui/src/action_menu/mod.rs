@@ -67,6 +67,9 @@ pub enum ActionEvent {
     Unauthorized,
     /// The server did it.
     Done(Box<Done>),
+    /// The server refused an action and the change was fetched again: this
+    /// is how the server has it now. The dialog stays open.
+    Refreshed(Box<ChangeDetail>),
 }
 
 /// The outcome of an action the server accepted.
@@ -676,13 +679,20 @@ impl ActionDialog {
         self.base.update(cx, |i, cx| i.set_disabled(true, cx));
         cx.notify();
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
+            let (result, fresh) = cx
                 .background_spawn(async move {
-                    kind.send(&syncer, change, message.as_deref(), base.as_deref())
-                        .await
+                    let result = kind
+                        .send(&syncer, change, message.as_deref(), base.as_deref())
+                        .await;
+                    // A refusal means our picture of the change is stale.
+                    let fresh = match &result {
+                        Err(e) => syncer.refresh_after_refusal(change, e).await,
+                        Ok(_) => None,
+                    };
+                    (result, fresh)
                 })
                 .await;
-            this.update(cx, |this, cx| this.finished(kind, from, result, cx))
+            this.update(cx, |this, cx| this.finished(kind, from, result, fresh, cx))
                 .ok();
         }));
     }
@@ -692,6 +702,7 @@ impl ActionDialog {
         kind: Kind,
         from: Step,
         result: Result<Option<ChangeDetail>, sync::Error>,
+        fresh: Option<ChangeDetail>,
         cx: &mut Context<Self>,
     ) {
         self.message.update(cx, |i, cx| i.set_disabled(false, cx));
@@ -702,12 +713,28 @@ impl ActionDialog {
             Err(e) => {
                 self.step = from;
                 self.error = Some(describe(kind, &e));
+                self.take_fresh(fresh, cx);
                 if let Step::Confirm(_) = from {
                     self.pending_focus = Some(self.confirm_focus.clone());
                 }
             }
         }
         cx.notify();
+    }
+
+    /// The server refused something and we fetched the change again: show
+    /// the menu (what is offered, with the reasons) and the reviewers list
+    /// from that, and tell the page.
+    pub(super) fn take_fresh(&mut self, fresh: Option<ChangeDetail>, cx: &mut Context<Self>) {
+        let Some(detail) = fresh else { return };
+        let kind = self.entries.get(self.selected).map(|e| e.kind);
+        self.entries = menu_entries(&detail);
+        self.selected = kind
+            .and_then(|k| self.entries.iter().position(|e| e.kind == k))
+            .unwrap_or(0);
+        self.detail = detail.clone();
+        self.sync_rows(cx);
+        cx.emit(ActionEvent::Refreshed(Box::new(detail)));
     }
 
     // ---- test access ----

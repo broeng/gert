@@ -683,6 +683,11 @@ impl Shell {
                 ActionEvent::Close => this.close_menu(window, cx),
                 ActionEvent::Unauthorized => this.unauthorized(window, cx),
                 ActionEvent::Done(done) => this.action_done(done, window, cx),
+                ActionEvent::Refreshed(detail) => {
+                    if let Page::Change(p) = &this.page {
+                        p.update(cx, |p, cx| p.detail_refreshed(detail, cx));
+                    }
+                }
             },
         ));
         self.menu = Some(dialog);
