@@ -516,7 +516,10 @@ impl ChangePage {
                         .rounded_md()
                         .border_1()
                         .border_color(theme.border)
-                        .bg(theme.background)
+                        // Set off from the columns beside it, which sit on
+                        // the page background.
+                        .bg(theme.secondary)
+                        .text_color(theme.secondary_foreground)
                         .font_family(theme.mono_font_family.clone())
                         .text_sm()
                         .children(lines_of(
