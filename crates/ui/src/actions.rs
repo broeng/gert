@@ -129,7 +129,7 @@ pub const SEARCH_BAR: &str = "SearchBar";
 
 // Single-letter bindings must not fire while text is being typed; the text
 // input marks its key context "Input".
-const SHELL_KEYS: &str = "Shell && !Input && !ReplyDialog && !ActionDialog";
+const SHELL_KEYS: &str = "Shell && !Input && !ReplyDialog && !ActionDialog && !FiltersDialog";
 const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
 const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
@@ -141,7 +141,7 @@ const SETTINGS_EDIT: &str = "SettingsPage && Editing";
 /// the reply dialog's fields).
 const SETTINGS_FIELD: &str = "Editing > Input";
 /// Opening the settings works from anywhere but the modal dialogs.
-const SETTINGS_OPEN: &str = "Shell && !ReplyDialog && !ActionDialog";
+const SETTINGS_OPEN: &str = "Shell && !ReplyDialog && !ActionDialog && !FiltersDialog";
 
 /// All shell-level and list entries (what the help overlay called
 /// "everything" before the pages grew their own).
@@ -170,6 +170,10 @@ pub fn help_groups() -> Vec<HelpGroup> {
         g(
             "Change actions ( M )",
             crate::action_menu::actions::entries(),
+        ),
+        g(
+            "Manage filters ( F M )",
+            crate::filters_dialog::actions::entries(),
         ),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
     ]
@@ -715,6 +719,7 @@ mod tests {
             .chain(crate::diff::actions::editor_entries())
             .chain(crate::reply::actions::entries())
             .chain(crate::action_menu::actions::entries())
+            .chain(crate::filters_dialog::actions::entries())
             .collect()
     }
 
