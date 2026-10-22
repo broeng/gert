@@ -337,3 +337,41 @@ fn offline_drafts_sync_publish_and_reviewed_marks() {
     assert!(c.cached_comments(n).unwrap().drafts.is_empty());
     assert_eq!(block_on(c.retry_pending_drafts()).unwrap().synced, 0);
 }
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn actions_refresh_the_cached_change() {
+    let f = alice();
+    let c = &f.syncer;
+    let n = new_change();
+    block_on(c.refresh_change(n)).expect("detail");
+
+    let d = block_on(c.abandon(n, Some("not needed")))
+        .expect("abandon")
+        .expect("refreshed");
+    assert_eq!(d.summary.status, model::ChangeStatus::Abandoned);
+    assert!(d.action("restore").is_some_and(|a| a.enabled));
+    // The store has it too, including the list row.
+    assert_eq!(c.cached_change(n).unwrap().unwrap().detail, d);
+
+    // A refused action leaves the cache as it was.
+    let err = block_on(c.abandon(n, None)).unwrap_err();
+    assert!(!err.is_unauthorized(), "{err}");
+    assert_eq!(c.cached_change(n).unwrap().unwrap().detail, d);
+
+    let d = block_on(c.restore(n, None)).unwrap().unwrap();
+    assert_eq!(d.summary.status, model::ChangeStatus::New);
+
+    let d = block_on(c.set_work_in_progress(n, true, None))
+        .unwrap()
+        .unwrap();
+    assert!(d.summary.work_in_progress && d.action("ready").is_some());
+    let d = block_on(c.set_work_in_progress(n, false, None))
+        .unwrap()
+        .unwrap();
+    assert!(!d.summary.work_in_progress);
+    let d = block_on(c.set_private(n, true)).unwrap().unwrap();
+    assert!(d.summary.is_private);
+    let d = block_on(c.set_private(n, false)).unwrap().unwrap();
+    assert!(!d.summary.is_private);
+}
