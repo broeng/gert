@@ -20,6 +20,13 @@
 //! as comments, adds a change message and moves the attention set; the
 //! reviewed marks (`r`) are kept too. With `--drafts fail` or `offline` the
 //! review is refused (403) or not reachable (503), as the draft writes are.
+//!
+//! The change actions menu (`m`) works too. The change carries `actions`
+//! for alice: submit (the server answers 409 until Code-Review is +2),
+//! rebase (it succeeds once and is greyed out afterwards), abandon and
+//! restore, WIP and ready, private and not private. Each POST changes the
+//! change and adds a message to its log; `--drafts fail` refuses them (403)
+//! and `offline` cannot reach the server (503).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -221,6 +228,11 @@ struct DraftState {
     messages: Vec<serde_json::Value>,
     /// Files of patch set 3 that alice marked reviewed.
     reviewed: BTreeSet<String>,
+    /// The change as alice's actions left it.
+    status: &'static str,
+    wip: bool,
+    private: bool,
+    rebased: bool,
 }
 
 const ALICE: u64 = 1_000_001;
@@ -297,6 +309,10 @@ impl DraftServer {
                     .into_iter()
                     .map(str::to_owned)
                     .collect(),
+                status: "NEW",
+                wip: false,
+                private: false,
+                rebased: false,
             }),
         }
     }
@@ -395,7 +411,107 @@ impl DraftServer {
                 }
             });
         }
+        // The change actions: `POST /changes/12345/{submit,rebase,...}`.
+        if let Some(action) = path.strip_prefix("/a/changes/12345/")
+            && matches!(
+                action,
+                "submit" | "rebase" | "abandon" | "restore" | "wip" | "ready" | "private"
+            )
+            && matches!(method, http::Method::POST | http::Method::DELETE)
+        {
+            return Some(match self.mode {
+                Drafts::Offline => Self::reply(503, b"unavailable".to_vec()),
+                Drafts::Fail => Self::reply(403, b"not allowed".to_vec()),
+                Drafts::Ok => {
+                    let body: Value = serde_json::from_slice(req.body()).unwrap_or(Value::Null);
+                    let delete = method == http::Method::DELETE;
+                    match Self::post_action(&mut state, action, delete, &body) {
+                        Ok(()) => {
+                            let mut c = self.change.clone();
+                            Self::apply_to_change(&mut c, &state);
+                            // The three that answer with a body send the
+                            // change; the rest answer with nothing.
+                            if matches!(action, "submit" | "rebase" | "abandon" | "restore") {
+                                Self::json(200, &c)
+                            } else {
+                                Self::reply(200, Vec::new())
+                            }
+                        }
+                        Err(message) => Self::reply(409, message.into_bytes()),
+                    }
+                }
+            });
+        }
         None
+    }
+
+    /// What alice's action does to the change, or why the server refuses.
+    fn post_action(
+        state: &mut DraftState,
+        action: &str,
+        delete: bool,
+        body: &serde_json::Value,
+    ) -> Result<(), String> {
+        use serde_json::json;
+        if state.status == "MERGED" {
+            return Err("change is merged".to_owned());
+        }
+        let note = body["message"].as_str().map(str::to_owned);
+        let text = match action {
+            "submit" => {
+                if state.votes.get("Code-Review") != Some(&2) {
+                    return Err("submit requirement 'Code-Review' is unsatisfied".to_owned());
+                }
+                state.status = "MERGED";
+                "Change has been successfully merged".to_owned()
+            }
+            "rebase" => {
+                if state.rebased {
+                    return Err("Change is already up to date.".to_owned());
+                }
+                state.rebased = true;
+                "Patch Set 3: Patch Set 3 was rebased".to_owned()
+            }
+            "abandon" => {
+                state.status = "ABANDONED";
+                "Abandoned".to_owned()
+            }
+            "restore" => {
+                if state.status != "ABANDONED" {
+                    return Err("change is not abandoned".to_owned());
+                }
+                state.status = "NEW";
+                "Restored".to_owned()
+            }
+            "wip" => {
+                state.wip = true;
+                "Set Work In Progress".to_owned()
+            }
+            "ready" => {
+                state.wip = false;
+                "Set Ready For Review".to_owned()
+            }
+            _ => {
+                state.private = !delete;
+                state.messages.push(json!({
+                    "id": format!("act-{}", state.messages.len()),
+                    "author": person(ALICE), "date": "2024-06-15 12:30:00.000000000",
+                    "message": if delete { "Set public" } else { "Set private" },
+                    "_revision_number": 3,
+                }));
+                return Ok(());
+            }
+        };
+        let text = match note {
+            Some(n) => format!("{text}\n\n{n}"),
+            None => text,
+        };
+        state.messages.push(json!({
+            "id": format!("act-{}", state.messages.len()),
+            "author": person(ALICE), "date": "2024-06-15 12:30:00.000000000",
+            "message": text, "_revision_number": 3,
+        }));
+        Ok(())
     }
 
     /// The labels alice may vote on and the values they have.
@@ -443,6 +559,50 @@ impl DraftServer {
             );
         }
         c["attention_set"] = set.into();
+        c["status"] = state.status.into();
+        c["work_in_progress"] = state.wip.into();
+        c["is_private"] = state.private.into();
+        // What alice may do now (Gerrit leaves out `enabled` when false).
+        let act = |label: &str| json!({"method": "POST", "label": label, "enabled": true});
+        let mut change_actions = serde_json::Map::new();
+        let mut revision_actions = serde_json::Map::new();
+        match state.status {
+            "NEW" => {
+                change_actions.insert("abandon".into(), act("Abandon"));
+                if state.wip {
+                    change_actions.insert("ready".into(), act("Ready"));
+                } else {
+                    change_actions.insert("wip".into(), act("WIP"));
+                    revision_actions.insert("submit".into(), act("Submit"));
+                }
+                revision_actions.insert(
+                    "rebase".into(),
+                    if state.rebased {
+                        json!({"method": "POST", "label": "Rebase",
+                            "title": "Change is already up to date"})
+                    } else {
+                        act("Rebase")
+                    },
+                );
+            }
+            "ABANDONED" => {
+                change_actions.insert("restore".into(), act("Restore"));
+            }
+            _ => {}
+        }
+        if state.status != "MERGED" {
+            if state.private {
+                change_actions.insert("private.delete".into(), act("Unmark private"));
+            } else {
+                change_actions.insert("private".into(), act("Mark private"));
+            }
+        }
+        c["actions"] = change_actions.into();
+        if let Some(rev) =
+            c["revisions"]["3333333333333333333333333333333333333333"].as_object_mut()
+        {
+            rev.insert("actions".into(), revision_actions.into());
+        }
         if let Some(messages) = c["messages"].as_array_mut() {
             messages.extend(state.messages.iter().cloned());
         }
