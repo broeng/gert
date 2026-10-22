@@ -18,6 +18,7 @@
 //! scrolling inside beyond that). Clicking into an inline diff focuses it,
 //! and its own keys apply until `Esc` hands the focus back.
 
+mod quick_vote;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -156,6 +157,8 @@ pub struct ChangePage {
     task: Option<Task<()>>,
     files_task: Option<Task<()>>,
     related_task: Option<Task<()>>,
+    /// A quick vote is on its way.
+    voting: Option<Task<()>>,
     /// The change's comment threads, shown in the inline diffs.
     comments: Entity<ChangeComments>,
     outbox: Entity<DraftOutbox>,
@@ -235,6 +238,7 @@ impl ChangePage {
             task: None,
             files_task: None,
             related_task: None,
+            voting: None,
             comments: comments.clone(),
             outbox,
             threads: Arc::default(),
@@ -392,6 +396,11 @@ impl ChangePage {
     #[cfg(test)]
     pub(crate) fn is_reviewed_for_test(&self, path: &str) -> bool {
         self.files.reviewed.contains(path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quick_buttons_for_test(&self) -> Vec<crate::reply::plan::QuickButton> {
+        self.quick_buttons()
     }
 
     #[cfg(test)]
@@ -1205,9 +1214,17 @@ impl ChangePage {
     /// A review was posted from the dialog: take the change as the server
     /// has it now (votes, attention set, log) and say so.
     pub fn reply_sent(&mut self, sent: &reply::Sent, cx: &mut Context<Self>) {
-        match &sent.detail {
+        self.take_detail(sent.detail.clone(), cx);
+        let (note, warning) = sent.note();
+        self.hint.say(note, warning, cx, |p| &mut p.hint);
+    }
+
+    /// Takes the change as the server has it after a write, or fetches it
+    /// again if that failed.
+    fn take_detail(&mut self, detail: Option<ChangeDetail>, cx: &mut Context<Self>) {
+        match detail {
             Some(d) => {
-                self.detail = Some(d.clone());
+                self.detail = Some(d);
                 self.fetched_at = Some(Timestamp::now());
                 self.apply_selection(true, cx);
             }
@@ -1216,8 +1233,6 @@ impl ChangePage {
                 self.tick(cx);
             }
         }
-        let (note, warning) = sent.note();
-        self.hint.say(note, warning, cx, |p| &mut p.hint);
     }
 
     /// `m`: asks the shell for the change action menu.

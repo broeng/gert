@@ -810,6 +810,41 @@ fn publish_a_review_with_a_vote_and_drafts() {
     assert!(!threads[0].is_unresolved());
 }
 
+/// What a quick vote in the UI sends: one label, no message, drafts kept.
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn a_label_only_review_with_drafts_kept_votes_and_leaves_the_drafts() {
+    use model::{DraftHandling, ReviewInput};
+    let bob = user("bob");
+    let (n, rev) = new_change("quick-vote");
+    block_on(bob.create_draft(n, &rev, &line_draft("Not yet published"))).expect("draft");
+
+    let mut review = ReviewInput::default();
+    review.labels.insert("Code-Review".into(), 2);
+    review.drafts = DraftHandling::Keep;
+    let result = block_on(bob.post_review(n, &rev, &review)).expect("review");
+    assert_eq!(result.labels.get("Code-Review"), Some(&2));
+    assert!(result.error.is_none());
+    assert!(review.unapplied_labels(&result).is_empty());
+
+    // The draft is still a draft, and no comment was published.
+    assert_eq!(block_on(bob.get_drafts(n)).unwrap().len(), 1);
+    assert!(block_on(bob.get_comments(n)).unwrap().is_empty());
+    // The vote is there; the change log has no message of bob's.
+    let detail = block_on(bob.get_change(n)).unwrap();
+    assert!(
+        detail.votes["Code-Review"]
+            .iter()
+            .any(|v| v.value == 2 && v.account.username.as_deref() == Some("bob"))
+    );
+    assert!(
+        detail
+            .messages
+            .iter()
+            .all(|m| !m.message.contains("Not yet published"))
+    );
+}
+
 #[test]
 #[ignore = "needs GERT_TEST_GERRIT"]
 fn review_errors_carry_the_servers_message() {

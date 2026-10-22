@@ -998,3 +998,179 @@ fn no_chain_no_panel(cx: &mut TestAppContext) {
     press(cx, &f, &["shift-l"]);
     assert!(!panel_shown(cx, &f));
 }
+
+// ---- quick votes ----
+
+const REVIEW: &str = "POST /changes/7/revisions/sha3/review";
+
+/// Change 7 as a reviewer "u" sees it: Code-Review and Verified may be
+/// voted on; in a chain of three where 7 is the middle (child 100, parent
+/// 102). `child` is the status of 100.
+fn voting_store(child: model::ChangeStatus) -> Store {
+    let mut store = seeded_with_chain_at(3, 1);
+    let mut d = detail(7, 3, 3);
+    d.permitted_labels = [
+        ("Code-Review".to_owned(), vec![-2, -1, 0, 1, 2]),
+        ("Verified".to_owned(), vec![-1, 0, 1]),
+    ]
+    .into();
+    store
+        .save_change_detail(ServerId(1), &d, ts())
+        .expect("detail");
+    let mut chain = store
+        .load_related(ServerId(1), ChangeNumber(7), &"sha3".into())
+        .expect("related")
+        .expect("cached")
+        .changes;
+    chain[0].status = Some(child);
+    store
+        .save_related(ServerId(1), ChangeNumber(7), &"sha3".into(), &chain, ts())
+        .expect("related");
+    store
+}
+
+fn voting_page(
+    cx: &mut TestAppContext,
+    child: model::ChangeStatus,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fixture {
+    let mut server = setup();
+    server.username = Some("u".into());
+    let auth = Auth::Basic {
+        username: "u".into(),
+        password: "p".into(),
+    };
+    page_in(
+        cx,
+        voting_store(child),
+        Some(auth),
+        server,
+        ChangeView::default(),
+        routes,
+    )
+}
+
+fn ok_review(http: &RouteHttpClient) {
+    http.route(REVIEW, 200, ")]}'\n{\"labels\":{\"Code-Review\":2}}");
+}
+
+fn reviews(f: &Fixture) -> Vec<serde_json::Value> {
+    f.http
+        .sent()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.target.contains("/review"))
+        .map(|r| serde_json::from_slice(&r.body).expect("a JSON body"))
+        .collect()
+}
+
+fn hint(cx: &mut TestAppContext, f: &Fixture) -> Option<(String, bool)> {
+    cx.update(|cx| f.page.read(cx).hint_for_test())
+}
+
+#[gpui_kit::test]
+fn shift_v_posts_the_first_vote_only_and_keeps_the_drafts(cx: &mut TestAppContext) {
+    let f = voting_page(cx, model::ChangeStatus::Merged, ok_review);
+    press(cx, &f, &["shift-v"]);
+    cx.run_until_parked();
+    let bodies = reviews(&f);
+    assert_eq!(bodies.len(), 1, "{:?}", f.http.sent());
+    assert_eq!(bodies[0]["labels"], serde_json::json!({"Code-Review": 2}));
+    assert_eq!(bodies[0]["drafts"], "KEEP");
+    assert!(bodies[0].get("message").is_none(), "{}", bodies[0]);
+    // The change is fetched again afterwards.
+    let seen = f.http.requested();
+    let at = seen
+        .iter()
+        .position(|r| r.ends_with("/review"))
+        .expect("sent");
+    assert!(
+        seen[at..].iter().any(|r| r.starts_with("/a/changes/7?")),
+        "{seen:?}"
+    );
+    // Merged child: stays and says so.
+    assert!(events(&f).is_empty(), "{:?}", events(&f));
+    assert_eq!(
+        hint(cx, &f),
+        Some(("Voted Code-Review +2".to_owned(), false))
+    );
+}
+
+#[gpui_kit::test]
+fn v_then_a_number_picks_that_button(cx: &mut TestAppContext) {
+    let f = voting_page(cx, model::ChangeStatus::Merged, |http| {
+        http.route(REVIEW, 200, ")]}'\n{\"labels\":{\"Verified\":1}}");
+    });
+    press(cx, &f, &["v", "2"]);
+    cx.run_until_parked();
+    let bodies = reviews(&f);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["labels"], serde_json::json!({"Verified": 1}));
+    // Out of range: a note, nothing sent.
+    press(cx, &f, &["v", "3"]);
+    cx.run_until_parked();
+    assert_eq!(reviews(&f).len(), 1);
+    let (note, error) = hint(cx, &f).expect("a note");
+    assert!(!error && note.contains("No such"), "{note}");
+}
+
+#[gpui_kit::test]
+fn the_buttons_follow_the_dialog_order_and_show_an_applied_vote(cx: &mut TestAppContext) {
+    let f = voting_page(cx, model::ChangeStatus::New, |_| {});
+    let texts = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            f.page
+                .read(cx)
+                .quick_buttons_for_test()
+                .into_iter()
+                .map(|b| (b.text(), b.applied))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        texts(cx),
+        [
+            ("Code-Review +2".to_owned(), false),
+            ("Verified +1".to_owned(), false)
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn no_quick_votes_for_anonymous_sessions(cx: &mut TestAppContext) {
+    let f = page(cx, true, ChangeView::default());
+    press(cx, &f, &["shift-v", "v", "1"]);
+    cx.run_until_parked();
+    assert!(reviews(&f).is_empty());
+    assert!(f.http.sent().iter().all(|r| r.method == "GET"));
+}
+
+#[gpui_kit::test]
+fn a_401_goes_to_the_login_flow_and_other_errors_are_noted(cx: &mut TestAppContext) {
+    let f = voting_page(cx, model::ChangeStatus::New, |http| {
+        http.route(REVIEW, 401, "");
+    });
+    press(cx, &f, &["shift-v"]);
+    cx.run_until_parked();
+    assert_eq!(events(&f), ["unauthorized"]);
+
+    let f = voting_page(cx, model::ChangeStatus::New, |http| {
+        http.route(REVIEW, 403, "not allowed to vote");
+    });
+    press(cx, &f, &["shift-v"]);
+    cx.run_until_parked();
+    let (note, error) = hint(cx, &f).expect("a note");
+    assert!(error && note.contains("not allowed to vote"), "{note}");
+    assert!(events(&f).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_second_vote_while_one_is_on_its_way_is_ignored(cx: &mut TestAppContext) {
+    let f = voting_page(cx, model::ChangeStatus::Merged, ok_review);
+    f.page.update(cx, |p, cx| {
+        p.quick_vote(0, cx);
+        p.quick_vote(0, cx);
+        p.quick_vote(1, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(reviews(&f).len(), 1);
+}

@@ -1,5 +1,6 @@
 //! Rendering of the change page blocks.
 
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -291,6 +292,30 @@ impl ChangePage {
             ChangeStatus::Abandoned => theme.muted_foreground,
             _ => theme.primary,
         };
+        let voting = self.voting();
+        let quick: Vec<_> = self
+            .quick_buttons()
+            .into_iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let key = match i {
+                    0 => "Shift-V".to_owned(),
+                    1..=8 => format!("v {}", i + 1),
+                    _ => String::new(),
+                };
+                let label = match (q.applied, key.is_empty()) {
+                    (true, _) => format!("\u{2713} {}", q.text()),
+                    (false, true) => q.text(),
+                    (false, false) => format!("{}  ({key})", q.text()),
+                };
+                Button::new(("quick-vote", i))
+                    .label(label)
+                    .small()
+                    .outline()
+                    .disabled(q.applied || voting)
+                    .on_click(cx.listener(move |this, _, _, cx| this.quick_vote(i, cx)))
+            })
+            .collect();
         let bar = h_flex()
             .w_full()
             .gap_2()
@@ -324,6 +349,7 @@ impl ChangePage {
                     .child(c.subject.clone()),
             )
             .child(div().flex_1())
+            .children(quick)
             .child(status);
         Some(bar.into_any_element())
     }
@@ -1195,6 +1221,7 @@ impl Render for ChangePage {
             .key_context(CHANGE_PAGE)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::refresh_now))
+            .on_action(cx.listener(Self::quick_vote_action))
             .on_action(cx.listener(Self::open_in_browser))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))
