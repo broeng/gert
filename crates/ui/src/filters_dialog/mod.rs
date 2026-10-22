@@ -500,6 +500,11 @@ impl FiltersDialog {
         self.set_kind(self.form.kind.step(1), cx);
     }
 
+    /// Space on the color field (Enter is gpui-kit's own).
+    fn color_open(&mut self, _: &ColorOpen, _: &mut Window, cx: &mut Context<Self>) {
+        self.picker.update(cx, |p, cx| p.toggle_open(cx));
+    }
+
     fn only_this_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(project) = self.project.clone() {
             self.projects
@@ -1057,6 +1062,7 @@ impl Render for FiltersDialog {
                     .on_action(cx.listener(Self::move_down))
                     .on_action(cx.listener(Self::move_up))
                     .on_action(cx.listener(Self::toggle_default))
+                    .on_action(cx.listener(Self::color_open))
                     .w(px(900.))
                     .h(px(600.))
                     .max_w_full()

@@ -36,6 +36,8 @@ actions!(
         /// Left / Right on the action: Hide, Dim, Highlight.
         ActionPrev,
         ActionNext,
+        /// Space on the color field: open or close the picker.
+        ColorOpen,
     ]
 );
 
@@ -52,6 +54,10 @@ pub const ACTION_GROUP: &str = "FilterActionGroup";
 /// this binding is as deep as the field's own (`Input`) and registered after
 /// it, so it wins.
 const IN_FIELD: &str = "FiltersDialog > Input";
+
+/// The color field itself (not the hex field in its popover, whose own
+/// context is the innermost).
+const COLOR_FIELD: &str = "FiltersDialog > ColorPicker";
 
 pub fn entries() -> Vec<Entry> {
     fn e(
@@ -152,6 +158,15 @@ pub fn entries() -> Vec<Entry> {
             "On the action: Hide, Dim or Highlight",
         ),
         e("", "right", ActionNext, ACTION_GROUP, ""),
+        // The color field opens on Enter by itself (gpui-kit binds that);
+        // Space does the same, like on the tick boxes.
+        e(
+            "Enter / Space",
+            "space",
+            ColorOpen,
+            COLOR_FIELD,
+            "On the color: open the picker",
+        ),
     ]
 }
 
