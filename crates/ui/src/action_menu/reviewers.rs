@@ -51,6 +51,19 @@ pub(super) struct Reviewers {
     pub unavailable: Option<String>,
     /// Empty the field in the next frame (`set_value` needs the window).
     pub clear_input: bool,
+    /// An edit started from a list row: the focus goes back to the list
+    /// when it is done, to this row.
+    pub list_focus: Option<ListFocus>,
+}
+
+/// Where the focus goes in the list after an edit started from it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ListFocus {
+    /// The row at this position, or the last one if the list got shorter
+    /// (after a removal: the row that moved up, else the one above).
+    Row(usize),
+    /// The row of this person (after a move between reviewers and CC).
+    Person(String),
 }
 
 impl Reviewers {
@@ -69,6 +82,7 @@ impl Reviewers {
             notice: None,
             unavailable: None,
             clear_input: false,
+            list_focus: None,
         }
     }
 
@@ -78,6 +92,23 @@ impl Reviewers {
         self.pending = None;
         self.task = None;
         self.unavailable = None;
+    }
+}
+
+impl Reviewers {
+    /// The row to focus after a list edit, if the edit started there and a
+    /// row is left.
+    pub(super) fn take_list_focus(&mut self, detail: &ChangeDetail) -> Option<FocusHandle> {
+        let target = self.list_focus.take()?;
+        let ix = match target {
+            ListFocus::Row(ix) => ix,
+            ListFocus::Person(id) => people(detail)
+                .iter()
+                .position(|(a, _)| a.id.to_string() == id)?,
+        };
+        self.rows
+            .get(ix.min(self.rows.len().checked_sub(1)?))
+            .cloned()
     }
 }
 
@@ -233,6 +264,7 @@ impl ActionDialog {
         if self.step != Step::Reviewers || self.running() {
             return;
         }
+        self.rev.list_focus = None;
         let typed = self.rev.input.read(cx).value().trim().to_owned();
         let input = match self.rev.suggestions.get(self.rev.selected) {
             Some(s) => s.reviewer_input(),
@@ -319,6 +351,7 @@ impl ActionDialog {
             return;
         }
         if let Some((a, _)) = self.person_at(ix) {
+            self.rev.list_focus = Some(ListFocus::Row(ix));
             self.run_edit(Edit::RemoveReviewer(a.id.to_string()), cx);
         }
     }
@@ -333,6 +366,7 @@ impl ActionDialog {
                 ReviewerState::Reviewer => ReviewerState::Cc,
                 ReviewerState::Cc => ReviewerState::Reviewer,
             };
+            self.rev.list_focus = Some(ListFocus::Person(a.id.to_string()));
             self.run_edit(
                 Edit::AddReviewer {
                     input: a.id.to_string(),

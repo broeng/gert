@@ -150,10 +150,14 @@ impl ActionDialog {
             .update(cx, |i, cx| i.set_disabled(disabled, cx));
     }
 
-    /// Puts the focus back in the step's text field.
+    /// Puts the focus back in the step's text field (the reviewers list, if
+    /// the edit was made there).
     pub(super) fn refocus_step(&mut self, cx: &App) {
         self.pending_focus = match self.step {
-            Step::Reviewers => Some(self.rev.input.read(cx).focus_handle(cx)),
+            Step::Reviewers => self
+                .rev
+                .take_list_focus(&self.detail)
+                .or_else(|| Some(self.rev.input.read(cx).focus_handle(cx))),
             Step::Topic => Some(self.tags.topic.read(cx).focus_handle(cx)),
             Step::Hashtags => Some(self.tags.add.read(cx).focus_handle(cx)),
             _ => None,

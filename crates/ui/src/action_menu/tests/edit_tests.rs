@@ -242,6 +242,73 @@ fn delete_on_a_listed_reviewer_removes_it(cx: &mut TestAppContext) {
     assert_eq!(events(&f), ["done Reviewers detail=true"]);
 }
 
+fn focused_row(cx: &mut TestAppContext, f: &Fx) -> Option<usize> {
+    cx.update_window(f.window, |_, w, cx| {
+        f.dialog.read(cx).focused_row_for_test(w)
+    })
+    .expect("window")
+}
+
+#[gpui_kit::test]
+fn the_list_keeps_the_focus_so_delete_can_repeat(cx: &mut TestAppContext) {
+    let f = reviewers_step(cx);
+    press(cx, &f, &["tab"]);
+    assert_eq!(focused_row(cx, &f), Some(0));
+    // The server's answer still lists two people: the focus stays on the
+    // row at the same position, so the next Delete needs no Tab.
+    press(cx, &f, &["delete"]);
+    assert_eq!(focused_row(cx, &f), Some(0));
+    press(cx, &f, &["delete"]);
+    assert_eq!(
+        writes(&f),
+        [
+            "DELETE /a/changes/7/reviewers/2",
+            "DELETE /a/changes/7/reviewers/2"
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn removing_the_last_row_focuses_the_one_above_and_the_last_person_the_field(
+    cx: &mut TestAppContext,
+) {
+    let mut two = change();
+    two.reviewers.push(crate::testing::account(4, "Dee"));
+    let f = dialog(cx, two, |http| {
+        http.route("DELETE /a/changes/7/reviewers/4", 204, "");
+        http.route("DELETE /a/changes/7/reviewers/2", 204, "");
+        // Dee is gone from the refreshed change.
+        http.route(
+            "GET /a/changes/7?",
+            200,
+            with_dee().replace(r#",{"_account_id":4,"name":"Dee"}"#, ""),
+        );
+    });
+    press(cx, &f, &["v", "tab", "tab"]);
+    assert_eq!(focused_row(cx, &f), Some(1));
+    press(cx, &f, &["delete"]);
+    // Only Bob is left: the focus moved up to him.
+    assert_eq!(focused_row(cx, &f), Some(0));
+    f.http.route(
+        "GET /a/changes/7?",
+        200,
+        with_dee().replace(
+            r#""reviewers":{"REVIEWER":[{"_account_id":2,"name":"Bob Reviewer"},{"_account_id":4,"name":"Dee"}]}"#,
+            r#""reviewers":{}"#,
+        ),
+    );
+    press(cx, &f, &["delete"]);
+    // Nobody is left: back to the field.
+    assert_eq!(focused_row(cx, &f), None);
+}
+
+#[gpui_kit::test]
+fn moving_a_person_keeps_the_focus_on_them(cx: &mut TestAppContext) {
+    let f = reviewers_step(cx);
+    press(cx, &f, &["tab", "enter"]);
+    assert_eq!(focused_row(cx, &f), Some(0));
+}
+
 #[gpui_kit::test]
 fn enter_on_a_listed_reviewer_moves_it_to_cc(cx: &mut TestAppContext) {
     let f = reviewers_step(cx);
