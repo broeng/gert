@@ -95,6 +95,7 @@ actions!(
         PrefsTabSize,
         PrefsShowTabs,
         PrefsIntraline,
+        PrefsSyntax,
     ]
 );
 
@@ -476,6 +477,11 @@ pub fn diff_prefs_entries() -> Vec<Entry> {
             "i",
             KeyBinding::new("i", PrefsIntraline, Some(k)),
             "Highlight changes within a line",
+        ),
+        e(
+            "y",
+            KeyBinding::new("y", PrefsSyntax, Some(k)),
+            "Syntax highlighting",
         ),
         e(
             "Esc or ,",

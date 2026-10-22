@@ -744,6 +744,13 @@ impl DiffPage {
         );
     }
 
+    fn prefs_syntax(&mut self, _: &PrefsSyntax, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_session(
+            |p, r| p.syntax_highlighting = Some(!r.syntax_highlighting),
+            cx,
+        );
+    }
+
     // ---- rendering ----
 
     fn path_label(&self) -> String {
@@ -963,6 +970,7 @@ impl DiffPage {
                 .on_action(cx.listener(Self::prefs_tab_size))
                 .on_action(cx.listener(Self::prefs_show_tabs))
                 .on_action(cx.listener(Self::prefs_intraline))
+                .on_action(cx.listener(Self::prefs_syntax))
                 .gap_0p5()
                 .p_3()
                 .rounded_lg()
@@ -1018,6 +1026,13 @@ impl DiffPage {
                     "Intraline changes",
                     on_off(p.intraline_difference),
                     |t, w, cx| t.prefs_intraline(&PrefsIntraline, w, cx),
+                ))
+                .child(row(
+                    "pref-syntax",
+                    "y",
+                    "Syntax highlighting",
+                    on_off(p.syntax_highlighting),
+                    |t, w, cx| t.prefs_syntax(&PrefsSyntax, w, cx),
                 ))
                 .child(
                     div()
