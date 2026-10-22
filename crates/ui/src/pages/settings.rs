@@ -1244,7 +1244,7 @@ impl Render for SettingsPage {
                     .child(
                         "j / k: select    Enter / e: edit    a: add    d: delete    \
                          Shift-J / Shift-K: move    Space: toggle    u: back to the dashboard    \
-                         (file filters: Enter / e / d open the dialog)",
+                         Filters: Enter / e / d: dialog",
                     ),
             )
     }
