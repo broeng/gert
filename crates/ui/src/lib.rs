@@ -23,6 +23,7 @@ mod row;
 mod session;
 mod settings;
 mod shell;
+mod syntax_cache;
 mod theme;
 mod time_fmt;
 mod tracker;
