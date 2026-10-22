@@ -13,7 +13,9 @@
 //!
 //! Most tests only read the seeded data. The write tests (drafts, reviews,
 //! reviewed marks) create a throwaway change of their own each time, so the
-//! seeded changes stay as the read tests expect them. Per `CLAUDE.md`, writes
+//! seeded changes stay as the read tests expect them. The action tests also
+//! do that; those that submit use `admin` (alice may not submit) and leave
+//! merged changes on `main`, each with a file name of its own. Per `CLAUDE.md`, writes
 //! may only go to a local dev Gerrit: every test refuses to run unless
 //! `GERT_TEST_GERRIT` points at 127.0.0.1 or localhost.
 
@@ -91,6 +93,14 @@ fn alice() -> GerritClient {
     })
 }
 
+/// The seeded administrator, the only user who may submit (`alice` may not).
+fn admin() -> GerritClient {
+    client_with(Auth::Basic {
+        username: "admin".into(),
+        password: "admin-dev-password".into(),
+    })
+}
+
 /// The number of the seeded change with this subject.
 fn find(c: &GerritClient, subject: &str) -> ChangeNumber {
     let q = format!("project:demo/scheduler subject:\"{subject}\"");
@@ -142,7 +152,7 @@ fn anonymous_and_authenticated() {
 #[ignore = "needs GERT_TEST_GERRIT"]
 fn query_lists_the_seeded_changes() {
     let c = alice();
-    let mut all = block_on(c.query_changes(&ChangeQuery::new("project:demo/scheduler").limit(50)))
+    let mut all = block_on(c.query_changes(&ChangeQuery::new("project:demo/scheduler").limit(500)))
         .expect("query");
     // The write tests add changes of their own; the seeded ones are 1-9.
     all.changes.retain(|ch| ch.number.0 <= 9);
@@ -422,6 +432,27 @@ fn raw(method: &str, path: &str, body: Option<serde_json::Value>) -> (u16, Strin
 /// that tests can comment and vote without touching the seeded data.
 /// Returns its number and the SHA of its (only) patch set.
 fn new_change(name: &str) -> (ChangeNumber, RevisionId) {
+    new_change_with(name, "line one\nline two\nline three\n")
+}
+
+/// Like [`new_change`], with the content of `probe.txt` given, so that two
+/// changes can conflict.
+fn new_change_with(name: &str, text: &str) -> (ChangeNumber, RevisionId) {
+    new_change_file(name, "probe.txt", text)
+}
+
+/// A file name that no other test (or earlier run) has used: merged changes
+/// stay on `main`, and the tests run in parallel.
+fn unique_file(name: &str) -> String {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{name}-{stamp}.txt")
+}
+
+/// Like [`new_change`], with the file and its content given.
+fn new_change_file(name: &str, file: &str, text: &str) -> (ChangeNumber, RevisionId) {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -437,11 +468,10 @@ fn new_change(name: &str) -> (ChangeNumber, RevisionId) {
     assert_eq!(code, 201, "{body}");
     let info: serde_json::Value = serde_json::from_str(body.trim_start_matches(")]}'")).unwrap();
     let n = info["_number"].as_u64().expect("number");
-    let content =
-        base64::engine::general_purpose::STANDARD.encode("line one\nline two\nline three\n");
+    let content = base64::engine::general_purpose::STANDARD.encode(text);
     let (code, body) = raw(
         "PUT",
-        &format!("/changes/{n}/edit/probe.txt"),
+        &format!("/changes/{n}/edit/{file}"),
         Some(serde_json::json!({"binary_content": format!("data:text/plain;base64,{content}")})),
     );
     assert_eq!(code, 204, "{body}");
@@ -852,4 +882,173 @@ fn reviewed_marks_toggle() {
         block_on(anon().set_reviewed(n, &rev, "probe.txt", true)),
         Err(Error::Unauthorized)
     ));
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn actions_are_read_and_abandon_restore_round_trips() {
+    let c = alice();
+    let (n, _) = new_change("abandon");
+    let d = block_on(c.get_change(n)).expect("detail");
+    println!("change actions: {:?}", d.change_actions);
+    println!("revision actions: {:?}", d.revision_actions);
+    assert!(d.action("abandon").is_some_and(|a| a.enabled));
+    assert!(d.action("restore").is_none());
+    // Up to date, so not rebasable. Alice has no submit permission, so the
+    // server does not list the action at all.
+    assert!(d.action("rebase").is_some_and(|a| !a.enabled));
+    assert!(d.action("submit").is_none());
+
+    let s = block_on(c.abandon(n, Some("not needed"))).expect("abandon");
+    assert_eq!(s.status, ChangeStatus::Abandoned);
+    let d = block_on(c.get_change(n)).expect("detail");
+    assert!(d.action("restore").is_some_and(|a| a.enabled));
+    assert!(d.action("abandon").is_none());
+    assert!(
+        d.messages.iter().any(|m| m.message.contains("not needed")),
+        "{:?}",
+        d.messages
+    );
+    // Abandoning twice is refused as a conflict.
+    assert!(matches!(
+        block_on(c.abandon(n, None)),
+        Err(Error::Conflict { .. })
+    ));
+
+    let s = block_on(c.restore(n, Some("needed again"))).expect("restore");
+    assert_eq!(s.status, ChangeStatus::New);
+    assert!(
+        block_on(c.get_change(n))
+            .unwrap()
+            .action("abandon")
+            .is_some()
+    );
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn wip_ready_and_private_toggle() {
+    let c = alice();
+    let (n, _) = new_change("wip");
+    block_on(c.set_work_in_progress(n, true, Some("not done"))).expect("wip");
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(d.summary.work_in_progress);
+    assert!(d.action("ready").is_some_and(|a| a.enabled));
+    block_on(c.set_work_in_progress(n, false, None)).expect("ready");
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(!d.summary.work_in_progress);
+    assert!(d.action("wip").is_some());
+
+    assert!(!d.summary.is_private);
+    block_on(c.set_private(n, true)).expect("private");
+    assert!(block_on(c.get_change(n)).unwrap().summary.is_private);
+    // Anonymous users cannot see a private change.
+    assert!(matches!(
+        block_on(anon().get_change(n)),
+        Err(Error::NotFound)
+    ));
+    block_on(c.set_private(n, false)).expect("not private");
+    assert!(!block_on(c.get_change(n)).unwrap().summary.is_private);
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn rebase_reports_noop_and_conflicts_and_works_otherwise() {
+    let c = alice();
+    // Nothing to do on a change that is based on the branch tip.
+    let file = unique_file("rebase-conflict");
+    let (a, _) = new_change_file("rebase a", &file, "from a\n");
+    match block_on(c.rebase(a, None)) {
+        Err(Error::Conflict { message }) => {
+            println!("no-op rebase: {message}");
+            assert!(message.to_lowercase().contains("up to date"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let ps_before = block_on(c.get_change(a)).unwrap().current_patch_set;
+
+    // Move the branch: submit another change that adds `probe.txt` too.
+    let (b, _) = new_change_file("rebase b", &file, "from b\n");
+    let admin = admin();
+    approve(&admin, b);
+    block_on(admin.submit(b)).expect("submit b");
+
+    // A adds the same file with other content: a conflict, reported with
+    // the server's message, and the change stays as it was.
+    match block_on(c.rebase(a, None)) {
+        Err(Error::Conflict { message }) => {
+            println!("conflicting rebase: {message}");
+            assert!(!message.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        block_on(c.get_change(a)).unwrap().current_patch_set,
+        ps_before
+    );
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn rebase_onto_a_moved_branch_makes_a_new_patch_set() {
+    let c = alice();
+    // Created before the branch moves, with a file nobody else touches.
+    let (a, _) = new_change_file("rebase clean", &unique_file("only-a"), "mine\n");
+    let admin = admin();
+    let (b, _) = new_change_file("rebase mover", &unique_file("mover"), "mover\n");
+    approve(&admin, b);
+    block_on(admin.submit(b)).expect("submit b");
+
+    let before = block_on(c.get_change(a)).unwrap();
+    assert!(before.action("rebase").is_some_and(|x| x.enabled));
+    let s = block_on(c.rebase(a, None)).expect("rebase");
+    assert_eq!(s.status, ChangeStatus::New);
+    let after = block_on(c.get_change(a)).unwrap();
+    assert_eq!(
+        after.current_patch_set.map(|p| p.0),
+        before.current_patch_set.map(|p| p.0 + 1)
+    );
+    assert_ne!(after.current_revision, before.current_revision);
+}
+
+/// Code-Review +2 (and Verified +1) from alice, so the change can be
+/// submitted.
+fn approve(c: &GerritClient, n: ChangeNumber) {
+    let sha = current_sha(c, n);
+    let mut review = model::ReviewInput::default();
+    review.labels.insert("Code-Review".into(), 2);
+    review.labels.insert("Verified".into(), 1);
+    block_on(c.post_review(n, &sha, &review)).expect("approve");
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn submit_needs_approval_then_merges() {
+    let (n, _) = new_change_file("submit", &unique_file("submit"), "to be merged\n");
+    let c = admin();
+    let d = block_on(c.get_change(n)).unwrap();
+    assert!(d.summary.submittable != Some(true));
+    println!("submit before approval: {:?}", d.action("submit"));
+    match block_on(c.submit(n)) {
+        Err(Error::Conflict { message }) => println!("not submittable: {message}"),
+        other => panic!("{other:?}"),
+    }
+    // Alice may neither see nor run it.
+    assert!(matches!(
+        block_on(alice().submit(n)),
+        Err(Error::Forbidden { .. })
+    ));
+    approve(&c, n);
+    let d = block_on(c.get_change(n)).unwrap();
+    assert_eq!(d.summary.submittable, Some(true));
+    assert!(d.action("submit").is_some_and(|a| a.enabled));
+    let s = block_on(c.submit(n)).expect("submit");
+    assert_eq!(s.status, ChangeStatus::Merged);
+    assert!(
+        block_on(c.get_change(n))
+            .unwrap()
+            .action("submit")
+            .is_none()
+    );
 }
