@@ -17,6 +17,7 @@ mod message;
 mod prefs;
 mod related;
 mod review;
+mod reviewer;
 mod revision;
 mod submit;
 mod thread;
@@ -45,6 +46,7 @@ pub use related::RelatedChange;
 pub use review::{
     AttentionSetInput, DraftHandling, LabelValue, NotifyHandling, ReviewInput, ReviewResult,
 };
+pub use reviewer::{AddReviewerResult, ReviewerState, SuggestedGroup, SuggestedReviewer};
 pub use revision::{Commit, CommitParent, GitPerson, PatchSetRef, Revision, RevisionKind};
 pub use submit::{ExpressionResult, ExpressionStatus, SubmitRequirement, SubmitRequirementStatus};
 pub use thread::{

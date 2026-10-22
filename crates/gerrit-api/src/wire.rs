@@ -412,6 +412,58 @@ pub(crate) struct RebaseInput {
     pub base: Option<String>,
 }
 
+/// `ReviewerInput`, the part we send.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct ReviewerInput {
+    pub reviewer: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed: Option<bool>,
+}
+
+/// `TopicInput`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct TopicInput {
+    pub topic: String,
+}
+
+/// `HashtagsInput`; empty lists are left out.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct HashtagsInput {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct GroupBaseInfo {
+    pub id: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct SuggestedReviewerInfo {
+    pub account: Option<AccountInfo>,
+    pub group: Option<GroupBaseInfo>,
+    pub count: Option<u32>,
+    pub confirm: Option<bool>,
+}
+
+/// `ReviewerResult` (the spec's name for what the docs call
+/// `AddReviewerResult`). `removed` is not read.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ReviewerResult {
+    pub input: Option<String>,
+    pub error: Option<String>,
+    pub confirm: Option<bool>,
+    pub reviewers: Option<Vec<AccountInfo>>,
+    pub ccs: Option<Vec<AccountInfo>>,
+}
+
 /// The part of `ReviewResult` we read.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
@@ -523,6 +575,9 @@ mod tests {
         conforms::<ContextLineInfo>(&spec, "ContextLineInfo");
         conforms::<CommentInfo>(&spec, "CommentInfo");
         conforms::<ReviewResult>(&spec, "ReviewResult");
+        conforms::<GroupBaseInfo>(&spec, "GroupBaseInfo");
+        conforms::<SuggestedReviewerInfo>(&spec, "SuggestedReviewerInfo");
+        conforms::<ReviewerResult>(&spec, "ReviewerResult");
         // The spec's schema omits the robot fields (see the struct).
         conforms_except::<RobotCommentInfo>(&spec, "RobotCommentInfo", &["robot_id"]);
     }
@@ -575,6 +630,19 @@ mod tests {
             base: Some("b".into()),
         };
         conforms_value(&spec, "RebaseInput", &rebase);
+        let reviewer = ReviewerInput {
+            reviewer: "r".into(),
+            state: "CC".into(),
+            confirmed: Some(true),
+        };
+        conforms_value(&spec, "ReviewerInput", &reviewer);
+        let topic = TopicInput { topic: "t".into() };
+        conforms_value(&spec, "TopicInput", &topic);
+        let tags = HashtagsInput {
+            add: vec!["a".into()],
+            remove: vec!["b".into()],
+        };
+        conforms_value(&spec, "HashtagsInput", &tags);
     }
 
     fn conforms_value<T: Serialize>(spec: &Value, schema: &str, value: &T) {
