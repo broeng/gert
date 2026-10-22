@@ -216,10 +216,15 @@ fn dialog_for(
                 ReplyEvent::Close => "close".to_owned(),
                 ReplyEvent::Unauthorized => "unauthorized".to_owned(),
                 ReplyEvent::Sent(s) => format!(
-                    "sent detail={} unapplied={:?} warning={:?}",
+                    "sent detail={} unapplied={:?} warning={:?}{}",
                     s.detail.is_some(),
                     s.unapplied,
-                    s.warning
+                    s.warning,
+                    if s.voted.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" voted={:?}", s.voted)
+                    }
                 ),
             };
             log.lock().expect("log").push(text);
@@ -539,6 +544,23 @@ fn only_changed_votes_are_in_the_body(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_sent_event_names_the_votes_cast_and_none_for_a_plain_reply(cx: &mut TestAppContext) {
+    let f = dialog(cx, |_| {}, ok_review);
+    type_text(cx, &f, "hi");
+    pick_vote(cx, &f, 0, 4);
+    press(cx, &f, &[SEND]);
+    assert_eq!(
+        events(&f),
+        ["sent detail=false unapplied=[] warning=None voted=[(\"Code-Review\", 2)]"]
+    );
+
+    let f = dialog(cx, |_| {}, ok_review);
+    type_text(cx, &f, "hi");
+    press(cx, &f, &[SEND]);
+    assert_eq!(events(&f), ["sent detail=false unapplied=[] warning=None"]);
+}
+
+#[gpui_kit::test]
 fn tab_enters_a_vote_row_on_the_current_vote(cx: &mut TestAppContext) {
     let f = dialog(cx, |_| {}, |_| {});
     // Message, Resolved, then Code-Review on bob's +1 (index 3), not -2.
@@ -726,7 +748,7 @@ fn a_sent_review_refreshes_the_change_and_the_comments(cx: &mut TestAppContext) 
     press(cx, &f, &[SEND]);
     assert_eq!(
         events(&f),
-        ["sent detail=false unapplied=[] warning=None"],
+        ["sent detail=false unapplied=[] warning=None voted=[(\"Code-Review\", 2)]"],
         "{:?}",
         f.http.sent()
     );
@@ -762,6 +784,7 @@ fn the_sent_note_names_unapplied_votes(cx: &mut TestAppContext) {
         detail: None,
         unapplied: vec![],
         warning: None,
+        voted: vec![],
     };
     assert_eq!(ok.note(), ("Reply sent".to_owned(), false));
     let dropped = Sent {

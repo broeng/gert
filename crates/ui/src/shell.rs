@@ -517,6 +517,15 @@ impl Shell {
                     this.nav.replace(Route::Change(*n));
                     this.show(window, cx)
                 }
+                // A vote moved on to the next change of the chain.
+                ChangeEvent::Advance(n, note) => {
+                    this.nav.replace(Route::Change(*n));
+                    this.show(window, cx);
+                    if let Page::Change(p) = &this.page {
+                        let note = note.clone();
+                        p.update(cx, |p, cx| p.say(note, cx));
+                    }
+                }
                 ChangeEvent::OpenDiff(route) => {
                     this.navigate(Route::Diff(route.clone()), window, cx)
                 }

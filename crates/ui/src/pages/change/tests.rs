@@ -167,6 +167,7 @@ fn page_in(
                 ChangeEvent::Actions(_) => "actions".to_owned(),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
+                ChangeEvent::Advance(n, note) => format!("advance {n}: {note}"),
                 ChangeEvent::OpenDiff(d) => format!(
                     "diff {} {:?}..{} {}{}",
                     d.change,
@@ -1111,6 +1112,43 @@ fn v_then_a_number_picks_that_button(cx: &mut TestAppContext) {
     assert_eq!(reviews(&f).len(), 1);
     let (note, error) = hint(cx, &f).expect("a note");
     assert!(!error && note.contains("No such"), "{note}");
+}
+
+#[gpui_kit::test]
+fn a_vote_moves_on_to_the_open_child_with_a_note(cx: &mut TestAppContext) {
+    let f = voting_page(cx, model::ChangeStatus::New, ok_review);
+    press(cx, &f, &["shift-v"]);
+    cx.run_until_parked();
+    assert_eq!(
+        events(&f),
+        ["advance 100: Voted Code-Review +2, moved to change 100"]
+    );
+}
+
+#[gpui_kit::test]
+fn a_reply_with_a_vote_moves_on_and_one_without_does_not(cx: &mut TestAppContext) {
+    let f = voting_page(cx, model::ChangeStatus::New, |_| {});
+    let sent = |voted: Vec<(String, i32)>, unapplied: Vec<(String, i32)>| crate::reply::Sent {
+        detail: None,
+        unapplied,
+        warning: None,
+        voted,
+    };
+    let page = f.page.clone();
+    let deliver = |cx: &mut TestAppContext, s: crate::reply::Sent| {
+        page.update(cx, |p, cx| p.reply_sent(&s, cx));
+    };
+    deliver(cx, sent(vec![], vec![]));
+    assert!(events(&f).is_empty());
+    assert_eq!(hint(cx, &f), Some(("Reply sent".to_owned(), false)));
+    // A vote the server dropped is a warning and does not move.
+    deliver(cx, sent(vec![], vec![("Code-Review".to_owned(), 2)]));
+    assert!(events(&f).is_empty());
+    deliver(cx, sent(vec![("Verified".to_owned(), 1)], vec![]));
+    assert_eq!(
+        events(&f),
+        ["advance 100: Voted Verified +1, moved to change 100"]
+    );
 }
 
 #[gpui_kit::test]

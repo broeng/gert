@@ -75,6 +75,9 @@ pub enum ChangeEvent {
     /// Shift-J / Shift-K stepped to a related change: replaces the current
     /// history entry, so that Back leaves the walk.
     ReplaceChange(ChangeNumber),
+    /// A vote went through and the next change of the chain is open: like
+    /// `ReplaceChange`, and the new page shows the note.
+    Advance(ChangeNumber, String),
     /// A file's diff page was chosen.
     OpenDiff(DiffRoute),
     /// A refresh succeeded: the server is reachable.
@@ -1216,6 +1219,10 @@ impl ChangePage {
     pub fn reply_sent(&mut self, sent: &reply::Sent, cx: &mut Context<Self>) {
         self.take_detail(sent.detail.clone(), cx);
         let (note, warning) = sent.note();
+        if !warning && self.advance_target(&sent.voted, cx).is_some() {
+            self.after_vote(&sent.voted, reply::plan::voted_text(&sent.voted), cx);
+            return;
+        }
         self.hint.say(note, warning, cx, |p| &mut p.hint);
     }
 
