@@ -1,6 +1,7 @@
 //! Theme-derived colors for markers and chips.
 
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::button::ButtonCustomVariant;
 use gpui_kit::*;
 
 use crate::{labels::Mark, row::Chip};
@@ -33,4 +34,27 @@ pub fn commit_card_background(cx: &App) -> Hsla {
     } else {
         hsla(50. / 360., 0.85, 0.90, 1.)
     }
+}
+
+/// The blue of the quick-vote buttons: a plain blue, since the theme's
+/// `info` leans teal. The same blue reads well on light and dark backgrounds.
+pub fn vote_blue() -> Hsla {
+    hsla(217. / 360., 0.80, 0.58, 1.)
+}
+
+/// Style of the quick-vote buttons. The button paints its idle background at
+/// a fifth of `color`, so it shows a light blue that turns `vote_blue` on
+/// hover. A `strong` button sets `vote_blue` as its idle background itself,
+/// and hovers a little lighter.
+pub fn vote_button(strong: bool, cx: &App) -> ButtonCustomVariant {
+    let hover = if strong {
+        hsla(217. / 360., 0.80, 0.64, 1.)
+    } else {
+        vote_blue()
+    };
+    ButtonCustomVariant::new(cx)
+        .color(hsla(217. / 360., 0.80, 0.52, 1.))
+        .hover(hover)
+        .active(hsla(217. / 360., 0.80, 0.46, 1.))
+        .foreground(hsla(0., 0., 1., 1.))
 }
