@@ -329,8 +329,10 @@ fn first_page_unchanged(cached: &CachedQuery, fresh: &[ChangeSummary], more: boo
 
 mod actions;
 mod comments;
+mod edits;
 
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
+pub use edits::ReviewerAdded;
 pub use store::DraftCounts;
 
 #[cfg(test)]

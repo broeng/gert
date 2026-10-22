@@ -75,7 +75,11 @@ impl Syncer {
         Ok(self.refresh_after_action(change, "private").await)
     }
 
-    async fn refresh_after_action(&self, change: ChangeNumber, what: &str) -> Option<ChangeDetail> {
+    pub(super) async fn refresh_after_action(
+        &self,
+        change: ChangeNumber,
+        what: &str,
+    ) -> Option<ChangeDetail> {
         match self.refresh_change(change).await {
             Ok(d) => Some(d),
             Err(e) => {
