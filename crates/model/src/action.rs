@@ -41,4 +41,6 @@ pub mod action_id {
     pub const PRIVATE_DELETE: &str = "private.delete";
     pub const REVERT: &str = "revert";
     pub const CHERRYPICK: &str = "cherrypick";
+    pub const TOPIC: &str = "topic";
+    pub const HASHTAGS: &str = "hashtags";
 }

@@ -189,8 +189,10 @@ fn the_menu_lists_what_the_server_offers_in_menu_order() {
             (Kind::Abandon, "Abandon", true, None),
             (Kind::Wip, "WIP", true, None),
             (Kind::Private, "Mark private", true, None),
+            (Kind::Reviewers, "Reviewers and CC", true, None),
+            (Kind::Topic, "Edit topic", true, None),
         ],
-        "restore, ready and the actions the menu does not know are absent"
+        "restore, ready, hashtags and the actions the menu does not know are absent"
     );
 }
 
@@ -218,6 +220,7 @@ fn a_missing_label_falls_back_and_the_other_toggles_show() {
             (Kind::Restore, "Restore".to_owned()),
             (Kind::Ready, "Ready for review".to_owned()),
             (Kind::Unprivate, "Unmark private".to_owned()),
+            (Kind::Reviewers, "Reviewers and CC".to_owned()),
         ]
     );
 }
@@ -232,7 +235,7 @@ fn j_k_and_the_arrows_move_the_selection_and_wrap(cx: &mut TestAppContext) {
     press(cx, &f, &["k", "up"]);
     assert_eq!(sel(cx), 1);
     press(cx, &f, &["k", "k"]);
-    assert_eq!(sel(cx), 4);
+    assert_eq!(sel(cx), 6);
     // The menu has no text fields: nothing was typed anywhere.
     assert_eq!(step(cx, &f), "Menu");
 }
@@ -672,7 +675,7 @@ mod in_the_shell {
     }
 
     #[gpui_kit::test]
-    fn a_change_with_nothing_to_do_gets_a_hint(cx: &mut TestAppContext) {
+    fn a_change_without_actions_still_offers_reviewers(cx: &mut TestAppContext) {
         let (window, shell) = on_the_change(
             cx,
             Some("bob"),
@@ -680,7 +683,8 @@ mod in_the_shell {
             &Default::default(),
         );
         press(cx, window, "m");
-        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_none()));
-        assert!(matches!(hint(cx, &shell), Some((_, false))));
+        cx.update(|cx| assert!(shell.read(cx).menu_for_test().is_some()));
     }
 }
+
+mod edit_tests;
