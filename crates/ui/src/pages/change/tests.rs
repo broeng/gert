@@ -502,16 +502,19 @@ fn shell_with_many_files(
     let http = RouteHttpClient::new();
     http.route("/diff", 200, diff_body());
     let startup = crate::session::Startup {
-        bookmarks: Vec::new(),
         env: env_with(store, &http),
-        server: Some(setup()),
-        queries: vec![crate::session::SavedQuery {
-            name: "Open".into(),
-            query: "status:open".into(),
-        }],
         diff: LocalDiff::default(),
         start_page: Default::default(),
         filters: Vec::new(),
+        servers: vec![crate::session::ServerSetup {
+            queries: vec![crate::session::SavedQuery {
+                name: "Open".into(),
+                query: "status:open".into(),
+            }],
+            bookmarks: Vec::new(),
+            ..setup()
+        }],
+        active: None,
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| crate::shell::Shell::new(startup, window, cx))

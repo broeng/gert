@@ -10,7 +10,7 @@ use gert::{
 };
 use gpui_kit::*;
 use store::Store;
-use ui::{ColorModes, Env, LocalDiff, ServerSetup, Shell, Startup, ThemeName};
+use ui::{ColorModes, Env, LocalDiff, ServerKey, ServerSetup, Shell, Startup, ThemeName};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -28,15 +28,20 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
         .unwrap_or_default();
     let db = paths.cache_db()?;
     let mut store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
-    let first = config.servers.first();
-    let server = match first {
-        Some(s) => Some(ServerSetup {
-            server: store.server_id(&s.url)?,
+    let mut servers = Vec::new();
+    for s in &config.servers {
+        servers.push(ServerSetup {
+            key: ServerKey::new(&s.id),
+            name: s.name.clone(),
             base_url: s.url.clone(),
             username: s.username.clone(),
-        }),
-        None => None,
-    };
+            color: s.color.clone(),
+            server: store.server_id(&s.url)?,
+            queries: queries_to_ui(&s.queries),
+            bookmarks: queries_to_ui(&s.bookmarks),
+        });
+    }
+    let active = servers.first().map(|s| s.key.clone());
     let http = GpuiHttpClient::new().context("creating the HTTP client")?;
     let advance_after_vote = config.advance_after_vote();
     let theme = config.theme();
@@ -50,9 +55,8 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
                 keyring: Keyring,
             }),
         },
-        server,
-        queries: first.map_or_else(Vec::new, |s| queries_to_ui(&s.queries)),
-        bookmarks: first.map_or_else(Vec::new, |s| queries_to_ui(&s.bookmarks)),
+        servers,
+        active,
         filters: config.file_filters(),
         start_page: startup_to_ui(&config.startup_page()),
         diff: LocalDiff {

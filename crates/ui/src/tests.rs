@@ -23,9 +23,14 @@ pub(crate) const URL: &str = "https://g.example.com";
 
 pub(crate) fn setup() -> ServerSetup {
     ServerSetup {
+        key: crate::session::ServerKey::new("test"),
+        name: "Test".into(),
         base_url: URL.into(),
         username: None,
+        color: None,
         server: ServerId(1),
+        queries: Vec::new(),
+        bookmarks: Vec::new(),
     }
 }
 
@@ -283,13 +288,16 @@ fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) 
         .expect("save detail");
     let env = env_with(store, &FakeHttpClient::new());
     let startup = Startup {
-        bookmarks: Vec::new(),
         env,
-        server: Some(setup()),
-        queries: vec![spec("Open", "status:open")],
         diff: Default::default(),
         start_page: Default::default(),
         filters: Vec::new(),
+        servers: vec![crate::session::ServerSetup {
+            queries: vec![spec("Open", "status:open")],
+            bookmarks: Vec::new(),
+            ..setup()
+        }],
+        active: None,
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -317,13 +325,16 @@ fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
     http.push_response(401, "denied");
     let env = env_with(seeded(&[("status:open", &[1])]), &http);
     let startup = Startup {
-        bookmarks: Vec::new(),
         env,
-        server: Some(setup()),
-        queries: vec![spec("Open", "status:open")],
         diff: Default::default(),
         start_page: Default::default(),
         filters: Vec::new(),
+        servers: vec![crate::session::ServerSetup {
+            queries: vec![spec("Open", "status:open")],
+            bookmarks: Vec::new(),
+            ..setup()
+        }],
+        active: None,
     };
     let (_window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -388,10 +399,7 @@ fn cached_server_diff_preferences_sit_under_the_local_overrides(cx: &mut TestApp
         )
         .expect("save prefs");
     let startup = Startup {
-        bookmarks: Vec::new(),
         env: env_with(store, &FakeHttpClient::new()),
-        server: Some(setup()),
-        queries: vec![spec("Open", "status:open")],
         diff: crate::LocalDiff {
             preferences: DiffPreferences {
                 tab_size: Some(2),
@@ -401,6 +409,12 @@ fn cached_server_diff_preferences_sit_under_the_local_overrides(cx: &mut TestApp
         },
         start_page: Default::default(),
         filters: Vec::new(),
+        servers: vec![crate::session::ServerSetup {
+            queries: vec![spec("Open", "status:open")],
+            bookmarks: Vec::new(),
+            ..setup()
+        }],
+        active: None,
     };
     let (_window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))
@@ -429,7 +443,7 @@ mod drafts {
         filters::FileFilter,
         outbox::DraftOutbox,
         pages::list::ListEvent,
-        session::{Backend, BackendError, SavedQuery, ServerSetup, Startup, StartupPage},
+        session::{Backend, BackendError, SavedQuery, Startup, StartupPage},
         shell::Shell,
     };
 
@@ -437,12 +451,11 @@ mod drafts {
     struct Keyring;
 
     impl Backend for Keyring {
-        fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
-            Ok(Some("secret".into()))
-        }
-
-        fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
-            Err(BackendError("not used".into()))
+        fn for_server(
+            self: std::sync::Arc<Self>,
+            _: &crate::ServerKey,
+        ) -> std::sync::Arc<dyn crate::ServerBackend> {
+            self
         }
 
         fn save_filters(&self, f: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
@@ -462,6 +475,16 @@ mod drafts {
             t: crate::theme::ThemeName,
         ) -> Result<crate::theme::ThemeName, BackendError> {
             Ok(t)
+        }
+    }
+
+    impl crate::ServerBackend for Keyring {
+        fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
+            Ok(Some("secret".into()))
+        }
+
+        fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+            Err(BackendError("not used".into()))
         }
 
         fn save_login(
@@ -542,16 +565,17 @@ mod drafts {
         let mut env = env_with(store, http);
         env.backend = std::sync::Arc::new(Keyring);
         let startup = Startup {
-            bookmarks: Vec::new(),
             env,
-            server: Some(ServerSetup {
-                username: Some("u".into()),
-                ..setup()
-            }),
-            queries: vec![spec("Open", "status:open")],
             diff: Default::default(),
             start_page: Default::default(),
             filters: Vec::new(),
+            servers: vec![crate::session::ServerSetup {
+                username: Some("u".into()),
+                queries: vec![spec("Open", "status:open")],
+                bookmarks: Vec::new(),
+                ..setup()
+            }],
+            active: None,
         };
         let started = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
@@ -681,13 +705,16 @@ mod settings_page {
             )
         };
         let startup = Startup {
-            bookmarks,
             env,
-            server: Some(setup()),
-            queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
             diff: Default::default(),
             start_page,
             filters,
+            servers: vec![crate::session::ServerSetup {
+                queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
+                bookmarks,
+                ..setup()
+            }],
+            active: None,
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
@@ -1232,13 +1259,16 @@ mod goto {
     fn start(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Shell>) {
         let env = env_with(seeded(&[("status:open", &[1])]), &FakeHttpClient::new());
         let startup = Startup {
-            bookmarks: Vec::new(),
             env,
-            server: Some(setup()),
-            queries: vec![spec("Open", "status:open")],
             diff: Default::default(),
             start_page: Default::default(),
             filters: Vec::new(),
+            servers: vec![crate::session::ServerSetup {
+                queries: vec![spec("Open", "status:open")],
+                bookmarks: Vec::new(),
+                ..setup()
+            }],
+            active: None,
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))

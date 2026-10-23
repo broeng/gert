@@ -830,12 +830,11 @@ mod in_the_shell {
     struct Keyring;
 
     impl Backend for Keyring {
-        fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
-            Ok(Some("secret".into()))
-        }
-
-        fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
-            Err(BackendError("not used".into()))
+        fn for_server(
+            self: std::sync::Arc<Self>,
+            _: &crate::ServerKey,
+        ) -> std::sync::Arc<dyn crate::ServerBackend> {
+            self
         }
 
         fn save_filters(&self, f: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
@@ -855,6 +854,16 @@ mod in_the_shell {
             t: crate::theme::ThemeName,
         ) -> Result<crate::theme::ThemeName, BackendError> {
             Ok(t)
+        }
+    }
+
+    impl crate::ServerBackend for Keyring {
+        fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
+            Ok(Some("secret".into()))
+        }
+
+        fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+            Err(BackendError("not used".into()))
         }
 
         fn save_login(
@@ -886,19 +895,20 @@ mod in_the_shell {
         let mut env = env_with(store, http);
         env.backend = std::sync::Arc::new(Keyring);
         let startup = Startup {
-            bookmarks: Vec::new(),
             env,
-            server: Some(ServerSetup {
-                username: username.map(str::to_owned),
-                ..setup()
-            }),
-            queries: vec![SavedQuery {
-                name: "Open".into(),
-                query: "status:open".into(),
-            }],
             diff: Default::default(),
             start_page: Default::default(),
             filters: Vec::new(),
+            servers: vec![ServerSetup {
+                username: username.map(str::to_owned),
+                queries: vec![SavedQuery {
+                    name: "Open".into(),
+                    query: "status:open".into(),
+                }],
+                bookmarks: Vec::new(),
+                ..setup()
+            }],
+            active: None,
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
@@ -1062,19 +1072,20 @@ mod in_the_shell {
         let mut env = env_with(store, http);
         env.backend = std::sync::Arc::new(Keyring);
         let startup = Startup {
-            bookmarks: Vec::new(),
             env,
-            server: Some(ServerSetup {
-                username: Some("bob".into()),
-                ..setup()
-            }),
-            queries: vec![SavedQuery {
-                name: "Open".into(),
-                query: "status:open".into(),
-            }],
             diff: Default::default(),
             start_page: Default::default(),
             filters: Vec::new(),
+            servers: vec![ServerSetup {
+                username: Some("bob".into()),
+                queries: vec![SavedQuery {
+                    name: "Open".into(),
+                    query: "status:open".into(),
+                }],
+                bookmarks: Vec::new(),
+                ..setup()
+            }],
+            active: None,
         };
         let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
