@@ -2122,7 +2122,12 @@ impl Shell {
                             )
                             .child(
                                 Button::new("home")
-                                    .label(server_label(&session.base_url))
+                                    .label(if self.servers.several() {
+                                        // The chip names the server already.
+                                        "Dashboard".to_string()
+                                    } else {
+                                        server_label(&session.base_url)
+                                    })
                                     .small()
                                     .on_click(cx.listener(|this, _, w, cx| {
                                         this.navigate(Route::Dashboard, w, cx)
