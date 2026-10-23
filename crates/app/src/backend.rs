@@ -8,7 +8,7 @@ use ui::{
 };
 
 use crate::{
-    config::{Config, FilterConfig, QueryConfig, StartupConfig, StartupPage},
+    config::{Config, FilterConfig, QueryConfig, StartupConfig, StartupPage, server_name_from_url},
     secrets::Keyring,
 };
 
@@ -25,6 +25,15 @@ pub fn queries_to_ui(queries: &[QueryConfig]) -> Vec<SavedQuery> {
             query: q.query.clone(),
         })
         .collect()
+}
+
+fn first_queries(config: &Config) -> Vec<SavedQuery> {
+    queries_to_ui(
+        config
+            .servers
+            .first()
+            .map_or(&[][..], |s| s.queries.as_slice()),
+    )
 }
 
 /// Debug builds only: the HTTP password from `GERT_DEV_PASSWORD`, for
@@ -73,39 +82,54 @@ impl Backend for AppBackend {
                 .set(base_url, user, pass)
                 .map_err(|e| BackendError(e.to_string()))?;
         }
+        // One server for now: a login replaces the first one.
         let config = Config::update(&self.config_file, |c| {
-            *c = std::mem::take(c).after_login(base_url, username);
+            let id = c
+                .servers
+                .first()
+                .map(|s| s.id.clone())
+                .unwrap_or_else(|| c.unique_server_id(&server_name_from_url(base_url)));
+            *c = std::mem::take(c).after_login(&id, base_url, username);
         })
         .map_err(|e| BackendError(e.to_string()))?;
-        Ok(queries_to_ui(&config.queries))
+        Ok(first_queries(&config))
     }
 
     fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
         let config = Config::update(&self.config_file, |c| {
-            c.queries = queries
-                .iter()
-                .map(|q| QueryConfig {
-                    name: q.name.clone(),
-                    query: q.query.clone(),
-                })
-                .collect();
+            if let Some(s) = c.servers.first_mut() {
+                s.queries = queries
+                    .iter()
+                    .map(|q| QueryConfig {
+                        name: q.name.clone(),
+                        query: q.query.clone(),
+                    })
+                    .collect();
+            }
         })
         .map_err(|e| BackendError(e.to_string()))?;
-        Ok(queries_to_ui(&config.queries))
+        Ok(first_queries(&config))
     }
 
     fn save_bookmarks(&self, bookmarks: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
         let config = Config::update(&self.config_file, |c| {
-            c.bookmarks = bookmarks
-                .iter()
-                .map(|q| QueryConfig {
-                    name: q.name.clone(),
-                    query: q.query.clone(),
-                })
-                .collect();
+            if let Some(s) = c.servers.first_mut() {
+                s.bookmarks = bookmarks
+                    .iter()
+                    .map(|q| QueryConfig {
+                        name: q.name.clone(),
+                        query: q.query.clone(),
+                    })
+                    .collect();
+            }
         })
         .map_err(|e| BackendError(e.to_string()))?;
-        Ok(queries_to_ui(&config.bookmarks))
+        Ok(queries_to_ui(
+            config
+                .servers
+                .first()
+                .map_or(&[][..], |s| s.bookmarks.as_slice()),
+        ))
     }
 
     fn save_filters(&self, filters: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
@@ -113,11 +137,23 @@ impl Backend for AppBackend {
             // The rules the loader ignores stay in the file, after the ones
             // the UI manages; they are still ignored on the next load.
             let ignored = c.ignored_filters();
-            c.filters = filters
+            // The UI does not know the `servers` restriction of a rule;
+            // it stays with the rule of the same name.
+            let restriction = |name: &str| {
+                c.filters
+                    .iter()
+                    .find(|f| f.name.trim() == name)
+                    .map(|f| f.servers.clone())
+                    .unwrap_or_default()
+            };
+            let managed: Vec<FilterConfig> = filters
                 .iter()
-                .map(FilterConfig::from_filter)
-                .chain(ignored)
+                .map(|f| FilterConfig {
+                    servers: restriction(&f.name),
+                    ..FilterConfig::from_filter(f)
+                })
                 .collect();
+            c.filters = managed.into_iter().chain(ignored).collect();
         })
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(config.file_filters())
@@ -211,7 +247,7 @@ mod tests {
         let queries = b.save_login("https://g.example.com", None, None).unwrap();
         assert_eq!(queries.len(), 2);
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
-        assert_eq!(cfg.server.unwrap().username, None);
+        assert_eq!(cfg.servers[0].username, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -261,8 +297,11 @@ mod tests {
         assert_eq!(b.save_bookmarks(&new).unwrap(), new);
         let text = std::fs::read_to_string(&b.config_file).unwrap();
         assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
-        assert!(text.contains("[[bookmarks]]\nname = \"Mine\""), "{text}");
-        assert!(text.contains("[[queries]]\nname = \"A\""), "{text}");
+        assert!(
+            text.contains("[[servers.bookmarks]]\nname = \"Mine\""),
+            "{text}"
+        );
+        assert!(text.contains("[[servers.queries]]\nname = \"A\""), "{text}");
         assert_eq!(b.save_bookmarks(&[]).unwrap(), []);
         let text = std::fs::read_to_string(&b.config_file).unwrap();
         assert!(!text.contains("bookmarks"), "{text}");

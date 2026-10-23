@@ -1,16 +1,21 @@
 //! The TOML configuration file at `<config_dir>/<APP_NAME>/config.toml`.
 //!
 //! ```toml
-//! [server]
+//! # One table per Gerrit server. `id` is a slug made from the name when the
+//! # server is added; it names the server in the cache and must not change
+//! # (the name may). `color` is optional.
+//! [[servers]]
+//! id = "example"
+//! name = "example"
 //! url = "https://gerrit.example.com"
 //! username = "jdoe"          # absent: anonymous, read-only access
 //!
-//! [[queries]]
+//! [[servers.queries]]
 //! name = "Your turn"
 //! query = "attention:self"
 //!
 //! # Optional: bookmarks, buttons on the dashboard that open a search.
-//! [[bookmarks]]
+//! [[servers.bookmarks]]
 //! name = "My open"
 //! query = "is:open owner:self"
 //!
@@ -21,6 +26,7 @@
 //! name = "Generated"
 //! globs = ["*.pb.go", "gen/**"]        # no "/": the name at any depth
 //! projects = ["platform/foo"]          # absent or empty: every project
+//! servers = ["example"]                # server ids; absent or empty: every server
 //! action = "hide"                      # hide | dim | highlight
 //! color = "#e5a50a"                    # highlight only
 //! bold = true                          # highlight only
@@ -59,6 +65,10 @@
 //!
 //! The HTTP password is never stored here; see [`crate::secrets`].
 //!
+//! Older files had a single `[server]` table with top-level `[[queries]]` and
+//! `[[bookmarks]]`. The first load rewrites them in place into the layout
+//! above (comments kept, no backup file).
+//!
 //! The file is also edited by hand, so the writer ([`Config::update`]) never
 //! regenerates it: it re-reads the file, and applies only the keys that
 //! changed to the parsed document, which keeps comments and formatting.
@@ -92,17 +102,18 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
     #[error("cannot parse {path} for editing, leaving it untouched: {message}")]
     Edit { path: PathBuf, message: String },
+    #[error("{path}: server id {id:?} is not a slug (lowercase letters, digits, - and _)")]
+    InvalidServerId { path: PathBuf, id: String },
+    #[error("{path}: two servers have the id {id:?}; ids must be unique")]
+    DuplicateServerId { path: PathBuf, id: String },
     #[error("no home directory found")]
     NoHome,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
-    pub server: Option<ServerConfig>,
     #[serde(default)]
-    pub queries: Vec<QueryConfig>,
-    #[serde(default)]
-    pub bookmarks: Vec<QueryConfig>,
+    pub servers: Vec<ServerConfig>,
     #[serde(default)]
     pub filters: Vec<FilterConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,12 +295,88 @@ impl DiffConfig {
     }
 }
 
+/// A `[[servers]]` table: one Gerrit server with its saved queries and
+/// bookmarks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// A slug, stable for the life of the server entry: the cache and the
+    /// UI refer to the server by it. See [`slugify`] and [`is_slug`].
+    pub id: String,
+    pub name: String,
     pub url: String,
     /// `None` means anonymous access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// `"#rrggbb"`; absent: assigned automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<QueryConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<QueryConfig>,
+}
+
+impl ServerConfig {
+    /// Writes the scalar keys and the nested lists into `t`, touching only
+    /// what differs, so comments and the spelling of the rest survive.
+    fn fill(&self, t: &mut toml_edit::Table) {
+        set_str(t, "id", &self.id);
+        set_str(t, "name", &self.name);
+        set_str(t, "url", &self.url);
+        match &self.username {
+            Some(u) => set_str(t, "username", u),
+            None => {
+                t.remove("username");
+            }
+        }
+        match &self.color {
+            Some(c) => set_str(t, "color", c),
+            None => {
+                t.remove("color");
+            }
+        }
+        for (key, list) in [("queries", &self.queries), ("bookmarks", &self.bookmarks)] {
+            if table_queries(t, key) != *list {
+                apply_queries(key, list, t);
+            }
+        }
+    }
+}
+
+/// True for a usable server id: lowercase ASCII letters, digits, `-` and
+/// `_`, not empty.
+pub fn is_slug(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// A slug for `name`: lowercase letters and digits, runs of anything else
+/// become one `-`. `"server"` if nothing is left.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_end_matches('-');
+    if out.is_empty() { "server" } else { out }.to_owned()
+}
+
+/// A display name for a server URL: its host (with the port, if any).
+pub fn server_name_from_url(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    if host.is_empty() {
+        "server".to_owned()
+    } else {
+        host.to_owned()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +395,10 @@ pub struct FilterConfig {
     pub globs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
+    /// Ids of the servers the rule applies to; empty: all of them. Kept
+    /// and written back, but not applied yet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
@@ -385,6 +476,7 @@ impl FilterConfig {
             name: f.name.clone(),
             globs: f.globs.clone(),
             projects: f.projects.clone(),
+            servers: Vec::new(),
             action: action.to_owned(),
             color,
             bold,
@@ -422,6 +514,7 @@ impl FilterConfig {
                 name: opt("name")?.as_str()?.to_owned(),
                 globs: strings("globs")?,
                 projects: strings("projects")?,
+                servers: strings("servers")?,
                 action: opt("action")?.as_str()?.to_owned(),
                 color: match opt("color") {
                     None => None,
@@ -448,6 +541,9 @@ impl FilterConfig {
         let projects =
             (!self.projects.is_empty()).then(|| self.projects.iter().map(String::as_str).collect());
         set_or_remove(t, "projects", projects);
+        let servers =
+            (!self.servers.is_empty()).then(|| self.servers.iter().map(String::as_str).collect());
+        set_or_remove(t, "servers", servers);
         set_value(t, "action", self.action.as_str().into());
         set_or_remove(t, "color", self.color.as_deref().map(Into::into));
         set_or_remove(t, "bold", self.bold.map(Into::into));
@@ -488,28 +584,50 @@ pub fn default_queries(anonymous: bool) -> Vec<QueryConfig> {
 }
 
 impl Config {
-    /// The configuration after a successful login: the server is replaced,
-    /// existing saved queries and the `[diff]` section are kept, and an
-    /// empty query list is seeded.
-    pub fn after_login(self, url: &str, username: Option<&str>) -> Config {
-        let queries = if self.queries.is_empty() {
-            default_queries(username.is_none())
-        } else {
-            self.queries
-        };
-        Config {
-            server: Some(ServerConfig {
+    /// The server with this id.
+    pub fn server(&self, id: &str) -> Option<&ServerConfig> {
+        self.servers.iter().find(|s| s.id == id)
+    }
+
+    /// An id for a new server called `name`: its slug, with `-2`, `-3`, ...
+    /// added if another server has it. The id is stored and never derived
+    /// again, so renaming a server does not change it.
+    pub fn unique_server_id(&self, name: &str) -> String {
+        let base = slugify(name);
+        let mut id = base.clone();
+        let mut n = 2;
+        while self.server(&id).is_some() {
+            id = format!("{base}-{n}");
+            n += 1;
+        }
+        id
+    }
+
+    /// The configuration after a successful login to server `id`: the
+    /// server is updated if it exists (name, color and bookmarks stay), else
+    /// added at the end, named after its host. A server without saved
+    /// queries gets the default ones. Everything else is kept.
+    pub fn after_login(mut self, id: &str, url: &str, username: Option<&str>) -> Config {
+        let anonymous = username.is_none();
+        match self.servers.iter_mut().find(|s| s.id == id) {
+            Some(s) => {
+                s.url = url.to_owned();
+                s.username = username.map(str::to_owned);
+                if s.queries.is_empty() {
+                    s.queries = default_queries(anonymous);
+                }
+            }
+            None => self.servers.push(ServerConfig {
+                id: id.to_owned(),
+                name: server_name_from_url(url),
                 url: url.to_owned(),
                 username: username.map(str::to_owned),
+                color: None,
+                queries: default_queries(anonymous),
+                bookmarks: Vec::new(),
             }),
-            queries,
-            bookmarks: self.bookmarks,
-            filters: self.filters,
-            diff: self.diff,
-            startup: self.startup,
-            review: self.review,
-            appearance: self.appearance,
         }
+        self
     }
 
     /// The usable `[[filters]]` rules, in file order. A later rule with the
@@ -595,24 +713,17 @@ impl Config {
         }
     }
 
-    /// Reads the file; `Ok(None)` if it does not exist.
+    /// Reads the file; `Ok(None)` if it does not exist. A file in the old
+    /// layout (`[server]`) is rewritten in the current one first.
     pub fn load(path: &Path) -> Result<Option<Config>, ConfigError> {
-        let text = match fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(ConfigError::Read {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
+        let Some(mut text) = read_text(path)? else {
+            return Ok(None);
         };
-        toml::from_str(&text)
-            .map(Some)
-            .map_err(|source| ConfigError::Parse {
-                path: path.to_owned(),
-                source,
-            })
+        if let Some(migrated) = migrate_legacy(&text) {
+            write_atomic(path, &migrated)?;
+            text = migrated;
+        }
+        parse(path, &text).map(Some)
     }
 
     /// Writes this configuration as a whole, as [`Config::update`] would.
@@ -625,22 +736,15 @@ impl Config {
     /// document so comments and formatting survive. Reading at save time
     /// merges with edits made to the file since it was loaded. A file that
     /// does not parse is refused and left untouched; a missing one is
-    /// created. Returns the configuration as written.
+    /// created. A file in the old layout is migrated as part of the write.
+    /// Returns the configuration as written.
     pub fn update(path: &Path, change: impl FnOnce(&mut Config)) -> Result<Config, ConfigError> {
-        let text = match fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(source) => {
-                return Err(ConfigError::Read {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-        };
-        let old: Config = toml::from_str(&text).map_err(|source| ConfigError::Parse {
-            path: path.to_owned(),
-            source,
-        })?;
+        let mut text = read_text(path)?.unwrap_or_default();
+        let migrated = migrate_legacy(&text);
+        if let Some(m) = &migrated {
+            text = m.clone();
+        }
+        let old = parse(path, &text)?;
         let mut doc: DocumentMut =
             text.parse()
                 .map_err(|e: toml_edit::TomlError| ConfigError::Edit {
@@ -650,29 +754,106 @@ impl Config {
         let mut new = old.clone();
         change(&mut new);
         if new != old {
+            validate(path, &new)?;
             apply_changes(&old, &new, &mut doc)?;
             write_atomic(path, &doc.to_string())?;
+        } else if migrated.is_some() {
+            write_atomic(path, &text)?;
         }
         Ok(new)
     }
 }
 
+fn read_text(path: &Path) -> Result<Option<String>, ConfigError> {
+    match fs::read_to_string(path) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ConfigError::Read {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
+    let config: Config = toml::from_str(text).map_err(|source| ConfigError::Parse {
+        path: path.to_owned(),
+        source,
+    })?;
+    validate(path, &config)?;
+    Ok(config)
+}
+
+/// Every server id is a slug, and no two are the same.
+fn validate(path: &Path, config: &Config) -> Result<(), ConfigError> {
+    for (i, s) in config.servers.iter().enumerate() {
+        if !is_slug(&s.id) {
+            return Err(ConfigError::InvalidServerId {
+                path: path.to_owned(),
+                id: s.id.clone(),
+            });
+        }
+        if config.servers[..i].iter().any(|o| o.id == s.id) {
+            return Err(ConfigError::DuplicateServerId {
+                path: path.to_owned(),
+                id: s.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The text of a file in the old layout (a `[server]` table, top-level
+/// `[[queries]]` and `[[bookmarks]]`) in the current one, or `None` if the
+/// file is not in the old layout (or does not parse; the caller reports
+/// that). The `[server]` table becomes the first `[[servers]]` table, named
+/// after its host, and the lists move into it, all with their comments.
+fn migrate_legacy(text: &str) -> Option<String> {
+    let mut doc: DocumentMut = text.parse().ok()?;
+    if doc.contains_key("servers") {
+        return None;
+    }
+    let old = match doc.get("server")? {
+        Item::Table(t) => t.clone(),
+        Item::Value(toml_edit::Value::InlineTable(t)) => t.clone().into_table(),
+        _ => return None,
+    };
+    let url = old.get("url")?.as_str()?.to_owned();
+    doc.remove("server");
+    let name = server_name_from_url(&url);
+    let mut table = toml_edit::Table::new();
+    *table.decor_mut() = old.decor().clone();
+    // The new table takes the place of the old one in the file.
+    table.set_position(old.position());
+    table.insert("id", slugify(&name).as_str().into());
+    table.insert("name", name.as_str().into());
+    for (key, item) in old {
+        table.insert(&key, item);
+    }
+    for key in ["queries", "bookmarks"] {
+        if let Some(Item::ArrayOfTables(list)) = doc.remove(key) {
+            table.insert(key, Item::ArrayOfTables(list));
+        }
+    }
+    clear_nested_positions(&mut table);
+    let mut servers = toml_edit::ArrayOfTables::new();
+    servers.push(table);
+    doc.insert("servers", Item::ArrayOfTables(servers));
+    Some(doc.to_string())
+}
+
 /// The scalar and table keys of `new` that differ from `old` (everything
-/// but the query, bookmark and filter lists) go into `doc`.
+/// but the server and filter lists) go into `doc`.
 fn apply_changes(old: &Config, new: &Config, doc: &mut DocumentMut) -> Result<(), ConfigError> {
     let tables = |c: &Config| -> Result<toml::Table, ConfigError> {
         let mut t = toml::Table::try_from(c)?;
-        t.remove("queries");
-        t.remove("bookmarks");
+        t.remove("servers");
         t.remove("filters");
         Ok(t)
     };
     apply_table(&tables(old)?, &tables(new)?, doc.as_table_mut());
-    if old.queries != new.queries {
-        apply_queries("queries", &new.queries, doc.as_table_mut());
-    }
-    if old.bookmarks != new.bookmarks {
-        apply_queries("bookmarks", &new.bookmarks, doc.as_table_mut());
+    if old.servers != new.servers {
+        apply_servers(&new.servers, doc.as_table_mut());
     }
     if old.filters != new.filters {
         apply_filters(&new.filters, doc.as_table_mut());
@@ -743,6 +924,67 @@ fn set_value(t: &mut toml_edit::Table, key: &str, mut v: toml_edit::Value) {
         *v.decor_mut() = prev.decor().clone();
     }
     t.insert(key, Item::Value(v));
+}
+
+/// Clears the parsed position of the tables inside `t`, see [`apply_servers`].
+fn clear_nested_positions(t: &mut toml_edit::Table) {
+    for (_, item) in t.iter_mut() {
+        if let Item::ArrayOfTables(list) = item {
+            for nested in list.iter_mut() {
+                nested.set_position(None);
+                clear_nested_positions(nested);
+            }
+        }
+    }
+}
+
+/// Sets a string key, leaving the value alone (and so its spelling) when it
+/// already holds `v`.
+fn set_str(t: &mut toml_edit::Table, key: &str, v: &str) {
+    if t.get(key).and_then(Item::as_str) != Some(v) {
+        set_value(t, key, v.into());
+    }
+}
+
+/// The queries of the array of tables `key` in `t`.
+fn table_queries(t: &toml_edit::Table, key: &str) -> Vec<QueryConfig> {
+    match t.get(key) {
+        Some(Item::ArrayOfTables(a)) => a
+            .iter()
+            .filter_map(query_of)
+            .map(|(name, query)| QueryConfig { name, query })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Rewrites the `[[servers]]` tables. A server is matched to its table by
+/// `id` (the table is reused, so its comments stay, and `fill` changes only
+/// the keys that differ); a server with a new id gets a fresh table, and a
+/// table whose id is gone is dropped with its nested lists.
+fn apply_servers(new: &[ServerConfig], root: &mut toml_edit::Table) {
+    let mut existing: Vec<Option<toml_edit::Table>> = match root.get("servers") {
+        Some(Item::ArrayOfTables(a)) => a.iter().cloned().map(Some).collect(),
+        _ => Vec::new(),
+    };
+    let mut out = toml_edit::ArrayOfTables::new();
+    for server in new {
+        let slot = existing.iter_mut().find(|t| {
+            t.as_ref().and_then(|t| t.get("id")).and_then(Item::as_str) == Some(&server.id)
+        });
+        let mut table = slot.and_then(Option::take).unwrap_or_default();
+        server.fill(&mut table);
+        // Tables print sorted by their parsed position; clear it so that
+        // they follow the order of the array, each list after its server.
+        table.set_position(None);
+        clear_nested_positions(&mut table);
+        out.push(table);
+    }
+    if out.is_empty() {
+        root.remove("servers");
+    } else {
+        root.insert("servers", Item::ArrayOfTables(out));
+    }
 }
 
 fn set_or_remove(t: &mut toml_edit::Table, key: &str, v: Option<toml_edit::Value>) {
@@ -912,7 +1154,7 @@ mod tests {
     fn save_creates_dirs_and_round_trips() {
         let dir = tmp("roundtrip");
         let path = dir.join("nested").join("config.toml");
-        let cfg = Config::default().after_login("https://g.example.com", Some("jdoe"));
+        let cfg = Config::default().after_login("g", "https://g.example.com", Some("jdoe"));
         cfg.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), Some(cfg));
         let _ = fs::remove_dir_all(&dir);
@@ -921,45 +1163,58 @@ mod tests {
     #[test]
     fn parses_documented_shape() {
         let cfg: Config = toml::from_str(
-            r#"
-            [server]
+            r##"
+            [[servers]]
+            id = "work"
+            name = "Work"
             url = "https://gerrit.example.com"
             username = "jdoe"
-            [[queries]]
+            color = "#112233"
+            [[servers.queries]]
             name = "Your turn"
             query = "attention:self"
-            "#,
+            [[servers.bookmarks]]
+            name = "Mine"
+            query = "owner:self"
+            "##,
         )
         .unwrap();
-        assert_eq!(cfg.server.unwrap().username.as_deref(), Some("jdoe"));
-        assert_eq!(cfg.queries, vec![q("Your turn", "attention:self")]);
+        let s = &cfg.servers[0];
+        assert_eq!((s.id.as_str(), s.name.as_str()), ("work", "Work"));
+        assert_eq!(s.username.as_deref(), Some("jdoe"));
+        assert_eq!(s.color.as_deref(), Some("#112233"));
+        assert_eq!(s.queries, vec![q("Your turn", "attention:self")]);
+        assert_eq!(s.bookmarks, vec![q("Mine", "owner:self")]);
     }
 
     #[test]
     fn anonymous_has_no_username_key_and_no_password_anywhere() {
-        let cfg = Config::default().after_login("https://g.example.com", None);
+        let cfg = Config::default().after_login("g", "https://g.example.com", None);
         let text = toml::to_string_pretty(&cfg).unwrap();
         assert!(!text.contains("username"));
         assert!(!text.contains("password"));
-        assert_eq!(cfg.queries, default_queries(true));
+        assert_eq!(cfg.servers[0].queries, default_queries(true));
     }
 
     #[test]
     fn login_seeds_defaults_once() {
-        let cfg = Config::default().after_login("https://g.example.com", Some("jdoe"));
-        assert_eq!(cfg.queries.len(), 6);
-        assert_eq!(cfg.queries[0], q("Your turn", "attention:self"));
-        // A user's edited list survives a re-login.
+        let cfg = Config::default().after_login("g", "https://g.example.com", Some("jdoe"));
+        assert_eq!(cfg.servers[0].queries.len(), 6);
+        assert_eq!(cfg.servers[0].queries[0], q("Your turn", "attention:self"));
+        // A user's edited list survives a re-login, which updates the
+        // server in place and keeps its name.
         let mut edited = cfg.clone();
-        edited.queries = vec![q("Mine", "owner:self")];
-        let again = edited.after_login("https://other.example.com", Some("x"));
-        assert_eq!(again.queries, vec![q("Mine", "owner:self")]);
-        assert_eq!(again.server.unwrap().url, "https://other.example.com");
+        edited.servers[0].queries = vec![q("Mine", "owner:self")];
+        let again = edited.after_login("g", "https://other.example.com", Some("x"));
+        assert_eq!(again.servers.len(), 1);
+        assert_eq!(again.servers[0].queries, vec![q("Mine", "owner:self")]);
+        assert_eq!(again.servers[0].url, "https://other.example.com");
+        assert_eq!(again.servers[0].name, "g.example.com");
     }
 
     #[test]
     fn diff_section_is_optional() {
-        let cfg: Config = toml::from_str("[server]\nurl = \"https://g\"\n").unwrap();
+        let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.diff, None);
         let none = DiffConfig::default().preferences();
         assert_eq!(none, DiffPreferences::default());
@@ -1035,7 +1290,7 @@ mod tests {
             }),
             ..Default::default()
         }
-        .after_login("https://g.example.com", Some("jdoe"));
+        .after_login("g", "https://g.example.com", Some("jdoe"));
         cfg.save(&path).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("[diff]"), "{text}");
@@ -1047,23 +1302,25 @@ mod tests {
     const COMMENTED: &str = r#"# My config, edited by hand.
 
 # The server.
-[server]
+[[servers]]
+id = "g"
+name = "G"
 url = "https://g.example.com" # prod
 username = "jdoe"
 
 # --- queries ---
 # first
-[[queries]]
+[[servers.queries]]
 name = "A"
 query = "status:open" # inline a
 
 # second
-[[queries]]
+[[servers.queries]]
 name = "B"
 query = "owner:self"
 
 # third
-[[queries]]
+[[servers.queries]]
 name = "C"
 query = "is:wip"
 
@@ -1096,50 +1353,61 @@ advance_after_vote = false
     #[test]
     fn editing_one_query_keeps_every_other_comment() {
         let path = commented("edit1");
-        Config::update(&path, |c| c.queries[1].query = "owner:self is:open".into()).unwrap();
+        Config::update(&path, |c| {
+            c.servers[0].queries[1].query = "owner:self is:open".into()
+        })
+        .unwrap();
         let text = fs::read_to_string(&path).unwrap();
         lines_kept(&text, &["owner:self"]);
         assert!(text.contains("# second"), "{text}");
         assert!(text.contains("query = \"owner:self is:open\""), "{text}");
         let cfg = Config::load(&path).unwrap().unwrap();
-        assert_eq!(cfg.queries[1], q("B", "owner:self is:open"));
-        assert_eq!(cfg.queries.len(), 3);
+        assert_eq!(cfg.servers[0].queries[1], q("B", "owner:self is:open"));
+        assert_eq!(cfg.servers[0].queries.len(), 3);
     }
 
     #[test]
     fn adding_a_query_keeps_every_comment() {
         let path = commented("add1");
-        Config::update(&path, |c| c.queries.push(q("D", "is:merged"))).unwrap();
+        Config::update(&path, |c| c.servers[0].queries.push(q("D", "is:merged"))).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         lines_kept(&text, &[]);
-        assert_eq!(Config::load(&path).unwrap().unwrap().queries.len(), 4);
+        assert_eq!(
+            Config::load(&path).unwrap().unwrap().servers[0]
+                .queries
+                .len(),
+            4
+        );
     }
 
     #[test]
     fn deleting_a_query_drops_only_its_own_comment() {
         let path = commented("del1");
         Config::update(&path, |c| {
-            c.queries.remove(1);
+            c.servers[0].queries.remove(1);
         })
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
         lines_kept(&text, &["# second", "\"B\"", "owner:self"]);
         let cfg = Config::load(&path).unwrap().unwrap();
-        assert_eq!(cfg.queries, vec![q("A", "status:open"), q("C", "is:wip")]);
+        assert_eq!(
+            cfg.servers[0].queries,
+            vec![q("A", "status:open"), q("C", "is:wip")]
+        );
     }
 
     #[test]
     fn reordering_queries_moves_their_comments_along() {
         let path = commented("reorder1");
-        Config::update(&path, |c| c.queries.swap(0, 2)).unwrap();
+        Config::update(&path, |c| c.servers[0].queries.swap(0, 2)).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         lines_kept(&text, &[]);
         let third = text.find("# third").unwrap();
         let first = text.find("# first").unwrap();
         assert!(third < first, "{text}");
         let cfg = Config::load(&path).unwrap().unwrap();
-        assert_eq!(cfg.queries[0].name, "C");
-        assert_eq!(cfg.queries[2].name, "A");
+        assert_eq!(cfg.servers[0].queries[0].name, "C");
+        assert_eq!(cfg.servers[0].queries[2].name, "A");
     }
 
     #[test]
@@ -1147,7 +1415,7 @@ advance_after_vote = false
         let path = commented("scalar1");
         Config::update(&path, |c| {
             c.diff.get_or_insert_with(Default::default).tab_size = Some(8);
-            c.server.as_mut().unwrap().url = "https://h.example.com".into();
+            c.servers[0].url = "https://h.example.com".into();
         })
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
@@ -1163,14 +1431,14 @@ advance_after_vote = false
     fn login_on_a_commented_file_keeps_the_comments() {
         let path = commented("login1");
         Config::update(&path, |c| {
-            *c = std::mem::take(c).after_login("https://new.example.com", Some("x"));
+            *c = std::mem::take(c).after_login("g", "https://new.example.com", Some("x"));
         })
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
         lines_kept(&text, &["url =", "username"]);
         let cfg = Config::load(&path).unwrap().unwrap();
-        assert_eq!(cfg.server.unwrap().url, "https://new.example.com");
-        assert_eq!(cfg.queries.len(), 3);
+        assert_eq!(cfg.servers[0].url, "https://new.example.com");
+        assert_eq!(cfg.servers[0].queries.len(), 3);
     }
 
     #[test]
@@ -1185,9 +1453,10 @@ advance_after_vote = false
         let dir = tmp("refuse1");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        for bad in ["[server\nurl = ", "server = 3\n"] {
+        for bad in ["[server\nurl = ", "servers = 3\n"] {
             fs::write(&path, bad).unwrap();
-            let err = Config::update(&path, |c| c.queries.push(q("x", "y"))).unwrap_err();
+            let err =
+                Config::update(&path, |c| c.filters.push(FilterConfig::default())).unwrap_err();
             assert!(err.to_string().contains("config.toml"), "{err}");
             assert_eq!(fs::read_to_string(&path).unwrap(), bad);
         }
@@ -1201,21 +1470,26 @@ advance_after_vote = false
         fs::write(&path, edited).unwrap();
         // A save from the copy loaded earlier would revert tab_size; update
         // works on what is on disk now.
-        Config::update(&path, |c| c.queries.push(q("D", "is:merged"))).unwrap();
+        Config::update(&path, |c| c.servers[0].queries.push(q("D", "is:merged"))).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("tab_size = 2 # four"), "{text}");
-        assert_eq!(Config::load(&path).unwrap().unwrap().queries.len(), 4);
+        assert_eq!(
+            Config::load(&path).unwrap().unwrap().servers[0]
+                .queries
+                .len(),
+            4
+        );
     }
 
     #[test]
     fn a_missing_file_is_created() {
         let dir = tmp("create1");
         let path = dir.join("sub").join("config.toml");
-        Config::update(&path, |c| c.queries.push(q("a", "b"))).unwrap();
-        assert_eq!(
-            Config::load(&path).unwrap().unwrap().queries,
-            vec![q("a", "b")]
-        );
+        Config::update(&path, |c| {
+            *c = std::mem::take(c).after_login("g", "https://g", None)
+        })
+        .unwrap();
+        assert_eq!(Config::load(&path).unwrap().unwrap().servers.len(), 1);
     }
 
     #[test]
@@ -1282,18 +1556,20 @@ advance_after_vote = false
         let dir = tmp("bad");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        fs::write(&path, "server = 3").unwrap();
+        fs::write(&path, "servers = 3").unwrap();
         let err = Config::load(&path).unwrap_err();
         assert!(err.to_string().contains("config.toml"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 
     const FILTERED: &str = r##"# Top of the file.
-[server]
+[[servers]]
+id = "g"
+name = "G"
 url = "https://gerrit.example.com"
 
 # queries
-[[queries]]
+[[servers.queries]]
 name = "A"
 query = "status:open" # inline a
 
@@ -1449,7 +1725,7 @@ action = "hide"
         assert!(text.contains("globs = [\"*.lock\", \"go.sum\"]"), "{text}");
         assert!(text.contains("# lock files"), "{text}");
         let cfg = Config::load(&path).unwrap().unwrap();
-        assert_eq!(cfg.queries, vec![q("A", "status:open")]);
+        assert_eq!(cfg.servers[0].queries, vec![q("A", "status:open")]);
         assert_eq!(cfg.file_filters()[1].globs, ["*.lock", "go.sum"]);
     }
 
@@ -1492,7 +1768,7 @@ action = "hide"
         let cfg = Config::load(&path).unwrap().unwrap();
         let names: Vec<_> = cfg.file_filters().into_iter().map(|f| f.name).collect();
         assert_eq!(names, ["Generated", "Mine"]);
-        assert_eq!(cfg.queries.len(), 1);
+        assert_eq!(cfg.servers[0].queries.len(), 1);
     }
 
     #[test]
@@ -1507,7 +1783,7 @@ action = "hide"
         let cfg = Config::load(&path).unwrap().unwrap();
         let names: Vec<_> = cfg.file_filters().into_iter().map(|f| f.name).collect();
         assert_eq!(names, ["Mine", "Locks", "Generated"]);
-        assert_eq!(cfg.queries.len(), 1);
+        assert_eq!(cfg.servers[0].queries.len(), 1);
     }
 
     #[test]
@@ -1516,6 +1792,350 @@ action = "hide"
         Config::update(&path, |c| c.filters.clear()).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains("filters"), "{text}");
-        assert!(text.contains("[[queries]]"));
+        assert!(text.contains("[[servers.queries]]"));
+    }
+
+    const LEGACY: &str = r##"# My config.
+
+# The server.
+[server]
+url = "https://gerrit.example.com:8443/r" # prod
+username = "jdoe"
+
+# first query
+[[queries]]
+name = "A"
+query = "status:open" # inline a
+
+# bookmark
+[[bookmarks]]
+name = "Mine"
+query = "owner:self"
+
+# generated
+[[filters]]
+name = "Generated"
+globs = ["*.pb.go"]
+action = "hide"
+
+# look
+[appearance]
+theme = "solarized" # nice
+"##;
+
+    fn legacy(name: &str) -> PathBuf {
+        let dir = tmp(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, LEGACY).unwrap();
+        path
+    }
+
+    fn check_migrated(path: &Path) {
+        let text = fs::read_to_string(path).unwrap();
+        for kept in [
+            "# My config.",
+            "# The server.",
+            "url = \"https://gerrit.example.com:8443/r\" # prod",
+            "# first query",
+            "query = \"status:open\" # inline a",
+            "# bookmark",
+            "# generated",
+            "# look",
+            "theme = \"solarized\" # nice",
+        ] {
+            assert!(text.contains(kept), "lost {kept:?} in\n{text}");
+        }
+        assert!(
+            !text.contains("[server]") && !text.contains("\n[[queries]]"),
+            "{text}"
+        );
+        assert!(!text.contains("\n[[bookmarks]]"), "{text}");
+        let cfg = Config::load(path).unwrap().unwrap();
+        assert_eq!(cfg.servers.len(), 1);
+        let s = &cfg.servers[0];
+        assert_eq!(s.id, "gerrit-example-com-8443");
+        assert_eq!(s.name, "gerrit.example.com:8443");
+        assert_eq!(s.url, "https://gerrit.example.com:8443/r");
+        assert_eq!(s.username.as_deref(), Some("jdoe"));
+        assert_eq!(s.queries, vec![q("A", "status:open")]);
+        assert_eq!(s.bookmarks, vec![q("Mine", "owner:self")]);
+        assert_eq!(cfg.filters.len(), 1);
+        assert_eq!(cfg.theme(), ThemeName::Solarized);
+    }
+
+    #[test]
+    fn load_migrates_the_old_layout_in_place_keeping_comments() {
+        let path = legacy("migrate-load");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.servers[0].name, "gerrit.example.com:8443");
+        check_migrated(&path);
+        // Rewritten in place: no backup file next to it.
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("config.toml")]);
+        // A second load leaves the migrated file as it is.
+        let once = fs::read_to_string(&path).unwrap();
+        Config::load(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), once);
+    }
+
+    #[test]
+    fn update_migrates_the_old_layout_even_without_a_change() {
+        let path = legacy("migrate-update");
+        Config::update(&path, |_| {}).unwrap();
+        check_migrated(&path);
+    }
+
+    #[test]
+    fn update_migrates_then_applies_the_change() {
+        let path = legacy("migrate-change");
+        Config::update(&path, |c| {
+            c.servers[0].queries.push(q("B", "is:wip"));
+            c.servers[0].name = "Prod".into();
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# first query") && text.contains("# The server."),
+            "{text}"
+        );
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.servers[0].name, "Prod");
+        // Renaming does not change the id.
+        assert_eq!(cfg.servers[0].id, "gerrit-example-com-8443");
+        assert_eq!(cfg.servers[0].queries.len(), 2);
+    }
+
+    #[test]
+    fn an_old_file_without_a_server_is_left_alone() {
+        let dir = tmp("migrate-none");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let text = "[[queries]]\nname = \"A\"\nquery = \"x\"\n\n[startup]\npage = \"dashboard\"\n";
+        fs::write(&path, text).unwrap();
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert!(cfg.servers.is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    const TWO: &str = r##"# two servers
+[[servers]]
+id = "work"
+name = "Work" # the big one
+url = "https://gerrit.work.example"
+username = "jdoe"
+
+# work queries
+[[servers.queries]]
+name = "Mine"
+query = "owner:self"
+
+[[servers]]
+id = "oss"
+name = "OSS"
+url = "https://gerrit.oss.example"
+color = "#ff8800"
+
+[[servers.queries]]
+name = "Open"
+query = "status:open"
+
+[[servers.bookmarks]]
+name = "Recent"
+query = "-age:1d"
+"##;
+
+    fn two(name: &str) -> PathBuf {
+        let dir = tmp(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, TWO).unwrap();
+        path
+    }
+
+    #[test]
+    fn two_servers_keep_their_own_lists() {
+        let path = two("two-parse");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.servers.len(), 2);
+        assert_eq!(
+            cfg.server("work").unwrap().queries,
+            vec![q("Mine", "owner:self")]
+        );
+        assert_eq!(cfg.server("work").unwrap().bookmarks, vec![]);
+        let oss = cfg.server("oss").unwrap();
+        assert_eq!(oss.username, None);
+        assert_eq!(oss.color.as_deref(), Some("#ff8800"));
+        assert_eq!(oss.queries, vec![q("Open", "status:open")]);
+        assert_eq!(oss.bookmarks, vec![q("Recent", "-age:1d")]);
+        // Nothing to migrate or change: the file is untouched.
+        assert_eq!(fs::read_to_string(&path).unwrap(), TWO);
+    }
+
+    #[test]
+    fn editing_one_server_leaves_the_other_and_the_comments_alone() {
+        let path = two("two-edit");
+        Config::update(&path, |c| {
+            c.servers[1].queries.push(q("Merged", "status:merged"));
+            c.servers[1].name = "Open source".into();
+            c.servers[1].username = Some("alice".into());
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        for kept in [
+            "# two servers",
+            "# the big one",
+            "# work queries",
+            "id = \"oss\"",
+        ] {
+            assert!(text.contains(kept), "lost {kept:?} in\n{text}");
+        }
+        assert!(text.contains("name = \"Open source\""), "{text}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(
+            cfg.servers[0],
+            Config::load(&path).unwrap().unwrap().servers[0]
+        );
+        assert_eq!(cfg.servers[0].queries, vec![q("Mine", "owner:self")]);
+        assert_eq!(cfg.servers[1].queries.len(), 2);
+        assert_eq!(cfg.servers[1].username.as_deref(), Some("alice"));
+        assert_eq!(cfg.servers[1].bookmarks.len(), 1);
+    }
+
+    #[test]
+    fn adding_removing_and_reordering_servers_keeps_the_other_comments() {
+        let path = two("two-shape");
+        Config::update(&path, |c| {
+            *c = std::mem::take(c).after_login("third", "https://third.example", None);
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# two servers") && text.contains("# work queries"),
+            "{text}"
+        );
+        let cfg = Config::load(&path).unwrap().unwrap();
+        let ids: Vec<_> = cfg.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["work", "oss", "third"]);
+        assert_eq!(cfg.servers[2].name, "third.example");
+        assert_eq!(cfg.servers[2].queries, default_queries(true));
+
+        Config::update(&path, |c| c.servers.swap(0, 1)).unwrap();
+        let cfg = Config::load(&path).unwrap().unwrap();
+        let ids: Vec<_> = cfg.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["oss", "work", "third"]);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# work queries") && text.contains("# the big one"),
+            "{text}"
+        );
+
+        Config::update(&path, |c| {
+            c.servers.remove(0);
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("oss") && !text.contains("-age:1d"), "{text}");
+        assert!(text.contains("# work queries"), "{text}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        let ids: Vec<_> = cfg.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["work", "third"]);
+    }
+
+    #[test]
+    fn duplicate_and_invalid_server_ids_are_clear_errors() {
+        let dir = tmp("slug-errors");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let server =
+            |id: &str| format!("[[servers]]\nid = \"{id}\"\nname = \"N\"\nurl = \"https://g\"\n\n");
+
+        fs::write(&path, server("a") + &server("a")).unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::DuplicateServerId { .. }),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("\"a\"") && err.to_string().contains("config.toml"),
+            "{err}"
+        );
+
+        for bad in ["", "Has Space", "UPPER", "a/b"] {
+            fs::write(&path, server(bad)).unwrap();
+            let err = Config::load(&path).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidServerId { .. }),
+                "{bad:?}: {err}"
+            );
+        }
+
+        // An update refuses a file like that, and a change that makes one.
+        let before = server("a") + &server("a");
+        fs::write(&path, &before).unwrap();
+        assert!(Config::update(&path, |_| {}).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        fs::write(&path, server("a")).unwrap();
+        let err = Config::update(&path, |c| c.servers[0].id = "Bad".into()).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidServerId { .. }), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), server("a"));
+    }
+
+    #[test]
+    fn slugs_are_derived_from_names_and_made_unique() {
+        assert_eq!(slugify("Gerrit Code Review"), "gerrit-code-review");
+        assert_eq!(
+            slugify("gerrit.example.com:8080"),
+            "gerrit-example-com-8080"
+        );
+        assert_eq!(slugify("  --Ünï--  "), "n");
+        assert_eq!(slugify("!!!"), "server");
+        assert!(is_slug("a-b_1") && !is_slug("") && !is_slug("A") && !is_slug("a b"));
+
+        assert_eq!(
+            server_name_from_url("https://gerrit.example.com/r/"),
+            "gerrit.example.com"
+        );
+        assert_eq!(
+            server_name_from_url("http://127.0.0.1:8080"),
+            "127.0.0.1:8080"
+        );
+        assert_eq!(
+            server_name_from_url("https://me@host.example/x"),
+            "host.example"
+        );
+
+        let mut cfg = Config::default();
+        for expected in ["dev", "dev-2", "dev-3"] {
+            let id = cfg.unique_server_id("Dev");
+            assert_eq!(id, expected);
+            cfg = cfg.after_login(&id, "http://127.0.0.1:8080", None);
+        }
+        // The id is stored: renaming leaves it alone.
+        cfg.servers[0].name = "Something else".into();
+        assert_eq!(cfg.servers[0].id, "dev");
+        assert_eq!(cfg.unique_server_id("Something else"), "something-else");
+    }
+
+    #[test]
+    fn a_filters_server_restriction_is_parsed_and_preserved() {
+        let dir = tmp("filter-servers");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let text =
+            "[[filters]]\nname = \"G\"\nglobs = [\"a\"]\nservers = [\"work\"]\naction = \"hide\"\n";
+        fs::write(&path, text).unwrap();
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.filters[0].servers, vec!["work".to_owned()]);
+        assert_eq!(cfg.file_filters().len(), 1);
+        Config::update(&path, |c| c.filters[0].action = "dim".into()).unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("servers = [\"work\"]") && after.contains("\"dim\""),
+            "{after}"
+        );
     }
 }
