@@ -8,7 +8,7 @@ mod spec;
 use std::rc::Rc;
 
 use gpui_kit::component::button::ButtonCustomVariant;
-use gpui_kit::component::{ActiveTheme as _, Theme};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::*;
 
 use crate::{labels::Mark, row::Chip};
@@ -64,6 +64,111 @@ impl ThemeName {
     }
 }
 
+/// Whether a part of the UI is light or dark, or follows the system.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ColorMode {
+    pub const ALL: [ColorMode; 3] = [ColorMode::System, ColorMode::Light, ColorMode::Dark];
+
+    /// The name shown in the settings.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorMode::System => "Follow system",
+            ColorMode::Light => "Light",
+            ColorMode::Dark => "Dark",
+        }
+    }
+
+    /// The value in the config file.
+    pub fn key(self) -> &'static str {
+        match self {
+            ColorMode::System => "system",
+            ColorMode::Light => "light",
+            ColorMode::Dark => "dark",
+        }
+    }
+
+    /// The mode for a config value, ignoring case and surrounding blanks.
+    pub fn from_key(key: &str) -> Option<ColorMode> {
+        let key = key.trim();
+        Self::ALL
+            .into_iter()
+            .find(|m| m.key().eq_ignore_ascii_case(key))
+    }
+
+    /// The next mode in [`Self::ALL`], wrapping around.
+    pub fn next(self) -> ColorMode {
+        let at = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
+    }
+
+    /// Whether this mode is dark under the given system appearance.
+    fn is_dark(self, system: WindowAppearance) -> bool {
+        match self {
+            ColorMode::System => ThemeMode::from(system).is_dark(),
+            ColorMode::Light => false,
+            ColorMode::Dark => true,
+        }
+    }
+}
+
+/// The light/dark preference of the UI and of the diff view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColorModes {
+    pub ui: ColorMode,
+    pub diff: ColorMode,
+}
+
+impl Global for ColorModes {}
+
+/// The preferences in use (following the system before [`set_color_modes`]).
+pub fn color_modes(cx: &App) -> ColorModes {
+    cx.try_global::<ColorModes>().copied().unwrap_or_default()
+}
+
+/// Makes `modes` the preference and applies it to `window`.
+pub fn set_color_modes(modes: ColorModes, window: &mut Window, cx: &mut App) {
+    cx.set_global(modes);
+    sync_appearance(window, cx);
+}
+
+/// Applies the UI's mode: the system appearance if it follows the system,
+/// otherwise the chosen one. Call it when the system appearance changes.
+/// The window is redrawn either way, as the diff view may follow the system
+/// while the rest of the UI does not.
+pub fn sync_appearance(window: &mut Window, cx: &mut App) {
+    match color_modes(cx).ui {
+        ColorMode::System => Theme::sync_system_appearance(Some(&mut *window), cx),
+        ColorMode::Light => Theme::change(ThemeMode::Light, Some(&mut *window), cx),
+        ColorMode::Dark => Theme::change(ThemeMode::Dark, Some(&mut *window), cx),
+    }
+    window.refresh();
+}
+
+/// The theme the diff view paints with: the UI's own unless the diff has
+/// the other mode, then the other variant of the theme in use.
+pub fn diff_theme(window: &Window, cx: &App) -> Theme {
+    let ui = cx.theme();
+    let dark = color_modes(cx).diff.is_dark(window.appearance());
+    if dark == ui.is_dark() {
+        return ui.clone();
+    }
+    let config = if dark {
+        ui.dark_theme.clone()
+    } else {
+        ui.light_theme.clone()
+    };
+    let mut theme = ui.clone();
+    theme.apply_config(&config);
+    theme
+}
+
 /// The theme in use, with the extra colors of both its variants.
 struct Current {
     name: ThemeName,
@@ -107,9 +212,8 @@ pub fn current(cx: &App) -> ThemeName {
         .map_or_else(ThemeName::default, |c| c.name)
 }
 
-/// The extra colors of the theme and mode in use.
-fn extra(cx: &App) -> ExtraColors {
-    let dark = cx.theme().is_dark();
+/// The extra colors of the theme in use, for a light or dark mode.
+fn extra(dark: bool, cx: &App) -> ExtraColors {
     match cx.try_global::<Current>() {
         Some(c) if dark => c.dark,
         Some(c) => c.light,
@@ -126,8 +230,9 @@ pub struct DiffColors {
     pub comment_mark: Hsla,
 }
 
-pub fn diff_colors(cx: &App) -> DiffColors {
-    let e = extra(cx);
+/// The diff colors for the mode of `theme`.
+pub fn diff_colors(theme: &Theme, cx: &App) -> DiffColors {
+    let e = extra(theme.is_dark(), cx);
     DiffColors {
         removed_row: color(e.removed_row),
         removed_mark: color(e.removed_mark),
@@ -163,7 +268,7 @@ pub fn chip_colors(chip: Chip, cx: &App) -> (Hsla, Hsla) {
 /// Background of the commit message card: a faint tint of the theme's, so
 /// it stands out from the columns beside it.
 pub fn commit_card_background(cx: &App) -> Hsla {
-    color(extra(cx).commit_card)
+    color(extra(cx.theme().is_dark(), cx).commit_card)
 }
 
 /// Style of the quick-vote buttons, in the theme's primary color. The
@@ -212,7 +317,17 @@ pub fn modal_backdrop(cx: &App) -> Hsla {
 
 #[cfg(test)]
 mod tests {
-    use super::ThemeName;
+    use super::{ColorMode, ThemeName};
+
+    #[test]
+    fn color_mode_keys_round_trip() {
+        for m in ColorMode::ALL {
+            assert_eq!(ColorMode::from_key(m.key()), Some(m));
+        }
+        assert_eq!(ColorMode::from_key(" Dark "), Some(ColorMode::Dark));
+        assert_eq!(ColorMode::from_key("auto"), None);
+        assert_eq!(ColorMode::Dark.next(), ColorMode::System);
+    }
 
     #[test]
     fn config_keys_round_trip() {

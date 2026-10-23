@@ -782,6 +782,38 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    fn switching_the_modes_saves_and_applies_them(cx: &mut TestAppContext) {
+        use crate::theme::{ColorMode, ColorModes, color_modes};
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        let ui_dark = |cx: &mut TestAppContext| {
+            cx.update(|cx| gpui_kit::component::ActiveTheme::theme(cx).is_dark())
+        };
+        assert_eq!(cx.update(|cx| color_modes(cx)), ColorModes::default());
+        // Two query rows, the startup, advance and theme rows, then the UI
+        // mode row: system, light, dark.
+        for _ in 0..5 {
+            press(cx, &f, "j");
+        }
+        press(cx, &f, "space");
+        press(cx, &f, "space");
+        assert_eq!(cx.update(|cx| color_modes(cx).ui), ColorMode::Dark);
+        assert!(ui_dark(cx));
+        press(cx, &f, "space");
+        assert_eq!(cx.update(|cx| color_modes(cx).ui), ColorMode::System);
+        // The diff row is separate.
+        press(cx, &f, "j");
+        press(cx, &f, "space");
+        assert_eq!(
+            cx.update(|cx| color_modes(cx)),
+            ColorModes {
+                ui: ColorMode::System,
+                diff: ColorMode::Light
+            }
+        );
+    }
+
+    #[gpui_kit::test]
     fn a_failed_theme_save_keeps_the_theme(cx: &mut TestAppContext) {
         let f = fixture(cx, true);
         open_settings(cx, &f);
@@ -898,9 +930,9 @@ mod settings_page {
         })
     }
 
-    /// Cursor on the first filter row: 2 queries, startup, advance, theme.
+    /// Cursor on the first filter row: 2 queries, startup, advance, theme, two modes.
     fn to_filters(cx: &mut TestAppContext, f: &Fixture) {
-        for _ in 0..5 {
+        for _ in 0..7 {
             press(cx, f, "j");
         }
     }
@@ -911,13 +943,13 @@ mod settings_page {
         open_settings(cx, &f);
         assert_eq!(page_state(cx, &f).1, ["gen", "lock"]);
         to_filters(cx, &f);
-        assert_eq!(page_state(cx, &f).0, 5);
+        assert_eq!(page_state(cx, &f).0, 7);
         press(cx, &f, "j");
         press(cx, &f, "j");
         // The last rule is the last row.
-        assert_eq!(page_state(cx, &f).0, 6);
+        assert_eq!(page_state(cx, &f).0, 8);
         press(cx, &f, "k");
-        assert_eq!(page_state(cx, &f).0, 5);
+        assert_eq!(page_state(cx, &f).0, 7);
     }
 
     #[gpui_kit::test]
@@ -932,7 +964,7 @@ mod settings_page {
         assert_eq!(dialog_state(cx, &f), None);
         // Focus is back on the page: the cursor still works.
         press(cx, &f, "k");
-        assert_eq!(page_state(cx, &f).0, 5);
+        assert_eq!(page_state(cx, &f).0, 7);
         press(cx, &f, "d");
         // Deleting is the dialog's business, with its confirmation.
         assert_eq!(dialog_state(cx, &f), Some((0, "browsing")));
@@ -965,7 +997,7 @@ mod settings_page {
         open_settings(cx, &f);
         to_filters(cx, &f);
         press(cx, &f, "j");
-        assert_eq!(page_state(cx, &f), (5, Vec::new()));
+        assert_eq!(page_state(cx, &f), (7, Vec::new()));
         press(cx, &f, "enter");
         assert_eq!(dialog_state(cx, &f), Some((0, "adding")));
     }
@@ -990,7 +1022,7 @@ mod settings_page {
             })
         });
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (5, vec!["lock".into(), "gen".into()]));
+        assert_eq!(page_state(cx, &f), (7, vec!["lock".into(), "gen".into()]));
         // Removing the rule under the cursor clamps it.
         cx.update(|cx| {
             filters.update(cx, |ff, cx| {
@@ -998,10 +1030,10 @@ mod settings_page {
             })
         });
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (5, vec!["gen".into()]));
+        assert_eq!(page_state(cx, &f), (7, vec!["gen".into()]));
         cx.update(|cx| filters.update(cx, |ff, cx| ff.set_rules(Vec::new(), cx)));
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (5, Vec::new()));
+        assert_eq!(page_state(cx, &f), (7, Vec::new()));
     }
 }
 

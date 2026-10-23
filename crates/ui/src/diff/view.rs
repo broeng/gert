@@ -24,7 +24,7 @@ use super::{
         Anchor, Cell, Expansion, FoldRow, HiddenRow, Layout, LayoutOptions, LineKind, REVEAL_STEP,
         Row, ThreadSlot,
     },
-    paint::{Style, SyntaxPaint, line_highlights},
+    paint::{Palette, Style, SyntaxPaint, line_highlights},
     syntax::{DiffSyntax, highlight_diff},
 };
 
@@ -1358,8 +1358,8 @@ fn hidden_element(hidden: &HiddenRow, style: &Style) -> AnyElement {
 
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = crate::theme::diff_theme(window, cx);
         let (family, size, row_height, bg, fg, strip) = {
-            let t = cx.theme();
             let strip = match (&self.status, &self.hint) {
                 (Some(DiffStatus::Busy(m)), _) => Some((m.clone(), t.muted_foreground, t.muted)),
                 // A transient hint (the key was pressed with nothing to do)
@@ -1393,15 +1393,15 @@ impl Render for DiffView {
             self.font_family.clone(),
             self.prefs.line_length,
             self.prefs.hide_line_numbers,
-            self.focus.is_focused(window),
+            Palette::new(self.focus.is_focused(window), &t, cx),
             self.layout.max_numbers(),
+            &t,
             window,
-            cx,
         );
         if let Some(syntax) = self.active_syntax() {
             style.syntax = Some(SyntaxPaint {
                 syntax: syntax.clone(),
-                theme: cx.theme().highlight_theme.clone(),
+                theme: t.highlight_theme.clone(),
                 tab_size: self.prefs.tab_size,
                 show_tabs: self.prefs.show_tabs,
             });
