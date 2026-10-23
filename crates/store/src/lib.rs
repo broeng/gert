@@ -90,18 +90,74 @@ impl Store {
         migrations::user_version(&self.conn)
     }
 
-    /// Gets or creates the id for a server. A trailing slash on `base_url`
-    /// is ignored.
+    /// Gets or creates the id for a server by URL, for callers that know
+    /// no slug (a login, tests). A trailing slash on `base_url` is ignored.
+    /// Several rows may share a URL; this prefers one no config entry has
+    /// claimed yet (so a fresh login's rows are adopted by its entry) and
+    /// then the oldest.
     pub fn server_id(&mut self, base_url: &str) -> Result<ServerId, Error> {
         let url = normalize_url(base_url);
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT OR IGNORE INTO servers (base_url) VALUES (?1)",
-            [url],
-        )?;
-        let id = tx.query_row("SELECT id FROM servers WHERE base_url = ?1", [url], |r| {
-            r.get(0)
-        })?;
+        let id = match find_by_url(&tx, url)? {
+            Some(id) => id,
+            None => {
+                tx.execute("INSERT INTO servers (base_url) VALUES (?1)", [url])?;
+                tx.last_insert_rowid()
+            }
+        };
+        tx.commit()?;
+        Ok(ServerId(id))
+    }
+
+    /// The row of the configured server `slug` at `base_url`, created if
+    /// needed. This is how `app` maps `[[servers]]` entries to rows, so that
+    /// two entries with the same URL get separate caches.
+    ///
+    /// 1. A row with this slug is the server's; if its URL differs the
+    ///    config was edited, and the row follows it (the cache is kept).
+    /// 2. Otherwise a row with this URL and no slug is adopted: caches from
+    ///    before slugs existed (or from a login) become the first entry's.
+    /// 3. Otherwise a new row.
+    pub fn server_for_slug(&mut self, slug: &str, base_url: &str) -> Result<ServerId, Error> {
+        let url = normalize_url(base_url);
+        let tx = self.conn.transaction()?;
+        let by_slug: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT id, base_url FROM servers WHERE slug = ?1",
+                [slug],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let id = if let Some((id, current)) = by_slug {
+            if current != url {
+                // The config is the truth for a slugged row; unlike
+                // `set_server_url` this allows sharing a URL.
+                tx.execute(
+                    "UPDATE servers SET base_url = ?1 WHERE id = ?2",
+                    params![url, id],
+                )?;
+            }
+            id
+        } else if let Some(id) = tx
+            .query_row(
+                "SELECT id FROM servers WHERE base_url = ?1 AND slug IS NULL ORDER BY id LIMIT 1",
+                [url],
+                |r| r.get(0),
+            )
+            .optional()?
+        {
+            tx.execute(
+                "UPDATE servers SET slug = ?1 WHERE id = ?2",
+                params![slug, id],
+            )?;
+            id
+        } else {
+            tx.execute(
+                "INSERT INTO servers (base_url, slug) VALUES (?1, ?2)",
+                params![url, slug],
+            )?;
+            tx.last_insert_rowid()
+        };
         tx.commit()?;
         Ok(ServerId(id))
     }
@@ -358,6 +414,18 @@ impl Store {
         })
         .transpose()
     }
+}
+
+/// A row with this URL, preferring one without a slug, then the oldest.
+fn find_by_url(tx: &Transaction<'_>, url: &str) -> Result<Option<i64>, Error> {
+    Ok(tx
+        .query_row(
+            "SELECT id FROM servers WHERE base_url = ?1
+             ORDER BY slug IS NOT NULL, id LIMIT 1",
+            [url],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 fn normalize_url(base_url: &str) -> &str {

@@ -36,7 +36,7 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
             base_url: s.url.clone(),
             username: s.username.clone(),
             color: s.color.clone(),
-            server: store.server_id(&s.url)?,
+            server: store.server_for_slug(&s.id, &s.url)?,
             queries: queries_to_ui(&s.queries),
             bookmarks: queries_to_ui(&s.bookmarks),
         });
