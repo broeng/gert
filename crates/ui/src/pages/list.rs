@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -18,6 +19,7 @@ use crate::{
     actions::*,
     labels::{label_columns, mark, short_name},
     list_model::{DASHBOARD_ROWS, ListModel, PAGE_SIZE, Pager},
+    pages::settings::validate,
     row::{browser_url, chips, size_text},
     session::{SavedQuery, Session, is_unauthorized},
     theme::{chip_colors, mark_color},
@@ -29,6 +31,10 @@ use crate::{
 pub enum ListEvent {
     Open(ChangeNumber),
     Unauthorized,
+    /// Show the results of this query (a bookmark was chosen).
+    Search(String),
+    /// The bookmarks changed: save this list.
+    SaveBookmarks(Vec<SavedQuery>),
     /// A refresh succeeded: the server is reachable.
     Refreshed,
 }
@@ -117,6 +123,11 @@ pub struct ChangeListPage {
     restore: Option<ChangeNumber>,
     reveal: bool,
     ticks: u32,
+    bookmarks: Vec<SavedQuery>,
+    /// The label box while a search is being bookmarked.
+    naming: Option<Entity<InputState>>,
+    naming_sub: Option<Subscription>,
+    why_not: Option<&'static str>,
     _ticker: Task<()>,
 }
 
@@ -151,6 +162,10 @@ impl ChangeListPage {
             restore,
             reveal: false,
             ticks: 0,
+            bookmarks: Vec::new(),
+            naming: None,
+            naming_sub: None,
+            why_not: None,
             _ticker: Task::ready(()),
         };
         for i in 0..count {
@@ -175,6 +190,12 @@ impl ChangeListPage {
     #[cfg(test)]
     pub(crate) fn focus_handle_for_test(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// The bookmarks to show (the shell hands over the saved list).
+    pub fn set_bookmarks(&mut self, bookmarks: Vec<SavedQuery>, cx: &mut Context<Self>) {
+        self.bookmarks = bookmarks;
+        cx.notify();
     }
 
     pub fn selected_number(&self) -> Option<ChangeNumber> {
@@ -438,6 +459,84 @@ impl ChangeListPage {
         }
     }
 
+    fn open_bookmark(&mut self, a: &OpenBookmark, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(b) = self.bookmarks.get(a.position) {
+            cx.emit(ListEvent::Search(b.query.clone()));
+        }
+    }
+
+    /// The query of a search page.
+    fn search_query(&self) -> Option<&str> {
+        match self.kind {
+            ListKind::Search => self.sections.first().map(|s| s.spec.query.as_str()),
+            ListKind::Dashboard => None,
+        }
+    }
+
+    /// `b b`: bookmark the search, or drop the bookmark it has.
+    fn toggle_bookmark(&mut self, _: &ToggleBookmark, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(query) = self.search_query().map(str::to_owned) else {
+            return;
+        };
+        if self.naming.is_some() {
+            return;
+        }
+        if self.bookmarks.iter().any(|b| b.query == query) {
+            let rest = self
+                .bookmarks
+                .iter()
+                .filter(|b| b.query != query)
+                .cloned()
+                .collect();
+            cx.emit(ListEvent::SaveBookmarks(rest));
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Label of the bookmark"));
+        self.naming_sub =
+            Some(
+                cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = ev {
+                        this.commit_bookmark(window, cx);
+                    }
+                }),
+            );
+        input.update(cx, |s, cx| s.focus(window, cx));
+        self.naming = Some(input);
+        self.why_not = None;
+        cx.notify();
+    }
+
+    fn commit_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(input), Some(query)) = (&self.naming, self.search_query()) else {
+            return;
+        };
+        let name = input.read(cx).value().to_string();
+        match validate(&name, query) {
+            Ok(b) => {
+                let mut list = self.bookmarks.clone();
+                list.push(b);
+                self.close_naming(window, cx);
+                cx.emit(ListEvent::SaveBookmarks(list));
+            }
+            Err(why) => {
+                self.why_not = Some(why);
+                cx.notify();
+            }
+        }
+    }
+
+    fn cancel_bookmark(&mut self, _: &CancelBookmark, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_naming(window, cx);
+    }
+
+    fn close_naming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.naming.take().is_some() {
+            self.naming_sub = None;
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
     fn refresh_action(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
         self.refresh_now(cx);
     }
@@ -652,6 +751,87 @@ impl ChangeListPage {
             })
             .child(div().flex_1())
             .child(status)
+            .when(self.kind == ListKind::Search, |d| {
+                let on = self.bookmarks.iter().any(|b| b.query == s.spec.query);
+                d.child(
+                    Button::new("bookmark-toggle")
+                        .label(if on {
+                            "Bookmarked (b b)"
+                        } else {
+                            "Bookmark (b b)"
+                        })
+                        .xsmall()
+                        .on_click(cx.listener(|this, _, w, cx| {
+                            this.toggle_bookmark(&ToggleBookmark, w, cx)
+                        })),
+                )
+            })
+    }
+
+    /// The dashboard's bookmark buttons.
+    fn render_bookmarks(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.kind != ListKind::Dashboard || self.bookmarks.is_empty() {
+            return None;
+        }
+        Some(
+            h_flex()
+                .flex_wrap()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .children(self.bookmarks.iter().enumerate().map(|(i, b)| {
+                    let query = b.query.clone();
+                    Button::new(("bookmark", i))
+                        .label(b.name.clone())
+                        .small()
+                        .on_click(
+                            cx.listener(move |_, _, _, cx| {
+                                cx.emit(ListEvent::Search(query.clone()))
+                            }),
+                        )
+                })),
+        )
+    }
+
+    /// The label box shown while a search is being bookmarked.
+    fn render_naming(
+        &self,
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .key_context("Naming")
+            .gap_2()
+            .px_3()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .w(px(240.))
+                    .flex_none()
+                    .child(Input::new(input).small()),
+            )
+            .child(
+                Button::new("bookmark-save")
+                    .label("Bookmark")
+                    .small()
+                    .on_click(cx.listener(|this, _, w, cx| this.commit_bookmark(w, cx))),
+            )
+            .child(
+                Button::new("bookmark-cancel")
+                    .label("Cancel")
+                    .small()
+                    .on_click(
+                        cx.listener(|this, _, w, cx| this.cancel_bookmark(&CancelBookmark, w, cx)),
+                    ),
+            )
+            .children(
+                self.why_not
+                    .map(|why| div().text_sm().text_color(cx.theme().danger).child(why)),
+            )
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -767,7 +947,16 @@ impl Render for ChangeListPage {
             .on_action(cx.listener(Self::next_page))
             .on_action(cx.listener(Self::prev_page))
             .on_action(cx.listener(Self::refresh_action))
+            .on_action(cx.listener(Self::open_bookmark))
+            .on_action(cx.listener(Self::toggle_bookmark))
+            .on_action(cx.listener(Self::cancel_bookmark))
             .size_full()
+            .children(self.render_bookmarks(cx))
+            .children(
+                self.naming
+                    .as_ref()
+                    .map(|input| self.render_naming(input, cx)),
+            )
             .child(
                 div()
                     .relative()

@@ -121,6 +121,114 @@ fn dashboard_shows_cached_rows_and_j_k_cross_sections(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn bookmark_keys_open_the_bookmark_and_b_b_bookmarks_a_search(cx: &mut TestAppContext) {
+    use crate::pages::list::ListEvent;
+    let env = env_with(seeded(&[("a", &[1])]), &FakeHttpClient::new());
+    let session = Session::new(&env, &setup(), None).expect("session");
+    let (window, page) = open(cx, |window, cx| {
+        let page = cx.new(|cx| {
+            ChangeListPage::new(
+                session,
+                ListKind::Search,
+                vec![spec("S", "a")],
+                None,
+                true,
+                cx,
+            )
+        });
+        page.update(cx, |p, cx| {
+            p.set_bookmarks(vec![spec("Mine", "owner:self"), spec("Old", "a")], cx)
+        });
+        let focus = page.read(cx).focus_handle_for_test();
+        window.focus(&focus, cx);
+        page
+    });
+    cx.run_until_parked();
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = events.clone();
+    let _sub = cx.update(|cx| {
+        cx.subscribe(&page, move |_, ev: &ListEvent, _| match ev {
+            ListEvent::Search(q) => seen.borrow_mut().push(format!("search {q}")),
+            ListEvent::SaveBookmarks(l) => seen.borrow_mut().push(format!(
+                "save {}",
+                l.iter()
+                    .map(|b| b.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
+            _ => {}
+        })
+    });
+    let press = |cx: &mut TestAppContext, key: &'static str| {
+        cx.update_window(window, |_, window, cx| window.press(key, cx))
+            .expect("press");
+    };
+
+    press(cx, "b");
+    press(cx, "1");
+    // Past the end of the list: nothing.
+    press(cx, "b");
+    press(cx, "5");
+    assert_eq!(*events.borrow(), ["search owner:self"]);
+
+    // This search is bookmarked already: `b b` takes the bookmark away.
+    press(cx, "b");
+    press(cx, "b");
+    assert_eq!(
+        events.borrow().last().map(String::as_str),
+        Some("save Mine")
+    );
+}
+
+#[gpui_kit::test]
+fn a_new_bookmark_needs_a_label(cx: &mut TestAppContext) {
+    use crate::pages::list::ListEvent;
+    let env = env_with(seeded(&[("a", &[1])]), &FakeHttpClient::new());
+    let session = Session::new(&env, &setup(), None).expect("session");
+    let (window, page) = open(cx, |window, cx| {
+        let page = cx.new(|cx| {
+            ChangeListPage::new(
+                session,
+                ListKind::Search,
+                vec![spec("S", "a")],
+                None,
+                true,
+                cx,
+            )
+        });
+        let focus = page.read(cx).focus_handle_for_test();
+        window.focus(&focus, cx);
+        page
+    });
+    cx.run_until_parked();
+    let saved = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = saved.clone();
+    let _sub = cx.update(|cx| {
+        cx.subscribe(&page, move |_, ev: &ListEvent, _| {
+            if let ListEvent::SaveBookmarks(l) = ev {
+                seen.borrow_mut().push(l.clone());
+            }
+        })
+    });
+    let press = |cx: &mut TestAppContext, key: &'static str| {
+        cx.update_window(window, |_, window, cx| window.press(key, cx))
+            .expect("press");
+    };
+
+    // Enter on an empty label does not save; Esc closes the box.
+    press(cx, "b");
+    press(cx, "b");
+    press(cx, "enter");
+    assert!(saved.borrow().is_empty());
+    press(cx, "escape");
+    press(cx, "b");
+    press(cx, "b");
+    cx.simulate_input(window, "Wip");
+    press(cx, "enter");
+    assert_eq!(*saved.borrow(), [vec![spec("Wip", "a")]]);
+}
+
+#[gpui_kit::test]
 fn the_list_follows_the_window_height_when_it_is_resized(cx: &mut TestAppContext) {
     let numbers: Vec<u64> = (1..=60).collect();
     let env = env_with(seeded(&[("a", &numbers)]), &FakeHttpClient::new());
@@ -175,6 +283,7 @@ fn shell_opens_a_change_from_the_dashboard_and_goes_up(cx: &mut TestAppContext) 
         .expect("save detail");
     let env = env_with(store, &FakeHttpClient::new());
     let startup = Startup {
+        bookmarks: Vec::new(),
         env,
         server: Some(setup()),
         queries: vec![spec("Open", "status:open")],
@@ -208,6 +317,7 @@ fn unauthorized_sends_the_user_to_login(cx: &mut TestAppContext) {
     http.push_response(401, "denied");
     let env = env_with(seeded(&[("status:open", &[1])]), &http);
     let startup = Startup {
+        bookmarks: Vec::new(),
         env,
         server: Some(setup()),
         queries: vec![spec("Open", "status:open")],
@@ -278,6 +388,7 @@ fn cached_server_diff_preferences_sit_under_the_local_overrides(cx: &mut TestApp
         )
         .expect("save prefs");
     let startup = Startup {
+        bookmarks: Vec::new(),
         env: env_with(store, &FakeHttpClient::new()),
         server: Some(setup()),
         queries: vec![spec("Open", "status:open")],
@@ -431,6 +542,7 @@ mod drafts {
         let mut env = env_with(store, http);
         env.backend = std::sync::Arc::new(Keyring);
         let startup = Startup {
+            bookmarks: Vec::new(),
             env,
             server: Some(ServerSetup {
                 username: Some("u".into()),
@@ -559,6 +671,7 @@ mod settings_page {
             )
         };
         let startup = Startup {
+            bookmarks: Vec::new(),
             env,
             server: Some(setup()),
             queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
@@ -1048,6 +1161,7 @@ mod goto {
     fn start(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Shell>) {
         let env = env_with(seeded(&[("status:open", &[1])]), &FakeHttpClient::new());
         let startup = Startup {
+            bookmarks: Vec::new(),
             env,
             server: Some(setup()),
             queries: vec![spec("Open", "status:open")],

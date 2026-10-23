@@ -886,6 +886,7 @@ mod in_the_shell {
         let mut env = env_with(store, http);
         env.backend = std::sync::Arc::new(Keyring);
         let startup = Startup {
+            bookmarks: Vec::new(),
             env,
             server: Some(ServerSetup {
                 username: username.map(str::to_owned),
@@ -1061,6 +1062,7 @@ mod in_the_shell {
         let mut env = env_with(store, http);
         env.backend = std::sync::Arc::new(Keyring);
         let startup = Startup {
+            bookmarks: Vec::new(),
             env,
             server: Some(ServerSetup {
                 username: Some("bob".into()),

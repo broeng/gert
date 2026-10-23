@@ -97,6 +97,10 @@ pub struct Shell {
     outbox: Option<Entity<DraftOutbox>>,
     outbox_subs: Vec<Subscription>,
     queries: Vec<SavedQuery>,
+    /// The dashboard's bookmark buttons.
+    bookmarks: Vec<SavedQuery>,
+    /// Saving the bookmarks.
+    bookmarks_task: Option<Task<()>>,
     /// What `start` opens (the `[startup]` setting).
     start_page: StartupPage,
     nav: NavState,
@@ -141,6 +145,7 @@ impl Shell {
             env,
             server,
             queries,
+            bookmarks,
             filters,
             diff,
             start_page,
@@ -194,6 +199,8 @@ impl Shell {
             outbox: None,
             outbox_subs: Vec::new(),
             queries,
+            bookmarks,
+            bookmarks_task: None,
             start_page,
             nav: NavState::new(Route::Login),
             page: Page::Login(login),
@@ -541,6 +548,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Page {
         let page = cx.new(|cx| ChangeListPage::new(session, kind, specs, restore, active, cx));
+        let bookmarks = self.bookmarks.clone();
+        page.update(cx, |p, cx| p.set_bookmarks(bookmarks, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
@@ -549,6 +558,8 @@ impl Shell {
                     this.nav.set_selected(page.read(cx).selected_number());
                     this.navigate(Route::Change(*n), window, cx);
                 }
+                ListEvent::Search(q) => this.search(q.clone(), window, cx),
+                ListEvent::SaveBookmarks(list) => this.save_bookmarks(list.clone(), cx),
                 ListEvent::Unauthorized => this.unauthorized(window, cx),
                 ListEvent::Refreshed => this.server_reachable(cx),
             },
@@ -691,6 +702,30 @@ impl Shell {
         self.remember_selection(cx);
         self.nav.push(route);
         self.show(window, cx);
+    }
+
+    /// Writes the bookmarks in the background; the buttons follow once the
+    /// config file has them. On failure the old list stays.
+    fn save_bookmarks(&mut self, list: Vec<SavedQuery>, cx: &mut Context<Self>) {
+        let backend = self.env.backend.clone();
+        self.bookmarks_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.save_bookmarks(&list) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(saved) => {
+                        this.bookmarks = saved.clone();
+                        if let Page::List(page) = &this.page {
+                            page.update(cx, |p, cx| p.set_bookmarks(saved, cx));
+                        }
+                    }
+                    Err(e) => log::warn!("saving the bookmarks: {e}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn search(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
