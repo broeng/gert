@@ -138,6 +138,13 @@ pub(crate) struct ServerEntry {
     pub credentials_task: Option<Task<()>>,
     /// Saving the bookmarks.
     pub bookmarks_task: Option<Task<()>>,
+    /// How many changes want the user's attention on this server, as of the
+    /// last background poll (or an earlier run's, from the cache). `None`:
+    /// not known. Only polled while the server is not the active one.
+    pub attention_count: Option<usize>,
+    /// The background poll of `attention_count`; present exactly while the
+    /// server is polled (inactive, signed in). Dropping it stops the poll.
+    pub attention_task: Option<Task<()>>,
 }
 
 impl ServerEntry {
@@ -152,6 +159,8 @@ impl ServerEntry {
             diff_prefs: None,
             credentials_task: None,
             bookmarks_task: None,
+            attention_count: None,
+            attention_task: None,
         }
     }
 }

@@ -27,6 +27,22 @@ impl Default for PollPolicy {
     }
 }
 
+impl PollPolicy {
+    /// The interval of the background poll of servers that are not shown:
+    /// slow, and the same whether or not the window is focused.
+    pub const BACKGROUND_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+    /// The policy for polling servers that are not shown (one cheap query
+    /// per [`Self::BACKGROUND_INTERVAL`], backing off after failures).
+    pub fn background() -> Self {
+        Self {
+            focused: Self::BACKGROUND_INTERVAL,
+            unfocused: Self::BACKGROUND_INTERVAL,
+            max_backoff: Duration::from_secs(30 * 60),
+        }
+    }
+}
+
 /// What the policy needs to know about one query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PollState {
@@ -171,6 +187,20 @@ mod tests {
         let mut s = state(Some(T0));
         s.consecutive_failures = 3;
         assert_eq!(p.interval(&s), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn the_background_policy_is_slow_and_ignores_focus() {
+        let p = PollPolicy::background();
+        let mut s = state(Some(T0));
+        let secs = Duration::from_secs;
+        assert_eq!(p.interval(&s), secs(300));
+        s.window_focused = false;
+        assert_eq!(p.interval(&s), secs(300));
+        s.consecutive_failures = 1;
+        assert_eq!(p.interval(&s), secs(600));
+        s.consecutive_failures = 9;
+        assert_eq!(p.interval(&s), secs(1800));
     }
 
     #[test]

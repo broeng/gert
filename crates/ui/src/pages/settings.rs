@@ -37,6 +37,7 @@ use crate::{
     filters::{FileFilter, FilterAction},
     hint::Hint,
     login::LoginOutcome,
+    servers::Connection,
     session::{BackendError, Env, SavedQuery, ServerBackend, ServerConfig, ServerKey, StartupPage},
     settings::{FileFilters, PageLayout},
     theme::{self as app_theme, ColorMode, ColorModes, ThemeName},
@@ -65,6 +66,13 @@ pub enum SettingsEvent {
     },
     /// Server `key` was removed with its cache and password.
     ServerRemoved { key: ServerKey },
+    /// A connection test of server `key` reached a verdict: the server
+    /// answered (`Online`), could not be reached (`Offline`) or refused the
+    /// saved credentials (`Unauthorized`).
+    ConnectionTested {
+        key: ServerKey,
+        connection: Connection,
+    },
 }
 
 /// The two lists of name and query pairs the page edits.
