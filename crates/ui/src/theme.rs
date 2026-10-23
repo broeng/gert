@@ -315,9 +315,101 @@ pub fn modal_backdrop(cx: &App) -> Hsla {
     hsla(0., 0., 0., alpha)
 }
 
+/// How many distinct server colors the palette has; later servers reuse
+/// them in order.
+pub const SERVER_PALETTE_LEN: usize = 8;
+
+/// Server colors for a light page: dark enough to read as a dot or a line
+/// on white (at least 3:1) and to carry text on a faint tint.
+const SERVER_PALETTE_LIGHT: [u32; SERVER_PALETTE_LEN] = [
+    0x2563eb, // blue
+    0xd9480f, // orange
+    0x2f9e44, // green
+    0xae3ec9, // purple
+    0x0c8599, // teal
+    0xc2255c, // pink
+    0x9c6b00, // amber
+    0x5c6f82, // slate
+];
+
+/// The same hues for a dark page: lighter, so they keep their contrast.
+const SERVER_PALETTE_DARK: [u32; SERVER_PALETTE_LEN] = [
+    0x6ea8fe, 0xff9b5e, 0x69db7c, 0xd27cf0, 0x3bc9db, 0xf783ac, 0xffd43b, 0xa0aec0,
+];
+
+/// The color of the server at `position` in the config (0-based): the
+/// user's `custom` `"#rrggbb"` if it parses, else the palette entry for the
+/// position, from the variant that suits `theme`. By position, so the first
+/// eight servers always differ; it moves when servers are reordered, which
+/// is why a color that must stay put is set in the config.
+pub fn server_color(position: usize, custom: Option<&str>, theme: &Theme) -> Hsla {
+    if let Some(c) = custom.and_then(parse_hex_color) {
+        return c;
+    }
+    let palette = if theme.is_dark() {
+        &SERVER_PALETTE_DARK
+    } else {
+        &SERVER_PALETTE_LIGHT
+    };
+    color(palette[position % SERVER_PALETTE_LEN])
+}
+
+/// `#rrggbb` (the `#` is optional).
+pub fn parse_hex_color(text: &str) -> Option<Hsla> {
+    let hex = text.trim().trim_start_matches('#');
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(hex, 16).ok().map(color)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ColorMode, ThemeName};
+    use super::{
+        ColorMode, SERVER_PALETTE_DARK, SERVER_PALETTE_LEN, SERVER_PALETTE_LIGHT, ThemeName,
+        parse_hex_color,
+    };
+
+    fn luminance(c: u32) -> f32 {
+        let channel = |shift: u32| {
+            let v = ((c >> shift) & 0xff) as f32 / 255.;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast(a: u32, b: u32) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn server_palettes_are_distinct_and_readable() {
+        for (palette, page) in [
+            (SERVER_PALETTE_LIGHT, 0xffffff),
+            (SERVER_PALETTE_DARK, 0x1c1c1c),
+        ] {
+            assert_eq!(palette.len(), SERVER_PALETTE_LEN);
+            let mut seen = std::collections::HashSet::new();
+            for c in palette {
+                assert!(seen.insert(c), "{c:06x} twice");
+                assert!(contrast(c, page) >= 3., "{c:06x} on {page:06x}");
+            }
+        }
+    }
+
+    #[test]
+    fn hex_colors_parse() {
+        assert!(parse_hex_color("#2563eb").is_some());
+        assert!(parse_hex_color(" 2563EB ").is_some());
+        assert!(parse_hex_color("#25").is_none());
+        assert!(parse_hex_color("#zzzzzz").is_none());
+        assert!(parse_hex_color("red").is_none());
+    }
 
     #[test]
     fn color_mode_keys_round_trip() {

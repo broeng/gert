@@ -48,6 +48,7 @@ use crate::{
     nav::DiffRoute,
     outbox::DraftOutbox,
     reply, reviewed,
+    servers::ServerBadge,
     session::{Session, is_unauthorized},
     settings::{DiffSettings, FileFilters},
     syntax_cache::{Highlight, SyntaxCache, ahead_paths, diff_key, is_magic},
@@ -103,6 +104,8 @@ pub struct DiffPage {
     reviewed: HashSet<String>,
     /// A note for the user (why a key did nothing, a failed request).
     hint: Hint,
+    /// The server's name and color, when there are several servers.
+    server_badge: Option<ServerBadge>,
     /// The key of the diff shown or being fetched.
     key: Option<DiffKey>,
     /// The key of the diff that is on screen (`key` runs ahead of it while a
@@ -162,6 +165,7 @@ impl DiffPage {
             styles: Vec::new(),
             reviewed: HashSet::new(),
             hint: Hint::default(),
+            server_badge: None,
             key: None,
             shown: None,
             view: None,
@@ -573,6 +577,19 @@ impl DiffPage {
         }
     }
 
+    /// Names the page's server in its header (several servers only).
+    pub fn set_server_badge(&mut self, badge: Option<ServerBadge>, cx: &mut Context<Self>) {
+        if self.server_badge != badge {
+            self.server_badge = badge;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_badge_for_test(&self) -> Option<&ServerBadge> {
+        self.server_badge.as_ref()
+    }
+
     /// A review was posted from the dialog: take the change as the server
     /// has it now and say so.
     pub fn reply_sent(&mut self, sent: &reply::Sent, cx: &mut Context<Self>) {
@@ -899,6 +916,7 @@ impl DiffPage {
                     .gap_2()
                     .items_baseline()
                     .min_w_0()
+                    .children(self.server_badge.as_ref().map(|b| b.pill(cx)))
                     .child(
                         h_flex()
                             .id("diff-up-to-change")
@@ -1246,6 +1264,7 @@ impl Render for DiffPage {
             .on_action(cx.listener(Self::open_actions))
             .relative()
             .size_full()
+            .children(self.server_badge.as_ref().map(|b| b.accent_line(cx)))
             .child(self.render_header(cx))
             .child(div().flex_1().min_h_0().child(body))
             .when(self.prefs_open, |d| d.child(self.render_prefs(cx)))

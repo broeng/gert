@@ -239,7 +239,13 @@ impl ChangePage {
             };
             return v_flex()
                 .gap_1()
-                .child(div().text_lg().child(format!("Change {}", self.number)))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_lg().child(format!("Change {}", self.number)))
+                        .children(self.server_badge.as_ref().map(|b| b.pill(cx))),
+                )
                 .child(div().text_color(muted).child(text))
                 .child(status)
                 .into_any_element();
@@ -355,6 +361,7 @@ impl ChangePage {
                 pill(status_text, status_color)
             })
             .child(div().text_color(muted).child(format!("#{}", c.number)))
+            .children(self.server_badge.as_ref().map(|b| b.pill(cx)))
             .children(
                 chips(c)
                     .into_iter()
@@ -1430,6 +1437,7 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::page_up))
             .size_full()
+            .children(self.server_badge.as_ref().map(|b| b.accent_line(cx)))
             .children(bar.map(|b| div().w_full().px_4().pt_1().pb_2().child(b)))
             .child(
                 h_flex()

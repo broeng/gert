@@ -11,12 +11,17 @@
 //! cache database (`app_state`, key [`ACTIVE_SERVER_STATE`]) and passed back
 //! in at the next start as `Startup::active`.
 
-use gpui_kit::{Entity, Subscription, Task};
+use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::{
+    App, Div, Entity, Hsla, ParentElement as _, SharedString, Styled as _, Subscription, Task, div,
+    px,
+};
 
 use crate::{
     outbox::DraftOutbox,
     session::{ServerKey, ServerSetup, Session},
     syntax_cache::SyntaxCache,
+    theme,
 };
 
 /// The `app_state` key under which the slug of the last active server is
@@ -36,6 +41,48 @@ pub enum Connection {
     Offline,
     /// The server refused the credentials (401), or the password is gone.
     Unauthorized,
+}
+
+/// How a page, dialog or list names its server when there are several: the
+/// name in the server's color. Resolved against the theme at paint time, so
+/// it follows light and dark.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerBadge {
+    pub name: SharedString,
+    position: usize,
+    custom: Option<String>,
+}
+
+impl ServerBadge {
+    pub fn color(&self, cx: &App) -> Hsla {
+        theme::server_color(self.position, self.custom.as_deref(), cx.theme())
+    }
+
+    /// A small pill: the dot and the name, on a faint tint of the color.
+    pub fn pill(&self, cx: &App) -> Div {
+        let color = self.color(cx);
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .items_center()
+            .px_1p5()
+            .rounded_sm()
+            .text_xs()
+            .bg(color.opacity(0.14))
+            .text_color(cx.theme().foreground)
+            .child(dot(color))
+            .child(self.name.clone())
+    }
+
+    /// The thin line along the top of a page.
+    pub fn accent_line(&self, cx: &App) -> Div {
+        div().w_full().h(px(2.)).flex_none().bg(self.color(cx))
+    }
+}
+
+/// A small round marker in `color`.
+pub fn dot(color: Hsla) -> Div {
+    div().size(px(8.)).flex_none().rounded_full().bg(color)
 }
 
 /// One configured server.
@@ -124,9 +171,30 @@ impl Servers {
         self.entries.iter().map(|e| e.setup.key.clone()).collect()
     }
 
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.entries.len()
+    /// Whether the user has configured more than one server, which is when
+    /// the UI starts naming and coloring them.
+    pub fn several(&self) -> bool {
+        self.entries.len() > 1
+    }
+
+    /// The badge of server `key`; `None` with a single server (the UI
+    /// stays as it is without the identity marks) or an unknown key.
+    pub fn badge(&self, key: &ServerKey) -> Option<ServerBadge> {
+        if !self.several() {
+            return None;
+        }
+        self.badge_of(key)
+    }
+
+    /// The badge of server `key` even if it is the only one.
+    pub fn badge_of(&self, key: &ServerKey) -> Option<ServerBadge> {
+        let position = self.entries.iter().position(|e| e.setup.key == *key)?;
+        let setup = &self.entries[position].setup;
+        Some(ServerBadge {
+            name: setup.name.clone().into(),
+            position,
+            custom: setup.color.clone(),
+        })
     }
 
     /// Makes `key` the active server. False (and no change) if there is no
@@ -152,6 +220,11 @@ impl Servers {
             }
         };
         &mut self.entries[i]
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
 
     #[cfg(test)]

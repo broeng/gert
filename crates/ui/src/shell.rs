@@ -888,10 +888,13 @@ impl Shell {
         let syntax = self.syntax_cache(cx);
         let outbox = self.outbox_for(&session, cx);
         let owner = session.key.clone();
+        let badge = self.servers.badge(&owner);
         let page = cx.new(|cx| {
-            ChangePage::new(
+            let mut page = ChangePage::new(
                 session, settings, layout, filters, syntax, number, view, active, outbox, cx,
-            )
+            );
+            page.set_server_badge(badge, cx);
+            page
         });
         self.page_subs.push(cx.subscribe_in(
             &page,
@@ -949,8 +952,12 @@ impl Shell {
         let filters = self.filters.clone();
         let syntax = self.syntax_cache(cx);
         let owner = session.key.clone();
-        let page =
-            cx.new(|cx| DiffPage::new(session, settings, filters, syntax, route, outbox, cx));
+        let badge = self.servers.badge(&owner);
+        let page = cx.new(|cx| {
+            let mut page = DiffPage::new(session, settings, filters, syntax, route, outbox, cx);
+            page.set_server_badge(badge, cx);
+            page
+        });
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,

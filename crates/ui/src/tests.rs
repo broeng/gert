@@ -1020,6 +1020,101 @@ mod drafts {
             assert!(s.list_page_for_test().is_some());
         });
     }
+
+    // ---- identity marks ----
+
+    #[gpui_kit::test]
+    fn palette_colors_of_the_first_eight_servers_differ_in_both_modes(cx: &mut TestAppContext) {
+        use gpui_kit::component::{Theme, ThemeMode};
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                Theme::change(mode, None, cx);
+                let colors: Vec<_> = (0..8)
+                    .map(|i| {
+                        let c = crate::theme::server_color(
+                            i,
+                            None,
+                            gpui_kit::component::ActiveTheme::theme(cx),
+                        );
+                        format!("{c:?}")
+                    })
+                    .collect();
+                let distinct: std::collections::HashSet<_> = colors.iter().collect();
+                assert_eq!(distinct.len(), 8, "{mode:?}: {colors:?}");
+                // The configured color wins over the palette.
+                let own = crate::theme::server_color(
+                    0,
+                    Some("#102030"),
+                    gpui_kit::component::ActiveTheme::theme(cx),
+                );
+                assert_ne!(format!("{own:?}"), colors[0]);
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn pages_carry_the_server_badge_only_with_several_servers(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, false);
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("b"), &http);
+        let go = |cx: &mut TestAppContext, route: Route| {
+            cx.update_window(window, |_, window, cx| {
+                shell.update(cx, |s, cx| s.navigate_for_test(route, window, cx))
+            })
+            .expect("navigate");
+            cx.run_until_parked();
+        };
+        go(cx, Route::Change(ChangeNumber(7)));
+        let badge = cx.update(|cx| {
+            let page = shell.read(cx).change_page_for_test().expect("change page");
+            page.read(cx).server_badge_for_test().cloned()
+        });
+        assert_eq!(badge.expect("badge").name.as_ref(), "b");
+        go(
+            cx,
+            Route::Diff(crate::nav::DiffRoute {
+                change: ChangeNumber(7),
+                base: None,
+                target: PatchSetNumber(1),
+                path: "f.rs".into(),
+                thread: None,
+            }),
+        );
+        cx.update(|cx| {
+            let page = shell.read(cx).diff_page_for_test().expect("diff page");
+            assert!(page.read(cx).server_badge_for_test().is_some());
+        });
+
+        // One server: nothing.
+        let env = env_with(seeded(&[("status:open", &[7])]), &http);
+        let startup = Startup {
+            env,
+            diff: Default::default(),
+            start_page: Default::default(),
+            filters: Vec::new(),
+            servers: vec![crate::session::ServerSetup {
+                queries: vec![spec("Open", "status:open")],
+                ..setup()
+            }],
+            active: None,
+        };
+        let (window, shell) = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            shell.update(cx, |s, cx| {
+                s.navigate_for_test(Route::Change(ChangeNumber(7)), window, cx)
+            })
+        })
+        .expect("navigate");
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let page = shell.read(cx).change_page_for_test().expect("change page");
+            assert!(page.read(cx).server_badge_for_test().is_none());
+        });
+    }
 }
 
 // --- the settings page ---------------------------------------------------
