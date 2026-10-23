@@ -376,8 +376,8 @@ impl ChangePage {
         Some(bar.into_any_element())
     }
 
-    /// First column of the top: who and where, then the submit requirements
-    /// and the votes.
+    /// First column of the top: the Reply button, who and where, then the
+    /// submit requirements and the votes.
     fn change_info(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(d) = &self.detail else {
             return div().into_any_element();
@@ -430,8 +430,19 @@ impl ChangePage {
         let has_votes = !d.votes.is_empty();
         let requirements = has_requirements.then(|| self.requirements(cx));
         let votes = has_votes.then(|| self.votes(cx));
+        // Not for anonymous sessions, which cannot reply.
+        let reply = self.session.can_comment().then(|| {
+            h_flex().child(
+                Button::new("reply")
+                    .label("Reply  (A)")
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _, window, cx| this.reply(&Reply, window, cx))),
+            )
+        });
         v_flex()
             .gap_2()
+            .children(reply)
             .child(fields)
             .children(requirements)
             .children(votes)
