@@ -84,6 +84,9 @@ pub(crate) struct SwitcherRow {
     pub connection: Connection,
     /// Drafts of this server that are not on it yet (pending and failed).
     pub drafts: usize,
+    /// Changes waiting for the user on this server, as of the last
+    /// background poll; `None` when not known or for the active server.
+    pub attention: Option<usize>,
     pub active: bool,
 }
 
@@ -123,10 +126,31 @@ fn drafts_text(count: usize) -> String {
     }
 }
 
-/// The chip in the title bar: the dot and name of the active server, and a
-/// warning glyph if it is offline or refused the credentials. The caller
-/// adds the click handler.
-pub(crate) fn chip(badge: &ServerBadge, connection: Connection, cx: &App) -> Stateful<Div> {
+/// "3 waiting" for a server's row; nothing for zero or unknown.
+fn attention_text(count: Option<usize>) -> Option<String> {
+    count.filter(|&n| n > 0).map(|n| format!("{n} waiting"))
+}
+
+/// The number on the chip: how many changes wait for the user on the other
+/// servers together; nothing for zero. Capped so the chip stays small.
+pub(crate) fn badge_text(others: usize) -> Option<String> {
+    match others {
+        0 => None,
+        1..=99 => Some(others.to_string()),
+        _ => Some("99+".to_owned()),
+    }
+}
+
+/// The chip in the title bar: the dot and name of the active server, a
+/// warning glyph if it is offline or refused the credentials, and the
+/// number of changes waiting for the user on the other servers (`others`).
+/// The caller adds the click handler.
+pub(crate) fn chip(
+    badge: &ServerBadge,
+    connection: Connection,
+    others: usize,
+    cx: &App,
+) -> Stateful<Div> {
     let theme = cx.theme();
     let marker = marker_text(connection).map(|_| marker_color(connection, cx));
     h_flex()
@@ -146,6 +170,17 @@ pub(crate) fn chip(badge: &ServerBadge, connection: Connection, cx: &App) -> Sta
         .child(badge.name.clone())
         .when_some(marker, |d, color| {
             d.child(div().text_color(color).child("\u{26A0}"))
+        })
+        .when_some(badge_text(others), |d, text| {
+            d.child(
+                div()
+                    .px_1p5()
+                    .rounded_full()
+                    .text_xs()
+                    .bg(theme.primary)
+                    .text_color(theme.primary_foreground)
+                    .child(text),
+            )
         })
 }
 
@@ -276,6 +311,7 @@ impl ServerSwitcher {
         let key = row.key.clone();
         let hover = theme.list_hover;
         let marker = marker_text(row.connection).map(|t| (t, marker_color(row.connection, cx)));
+        let waiting = attention_text(row.attention);
         h_flex()
             .id(("server-row", ix))
             .gap_3()
@@ -326,6 +362,16 @@ impl ServerSwitcher {
                         .text_xs()
                         .text_color(color)
                         .child(format!("\u{26A0} {text}")),
+                )
+            })
+            .when_some(waiting, |d, text| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(theme.primary)
+                        .child(text),
                 )
             })
             .when(row.drafts > 0, |d| {
@@ -461,6 +507,7 @@ mod tests {
             haystack: format!("{name} {url} {}", user.unwrap_or_default()).to_lowercase(),
             connection: Connection::Online,
             drafts: 0,
+            attention: None,
             active: false,
         }
     }
@@ -477,6 +524,18 @@ mod tests {
         assert_eq!(filter_rows(&rows, "alice corp"), [0]);
         assert_eq!(filter_rows(&rows, "example"), [0, 1]);
         assert!(filter_rows(&rows, "nothing").is_empty());
+    }
+
+    #[test]
+    fn counts_show_only_when_there_is_something_waiting() {
+        use super::{attention_text, badge_text};
+        assert_eq!(attention_text(None), None);
+        assert_eq!(attention_text(Some(0)), None);
+        assert_eq!(attention_text(Some(4)).as_deref(), Some("4 waiting"));
+        assert_eq!(badge_text(0), None);
+        assert_eq!(badge_text(7).as_deref(), Some("7"));
+        assert_eq!(badge_text(99).as_deref(), Some("99"));
+        assert_eq!(badge_text(100).as_deref(), Some("99+"));
     }
 
     #[test]
