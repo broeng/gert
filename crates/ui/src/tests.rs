@@ -708,6 +708,23 @@ mod drafts {
         Entity<Shell>,
         std::sync::Arc<std::sync::Mutex<Store>>,
     ) {
+        start_two_with(cx, store, ids, active, None, http)
+    }
+
+    /// As `start_two_in`, with server `anonymous` (if any) not signed in.
+    #[allow(clippy::type_complexity)]
+    fn start_two_with(
+        cx: &mut TestAppContext,
+        store: Store,
+        ids: [store::ServerId; 2],
+        active: Option<&str>,
+        anonymous: Option<&str>,
+        http: &RouteHttpClient,
+    ) -> (
+        gpui_kit::AnyWindowHandle,
+        Entity<Shell>,
+        std::sync::Arc<std::sync::Mutex<Store>>,
+    ) {
         let mut env = env_with(store, http);
         env.backend = std::sync::Arc::new(Keyring);
         let shared = env.store.clone();
@@ -715,7 +732,7 @@ mod drafts {
             key: crate::ServerKey::new(key),
             name: key.into(),
             base_url: url.into(),
-            username: Some("u".into()),
+            username: (anonymous != Some(key)).then(|| "u".into()),
             queries: vec![spec(key, "status:open")],
             server: id,
             ..setup()
@@ -1149,6 +1166,193 @@ mod drafts {
             assert_eq!(rows[1].drafts, 1);
             assert!(rows[1].detail.contains("u") && rows[1].detail.contains(B));
         });
+    }
+
+    // ---- background polling of the servers that are not shown ----
+
+    fn attention_page(numbers: &[u64]) -> String {
+        let items: Vec<String> = numbers
+            .iter()
+            .map(|n| {
+                format!(
+                    r#"{{"_number": {n}, "branch": "main", "change_id": "I{n:040}",
+                    "created": "2013-02-01 09:59:32.126000000", "id": "p~{n}",
+                    "owner": {{"_account_id": 1}}, "project": "p", "status": "NEW",
+                    "subject": "change {n}", "updated": "2024-02-01 10:00:00.000000000"}}"#
+                )
+            })
+            .collect();
+        format!(")]}}'\n[{}]", items.join(","))
+    }
+
+    /// The attention requests seen so far, `(server path, count)`.
+    fn polls(http: &RouteHttpClient, server: &str) -> usize {
+        http.requested()
+            .iter()
+            .filter(|r| r.contains("attention") && r.contains(&format!("/{server}/")))
+            .count()
+    }
+
+    fn advance(cx: &mut TestAppContext, secs: u64) {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(secs));
+        cx.run_until_parked();
+    }
+
+    fn attention_of(cx: &mut TestAppContext, shell: &Entity<Shell>, key: &str) -> Option<usize> {
+        cx.update(|cx| shell.read(cx).attention_for_test(key))
+    }
+
+    fn connection_of(
+        cx: &mut TestAppContext,
+        shell: &Entity<Shell>,
+        key: &str,
+    ) -> Option<crate::Connection> {
+        cx.update(|cx| shell.read(cx).connection_for_test(key))
+    }
+
+    #[gpui_kit::test]
+    fn only_the_inactive_server_is_polled_and_its_count_is_kept(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/gb/a/changes/?q=attention", 200, attention_page(&[3, 4]));
+        let (store, ids) = two_server_store(false, false);
+        let (_, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        assert_eq!(polls(&http, "gb"), 1);
+        assert_eq!(polls(&http, "ga"), 0);
+        assert_eq!(attention_of(cx, &shell, "b"), Some(2));
+        assert_eq!(attention_of(cx, &shell, "a"), None);
+        assert_eq!(
+            connection_of(cx, &shell, "b"),
+            Some(crate::Connection::Online)
+        );
+
+        // Slowly: nothing before five minutes, then once more.
+        advance(cx, 299);
+        assert_eq!(polls(&http, "gb"), 1);
+        http.route("/gb/a/changes/?q=attention", 200, attention_page(&[3]));
+        advance(cx, 2);
+        assert_eq!(polls(&http, "gb"), 2);
+        assert_eq!(attention_of(cx, &shell, "b"), Some(1));
+    }
+
+    #[gpui_kit::test]
+    fn the_last_count_comes_from_the_cache_at_start(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        // The server refuses the query, so only the cache can tell.
+        http.route("/gb/a/changes/?q=attention", 403, "no");
+        let (mut store, ids) = two_server_store(false, false);
+        let now = "2024-06-15T10:00:00Z".parse().expect("ts");
+        let rows = [crate::testing::summary(5), crate::testing::summary(6)];
+        store
+            .save_query_page(ids[1], "attention:self", &rows, false, now)
+            .expect("cache");
+        let (_, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        assert_eq!(attention_of(cx, &shell, "b"), Some(2));
+        // It answered, if with a refusal: not offline.
+        assert_eq!(
+            connection_of(cx, &shell, "b"),
+            Some(crate::Connection::Online)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn an_unreachable_server_goes_offline_and_is_asked_less_often(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/gb/a/changes/?q=attention", 503, "down");
+        let (store, ids) = two_server_store(false, false);
+        let (_, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        assert_eq!(
+            connection_of(cx, &shell, "b"),
+            Some(crate::Connection::Offline)
+        );
+        // The shown server is not touched by the poll.
+        assert_ne!(
+            connection_of(cx, &shell, "a"),
+            Some(crate::Connection::Offline)
+        );
+        let first = polls(&http, "gb");
+        assert!(first >= 1);
+        // After one failure the wait doubles: nothing at six minutes ...
+        advance(cx, 360);
+        assert_eq!(polls(&http, "gb"), first);
+        // ... and it recovers when the server is back.
+        http.route("/gb/a/changes/?q=attention", 200, attention_page(&[9]));
+        advance(cx, 245);
+        assert!(polls(&http, "gb") > first);
+        assert_eq!(
+            connection_of(cx, &shell, "b"),
+            Some(crate::Connection::Online)
+        );
+        assert_eq!(attention_of(cx, &shell, "b"), Some(1));
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_login_is_marked_and_polling_stops(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/gb/a/changes/?q=attention", 401, "no");
+        let (store, ids) = two_server_store(false, false);
+        let (_, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        assert_eq!(
+            connection_of(cx, &shell, "b"),
+            Some(crate::Connection::Unauthorized)
+        );
+        let n = polls(&http, "gb");
+        assert_eq!(n, 1);
+        advance(cx, 4 * 3600);
+        assert_eq!(polls(&http, "gb"), n);
+        // The shown server keeps its page.
+        cx.update(|cx| assert!(shell.read(cx).list_page_for_test().is_some()));
+    }
+
+    #[gpui_kit::test]
+    fn anonymous_servers_are_not_polled(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, false);
+        let (_, shell, _) = start_two_with(cx, store, ids, Some("a"), Some("b"), &http);
+        advance(cx, 3600);
+        assert_eq!(polls(&http, "gb"), 0);
+        assert_eq!(attention_of(cx, &shell, "b"), None);
+    }
+
+    #[gpui_kit::test]
+    fn switching_swaps_which_server_is_polled(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/gb/a/changes/?q=attention", 200, attention_page(&[1]));
+        http.route(
+            "/ga/a/changes/?q=attention",
+            200,
+            attention_page(&[1, 2, 3]),
+        );
+        let (store, ids) = two_server_store(false, false);
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        assert_eq!((polls(&http, "ga"), polls(&http, "gb")), (0, 1));
+
+        cx.update_window(window, |_, window, cx| {
+            shell.update(cx, |s, cx| s.switch_to(&key("b"), window, cx))
+        })
+        .expect("switch");
+        cx.run_until_parked();
+        // a is polled at once now, b not any more, however long we wait.
+        assert_eq!((polls(&http, "ga"), polls(&http, "gb")), (1, 1));
+        assert_eq!(attention_of(cx, &shell, "a"), Some(3));
+        advance(cx, 3 * 300 + 1);
+        assert_eq!(polls(&http, "gb"), 1);
+        assert_eq!(polls(&http, "ga"), 4);
+    }
+
+    #[gpui_kit::test]
+    fn a_removed_server_is_never_asked_again(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/gb/a/changes/?q=attention", 200, attention_page(&[1]));
+        let (store, ids) = two_server_store(false, false);
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        assert_eq!(polls(&http, "gb"), 1);
+        cx.update_window(window, |_, window, cx| {
+            shell.update(cx, |s, cx| s.remove_server_for_test(&key("b"), window, cx))
+        })
+        .expect("remove");
+        advance(cx, 3600);
+        assert_eq!(polls(&http, "gb"), 1);
     }
 
     #[gpui_kit::test]
@@ -2799,9 +3003,14 @@ mod servers_settings {
             cx.update(|cx| page.read(cx).connection_test_for_test("a")),
             Some(TestState::Passed)
         );
+        // The registry took the verdict over.
+        let conn =
+            |cx: &mut TestAppContext| cx.update(|cx| f.shell.read(cx).connection_for_test("a"));
+        assert_eq!(conn(cx), Some(crate::Connection::Online));
         // A refusal is shown on the row.
         f.http.push_response(401, "Unauthorized");
         press(cx, &f, "t");
+        assert_eq!(conn(cx), Some(crate::Connection::Unauthorized));
         let state = cx.update(|cx| page.read(cx).connection_test_for_test("a"));
         assert!(
             matches!(&state, Some(TestState::Failed(e)) if e.contains("wrong username")),

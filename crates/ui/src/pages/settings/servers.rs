@@ -19,7 +19,7 @@ pub(crate) use crate::servers::ServerRow;
 use crate::{
     actions::*,
     card,
-    login::{LoginRequest, check_credentials, login, normalize_base_url},
+    login::{LoginError, LoginRequest, check_credentials, login, normalize_base_url},
     servers::{Connection, ServerBadge, dot},
     session::ServerConfig,
     theme::parse_hex_color,
@@ -480,18 +480,17 @@ impl SettingsPage {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
+                    let failed = |text: String| (TestState::Failed(text), None);
                     let password = match &row.username {
                         Some(user) => match backend.load_password(&row.url, user) {
                             Ok(Some(p)) => Some(p),
                             Ok(None) => {
-                                return TestState::Failed(
+                                return failed(
                                     "no saved password; log in again by editing the server".into(),
                                 );
                             }
                             Err(e) => {
-                                return TestState::Failed(format!(
-                                    "could not read the password: {e}"
-                                ));
+                                return failed(format!("could not read the password: {e}"));
                             }
                         },
                         None => None,
@@ -504,12 +503,28 @@ impl SettingsPage {
                     )
                     .await
                     {
-                        Ok(()) => TestState::Passed,
-                        Err(e) => TestState::Failed(e.to_string()),
+                        Ok(()) => (TestState::Passed, Some(Connection::Online)),
+                        Err(e) => {
+                            let connection = match &e {
+                                LoginError::Unauthorized | LoginError::AnonymousDenied => {
+                                    Some(Connection::Unauthorized)
+                                }
+                                LoginError::Server(_) => Some(Connection::Offline),
+                                _ => None,
+                            };
+                            (TestState::Failed(e.to_string()), connection)
+                        }
                     }
                 })
                 .await;
+            let (result, connection) = result;
             this.update(cx, |this, cx| {
+                if let Some(connection) = connection {
+                    cx.emit(SettingsEvent::ConnectionTested {
+                        key: key.clone(),
+                        connection,
+                    });
+                }
                 this.tests.insert(key, result);
                 cx.notify();
             })

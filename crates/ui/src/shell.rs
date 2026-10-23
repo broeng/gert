@@ -15,6 +15,7 @@ use model::{ChangeDetail, ChangeNumber};
 use crate::{
     action_menu::{ActionDialog, ActionEvent, Done},
     actions::{self, *},
+    attention::{self, Polled},
     filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
     goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, LinkServer, resolve_link},
     login::LoginOutcome,
@@ -451,7 +452,123 @@ impl Shell {
             entry.session = session;
             entry.outbox = outbox;
             entry.outbox_subs = subs;
+            // The poll holds the old session's client.
+            entry.attention_task = None;
         }
+        self.sync_attention_polls(window, cx);
+    }
+
+    /// Starts and stops the background polls so that exactly the servers
+    /// that are not shown, are signed in and can talk to the network are
+    /// polled. Cheap and idempotent: called whenever one of these changes.
+    fn sync_attention_polls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.servers.active_key().cloned();
+        for key in self.servers.keys() {
+            let Some(entry) = self.servers.get(&key) else {
+                continue;
+            };
+            let syncer = entry
+                .session
+                .as_ref()
+                .filter(|s| s.can_sync() && s.username.is_some())
+                .filter(|_| active.as_ref() != Some(&key))
+                .filter(|_| entry.connection != Connection::Unauthorized)
+                .map(|s| s.syncer().clone());
+            let running = entry.attention_task.is_some();
+            let task = match syncer {
+                Some(_) if running => continue,
+                Some(syncer) => Some(self.attention_poll(key.clone(), syncer, window, cx)),
+                None => None,
+            };
+            if let Some(entry) = self.servers.get_mut(&key) {
+                entry.attention_task = task;
+            }
+        }
+    }
+
+    /// The task that polls the attention count of server `key` until it is
+    /// dropped: once now, then every `PollPolicy::background` interval
+    /// (longer after failures). It starts from the count in the cache.
+    fn attention_poll(
+        &mut self,
+        key: ServerKey,
+        syncer: sync::Syncer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let policy = sync::PollPolicy::background();
+        cx.spawn_in(window, async move |this, cx| {
+            let known = {
+                let syncer = syncer.clone();
+                cx.background_spawn(async move { attention::cached_count(&syncer) })
+                    .await
+            };
+            let stored = this.update(cx, |this, cx| {
+                if let Some(e) = this.servers.get_mut(&key) {
+                    e.attention_count = e.attention_count.or(known);
+                    cx.notify();
+                }
+            });
+            if stored.is_err() {
+                return;
+            }
+            let mut failures = 0u32;
+            loop {
+                let polled = {
+                    let syncer = syncer.clone();
+                    cx.background_spawn(async move { attention::poll(&syncer).await })
+                        .await
+                };
+                failures = if polled.failed() {
+                    failures.saturating_add(1)
+                } else {
+                    0
+                };
+                let stop = this.update_in(cx, |this, window, cx| {
+                    this.attention_polled(&key, polled, window, cx)
+                });
+                if stop.unwrap_or(true) {
+                    return;
+                }
+                let state = sync::PollState {
+                    last_attempt: None,
+                    window_focused: true,
+                    visible: true,
+                    consecutive_failures: failures,
+                };
+                cx.background_executor()
+                    .timer(policy.interval(&state))
+                    .await;
+            }
+        })
+    }
+
+    /// The result of a background poll of server `key`. True when polling
+    /// should stop (the credentials are refused).
+    fn attention_polled(
+        &mut self,
+        key: &ServerKey,
+        polled: Polled,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match polled {
+            Polled::Count(n) => {
+                if let Some(e) = self.servers.get_mut(key) {
+                    e.attention_count = Some(n);
+                }
+                self.server_reachable(key, cx);
+            }
+            // It answered, so it is reachable even without a result.
+            Polled::Refused => self.server_reachable(key, cx),
+            Polled::Offline => self.servers.set_connection(key, Connection::Offline),
+            Polled::Unauthorized => {
+                self.unauthorized_for(key, window, cx);
+                return true;
+            }
+        }
+        cx.notify();
+        false
     }
 
     /// A refresh of server `key` worked, so it is reachable: upload its
@@ -782,6 +899,8 @@ impl Shell {
         };
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
+        // The shown server may have changed.
+        self.sync_attention_polls(window, cx);
         cx.notify();
     }
 
@@ -937,6 +1056,11 @@ impl Shell {
                     this.servers_saved(servers, relogin.as_deref(), window, cx)
                 }
                 SettingsEvent::ServerRemoved { key } => this.server_removed(key, window, cx),
+                // What a test found is the freshest word on the server.
+                SettingsEvent::ConnectionTested { key, connection } => {
+                    this.servers.set_connection(key, *connection);
+                    cx.notify();
+                }
                 SettingsEvent::ManageFilters { select, add } => {
                     let context = FiltersContext {
                         select: select.clone(),
@@ -1775,6 +1899,21 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn chip_shown_for_test(&self, cx: &mut Context<Self>) -> bool {
         self.render_server_chip(cx).is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attention_for_test(&self, key: &str) -> Option<usize> {
+        self.servers.get(&ServerKey::new(key))?.attention_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_server_for_test(
+        &mut self,
+        key: &ServerKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.server_removed(key, window, cx);
     }
 
     #[cfg(test)]
