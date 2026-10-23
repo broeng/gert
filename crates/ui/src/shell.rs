@@ -1875,6 +1875,11 @@ impl Shell {
                     detail: format!("{who} \u{00B7} {}", setup.base_url),
                     haystack: format!("{} {} {who}", setup.name, setup.base_url).to_lowercase(),
                     connection: entry.connection,
+                    attention: if active == Some(&key) {
+                        None
+                    } else {
+                        entry.attention_count
+                    },
                     key,
                     badge,
                     position,
@@ -1899,6 +1904,13 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn chip_shown_for_test(&self, cx: &mut Context<Self>) -> bool {
         self.render_server_chip(cx).is_some()
+    }
+
+    /// The number on the chip, if it shows one.
+    #[cfg(test)]
+    pub(crate) fn chip_badge_for_test(&self) -> Option<String> {
+        self.servers.several().then_some(())?;
+        crate::switcher::badge_text(self.servers.others_attention())
     }
 
     #[cfg(test)]
@@ -2153,9 +2165,12 @@ impl Shell {
         let key = self.servers.active_key()?;
         let badge = self.servers.badge(key)?;
         let connection = self.servers.get(key)?.connection;
-        Some(crate::switcher::chip(&badge, connection, cx).on_click(
-            cx.listener(|this, _, w, cx| this.toggle_server_switcher(&ToggleServerSwitcher, w, cx)),
-        ))
+        Some(
+            crate::switcher::chip(&badge, connection, self.servers.others_attention(), cx)
+                .on_click(cx.listener(|this, _, w, cx| {
+                    this.toggle_server_switcher(&ToggleServerSwitcher, w, cx)
+                })),
+        )
     }
 
     /// The drafts that are not on the server, as the title bar says it;

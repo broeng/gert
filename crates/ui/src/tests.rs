@@ -1356,6 +1356,62 @@ mod drafts {
     }
 
     #[gpui_kit::test]
+    fn the_switcher_shows_what_waits_on_the_other_servers(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/gb/a/changes/?q=attention", 200, attention_page(&[1, 2]));
+        http.route("/ga/a/changes/?q=attention", 200, attention_page(&[]));
+        let (store, ids) = two_server_store(false, false);
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        let badge = |cx: &mut TestAppContext| cx.update(|cx| shell.read(cx).chip_badge_for_test());
+        // b has two changes waiting: the chip of the shown server says so
+        // and b's row has the count; a's own row has none.
+        assert_eq!(badge(cx).as_deref(), Some("2"));
+        press_key(cx, window, "ctrl-k");
+        let popup = switcher_of(cx, &shell).expect("open");
+        cx.update(|cx| {
+            let rows = popup.read(cx).rows_for_test();
+            assert_eq!(rows[0].attention, None);
+            assert_eq!(rows[1].attention, Some(2));
+        });
+        press_key(cx, window, "escape");
+
+        // Shown, b no longer counts as "other"; a was polled and has none,
+        // so there is no badge at all.
+        cx.update_window(window, |_, window, cx| {
+            shell.update(cx, |s, cx| s.switch_to(&key("b"), window, cx))
+        })
+        .expect("switch");
+        cx.run_until_parked();
+        assert_eq!(badge(cx), None);
+        press_key(cx, window, "ctrl-k");
+        let popup = switcher_of(cx, &shell).expect("open");
+        cx.update(|cx| {
+            let rows = popup.read(cx).rows_for_test();
+            assert_eq!(rows[0].attention, Some(0));
+            assert_eq!(rows[1].attention, None);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn with_one_server_there_is_no_badge(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        let env = env_with(seeded(&[("status:open", &[7])]), &http);
+        let startup = Startup {
+            env,
+            diff: Default::default(),
+            start_page: Default::default(),
+            filters: Vec::new(),
+            servers: vec![setup()],
+            active: None,
+        };
+        let (_, one) = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| one.read(cx).chip_badge_for_test()), None);
+    }
+
+    #[gpui_kit::test]
     fn the_reply_dialog_and_the_menu_name_their_server_only_with_several(cx: &mut TestAppContext) {
         let http = RouteHttpClient::new();
         let (store, ids) = two_server_store(false, false);

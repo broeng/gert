@@ -300,6 +300,16 @@ impl Servers {
         &mut self.entries[i]
     }
 
+    /// The sum of the attention counts of the servers other than the active
+    /// one: what the chip shows. Unknown counts add nothing.
+    pub fn others_attention(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| Some(&e.setup.key) != self.active.as_ref())
+            .filter_map(|e| e.attention_count)
+            .sum()
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
