@@ -19,7 +19,7 @@ use gpui_kit::{
 
 use crate::{
     outbox::DraftOutbox,
-    session::{ServerKey, ServerSetup, Session},
+    session::{ServerConfig, ServerKey, ServerSetup, Session},
     syntax_cache::SyntaxCache,
     theme,
 };
@@ -54,6 +54,20 @@ pub struct ServerBadge {
 }
 
 impl ServerBadge {
+    /// The badge of the server at `position` of the list, called `name`;
+    /// `custom` is its `#rrggbb` override.
+    pub(crate) fn new(
+        name: impl Into<SharedString>,
+        position: usize,
+        custom: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            position,
+            custom,
+        }
+    }
+
     pub fn color(&self, cx: &App) -> Hsla {
         theme::server_color(self.position, self.custom.as_deref(), cx.theme())
     }
@@ -83,6 +97,19 @@ impl ServerBadge {
 /// A small round marker in `color`.
 pub fn dot(color: Hsla) -> Div {
     div().size(px(8.)).flex_none().rounded_full().bg(color)
+}
+
+/// A configured server as the settings page lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ServerRow {
+    pub key: ServerKey,
+    pub name: String,
+    pub url: String,
+    /// `None`: anonymous.
+    pub username: Option<String>,
+    /// `"#rrggbb"` if the user chose one.
+    pub color: Option<String>,
+    pub connection: Connection,
 }
 
 /// One configured server.
@@ -165,6 +192,48 @@ impl Servers {
 
     pub fn get_mut(&mut self, key: &ServerKey) -> Option<&mut ServerEntry> {
         self.entries.iter_mut().find(|e| e.setup.key == *key)
+    }
+
+    /// What the settings page lists, in config order.
+    pub fn rows(&self) -> Vec<ServerRow> {
+        self.entries
+            .iter()
+            .map(|e| ServerRow {
+                key: e.setup.key.clone(),
+                name: e.setup.name.clone(),
+                url: e.setup.base_url.clone(),
+                username: e.setup.username.clone(),
+                color: e.setup.color.clone(),
+                connection: e.connection,
+            })
+            .collect()
+    }
+
+    /// Takes server `key` out of the registry, with its session and outbox.
+    /// If it was the active one there is no active server until the caller
+    /// picks another with [`Servers::set_active`].
+    pub fn remove(&mut self, key: &ServerKey) -> Option<ServerEntry> {
+        let i = self.entries.iter().position(|e| e.setup.key == *key)?;
+        if self.active.as_ref() == Some(key) {
+            self.active = None;
+        }
+        Some(self.entries.remove(i))
+    }
+
+    /// Puts the servers in the order of `list` and takes over their names
+    /// and colors (what settings can change without a new login). Entries
+    /// the list does not mention stay, after the others.
+    pub fn apply_list(&mut self, list: &[ServerConfig]) {
+        let mut old = std::mem::take(&mut self.entries);
+        for c in list {
+            if let Some(i) = old.iter().position(|e| e.setup.key == c.key) {
+                let mut entry = old.remove(i);
+                entry.setup.name = c.name.clone();
+                entry.setup.color = c.color.clone();
+                self.entries.push(entry);
+            }
+        }
+        self.entries.append(&mut old);
     }
 
     pub fn keys(&self) -> Vec<ServerKey> {

@@ -1,9 +1,11 @@
 //! The settings page: the saved queries of the dashboard, the startup page,
 //! the review flow (advance after a vote), the theme, the light/dark mode of
-//! the UI and of the diff view, and the file filters.
+//! the UI and of the diff view, the file filters and the servers.
 //! The cursor walks the query rows, then the startup row, the advance row
-//! the theme row and the two mode rows, then the filter rows (one empty-state row when there
-//! are none).
+//! the theme row and the two mode rows, then the filter rows (one empty-state
+//! row when there are none), then the server rows (likewise). The queries and
+//! bookmarks are those of the active server; the servers section is in
+//! `servers`.
 //!
 //! The filters are edited in the Manage filters dialog, which the shell
 //! opens when the page emits [`SettingsEvent::ManageFilters`]; the page only
@@ -24,12 +26,18 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+pub(crate) mod servers;
+
+use servers::ServerForm;
+pub(crate) use servers::ServerRow;
+
 use crate::{
     actions::*,
     card,
     filters::{FileFilter, FilterAction},
     hint::Hint,
-    session::{BackendError, Env, SavedQuery, ServerBackend, StartupPage},
+    login::LoginOutcome,
+    session::{BackendError, Env, SavedQuery, ServerBackend, ServerConfig, ServerKey, StartupPage},
     settings::{FileFilters, PageLayout},
     theme::{self as app_theme, ColorMode, ColorModes, ThemeName},
 };
@@ -45,6 +53,18 @@ pub enum SettingsEvent {
     /// Open the Manage filters dialog: on the rule `select`, or on a new
     /// rule when `add` is set.
     ManageFilters { select: Option<String>, add: bool },
+    /// Open the login page to add a server.
+    AddServer,
+    /// The server list was written (reordered, renamed, recolored, or a
+    /// URL or user changed): the list now in effect. `relogin` is the login
+    /// that went with a changed URL or user, whose session replaces the old
+    /// one.
+    ServersSaved {
+        servers: Vec<ServerConfig>,
+        relogin: Option<Box<LoginOutcome>>,
+    },
+    /// Server `key` was removed with its cache and password.
+    ServerRemoved { key: ServerKey },
 }
 
 /// The two lists of name and query pairs the page edits.
@@ -67,6 +87,10 @@ enum Mode {
     Confirming(Which, usize),
     /// Typing the query of the startup page.
     EditingStartup,
+    /// Editing server `index` in the form.
+    EditingServer(usize),
+    /// Asking whether to remove server `index`.
+    ConfirmingServer(usize),
 }
 
 // ---- pure list logic ----
@@ -143,6 +167,12 @@ pub struct SettingsPage {
     bookmarks: Vec<SavedQuery>,
     cursor: usize,
     mode: Mode,
+    /// The configured servers, in config order, and the one whose queries
+    /// and bookmarks the page edits.
+    servers: Vec<ServerRow>,
+    active: Option<ServerKey>,
+    form: ServerForm,
+    tests: std::collections::HashMap<ServerKey, servers::TestState>,
     name: Entity<InputState>,
     query: Entity<InputState>,
     startup_input: Entity<InputState>,
@@ -176,6 +206,8 @@ impl SettingsPage {
     pub fn new(
         env: Env,
         server: Option<Arc<dyn ServerBackend>>,
+        servers: Vec<ServerRow>,
+        active: Option<ServerKey>,
         queries: Vec<SavedQuery>,
         bookmarks: Vec<SavedQuery>,
         start_page: StartupPage,
@@ -188,8 +220,10 @@ impl SettingsPage {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Query, e.g. is:open"));
         let startup_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Query, e.g. is:open owner:self"));
+        let form = ServerForm::new(window, cx);
         let mut subs: Vec<Subscription> = [&name, &query, &startup_input]
             .into_iter()
+            .chain(form.inputs())
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, ev: &InputEvent, window, cx| {
                     if let InputEvent::PressEnter { .. } = ev {
@@ -206,6 +240,10 @@ impl SettingsPage {
         Self {
             env,
             server,
+            servers,
+            active,
+            form,
+            tests: Default::default(),
             queries,
             bookmarks,
             cursor: 0,
@@ -270,7 +308,10 @@ impl SettingsPage {
 
     #[cfg(test)]
     pub(crate) fn editing_for_test(&self) -> bool {
-        matches!(self.mode, Mode::Editing { .. } | Mode::EditingStartup)
+        matches!(
+            self.mode,
+            Mode::Editing { .. } | Mode::EditingStartup | Mode::EditingServer(_)
+        )
     }
 
     /// The rows of the bookmarks: one per bookmark, or one empty-state row
@@ -356,9 +397,14 @@ impl SettingsPage {
         }
     }
 
+    /// The first server row (the empty-state row when there are none).
+    fn servers_row(&self) -> usize {
+        self.filters_row() + self.filter_names.len().max(1)
+    }
+
     /// The last row the cursor can be on.
     fn last_row(&self) -> usize {
-        self.filters_row() + self.filter_names.len().saturating_sub(1)
+        self.servers_row() + self.servers.len().saturating_sub(1)
     }
 
     /// The rule the cursor is on, if it is on one.
@@ -369,7 +415,18 @@ impl SettingsPage {
     }
 
     fn in_filters(&self) -> bool {
-        self.cursor >= self.filters_row()
+        (self.filters_row()..self.servers_row()).contains(&self.cursor)
+    }
+
+    fn in_servers(&self) -> bool {
+        self.cursor >= self.servers_row()
+    }
+
+    /// The server the cursor is on, if it is on one.
+    fn server_under_cursor(&self) -> Option<usize> {
+        self.cursor
+            .checked_sub(self.servers_row())
+            .filter(|i| *i < self.servers.len())
     }
 
     /// Whether a key may change the list now.
@@ -400,6 +457,12 @@ impl SettingsPage {
         }
         if self.in_filters() {
             self.manage_filters(self.filter_under_cursor(), self.filter_names.is_empty(), cx);
+        } else if self.in_servers() {
+            if let Some(i) = self.server_under_cursor() {
+                self.start_server_edit(i, window, cx);
+            } else {
+                cx.emit(SettingsEvent::AddServer);
+            }
         } else if let Some((which, index)) = self.item_under_cursor() {
             self.start_edit(which, index, window, cx);
         } else if self.cursor == self.startup_row() {
@@ -449,6 +512,10 @@ impl SettingsPage {
     fn add_query(&mut self, _: &AddQuery, window: &mut Window, cx: &mut Context<Self>) {
         if self.in_filters() {
             self.manage_filters(None, true, cx);
+        } else if self.in_servers() {
+            if self.mode == Mode::Browsing && self.can_change() {
+                cx.emit(SettingsEvent::AddServer);
+            }
         } else if self.can_change() {
             let which = self.item_under_cursor().map_or(Which::Queries, |(w, _)| w);
             self.start_edit(which, self.list(which).len(), window, cx);
@@ -472,12 +539,17 @@ impl SettingsPage {
     /// cursor on its rule, or clamp it when that rule is gone.
     fn follow_filters(&mut self, filters: &Entity<FileFilters>, cx: &mut Context<Self>) {
         let names: Vec<String> = filters.read(cx).rules().iter().map(rule_name).collect();
+        // The server rows come after the filters and move with them.
+        let in_servers_at = self.in_servers().then(|| self.cursor - self.servers_row());
         if let Some(old) = self.filter_under_cursor()
             && let Some(at) = names.iter().position(|n| *n == self.filter_names[old])
         {
             self.cursor = self.filters_row() + at;
         }
         self.filter_names = names;
+        if let Some(at) = in_servers_at {
+            self.cursor = self.servers_row() + at;
+        }
         self.cursor = self.cursor.min(self.last_row());
         cx.notify();
     }
@@ -504,7 +576,11 @@ impl SettingsPage {
     }
 
     fn cancel_edit(&mut self, _: &CancelEdit, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode, Mode::Editing { .. } | Mode::EditingStartup) && !self.busy {
+        if matches!(
+            self.mode,
+            Mode::Editing { .. } | Mode::EditingStartup | Mode::EditingServer(_)
+        ) && !self.busy
+        {
             let new_row = match self.mode {
                 Mode::Editing { which, index } if index >= self.list(which).len() => Some(which),
                 _ => None,
@@ -527,6 +603,9 @@ impl SettingsPage {
 
     /// Tab / Shift-Tab between the two fields.
     fn other_field(&mut self, _: &NextField, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.mode, Mode::EditingServer(_)) {
+            return self.next_server_field(window, cx);
+        }
         if !matches!(self.mode, Mode::Editing { .. }) {
             return;
         }
@@ -538,6 +617,9 @@ impl SettingsPage {
     fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
+        }
+        if let Mode::EditingServer(i) = self.mode {
+            return self.commit_server_edit(i, window, cx);
         }
         if self.mode == Mode::EditingStartup {
             let text = self.startup_input.read(cx).value().trim().to_owned();
@@ -575,6 +657,14 @@ impl SettingsPage {
         // its own for that.
         if let Some(i) = self.filter_under_cursor() {
             self.manage_filters(Some(i), false, cx);
+        } else if self.in_servers() {
+            if self.can_change()
+                && self.mode == Mode::Browsing
+                && let Some(i) = self.server_under_cursor()
+            {
+                self.mode = Mode::ConfirmingServer(i);
+                cx.notify();
+            }
         } else if self.can_change()
             && self.mode == Mode::Browsing
             && let Some((which, index)) = self.item_under_cursor()
@@ -586,6 +676,11 @@ impl SettingsPage {
     }
 
     fn confirm_delete(&mut self, _: &ConfirmDelete, window: &mut Window, cx: &mut Context<Self>) {
+        if let Mode::ConfirmingServer(i) = self.mode
+            && self.can_change()
+        {
+            return self.remove_server(i, window, cx);
+        }
         if let Mode::Confirming(which, i) = self.mode
             && self.can_change()
         {
@@ -595,7 +690,7 @@ impl SettingsPage {
     }
 
     fn cancel_delete(&mut self, _: &CancelDelete, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode, Mode::Confirming(..)) && !self.busy {
+        if matches!(self.mode, Mode::Confirming(..) | Mode::ConfirmingServer(_)) && !self.busy {
             self.mode = Mode::Browsing;
             cx.notify();
         }
@@ -614,6 +709,9 @@ impl SettingsPage {
     fn move_by(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_change() || self.mode != Mode::Browsing {
             return;
+        }
+        if self.in_servers() {
+            return self.move_server(delta, window, cx);
         }
         if let Some((which, index)) = self.item_under_cursor()
             && let Some((list, to)) = moved(self.list(which), index, delta)
@@ -805,8 +903,10 @@ impl SettingsPage {
     fn key_context(&self) -> &'static str {
         match self.mode {
             Mode::Browsing => "SettingsPage Browsing",
-            Mode::Editing { .. } | Mode::EditingStartup => "SettingsPage Editing",
-            Mode::Confirming(..) => "SettingsPage Confirming",
+            Mode::Editing { .. } | Mode::EditingStartup | Mode::EditingServer(_) => {
+                "SettingsPage Editing"
+            }
+            Mode::Confirming(..) | Mode::ConfirmingServer(_) => "SettingsPage Confirming",
         }
     }
 
@@ -1003,6 +1103,7 @@ impl SettingsPage {
         let mut body = v_flex().w_full().child(card::frame(
             card::title_bar(cx)
                 .child(div().font_semibold().child(title))
+                .children(self.active_badge(cx).map(|b| b.pill(cx)))
                 .child(
                     div()
                         .text_xs()
@@ -1540,6 +1641,7 @@ impl Render for SettingsPage {
         let review = self.render_review(cx);
         let appearance = self.render_appearance(cx);
         let filters = self.render_filters(cx);
+        let servers = self.render_servers(cx);
         v_flex()
             .id("settings")
             .key_context(self.key_context())
@@ -1559,6 +1661,7 @@ impl Render for SettingsPage {
             )
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::test_connection))
             .size_full()
             .child(
                 div()
@@ -1579,7 +1682,8 @@ impl Render for SettingsPage {
                             .child(startup)
                             .child(review)
                             .child(appearance)
-                            .child(filters),
+                            .child(filters)
+                            .child(servers),
                     )
                     .vertical_scrollbar(&self.scroll),
             )
@@ -1595,7 +1699,7 @@ impl Render for SettingsPage {
                     .child(
                         "j / k: select    Enter / e: edit    a: add    d: delete    \
                          Shift-J / Shift-K: move    Space: toggle    u: back to the dashboard    \
-                         Filters: Enter / e / d: dialog",
+                         Filters: Enter / e / d: dialog    Servers: t: test connection",
                     ),
             )
     }

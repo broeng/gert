@@ -52,6 +52,8 @@ actions!(
         CancelDelete,
         /// `Esc` while editing a saved query.
         CancelEdit,
+        /// `t`: test the connection of the selected server.
+        TestConnection,
         /// `Tab` / `Shift-Tab` while editing: the other field.
         NextField,
         PrevField,
@@ -687,6 +689,11 @@ pub fn settings_entries() -> Vec<Entry> {
             "Move the query down / up",
         ),
         e("", KeyBinding::new("shift-k", MoveQueryUp, Some(b)), ""),
+        e(
+            "t",
+            KeyBinding::new("t", TestConnection, Some(b)),
+            "Servers: test the connection of the selected server (a adds one, Enter edits, d removes it with its cache and password)",
+        ),
         e(
             "",
             KeyBinding::new("y", ConfirmDelete, Some(SETTINGS_CONFIRM)),
