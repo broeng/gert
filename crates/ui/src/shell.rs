@@ -1131,7 +1131,12 @@ impl Shell {
             return;
         }
         let owner = session.key.clone();
-        let dialog = cx.new(|cx| ReplyDialog::new(session, outbox, detail, window, cx));
+        let badge = self.servers.badge(&owner);
+        let dialog = cx.new(|cx| {
+            let mut dialog = ReplyDialog::new(session, outbox, detail, window, cx);
+            dialog.set_server_badge(badge, cx);
+            dialog
+        });
         self.reply_subs.push(cx.subscribe_in(
             &dialog,
             window,
@@ -1184,7 +1189,12 @@ impl Shell {
             return;
         }
         let owner = session.key.clone();
-        let dialog = cx.new(|cx| ActionDialog::new(session, detail, window, cx));
+        let badge = self.servers.badge(&owner);
+        let dialog = cx.new(|cx| {
+            let mut dialog = ActionDialog::new(session, detail, window, cx);
+            dialog.set_server_badge(badge, cx);
+            dialog
+        });
         self.menu_subs.push(cx.subscribe_in(
             &dialog,
             window,
@@ -1474,6 +1484,21 @@ impl Shell {
     pub(crate) fn set_connection_for_test(&mut self, key: &str, connection: Connection) {
         self.servers
             .set_connection(&ServerKey::new(key), connection);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_dialogs_for_test(
+        &mut self,
+        detail: ChangeDetail,
+        menu: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if menu {
+            self.open_menu(detail, window, cx);
+        } else {
+            self.open_reply(detail, window, cx);
+        }
     }
 
     #[cfg(test)]

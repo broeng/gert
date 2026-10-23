@@ -65,6 +65,7 @@ use sync::{DraftSave, PublishOutcome};
 use crate::{
     comments::ChangeComments,
     outbox::DraftOutbox,
+    servers::ServerBadge,
     session::{Session, is_unauthorized},
 };
 use actions::*;
@@ -165,6 +166,8 @@ pub struct ReplyDialog {
     cancel_focus: FocusHandle,
     send_focus: FocusHandle,
     _subs: Vec<Subscription>,
+    /// The server this writes to, named when there are several.
+    server_badge: Option<ServerBadge>,
 }
 
 impl EventEmitter<ReplyEvent> for ReplyDialog {}
@@ -176,6 +179,19 @@ impl Focusable for ReplyDialog {
 }
 
 impl ReplyDialog {
+    /// Names the server the review goes to in the dialog (several servers only).
+    pub fn set_server_badge(&mut self, badge: Option<ServerBadge>, cx: &mut Context<Self>) {
+        if self.server_badge != badge {
+            self.server_badge = badge;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_badge_for_test(&self) -> Option<&ServerBadge> {
+        self.server_badge.as_ref()
+    }
+
     /// Opens the dialog for `detail` with the focus in the message field.
     pub fn new(
         session: Session,
@@ -272,6 +288,7 @@ impl ReplyDialog {
             cancel_focus: cx.focus_handle(),
             send_focus: cx.focus_handle(),
             _subs: subs,
+            server_badge: None,
         };
         window.focus(&this.input_focus, cx);
         this
@@ -1114,7 +1131,21 @@ impl Render for ReplyDialog {
                             .px_4()
                             .pt_3()
                             .pb_1()
-                            .child(div().text_base().font_semibold().child("Reply"))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().text_base().font_semibold().child("Reply"))
+                                    .children(self.server_badge.as_ref().map(|b| {
+                                        h_flex()
+                                            .gap_1()
+                                            .items_center()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child("sent to")
+                                            .child(b.pill(cx))
+                                    })),
+                            )
                             .child(
                                 div()
                                     .text_xs()

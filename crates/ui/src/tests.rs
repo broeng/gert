@@ -1151,6 +1151,62 @@ mod drafts {
         });
     }
 
+    #[gpui_kit::test]
+    fn the_reply_dialog_and_the_menu_name_their_server_only_with_several(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, false);
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("b"), &http);
+        let open_dialog = |cx: &mut TestAppContext, shell: &Entity<Shell>, menu: bool| {
+            cx.update_window(window, |_, window, cx| {
+                shell.update(cx, |s, cx| {
+                    s.open_dialogs_for_test(crate::testing::detail(7, 1, 1), menu, window, cx)
+                })
+            })
+            .expect("open");
+            cx.run_until_parked();
+        };
+        open_dialog(cx, &shell, false);
+        cx.update(|cx| {
+            let dialog = shell.read(cx).reply_for_test().expect("reply");
+            let name = dialog
+                .read(cx)
+                .server_badge_for_test()
+                .map(|b| b.name.to_string());
+            assert_eq!(name.as_deref(), Some("b"));
+        });
+        press_key(cx, window, "escape");
+        open_dialog(cx, &shell, true);
+        cx.update(|cx| {
+            let dialog = shell.read(cx).menu_for_test().expect("menu");
+            assert!(dialog.read(cx).server_badge_for_test().is_some());
+        });
+
+        let env = env_with(seeded(&[("status:open", &[7])]), &http);
+        let startup = Startup {
+            env,
+            diff: Default::default(),
+            start_page: Default::default(),
+            filters: Vec::new(),
+            servers: vec![setup()],
+            active: None,
+        };
+        let (window, one) = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            one.update(cx, |s, cx| {
+                s.open_dialogs_for_test(crate::testing::detail(7, 1, 1), false, window, cx)
+            })
+        })
+        .expect("open");
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let dialog = one.read(cx).reply_for_test().expect("reply");
+            assert!(dialog.read(cx).server_badge_for_test().is_none());
+        });
+    }
+
     // ---- identity marks ----
 
     #[gpui_kit::test]
