@@ -12,7 +12,7 @@
 //! `x` or a click opens the thread: its diff page, with the cursor on it, or
 //! for a patch-set level thread the card below the list, which takes the
 //! focus (so `c`, `q`, `d` and the editor keys of the diff apply) until
-//! `Esc` hands it back.
+//! `Esc` leaves the page.
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{

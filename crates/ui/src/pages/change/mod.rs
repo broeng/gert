@@ -16,7 +16,7 @@
 //! cursor. `i` expands the diff under the cursor as a display-only
 //! [`DiffView`] (as tall as its content, capped at [`INLINE_MAX_ROWS`] rows,
 //! scrolling inside beyond that). Clicking into an inline diff focuses it,
-//! and its own keys apply until `Esc` hands the focus back.
+//! and its own keys apply until `Esc` leaves the page.
 
 mod quick_vote;
 mod state;
@@ -1346,14 +1346,6 @@ impl ChangePage {
     fn toggle_related_panel(&mut self, cx: &mut Context<Self>) {
         self.layout.update(cx, |l, cx| l.toggle_related_panel(cx));
         self.reveal_current_related();
-    }
-
-    fn focus_files(&mut self, _: &FocusFiles, window: &mut Window, cx: &mut Context<Self>) {
-        if self.focus.is_focused(window) {
-            cx.propagate(); // nothing to hand back: let Esc close the help
-        } else {
-            window.focus(&self.focus, cx);
-        }
     }
 
     fn scroll_page(&mut self, down: bool) {

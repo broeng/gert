@@ -64,7 +64,6 @@ actions!(
         /// capped box again.
         ToggleRelatedPanel,
         /// Esc on the change page: give the focus back to the file list.
-        FocusFiles,
         /// `x`: open the comment thread under the thread cursor (its diff,
         /// or for a patch-set level thread its card on the page).
         OpenThread,
@@ -403,11 +402,6 @@ pub fn change_entries() -> Vec<Entry> {
         ),
         e("", KeyBinding::new("pagedown", ScrollPageDown, Some(k)), ""),
         e("", KeyBinding::new("pageup", ScrollPageUp, Some(k)), ""),
-        e(
-            "Esc",
-            KeyBinding::new("escape", FocusFiles, Some(k)),
-            "Back to the file list (from an inline diff)",
-        ),
     ]
 }
 
@@ -703,7 +697,7 @@ pub fn global_entries() -> Vec<Entry> {
         e(
             "Esc",
             KeyBinding::new("escape", Dismiss, Some(SHELL_KEYS)),
-            "Close help",
+            "Close help, or go up a level (diff to change, change to list)",
         ),
         e(
             "",

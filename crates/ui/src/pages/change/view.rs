@@ -1417,7 +1417,6 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::next_related))
             .on_action(cx.listener(Self::prev_related))
             .on_action(cx.listener(Self::toggle_related_panel_action))
-            .on_action(cx.listener(Self::focus_files))
             .on_action(cx.listener(Self::next_thread))
             .on_action(cx.listener(Self::prev_thread))
             .on_action(cx.listener(Self::open_thread_action))
