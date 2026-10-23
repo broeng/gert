@@ -12,6 +12,9 @@ authors = ["Simon Broeng Jensen <sbj@cwconsult.dk>"]
 repository = "https://github.com/broeng/gert"
 rust-version = "1.99"
 
+[workspace.metadata.crane]
+name = "gert"
+
 [workspace.dependencies]
 model = { path = "crates/model" }
 gerrit-api = { path = "crates/gerrit-api" }
