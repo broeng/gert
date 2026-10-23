@@ -35,6 +35,7 @@ use crate::{
         server_name_from_url,
     },
     settings::{DiffSettings, FileFilters, PageLayout},
+    switcher::{ServerSwitcher, SwitcherEvent, SwitcherRow},
     syntax_cache::SyntaxCache,
 };
 
@@ -92,6 +93,7 @@ pub fn init(cx: &mut App) {
     crate::action_menu::actions::bind_keys(cx);
     crate::filters_dialog::actions::bind_keys(cx);
     crate::goto::bind_keys(cx);
+    crate::switcher::bind_keys(cx);
 }
 
 pub struct Shell {
@@ -121,6 +123,9 @@ pub struct Shell {
     /// The Go to dialog while it is open (modal, like the others).
     goto: Option<Entity<GotoDialog>>,
     goto_subs: Vec<Subscription>,
+    /// The server switcher popup while it is open (modal, like the others).
+    switcher: Option<Entity<ServerSwitcher>>,
+    switcher_subs: Vec<Subscription>,
     /// Shown in the title bar when nobody is signed in.
     app_name: SharedString,
     window_active: bool,
@@ -208,6 +213,8 @@ impl Shell {
             filters_dialog_subs: Vec::new(),
             goto: None,
             goto_subs: Vec::new(),
+            switcher: None,
+            switcher_subs: Vec::new(),
             app_name: SharedString::default(),
             window_active: window.is_window_active(),
             settings: cx.new(|_| DiffSettings::new(diff)),
@@ -668,6 +675,7 @@ impl Shell {
         self.drop_menu();
         self.drop_filters_dialog();
         self.drop_goto();
+        self.drop_switcher();
         let mut route = self.nav.current().clone();
         if self.session().is_none() && route != Route::Login {
             self.nav.reset(Route::Login);
@@ -1333,7 +1341,8 @@ impl Shell {
         let modal_open = self.reply.is_some()
             || self.menu.is_some()
             || self.filters_dialog.is_some()
-            || self.goto.is_some();
+            || self.goto.is_some()
+            || self.switcher.is_some();
         let Some(base_url) = self.session().map(|s| s.base_url.clone()) else {
             return;
         };
@@ -1369,6 +1378,107 @@ impl Shell {
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
+    }
+
+    // ---- server switcher ----
+
+    /// `ctrl-k`, or a click on the chip: opens the switcher, or closes it if
+    /// it is open. Nothing with a single server, or under another dialog.
+    fn toggle_server_switcher(
+        &mut self,
+        _: &ToggleServerSwitcher,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.switcher.is_some() {
+            self.close_switcher(window, cx);
+            return;
+        }
+        if !self.servers.several()
+            || self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.goto.is_some()
+        {
+            return;
+        }
+        if self.help {
+            self.toggle_help(&ToggleHelp, window, cx);
+        }
+        let rows = self.switcher_rows(cx);
+        let switcher = cx.new(|cx| ServerSwitcher::new(rows, window, cx));
+        self.switcher_subs.push(cx.subscribe_in(
+            &switcher,
+            window,
+            |this, _, ev: &SwitcherEvent, window, cx| match ev {
+                SwitcherEvent::Close => this.close_switcher(window, cx),
+                SwitcherEvent::Pick(key) => {
+                    this.close_switcher(window, cx);
+                    this.switch_to(key, window, cx);
+                }
+            },
+        ));
+        self.switcher = Some(switcher);
+        cx.notify();
+    }
+
+    /// The popup's rows: every server in config order with what is known
+    /// about it now.
+    fn switcher_rows(&self, cx: &App) -> Vec<SwitcherRow> {
+        let active = self.servers.active_key();
+        self.servers
+            .keys()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(position, key)| {
+                let entry = self.servers.get(&key)?;
+                let badge = self.servers.badge_of(&key)?;
+                let setup = &entry.setup;
+                let who = setup.username.as_deref().unwrap_or("anonymous");
+                let drafts = entry.outbox.as_ref().map_or(0, |o| {
+                    let c = o.read(cx).counts();
+                    c.pending + c.failed
+                });
+                Some(SwitcherRow {
+                    active: active == Some(&key),
+                    detail: format!("{who} \u{00B7} {}", setup.base_url),
+                    haystack: format!("{} {} {who}", setup.name, setup.base_url).to_lowercase(),
+                    connection: entry.connection,
+                    key,
+                    badge,
+                    position,
+                    drafts,
+                })
+            })
+            .collect()
+    }
+
+    fn drop_switcher(&mut self) {
+        self.switcher_subs.clear();
+        self.switcher = None;
+    }
+
+    fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_switcher();
+        let handle = self.page.focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chip_shown_for_test(&self, cx: &mut Context<Self>) -> bool {
+        self.render_server_chip(cx).is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_connection_for_test(&mut self, key: &str, connection: Connection) {
+        self.servers
+            .set_connection(&ServerKey::new(key), connection);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn switcher_for_test(&self) -> Option<Entity<ServerSwitcher>> {
+        self.switcher.clone()
     }
 
     #[cfg(test)]
@@ -1535,7 +1645,8 @@ impl Shell {
                                     .on_click(cx.listener(|this, _, w, cx| {
                                         this.navigate(Route::Dashboard, w, cx)
                                     })),
-                            ),
+                            )
+                            .children(self.render_server_chip(cx)),
                     ))
                     .child(
                         div()
@@ -1573,6 +1684,17 @@ impl Shell {
             }
         };
         TitleBar::new().child(content)
+    }
+
+    /// The active server's chip, with several servers: its dot, name and
+    /// a warning if it cannot be used. A click opens the switcher.
+    fn render_server_chip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let key = self.servers.active_key()?;
+        let badge = self.servers.badge(key)?;
+        let connection = self.servers.get(key)?.connection;
+        Some(crate::switcher::chip(&badge, connection, cx).on_click(
+            cx.listener(|this, _, w, cx| this.toggle_server_switcher(&ToggleServerSwitcher, w, cx)),
+        ))
     }
 
     /// The drafts that are not on the server, as the title bar says it;
@@ -1762,6 +1884,7 @@ impl Render for Shell {
                     .on_action(cx.listener(Self::go_up))
                     .on_action(cx.listener(Self::open_settings))
                     .on_action(cx.listener(Self::switch_server))
+                    .on_action(cx.listener(Self::toggle_server_switcher))
                     .on_action(cx.listener(Self::focus_search))
                     .on_action(cx.listener(Self::open_goto))
                     .on_action(cx.listener(Self::toggle_help))
@@ -1778,7 +1901,8 @@ impl Render for Shell {
                     .children(self.reply.clone())
                     .children(self.menu.clone())
                     .children(self.filters_dialog.clone())
-                    .children(self.goto.clone()),
+                    .children(self.goto.clone())
+                    .children(self.switcher.clone()),
             )
     }
 }

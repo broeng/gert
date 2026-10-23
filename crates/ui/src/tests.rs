@@ -1021,6 +1021,136 @@ mod drafts {
         });
     }
 
+    // ---- the chip and the switcher ----
+
+    fn press_key(cx: &mut TestAppContext, window: gpui_kit::AnyWindowHandle, key: &'static str) {
+        use gpui_kit::test::TestWindowExt as _;
+        cx.update_window(window, |_, window, cx| window.press(key, cx))
+            .expect("press");
+        cx.run_until_parked();
+    }
+
+    fn switcher_of(
+        cx: &mut TestAppContext,
+        shell: &Entity<Shell>,
+    ) -> Option<Entity<crate::switcher::ServerSwitcher>> {
+        cx.update(|cx| shell.read(cx).switcher_for_test())
+    }
+
+    #[gpui_kit::test]
+    fn the_chip_shows_with_two_servers_and_not_with_one(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, false);
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        let shown = |cx: &mut TestAppContext, shell: &Entity<Shell>| {
+            cx.update(|cx| shell.update(cx, |s, cx| s.chip_shown_for_test(cx)))
+        };
+        assert!(shown(cx, &shell));
+        let _ = window;
+
+        let env = env_with(seeded(&[("status:open", &[7])]), &http);
+        let startup = Startup {
+            env,
+            diff: Default::default(),
+            start_page: Default::default(),
+            filters: Vec::new(),
+            servers: vec![setup()],
+            active: None,
+        };
+        let (window, one) = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        assert!(!shown(cx, &one));
+        // Ctrl-K does nothing there.
+        press_key(cx, window, "ctrl-k");
+        assert!(switcher_of(cx, &one).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_k_opens_the_switcher_typing_filters_and_enter_switches(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, false);
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        assert!(switcher_of(cx, &shell).is_none());
+        press_key(cx, window, "ctrl-k");
+        let popup = switcher_of(cx, &shell).expect("open");
+        // Both listed, the cursor on the active one.
+        cx.update(|cx| {
+            assert_eq!(
+                popup.read(cx).listed_for_test(),
+                (vec!["a".to_owned(), "b".to_owned()], Some("a".to_owned()))
+            )
+        });
+        // Typing filters by name or address.
+        cx.update_window(window, |_, window, cx| {
+            popup.update(cx, |p, cx| p.type_for_test("g.example/gb", window, cx))
+        })
+        .expect("type");
+        cx.update(|cx| {
+            assert_eq!(
+                popup.read(cx).listed_for_test(),
+                (vec!["b".to_owned()], Some("b".to_owned()))
+            )
+        });
+        press_key(cx, window, "enter");
+        assert!(switcher_of(cx, &shell).is_none());
+        assert_eq!(place(cx, &shell), at("b", Route::Dashboard));
+
+        // Arrows move, Esc and a second Ctrl-K close without switching.
+        press_key(cx, window, "ctrl-k");
+        let popup = switcher_of(cx, &shell).expect("open");
+        cx.update(|cx| assert_eq!(popup.read(cx).listed_for_test().1.as_deref(), Some("b")));
+        press_key(cx, window, "down");
+        cx.update(|cx| assert_eq!(popup.read(cx).listed_for_test().1.as_deref(), Some("a")));
+        press_key(cx, window, "escape");
+        assert!(switcher_of(cx, &shell).is_none());
+        assert_eq!(place(cx, &shell), at("b", Route::Dashboard));
+        press_key(cx, window, "ctrl-k");
+        assert!(switcher_of(cx, &shell).is_some());
+        press_key(cx, window, "ctrl-k");
+        assert!(switcher_of(cx, &shell).is_none());
+
+        // Down then Enter picks the other one; Ctrl-1 inside closes it too.
+        press_key(cx, window, "ctrl-k");
+        press_key(cx, window, "down");
+        press_key(cx, window, "enter");
+        assert_eq!(place(cx, &shell), at("a", Route::Dashboard));
+        press_key(cx, window, "ctrl-k");
+        press_key(cx, window, "ctrl-2");
+        assert!(switcher_of(cx, &shell).is_none());
+        assert_eq!(place(cx, &shell), at("b", Route::Dashboard));
+    }
+
+    #[gpui_kit::test]
+    fn rows_carry_markers_drafts_and_number_hints(cx: &mut TestAppContext) {
+        use crate::Connection;
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, true);
+        // b has a draft that cannot go out (no route answers).
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        cx.update(|cx| {
+            shell.update(cx, |s, _| {
+                s.set_connection_for_test("a", Connection::Offline);
+                s.set_connection_for_test("b", Connection::Unauthorized);
+            })
+        });
+        press_key(cx, window, "ctrl-k");
+        let popup = switcher_of(cx, &shell).expect("open");
+        cx.update(|cx| {
+            let rows = popup.read(cx).rows_for_test();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].connection, Connection::Offline);
+            assert_eq!(rows[1].connection, Connection::Unauthorized);
+            assert_eq!(rows[0].position, 0);
+            assert_eq!(rows[1].position, 1);
+            assert!(rows[0].active && !rows[1].active);
+            assert_eq!(rows[0].drafts, 0);
+            assert_eq!(rows[1].drafts, 1);
+            assert!(rows[1].detail.contains("u") && rows[1].detail.contains(B));
+        });
+    }
+
     // ---- identity marks ----
 
     #[gpui_kit::test]

@@ -26,6 +26,8 @@ actions!(
         OpenSettings,
         /// `g`: the Go to dialog (open a change from a link to it).
         OpenGoto,
+        /// `ctrl-k`: the server switcher popup (several servers only).
+        ToggleServerSwitcher,
         /// `b b` on a search: bookmark the query (asks for a label), or take
         /// its bookmark away again.
         ToggleBookmark,
@@ -152,8 +154,7 @@ pub const SEARCH_BAR: &str = "SearchBar";
 
 // Single-letter bindings must not fire while text is being typed; the text
 // input marks its key context "Input".
-const SHELL_KEYS: &str =
-    "Shell && !Input && !ReplyDialog && !ActionDialog && !FiltersDialog && !GotoDialog";
+const SHELL_KEYS: &str = "Shell && !Input && !ReplyDialog && !ActionDialog && !FiltersDialog && !GotoDialog && !ServerSwitcher";
 const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
 const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
@@ -205,6 +206,7 @@ pub fn help_groups() -> Vec<HelpGroup> {
         ),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
         g("Go to a change ( G )", crate::goto::entries()),
+        g("Server switcher ( Ctrl-K )", crate::switcher::entries()),
     ]
 }
 
@@ -784,6 +786,11 @@ pub fn global_entries() -> Vec<Entry> {
             "",
         ),
         e(
+            "Ctrl-K",
+            KeyBinding::new("ctrl-k", ToggleServerSwitcher, Some(SETTINGS_OPEN)),
+            "Open the server switcher: type to filter, Enter shows the server (several servers only)",
+        ),
+        e(
             "u",
             KeyBinding::new("u", GoUp, Some(SHELL_KEYS)),
             "Up: from a diff to its change, from a change to its list",
@@ -866,6 +873,7 @@ mod tests {
             .chain(crate::action_menu::actions::entries())
             .chain(crate::filters_dialog::actions::entries())
             .chain(crate::goto::entries())
+            .chain(crate::switcher::entries())
             .collect()
     }
 
