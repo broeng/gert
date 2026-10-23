@@ -356,3 +356,279 @@ fn v4_adds_comments_and_drafts_and_keeps_existing_data() {
     conn.execute("DELETE FROM servers", []).unwrap();
     assert_eq!(count("SELECT COUNT(*) FROM drafts"), 0);
 }
+
+// ---- several servers in one database ----
+
+/// Every table that has a `server_id` column: what a purge must empty.
+fn server_tables(conn: &Connection) -> Vec<String> {
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    names
+        .into_iter()
+        .filter(|t| {
+            conn.prepare(&format!("PRAGMA table_info({t})"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .any(|c| c.unwrap() == "server_id")
+        })
+        .collect()
+}
+
+fn rows_of(conn: &Connection, table: &str, server: ServerId) -> i64 {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM {table} WHERE server_id = ?1"),
+        [server.0],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn ps(n: u32, sha: &str) -> model::PatchSetRef {
+    model::PatchSetRef {
+        number: model::PatchSetNumber(n),
+        sha: sha.into(),
+    }
+}
+
+fn empty_diff() -> model::Diff {
+    model::Diff {
+        meta_a: None,
+        meta_b: None,
+        change_type: None,
+        intraline_status: None,
+        diff_header: vec![],
+        chunks: vec![],
+        binary: false,
+    }
+}
+
+/// Fills every per-server table for change 7, the way a session would.
+/// `tag` makes the content differ between servers.
+fn fill_server(s: &mut Store, id: ServerId, tag: &str) {
+    let files_key = model::FilesKey {
+        change: ChangeNumber(7),
+        base: None,
+        target: ps(2, "bbb"),
+    };
+    let diff_key = model::DiffKey {
+        change: ChangeNumber(7),
+        base: None,
+        target: ps(2, "bbb"),
+        path: "f".into(),
+        whitespace: model::Whitespace::IgnoreNone,
+    };
+    let mut c = change(7, T1);
+    c.subject = tag.to_owned();
+    s.save_query_page(id, "q", &[c.clone()], false, ts(T1))
+        .unwrap();
+    let detail = ChangeDetail {
+        summary: c,
+        current_revision: Some("bbb".into()),
+        current_patch_set: Some(model::PatchSetNumber(2)),
+        commit_message: Some(tag.to_owned()),
+        reviewers: vec![],
+        cc: vec![],
+        revisions: vec![],
+        messages: vec![],
+        submit_requirements: vec![],
+        votes: Default::default(),
+        attention: vec![],
+        permitted_labels: Default::default(),
+        label_values: Default::default(),
+        change_actions: Default::default(),
+        revision_actions: Default::default(),
+    };
+    s.save_change_detail(id, &detail, ts(T1)).unwrap();
+    let file = model::FileEntry {
+        path: tag.to_owned(),
+        status: model::FileStatus::Modified,
+        old_path: None,
+        lines_inserted: 1,
+        lines_deleted: 0,
+        size_delta: 0,
+        size: 1,
+        binary: false,
+    };
+    s.save_file_list(id, &files_key, &[file], Some(&[tag.to_owned()]), ts(T1))
+        .unwrap();
+    s.save_diff(id, &diff_key, &empty_diff(), ts(T1)).unwrap();
+    s.save_comments(id, ChangeNumber(7), &[], ts(T1)).unwrap();
+    s.save_related(id, ChangeNumber(7), &"bbb".into(), &[], ts(T1))
+        .unwrap();
+    s.save_diff_preferences(id, &model::DiffPreferences::default(), ts(T1))
+        .unwrap();
+    s.create_draft(
+        id,
+        ChangeNumber(7),
+        &ps(2, "bbb"),
+        &model::DraftInput {
+            path: "f".into(),
+            side: model::Side::Revision,
+            parent: None,
+            location: model::Location::Line(1),
+            in_reply_to: None,
+            message: tag.to_owned(),
+            unresolved: true,
+        },
+        ts(T1),
+    )
+    .unwrap();
+}
+
+#[test]
+fn two_servers_with_the_same_numbers_and_queries_do_not_mix() {
+    let (mut s, a) = store();
+    let b = s.server_id("https://b.example").unwrap();
+    fill_server(&mut s, a, "from-a");
+    fill_server(&mut s, b, "from-b");
+
+    for (id, tag) in [(a, "from-a"), (b, "from-b")] {
+        let n = ChangeNumber(7);
+        assert_eq!(
+            s.load_query(id, "q").unwrap().unwrap().changes[0].subject,
+            tag
+        );
+        assert_eq!(s.load_change_summary(id, n).unwrap().unwrap().subject, tag);
+        assert_eq!(
+            s.load_change_detail(id, n)
+                .unwrap()
+                .unwrap()
+                .detail
+                .commit_message,
+            Some(tag.to_owned())
+        );
+        let files_key = model::FilesKey {
+            change: n,
+            base: None,
+            target: ps(2, "bbb"),
+        };
+        let list = s.load_file_list(id, &files_key).unwrap().unwrap();
+        assert_eq!(list.files[0].path, tag);
+        assert_eq!(list.reviewed, Some(vec![tag.to_owned()]));
+        let drafts = s.load_drafts(id, n).unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].message, tag);
+        assert_eq!(s.pending_drafts(id).unwrap().len(), 1);
+    }
+
+    // A reviewed mark on one server leaves the other's alone.
+    let n = ChangeNumber(7);
+    s.set_reviewed_path(a, n, &"bbb".into(), "extra", true)
+        .unwrap();
+    let files_key = model::FilesKey {
+        change: n,
+        base: None,
+        target: ps(2, "bbb"),
+    };
+    assert_eq!(
+        s.load_file_list(a, &files_key).unwrap().unwrap().reviewed,
+        Some(vec!["from-a".to_owned(), "extra".to_owned()])
+    );
+    assert_eq!(
+        s.load_file_list(b, &files_key).unwrap().unwrap().reviewed,
+        Some(vec!["from-b".to_owned()])
+    );
+}
+
+#[test]
+fn delete_server_purges_only_that_server() {
+    let (mut s, a) = store();
+    let b = s.server_id("https://b.example").unwrap();
+    fill_server(&mut s, a, "from-a");
+    fill_server(&mut s, b, "from-b");
+    let tables = server_tables(&s.conn);
+    // The test would silently cover nothing if the schema probe broke.
+    for t in [
+        "changes",
+        "query_results",
+        "query_result_items",
+        "change_details",
+        "file_lists",
+        "diffs",
+        "related_changes",
+        "diff_preferences",
+        "comments",
+        "drafts",
+    ] {
+        assert!(tables.iter().any(|x| x == t), "{t} has no server_id");
+        assert!(rows_of(&s.conn, t, a) > 0, "{t} was not filled for a");
+        assert!(rows_of(&s.conn, t, b) > 0, "{t} was not filled for b");
+    }
+    let before: Vec<i64> = tables.iter().map(|t| rows_of(&s.conn, t, b)).collect();
+
+    s.delete_server(a).unwrap();
+
+    for t in &tables {
+        assert_eq!(rows_of(&s.conn, t, a), 0, "{t} kept rows of the server");
+    }
+    let after: Vec<i64> = tables.iter().map(|t| rows_of(&s.conn, t, b)).collect();
+    assert_eq!(before, after, "the other server lost rows");
+    assert!(s.load_query(b, "q").unwrap().is_some());
+    // Deleting twice, or an unknown id, is harmless.
+    s.delete_server(a).unwrap();
+    s.delete_server(ServerId(9999)).unwrap();
+}
+
+#[test]
+fn set_server_url_keeps_the_id_and_the_cache() {
+    let (mut s, a) = store();
+    let b = s.server_id("https://b.example").unwrap();
+    fill_server(&mut s, a, "from-a");
+    s.set_server_url(a, "https://moved.example/").unwrap();
+    assert_eq!(s.server_id("https://moved.example").unwrap(), a);
+    assert!(s.load_query(a, "q").unwrap().is_some());
+    // The same URL again is fine; another row's URL is not.
+    s.set_server_url(a, "https://moved.example").unwrap();
+    assert!(matches!(
+        s.set_server_url(a, "https://b.example"),
+        Err(Error::ServerUrlTaken(_))
+    ));
+    assert!(matches!(
+        s.set_server_url(ServerId(9999), "https://nowhere.example"),
+        Err(Error::NoSuchServer)
+    ));
+    // Nothing changed by the failures.
+    assert_eq!(s.server_id("https://b.example").unwrap(), b);
+}
+
+#[test]
+fn app_state_round_trip() {
+    let (mut s, _) = store();
+    assert_eq!(s.app_state("active_server").unwrap(), None);
+    s.set_app_state("active_server", "work").unwrap();
+    s.set_app_state("other", "x").unwrap();
+    s.set_app_state("active_server", "home").unwrap();
+    assert_eq!(
+        s.app_state("active_server").unwrap().as_deref(),
+        Some("home")
+    );
+    assert_eq!(s.app_state("other").unwrap().as_deref(), Some("x"));
+}
+
+#[test]
+fn v5_adds_app_state_and_keeps_existing_data() {
+    let mut conn = db_at_version(4);
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO comments (server_id, change_number, json, fetched_ms) VALUES (1, 5, '[]', 0)",
+        [],
+    )
+    .unwrap();
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT COUNT(*) FROM servers"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM comments"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM app_state"), 0);
+    conn.execute("INSERT INTO app_state (key, value) VALUES ('k', 'v')", [])
+        .unwrap();
+}
