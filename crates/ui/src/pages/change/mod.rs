@@ -57,6 +57,7 @@ use crate::{
     pages::list::Status,
     reply, reviewed,
     row::browser_url,
+    servers::ServerBadge,
     session::{Session, is_unauthorized},
     settings::{DiffSettings, FileFilters, PageLayout},
     syntax_cache::{SyntaxCache, ahead_paths, diff_key},
@@ -202,6 +203,8 @@ pub struct ChangePage {
     ps_sub: Option<Subscription>,
     /// A note for the user (why a key did nothing, a failed request).
     hint: Hint,
+    /// The server's name and color, when there are several servers.
+    server_badge: Option<ServerBadge>,
     _ticker: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -281,6 +284,7 @@ impl ChangePage {
             ps_view: None,
             ps_sub: None,
             hint: Hint::default(),
+            server_badge: None,
             _ticker: Task::ready(()),
             _subs: Vec::new(),
         };
@@ -1435,6 +1439,19 @@ impl ChangePage {
             }
         }
         self.hint.say(done.note(), false, cx, |p| &mut p.hint);
+    }
+
+    /// Names the page's server in its header (several servers only).
+    pub fn set_server_badge(&mut self, badge: Option<ServerBadge>, cx: &mut Context<Self>) {
+        if self.server_badge != badge {
+            self.server_badge = badge;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_badge_for_test(&self) -> Option<&ServerBadge> {
+        self.server_badge.as_ref()
     }
 
     /// A note under the header, for the shell after it opened the page.
