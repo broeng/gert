@@ -641,6 +641,175 @@ mod drafts {
         assert_eq!(uploads(&http), before + 1);
         assert_eq!(counts(cx, &shell), (0, 0));
     }
+
+    // ---- several servers ----
+
+    const A: &str = "https://g.example/ga";
+    const B: &str = "https://g.example/gb";
+
+    /// A store with two servers that share change number 7 and the query,
+    /// and a draft each on change 7 (`a_state`/`b_state` as in
+    /// `store_with_drafts`: pending, or none).
+    fn two_server_store(a_pending: bool, b_pending: bool) -> (Store, [store::ServerId; 2]) {
+        let mut store = Store::open_in_memory().expect("store");
+        let ids = [
+            store.server_for_slug("a", A).expect("a"),
+            store.server_for_slug("b", B).expect("b"),
+        ];
+        let now = "2024-06-15T10:00:00Z".parse().expect("ts");
+        let target = PatchSetRef {
+            number: PatchSetNumber(1),
+            sha: "sha1".into(),
+        };
+        for (id, pending) in ids.into_iter().zip([a_pending, b_pending]) {
+            let rows = [crate::testing::summary(7)];
+            store
+                .save_query_page(id, "status:open", &rows, false, now)
+                .expect("query");
+            if pending {
+                let d = store
+                    .create_draft(id, ChangeNumber(7), &target, &input("waits"), now)
+                    .expect("draft");
+                store
+                    .record_draft_failure(
+                        id,
+                        d.local_id,
+                        d.version,
+                        &DraftFailure::Transient("offline".into()),
+                        now,
+                    )
+                    .expect("failure");
+            }
+        }
+        (store, ids)
+    }
+
+    fn start_two(
+        cx: &mut TestAppContext,
+        store: Store,
+        ids: [store::ServerId; 2],
+        active: Option<&str>,
+        http: &RouteHttpClient,
+    ) -> (Entity<Shell>, std::sync::Arc<std::sync::Mutex<Store>>) {
+        let mut env = env_with(store, http);
+        env.backend = std::sync::Arc::new(Keyring);
+        let shared = env.store.clone();
+        let server = |key: &str, url: &str, id| crate::session::ServerSetup {
+            key: crate::ServerKey::new(key),
+            name: key.into(),
+            base_url: url.into(),
+            username: Some("u".into()),
+            queries: vec![spec(key, "status:open")],
+            server: id,
+            ..setup()
+        };
+        let startup = Startup {
+            env,
+            diff: Default::default(),
+            start_page: Default::default(),
+            filters: Vec::new(),
+            servers: vec![server("a", A, ids[0]), server("b", B, ids[1])],
+            active: active.map(crate::ServerKey::new),
+        };
+        let (_window, shell) = open(cx, |window, cx| {
+            cx.new(|cx| Shell::new(startup, window, cx))
+        });
+        cx.run_until_parked();
+        (shell, shared)
+    }
+
+    fn counts_of(cx: &mut TestAppContext, shell: &Entity<Shell>, key: &str) -> (usize, usize) {
+        cx.update(|cx| {
+            let outbox = shell
+                .read(cx)
+                .outbox_of_for_test(&crate::ServerKey::new(key))
+                .expect("outbox");
+            let c = outbox.read(cx).counts();
+            (c.pending, c.failed)
+        })
+    }
+
+    #[gpui_kit::test]
+    fn each_server_has_its_own_outbox_and_one_that_is_not_shown_still_uploads(
+        cx: &mut TestAppContext,
+    ) {
+        let http = RouteHttpClient::new();
+        http.route("/revisions/sha1/drafts", 201, RECEIPT);
+        // Change 7 has a draft on b only; a is the one shown.
+        let (store, ids) = two_server_store(false, true);
+        let (shell, _) = start_two(cx, store, ids, Some("a"), &http);
+        let uploaded: Vec<String> = http
+            .requested()
+            .into_iter()
+            .filter(|r| r.contains("/revisions/sha1/drafts"))
+            .collect();
+        assert_eq!(uploaded.len(), 1, "{uploaded:?}");
+        assert!(uploaded[0].contains("/gb/"), "{uploaded:?}");
+        assert_eq!(counts_of(cx, &shell, "a"), (0, 0));
+        assert_eq!(counts_of(cx, &shell, "b"), (0, 0));
+        // The title bar and the pages follow the active server.
+        cx.update(|cx| {
+            let active = shell.read(cx).outbox_for_test().expect("outbox");
+            let a = shell
+                .read(cx)
+                .outbox_of_for_test(&crate::ServerKey::new("a"))
+                .expect("a");
+            assert_eq!(active, a);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_startup_server_is_the_requested_one_else_the_first_and_is_remembered(
+        cx: &mut TestAppContext,
+    ) {
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, false);
+        let (shell, shared) = start_two(cx, store, ids, Some("b"), &http);
+        cx.update(|cx| {
+            assert_eq!(shell.read(cx).queries_for_test()[0].name, "b");
+            assert_eq!(
+                shell.read(cx).list_page_for_test().map(|_| ()),
+                Some(()),
+                "the dashboard of b is shown"
+            );
+        });
+        // A requested server that is still configured needs no write.
+        let state = |shared: &std::sync::Arc<std::sync::Mutex<Store>>| {
+            shared
+                .lock()
+                .expect("lock")
+                .app_state(crate::ACTIVE_SERVER_STATE)
+                .expect("state")
+        };
+        assert_eq!(state(&shared), None);
+
+        let (store, ids) = two_server_store(false, false);
+        let (shell, shared) = start_two(cx, store, ids, Some("gone"), &http);
+        cx.update(|cx| assert_eq!(shell.read(cx).queries_for_test()[0].name, "a"));
+        assert_eq!(state(&shared).as_deref(), Some("a"));
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_server_is_marked_and_the_other_one_is_left_alone(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/revisions/sha1/drafts", 401, "no");
+        // b's draft is refused with 401 while a is shown.
+        let (store, ids) = two_server_store(false, true);
+        let (shell, _) = start_two(cx, store, ids, Some("a"), &http);
+        cx.update(|cx| {
+            let s = shell.read(cx);
+            assert_eq!(
+                s.connection_for_test("b"),
+                Some(crate::Connection::Unauthorized)
+            );
+            assert_ne!(
+                s.connection_for_test("a"),
+                Some(crate::Connection::Unauthorized)
+            );
+            // The shown server did not lose its page.
+            assert!(s.list_page_for_test().is_some());
+        });
+    }
 }
 
 // --- the settings page ---------------------------------------------------

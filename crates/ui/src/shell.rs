@@ -29,7 +29,11 @@ use crate::{
     },
     reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
-    session::{Env, SavedQuery, ServerSetup, Session, Startup, StartupPage, server_name_from_url},
+    servers::{ACTIVE_SERVER_STATE, Connection, Servers},
+    session::{
+        Env, SavedQuery, ServerKey, ServerSetup, Session, Startup, StartupPage,
+        server_name_from_url,
+    },
     settings::{DiffSettings, FileFilters, PageLayout},
     syntax_cache::SyntaxCache,
 };
@@ -92,15 +96,9 @@ pub fn init(cx: &mut App) {
 
 pub struct Shell {
     env: Env,
-    session: Option<Session>,
-    /// The drafts of the current session; present exactly when `session` is.
-    outbox: Option<Entity<DraftOutbox>>,
-    outbox_subs: Vec<Subscription>,
-    queries: Vec<SavedQuery>,
-    /// The dashboard's bookmark buttons.
-    bookmarks: Vec<SavedQuery>,
-    /// Saving the bookmarks.
-    bookmarks_task: Option<Task<()>>,
+    /// The configured servers, each with its session, outbox, connection
+    /// state, queries and bookmarks; and which one is active.
+    servers: Servers,
     /// What `start` opens (the `[startup]` setting).
     start_page: StartupPage,
     nav: NavState,
@@ -126,7 +124,6 @@ pub struct Shell {
     /// Shown in the title bar when nobody is signed in.
     app_name: SharedString,
     window_active: bool,
-    credentials_task: Option<Task<()>>,
     settings: Entity<DiffSettings>,
     layout: Entity<PageLayout>,
     /// The file filter rules and their session toggles; the pages get it
@@ -191,24 +188,12 @@ impl Shell {
         }));
 
         // The first page is a placeholder; `start` replaces it.
-        // One server at a time for now: the active one, else the first.
-        let server = active
-            .and_then(|key| servers.iter().position(|s| s.key == key))
-            .unwrap_or(0);
-        let server = servers.into_iter().nth(server);
-        let (queries, bookmarks) = server
-            .as_ref()
-            .map(|s| (s.queries.clone(), s.bookmarks.clone()))
-            .unwrap_or_default();
+        let requested = active.clone();
+        let servers = Servers::new(servers, active);
         let login = cx.new(|cx| LoginPage::new(env.clone(), LoginPrefill::default(), window, cx));
         let mut this = Self {
             env,
-            session: None,
-            outbox: None,
-            outbox_subs: Vec::new(),
-            queries,
-            bookmarks,
-            bookmarks_task: None,
+            servers,
             start_page,
             nav: NavState::new(Route::Login),
             page: Page::Login(login),
@@ -228,7 +213,6 @@ impl Shell {
             goto_subs: Vec::new(),
             app_name: SharedString::default(),
             window_active: window.is_window_active(),
-            credentials_task: None,
             settings: cx.new(|_| DiffSettings::new(diff)),
             layout: cx.new(|_| PageLayout::default()),
             filters: cx.new(|_| FileFilters::new(filters)),
@@ -236,7 +220,12 @@ impl Shell {
             prefs_task: None,
             _subs: subs,
         };
-        this.start(server, window, cx);
+        this.start(window, cx);
+        // Remember the fallback when the stored server is gone from the
+        // config, so that the next start does not look it up again.
+        if this.servers.active_key() != requested.as_ref() {
+            this.persist_active(cx);
+        }
         this
     }
 
@@ -254,43 +243,114 @@ impl Shell {
         self
     }
 
-    /// Opens the dashboard from the cache right away and fetches the
-    /// password in the background.
-    fn start(&mut self, server: Option<ServerSetup>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(setup) = server else {
+    /// The session of the active server.
+    fn session(&self) -> Option<&Session> {
+        self.servers.active()?.session.as_ref()
+    }
+
+    /// The outbox of the active server.
+    fn active_outbox(&self) -> Option<&Entity<DraftOutbox>> {
+        self.servers.active()?.outbox.as_ref()
+    }
+
+    /// The saved queries of the active server.
+    fn queries(&self) -> Vec<SavedQuery> {
+        self.servers
+            .active()
+            .map(|e| e.setup.queries.clone())
+            .unwrap_or_default()
+    }
+
+    /// The bookmarks of the active server.
+    fn bookmarks(&self) -> Vec<SavedQuery> {
+        self.servers
+            .active()
+            .map(|e| e.setup.bookmarks.clone())
+            .unwrap_or_default()
+    }
+
+    /// Stores the active server as the one to start on next time.
+    fn persist_active(&self, cx: &mut Context<Self>) {
+        let Some(key) = self.servers.active_key() else {
+            return;
+        };
+        let (store, key) = (self.env.store.clone(), key.to_string());
+        cx.background_spawn(async move {
+            let result = match store.lock() {
+                Ok(mut store) => store
+                    .set_app_state(ACTIVE_SERVER_STATE, &key)
+                    .map_err(|e| e.to_string()),
+                Err(_) => Err("the cache lock is poisoned".to_owned()),
+            };
+            if let Err(e) = result {
+                log::warn!("remembering the active server: {e}");
+            }
+        })
+        .detach();
+    }
+
+    /// Opens the start page of the active server from the cache right away
+    /// and fetches the passwords in the background. Every configured server
+    /// gets its session and outbox now, so that the drafts of a server that
+    /// is not shown are uploaded too.
+    fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active) = self.servers.active_key().cloned() else {
             return self.show(window, cx);
         };
-        let username = setup.username.clone();
-        let auth = if username.is_some() {
-            None
-        } else {
-            Some(Auth::Anonymous)
-        };
-        let backend = match Session::new(&self.env, &setup, auth) {
-            Ok(session) => {
-                let backend = session.backend().clone();
-                self.set_session(Some(session), window, cx);
-                backend
+        let mut active_error = None;
+        for key in self.servers.keys() {
+            if let Err(e) = self.open_server(&key, window, cx) {
+                if key == active {
+                    active_error = Some(e);
+                } else {
+                    log::warn!("server {key}: invalid configuration: {e}");
+                    self.servers.set_connection(&key, Connection::Offline);
+                }
             }
-            Err(e) => {
+        }
+        if let Some(e) = active_error {
+            if let Some(entry) = self.servers.active() {
                 self.prefill = Some(prefill_from(
-                    &setup,
+                    &entry.setup,
                     format!("Invalid server configuration: {e}"),
                 ));
-                return self.show(window, cx);
             }
-        };
+            return self.show(window, cx);
+        }
         self.nav.reset(match &self.start_page {
             StartupPage::Dashboard => Route::Dashboard,
             StartupPage::Search(q) => Route::Search(q.clone()),
         });
         self.show(window, cx);
         self.load_diff_preferences(cx);
-        let Some(username) = username else {
-            return;
+    }
+
+    /// Gives server `key` a session that reads the cache, and starts
+    /// fetching its password if it has a user.
+    fn open_server(
+        &mut self,
+        key: &ServerKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), gerrit_api::Error> {
+        let Some(entry) = self.servers.get(key) else {
+            return Ok(());
         };
+        let setup = entry.setup.clone();
+        let auth = if setup.username.is_some() {
+            None
+        } else {
+            Some(Auth::Anonymous)
+        };
+        let session = Session::new(&self.env, &setup, auth)?;
+        let backend = session.backend().clone();
+        self.install_session(key, Some(session), window, cx);
+        let Some(username) = setup.username.clone() else {
+            return Ok(());
+        };
+        let (task_key, key) = (key.clone(), key.clone());
         let (url, user) = (setup.base_url.clone(), username.clone());
-        self.credentials_task = Some(cx.spawn_in(window, async move |this, cx| {
+        let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move { backend.load_password(&url, &user) })
                 .await;
@@ -299,75 +359,90 @@ impl Shell {
                     let auth = Auth::Basic { username, password };
                     match Session::new(&this.env, &setup, Some(auth)) {
                         Ok(session) => {
-                            this.set_session(Some(session), window, cx);
-                            this.show(window, cx);
-                            this.load_diff_preferences(cx);
+                            this.install_session(&key, Some(session), window, cx);
+                            if this.servers.active_key() == Some(&key) {
+                                this.show(window, cx);
+                                this.load_diff_preferences(cx);
+                            }
                         }
-                        Err(e) => this.back_to_login(
-                            &setup,
+                        Err(e) => this.credentials_failed(
+                            &key,
                             format!("Invalid server configuration: {e}"),
                             window,
                             cx,
                         ),
                     }
                 }
-                Ok(None) => this.back_to_login(
-                    &setup,
+                Ok(None) => this.credentials_failed(
+                    &key,
                     "No saved password for this account. Please log in again.".into(),
                     window,
                     cx,
                 ),
-                Err(e) => this.back_to_login(
-                    &setup,
+                Err(e) => this.credentials_failed(
+                    &key,
                     format!("Could not read the password: {e}"),
                     window,
                     cx,
                 ),
             })
             .ok();
-        }));
+        });
+        if let Some(entry) = self.servers.get_mut(&task_key) {
+            entry.credentials_task = Some(task);
+        }
+        Ok(())
     }
 
-    /// Replaces the session, and with it the outbox of drafts. A new
-    /// session counts its drafts and uploads those that waited.
-    fn set_session(
+    /// Replaces the session of server `key`, and with it its outbox of
+    /// drafts. A new session counts its drafts and uploads those that
+    /// waited.
+    fn install_session(
         &mut self,
+        key: &ServerKey,
         session: Option<Session>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.outbox_subs.clear();
-        self.outbox = session.as_ref().map(|s| {
+        let mut subs = Vec::new();
+        let outbox = session.as_ref().map(|s| {
             let outbox = cx.new(|_| DraftOutbox::new(s.clone()));
-            self.outbox_subs.push(cx.subscribe_in(
+            let owner = key.clone();
+            subs.push(cx.subscribe_in(
                 &outbox,
                 window,
-                |this, _, ev: &OutboxEvent, window, cx| {
+                move |this, _, ev: &OutboxEvent, window, cx| {
                     if matches!(ev, OutboxEvent::Unauthorized) {
-                        this.unauthorized(window, cx);
+                        this.unauthorized_for(&owner, window, cx);
                     }
                 },
             ));
             // The title bar shows the counts.
-            self.outbox_subs
-                .push(cx.observe(&outbox, |_, _, cx| cx.notify()));
+            subs.push(cx.observe(&outbox, |_, _, cx| cx.notify()));
             outbox.update(cx, |o, cx| o.resume(cx));
             outbox
         });
-        self.session = session;
+        if let Some(entry) = self.servers.get_mut(key) {
+            entry.session = session;
+            entry.outbox = outbox;
+            entry.outbox_subs = subs;
+        }
     }
 
-    /// A refresh worked, so the server is reachable: upload the drafts that
-    /// waited.
+    /// A refresh worked, so the active server is reachable: upload the
+    /// drafts that waited.
     fn server_reachable(&mut self, cx: &mut Context<Self>) {
-        if let Some(outbox) = &self.outbox {
+        if let Some(key) = self.servers.active_key().cloned() {
+            self.servers.set_connection(&key, Connection::Online);
+        }
+        if let Some(outbox) = self.active_outbox().cloned() {
             outbox.update(cx, |o, cx| o.retry_all(cx));
         }
     }
 
-    /// The outbox of the current session.
+    /// The outbox of the active server.
     fn outbox_for(&mut self, session: &Session, cx: &mut Context<Self>) -> Entity<DraftOutbox> {
-        match &self.outbox {
+        match self.active_outbox() {
             Some(outbox) => outbox.clone(),
             None => cx.new(|_| DraftOutbox::new(session.clone())),
         }
@@ -378,7 +453,7 @@ impl Shell {
     /// without credentials yet reads the cache only). Anonymous sessions
     /// have none, so only the local settings apply.
     fn load_diff_preferences(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.session.clone() else {
+        let Some(session) = self.session().cloned() else {
             return;
         };
         let settings = self.settings.clone();
@@ -411,6 +486,26 @@ impl Shell {
         }));
     }
 
+    /// The password of server `key` could not be had. The active server
+    /// goes to the login page; another one is only marked, and keeps
+    /// serving its cache.
+    fn credentials_failed(
+        &mut self,
+        key: &ServerKey,
+        notice: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.servers.set_connection(key, Connection::Unauthorized);
+        if self.servers.active_key() == Some(key) {
+            if let Some(setup) = self.servers.get(key).map(|e| e.setup.clone()) {
+                self.back_to_login(&setup, notice, window, cx);
+            }
+        } else {
+            log::warn!("server {key}: {notice}");
+        }
+    }
+
     fn back_to_login(
         &mut self,
         setup: &ServerSetup,
@@ -418,7 +513,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_session(None, window, cx);
+        self.install_session(&setup.key, None, window, cx);
         self.prefill = Some(prefill_from(setup, notice));
         self.nav.reset(Route::Login);
         self.show(window, cx);
@@ -447,7 +542,17 @@ impl Shell {
 
     #[cfg(test)]
     pub(crate) fn outbox_for_test(&self) -> Option<Entity<DraftOutbox>> {
-        self.outbox.clone()
+        self.active_outbox().cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outbox_of_for_test(&self, key: &ServerKey) -> Option<Entity<DraftOutbox>> {
+        self.servers.get(key)?.outbox.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_for_test(&self, key: &str) -> Option<Connection> {
+        self.servers.connection(&ServerKey::new(key))
     }
 
     #[cfg(test)]
@@ -465,7 +570,7 @@ impl Shell {
 
     #[cfg(test)]
     pub(crate) fn queries_for_test(&self) -> &[SavedQuery] {
-        &self.queries
+        &self.servers.active().expect("a server").setup.queries
     }
 
     #[cfg(test)]
@@ -496,15 +601,15 @@ impl Shell {
         self.drop_filters_dialog();
         self.drop_goto();
         let mut route = self.nav.current().clone();
-        if self.session.is_none() && route != Route::Login {
+        if self.session().is_none() && route != Route::Login {
             self.nav.reset(Route::Login);
             route = Route::Login;
         }
         let active = self.window_active;
         let restore = self.nav.selected();
-        self.page = match (route, self.session.clone()) {
+        self.page = match (route, self.session().cloned()) {
             (Route::Dashboard, Some(session)) => {
-                let queries = self.queries.clone();
+                let queries = self.queries();
                 self.list_page(
                     session,
                     ListKind::Dashboard,
@@ -559,7 +664,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Page {
         let page = cx.new(|cx| ChangeListPage::new(session, kind, specs, restore, active, cx));
-        let bookmarks = self.bookmarks.clone();
+        let bookmarks = self.bookmarks();
         page.update(cx, |p, cx| p.set_bookmarks(bookmarks, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
@@ -580,11 +685,11 @@ impl Shell {
 
     fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Page {
         let env = self.env.clone();
-        let queries = self.queries.clone();
-        let bookmarks = self.bookmarks.clone();
+        let queries = self.queries();
+        let bookmarks = self.bookmarks();
         let (start, layout) = (self.start_page.clone(), self.layout.clone());
         let filters = self.filters.clone();
-        let server = self.session.as_ref().map(|s| s.backend().clone());
+        let server = self.session().map(|s| s.backend().clone());
         let page = cx.new(|cx| {
             SettingsPage::new(
                 env, server, queries, bookmarks, start, layout, filters, window, cx,
@@ -596,8 +701,16 @@ impl Shell {
             |this, _, ev: &SettingsEvent, window, cx| match ev {
                 // The dashboard is built from this list when it is shown
                 // again, from the cache for the queries it already knew.
-                SettingsEvent::QueriesSaved(queries) => this.queries = queries.clone(),
-                SettingsEvent::BookmarksSaved(list) => this.bookmarks = list.clone(),
+                SettingsEvent::QueriesSaved(queries) => {
+                    if let Some(e) = this.servers.active_mut() {
+                        e.setup.queries = queries.clone();
+                    }
+                }
+                SettingsEvent::BookmarksSaved(list) => {
+                    if let Some(e) = this.servers.active_mut() {
+                        e.setup.bookmarks = list.clone();
+                    }
+                }
                 SettingsEvent::StartupSaved(page) => this.start_page = page.clone(),
                 SettingsEvent::ManageFilters { select, add } => {
                     let context = FiltersContext {
@@ -722,22 +835,31 @@ impl Shell {
         self.show(window, cx);
     }
 
-    /// Writes the bookmarks in the background; the buttons follow once the
-    /// config file has them. On failure the old list stays.
+    /// Writes the bookmarks of the active server in the background; the
+    /// buttons follow once the config file has them. On failure the old
+    /// list stays.
     fn save_bookmarks(&mut self, list: Vec<SavedQuery>, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        let Some(entry) = self.servers.active_mut() else {
+            return;
+        };
+        let Some(session) = &entry.session else {
             return;
         };
         let backend = session.backend().clone();
-        self.bookmarks_task = Some(cx.spawn(async move |this, cx| {
+        let key = entry.setup.key.clone();
+        entry.bookmarks_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { backend.save_bookmarks(&list) })
                 .await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(saved) => {
-                        this.bookmarks = saved.clone();
-                        if let Page::List(page) = &this.page {
+                        if let Some(e) = this.servers.get_mut(&key) {
+                            e.setup.bookmarks = saved.clone();
+                        }
+                        if this.servers.active_key() == Some(&key)
+                            && let Page::List(page) = &this.page
+                        {
                             page.update(cx, |p, cx| p.set_bookmarks(saved, cx));
                         }
                     }
@@ -750,12 +872,19 @@ impl Shell {
     }
 
     fn search(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !query.is_empty() && self.session.is_some() {
+        if !query.is_empty() && self.session().is_some() {
             self.navigate(Route::Search(query), window, cx);
         }
     }
 
     fn logged_in(&mut self, outcome: &LoginOutcome, window: &mut Window, cx: &mut Context<Self>) {
+        // A server that is known keeps its bookmarks (a new login after the
+        // credentials were refused is the usual case).
+        let bookmarks = self
+            .servers
+            .get(&outcome.key)
+            .map(|e| e.setup.bookmarks.clone())
+            .unwrap_or_default();
         let setup = ServerSetup {
             key: outcome.key.clone(),
             name: server_name_from_url(&outcome.base_url),
@@ -764,7 +893,7 @@ impl Shell {
             color: None,
             server: outcome.server,
             queries: outcome.queries.clone(),
-            bookmarks: Vec::new(),
+            bookmarks,
         };
         let auth = match (&outcome.username, &outcome.password) {
             (Some(username), Some(password)) => Auth::Basic {
@@ -775,8 +904,13 @@ impl Shell {
         };
         match Session::new(&self.env, &setup, Some(auth)) {
             Ok(session) => {
-                self.set_session(Some(session), window, cx);
-                self.queries = outcome.queries.clone();
+                self.servers.upsert(setup);
+                let key = outcome.key.clone();
+                self.install_session(&key, Some(session), window, cx);
+                self.servers.set_connection(&key, Connection::Online);
+                if self.servers.set_active(&key) == Some(true) {
+                    self.persist_active(cx);
+                }
                 self.nav.reset(Route::Dashboard);
                 self.show(window, cx);
                 self.load_diff_preferences(cx);
@@ -788,32 +922,52 @@ impl Shell {
         }
     }
 
-    /// The server refused our credentials: back to the login page, with the
-    /// server filled in.
+    /// The active server refused our credentials: back to the login page,
+    /// with the server filled in.
     fn unauthorized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.drop_reply(cx);
-        self.drop_menu();
-        self.drop_filters_dialog();
-        if let Some(s) = self.session.clone() {
-            self.set_session(None, window, cx);
-            self.prefill = Some(LoginPrefill {
-                server: Some(s.key),
-                base_url: s.base_url,
-                username: s.username,
-                notice: Some(
-                    "The server rejected the saved credentials. Please log in again.".into(),
-                ),
-            });
+        if let Some(key) = self.servers.active_key().cloned() {
+            self.unauthorized_for(&key, window, cx);
         }
-        self.nav.reset(Route::Login);
-        self.show(window, cx);
+    }
+
+    /// Server `key` refused our credentials. It loses its session (so
+    /// nothing more is sent with them) and is marked; if it is the active
+    /// one, the login page opens with the server filled in.
+    fn unauthorized_for(&mut self, key: &ServerKey, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.servers.active_key() == Some(key);
+        if active {
+            self.drop_reply(cx);
+            self.drop_menu();
+            self.drop_filters_dialog();
+        }
+        let session = self.servers.get(key).and_then(|e| e.session.clone());
+        self.servers.set_connection(key, Connection::Unauthorized);
+        if let Some(s) = session {
+            self.install_session(key, None, window, cx);
+            if active {
+                self.prefill = Some(LoginPrefill {
+                    server: Some(s.key),
+                    base_url: s.base_url,
+                    username: s.username,
+                    notice: Some(
+                        "The server rejected the saved credentials. Please log in again.".into(),
+                    ),
+                });
+            }
+        }
+        if active {
+            self.nav.reset(Route::Login);
+            self.show(window, cx);
+        }
     }
 
     // ---- reply dialog ----
 
     /// Opens the reply dialog for `detail` on top of the current page.
     fn open_reply(&mut self, detail: ChangeDetail, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(session), Some(outbox)) = (self.session.clone(), self.outbox.clone()) else {
+        let (Some(session), Some(outbox)) =
+            (self.session().cloned(), self.active_outbox().cloned())
+        else {
             return;
         };
         if self.reply.is_some() || self.menu.is_some() || self.filters_dialog.is_some() {
@@ -865,7 +1019,7 @@ impl Shell {
 
     /// Opens the action menu for `detail` on top of the current page.
     fn open_menu(&mut self, detail: ChangeDetail, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.session.clone() else {
+        let Some(session) = self.session().cloned() else {
             return;
         };
         if self.menu.is_some() || self.reply.is_some() || self.filters_dialog.is_some() {
@@ -983,7 +1137,7 @@ impl Shell {
     /// does not parse opens the Go to dialog on it, which says why. Does
     /// nothing before a server is set up.
     pub fn open_link(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        let Some(session) = self.session() else {
             log::warn!("not opening {text}: no server is set up");
             return;
         };
@@ -1029,7 +1183,7 @@ impl Shell {
             || self.menu.is_some()
             || self.filters_dialog.is_some()
             || self.goto.is_some();
-        let Some(base_url) = self.session.as_ref().map(|s| s.base_url.clone()) else {
+        let Some(base_url) = self.session().map(|s| s.base_url.clone()) else {
             return;
         };
         if modal_open {
@@ -1125,13 +1279,13 @@ impl Shell {
     }
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_some() {
+        if self.session().is_some() {
             self.navigate(Route::Settings, window, cx);
         }
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_some() {
+        if self.session().is_some() {
             self.search.update(cx, |s, cx| s.focus(window, cx));
         }
     }
@@ -1181,8 +1335,7 @@ impl Shell {
         // Controls must not start a window move.
         let no_drag = |d: Div| d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         let signed_in = self
-            .session
-            .as_ref()
+            .session()
             .filter(|_| *self.nav.current() != Route::Login);
         let content = match signed_in {
             None => h_flex()
@@ -1274,7 +1427,7 @@ impl Shell {
     /// The drafts that are not on the server, as the title bar says it;
     /// nothing when there are none.
     fn render_draft_indicator(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let counts = self.outbox.as_ref()?.read(cx).counts();
+        let counts = self.active_outbox()?.read(cx).counts();
         let label = draft_label(counts)?;
         let theme = cx.theme().clone();
         let color = if counts.failed > 0 {
@@ -1303,7 +1456,7 @@ impl Shell {
     /// The indicator's click: try the drafts that are not on the server
     /// again.
     fn retry_drafts(&mut self, cx: &mut Context<Self>) {
-        if let Some(outbox) = &self.outbox {
+        if let Some(outbox) = self.active_outbox().cloned() {
             outbox.update(cx, |o, cx| o.retry_everything(cx));
         }
     }
