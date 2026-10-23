@@ -182,6 +182,24 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     ",
+    // v5 -> v6: servers get the slug of their `[[servers]]` config entry, and
+    // `base_url` stops being unique: two entries may share a URL (different
+    // users) and each needs its own cache rows. SQLite cannot drop a
+    // constraint, so the table is rebuilt; `migrate` turns foreign keys off
+    // around this (dropping the parent would cascade-delete the cache
+    // otherwise). `slug` is NULL for rows from before slugs; the first
+    // server with that URL adopts them (`Store::server_for_slug`).
+    "
+    CREATE TABLE servers_new (
+        id       INTEGER PRIMARY KEY,
+        base_url TEXT NOT NULL,
+        slug     TEXT UNIQUE
+    );
+    INSERT INTO servers_new (id, base_url) SELECT id, base_url FROM servers;
+    DROP TABLE servers;
+    ALTER TABLE servers_new RENAME TO servers;
+    CREATE INDEX servers_by_url ON servers (base_url);
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {
@@ -199,9 +217,35 @@ pub(crate) fn migrate(conn: &mut Connection, steps: &[&str]) -> Result<(), Error
     if found == supported {
         return Ok(());
     }
+    // Table rebuilds need foreign keys off, and the pragma is a no-op inside
+    // a transaction. Restore it whatever happens.
+    let foreign_keys: bool = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    if foreign_keys {
+        conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    }
+    let result = run_steps(conn, &steps[found as usize..], supported);
+    if foreign_keys {
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
+    }
+    result
+}
+
+fn run_steps(conn: &mut Connection, steps: &[&str], supported: u32) -> Result<(), Error> {
     let tx = conn.transaction()?;
-    for step in &steps[found as usize..] {
+    for step in steps {
         tx.execute_batch(step)?;
+    }
+    // A rebuild must not leave dangling references.
+    let dangling = tx
+        .prepare("PRAGMA foreign_key_check")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .next()
+        .transpose()?;
+    if let Some(table) = dangling {
+        return Err(Error::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            Some(format!("migration left dangling references in {table}")),
+        )));
     }
     // PRAGMA does not accept bound parameters.
     tx.execute_batch(&format!("PRAGMA user_version = {supported}"))?;

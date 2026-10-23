@@ -632,3 +632,129 @@ fn v5_adds_app_state_and_keeps_existing_data() {
     conn.execute("INSERT INTO app_state (key, value) VALUES ('k', 'v')", [])
         .unwrap();
 }
+
+#[test]
+fn v6_rebuilds_servers_without_losing_the_cache() {
+    let mut conn = db_at_version(5);
+    // The app opens with foreign keys on; a naive rebuild would cascade.
+    conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (3, 'https://x'), (4, 'https://y')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO comments (server_id, change_number, json, fetched_ms)
+         VALUES (3, 5, '[]', 0), (4, 5, '[]', 0)",
+        [],
+    )
+    .unwrap();
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT COUNT(*) FROM servers"), 2);
+    assert_eq!(count("SELECT COUNT(*) FROM comments"), 2);
+    assert_eq!(count("SELECT COUNT(*) FROM servers WHERE slug IS NULL"), 2);
+    // Ids survive, and foreign keys are back on and point at the new table.
+    assert_eq!(count("PRAGMA foreign_keys"), 1);
+    assert_eq!(
+        count("SELECT base_url = 'https://y' FROM servers WHERE id = 4"),
+        1
+    );
+    assert!(
+        conn.execute(
+            "INSERT INTO comments (server_id, change_number, json, fetched_ms)
+             VALUES (99, 1, '[]', 0)",
+            [],
+        )
+        .is_err()
+    );
+    conn.execute("DELETE FROM servers WHERE id = 3", [])
+        .unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM comments"), 1);
+    // A URL may be shared now; a slug may not.
+    conn.execute(
+        "INSERT INTO servers (base_url, slug) VALUES ('https://y', 'a'), ('https://y', 'b')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "INSERT INTO servers (base_url, slug) VALUES ('https://z', 'a')",
+            []
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn v6_from_every_older_version_keeps_servers() {
+    for from in 1..MIGRATIONS.len() {
+        let mut conn = db_at_version(from);
+        conn.execute("INSERT INTO servers (base_url) VALUES ('https://x')", [])
+            .unwrap();
+        migrate(&mut conn, MIGRATIONS).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM servers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "from v{from}");
+    }
+}
+
+#[test]
+fn slugs_give_servers_with_the_same_url_their_own_rows() {
+    let mut s = Store::open_in_memory().unwrap();
+    let a = s.server_for_slug("work", "https://g.example/").unwrap();
+    let b = s.server_for_slug("work-bot", "https://g.example").unwrap();
+    assert_ne!(a, b);
+    assert_eq!(s.server_for_slug("work", "https://g.example").unwrap(), a);
+    assert_eq!(
+        s.server_for_slug("work-bot", "https://g.example").unwrap(),
+        b
+    );
+    fill_server(&mut s, a, "from-a");
+    fill_server(&mut s, b, "from-b");
+    assert_eq!(
+        s.load_query(a, "q").unwrap().unwrap().changes[0].subject,
+        "from-a"
+    );
+    assert_eq!(
+        s.load_query(b, "q").unwrap().unwrap().changes[0].subject,
+        "from-b"
+    );
+    s.delete_server(b).unwrap();
+    assert!(s.load_query(a, "q").unwrap().is_some());
+    assert_eq!(s.load_query(b, "q").unwrap(), None);
+}
+
+#[test]
+fn the_first_slug_adopts_an_existing_cache() {
+    let (mut s, old) = store();
+    s.save_query_page(old, "q", &[change(1, T1)], false, ts(T1))
+        .unwrap();
+    // Only the first entry with the URL adopts the unslugged rows.
+    let first = s.server_for_slug("one", "https://g.example").unwrap();
+    assert_eq!(first, old);
+    assert!(s.load_query(first, "q").unwrap().is_some());
+    let second = s.server_for_slug("two", "https://g.example").unwrap();
+    assert_ne!(second, old);
+    assert_eq!(s.load_query(second, "q").unwrap(), None);
+    // A login by URL after that finds the oldest claimed row, and one that
+    // is new stays unclaimed for the entry the login creates.
+    assert_eq!(s.server_id("https://g.example").unwrap(), first);
+    let fresh = s.server_id("https://new.example").unwrap();
+    assert_eq!(
+        s.server_for_slug("new", "https://new.example").unwrap(),
+        fresh
+    );
+}
+
+#[test]
+fn a_slug_follows_an_edited_url() {
+    let mut s = Store::open_in_memory().unwrap();
+    let a = s.server_for_slug("work", "https://old.example").unwrap();
+    s.save_query_page(a, "q", &[change(1, T1)], false, ts(T1))
+        .unwrap();
+    assert_eq!(s.server_for_slug("work", "https://new.example").unwrap(), a);
+    assert!(s.load_query(a, "q").unwrap().is_some());
+    assert_eq!(s.server_id("https://new.example").unwrap(), a);
+}
