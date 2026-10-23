@@ -26,6 +26,11 @@ actions!(
         OpenSettings,
         /// `g`: the Go to dialog (open a change from a link to it).
         OpenGoto,
+        /// `b b` on a search: bookmark the query (asks for a label), or take
+        /// its bookmark away again.
+        ToggleBookmark,
+        /// `Esc` while naming a bookmark.
+        CancelBookmark,
         // Settings page.
         /// `Enter` / `e`: edit the selected saved query.
         EditQuery,
@@ -108,6 +113,14 @@ pub struct QuickVote {
     pub position: usize,
 }
 
+/// `b 1` .. `b 9` on the dashboard and search pages: open the bookmark at
+/// `position` (0 is the first).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = ui, no_json)]
+pub struct OpenBookmark {
+    pub position: usize,
+}
+
 /// `f 1` .. `f 9` on the change page: toggle the file filter button at
 /// `position` (0 is the first rule that applies to the change).
 #[derive(Clone, PartialEq, Debug, Action)]
@@ -137,6 +150,9 @@ const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
 const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
 const DIFF_PREFS_KEYS: &str = "DiffPrefs && !Input";
+/// The label box of a new bookmark; as deep as the input's own context, to
+/// win over its Escape.
+const BOOKMARK_FIELD: &str = "Naming > Input";
 const SETTINGS_BROWSE: &str = "SettingsPage && Browsing";
 const SETTINGS_CONFIRM: &str = "SettingsPage && Confirming";
 const SETTINGS_EDIT: &str = "SettingsPage && Editing";
@@ -549,6 +565,61 @@ pub fn list_entries() -> Vec<Entry> {
         e(
             "",
             KeyBinding::new("shift-r", Refresh, Some(CHANGE_KEYS)),
+            "",
+        ),
+        e(
+            "B 1 to B 9",
+            KeyBinding::new("b 1", OpenBookmark { position: 0 }, Some(LIST_KEYS)),
+            "Open the bookmark with that number (the buttons on the dashboard)",
+        ),
+        e(
+            "",
+            KeyBinding::new("b 2", OpenBookmark { position: 1 }, Some(LIST_KEYS)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("b 3", OpenBookmark { position: 2 }, Some(LIST_KEYS)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("b 4", OpenBookmark { position: 3 }, Some(LIST_KEYS)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("b 5", OpenBookmark { position: 4 }, Some(LIST_KEYS)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("b 6", OpenBookmark { position: 5 }, Some(LIST_KEYS)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("b 7", OpenBookmark { position: 6 }, Some(LIST_KEYS)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("b 8", OpenBookmark { position: 7 }, Some(LIST_KEYS)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("b 9", OpenBookmark { position: 8 }, Some(LIST_KEYS)),
+            "",
+        ),
+        e(
+            "B B",
+            KeyBinding::new("b b", ToggleBookmark, Some(LIST_KEYS)),
+            "On a search: bookmark it (Enter: save, Esc: cancel), or remove its bookmark",
+        ),
+        e(
+            "",
+            KeyBinding::new("escape", CancelBookmark, Some(BOOKMARK_FIELD)),
             "",
         ),
         e(

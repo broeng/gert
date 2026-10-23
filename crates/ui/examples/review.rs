@@ -1179,6 +1179,7 @@ fn main() {
         std::process::exit(2);
     });
     let startup = Startup {
+        bookmarks: Vec::new(),
         env: Env {
             http: Arc::new(http),
             store: Arc::new(Mutex::new(store)),

@@ -94,6 +94,20 @@ impl Backend for AppBackend {
         Ok(queries_to_ui(&config.queries))
     }
 
+    fn save_bookmarks(&self, bookmarks: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+        let config = Config::update(&self.config_file, |c| {
+            c.bookmarks = bookmarks
+                .iter()
+                .map(|q| QueryConfig {
+                    name: q.name.clone(),
+                    query: q.query.clone(),
+                })
+                .collect();
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        Ok(queries_to_ui(&config.bookmarks))
+    }
+
     fn save_filters(&self, filters: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
         let config = Config::update(&self.config_file, |c| {
             // The rules the loader ignores stay in the file, after the ones
@@ -223,6 +237,35 @@ mod tests {
         let text = std::fs::read_to_string(&b.config_file).unwrap();
         assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
         assert!(text.contains("name = \"B\""), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_bookmarks_keeps_the_comments_and_the_queries() {
+        let dir = std::env::temp_dir().join(format!("backend-bookmarks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let b = AppBackend {
+            config_file: dir.join("config.toml"),
+            keyring: Keyring,
+        };
+        std::fs::write(
+            &b.config_file,
+            "# mine\n[server]\nurl = \"https://g\" # prod\n\n[[queries]]\nname = \"A\"\nquery = \"x\"\n",
+        )
+        .unwrap();
+        let new = [SavedQuery {
+            name: "Mine".into(),
+            query: "owner:self".into(),
+        }];
+        assert_eq!(b.save_bookmarks(&new).unwrap(), new);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
+        assert!(text.contains("[[bookmarks]]\nname = \"Mine\""), "{text}");
+        assert!(text.contains("[[queries]]\nname = \"A\""), "{text}");
+        assert_eq!(b.save_bookmarks(&[]).unwrap(), []);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(!text.contains("bookmarks"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

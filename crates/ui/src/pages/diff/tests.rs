@@ -499,6 +499,7 @@ fn the_preferences_panel_changes_session_settings_and_refetches(cx: &mut TestApp
 fn shell_flow(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Shell>, RouteHttpClient) {
     let http = http();
     let startup = Startup {
+        bookmarks: Vec::new(),
         env: env_with(seeded(), &http),
         server: Some(setup()),
         queries: vec![SavedQuery {

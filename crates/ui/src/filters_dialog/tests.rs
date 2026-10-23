@@ -126,6 +126,7 @@ fn on_the_change(cx: &mut TestAppContext, rules: Vec<FileFilter>) -> Fx {
     let mut env = env_with(store, &RouteHttpClient::new());
     env.backend = backend.clone();
     let startup = Startup {
+        bookmarks: Vec::new(),
         env,
         server: Some(ServerSetup { ..setup() }),
         queries: vec![SavedQuery {

@@ -9,6 +9,11 @@
 //! name = "Your turn"
 //! query = "attention:self"
 //!
+//! # Optional: bookmarks, buttons on the dashboard that open a search.
+//! [[bookmarks]]
+//! name = "My open"
+//! query = "is:open owner:self"
+//!
 //! # Optional: file filters. Rules that hide, dim or highlight files of a
 //! # change by path glob. `projects` (exact names), `color`, `bold` and
 //! # `enabled` are optional; `enabled` defaults to true.
@@ -96,6 +101,8 @@ pub struct Config {
     pub server: Option<ServerConfig>,
     #[serde(default)]
     pub queries: Vec<QueryConfig>,
+    #[serde(default)]
+    pub bookmarks: Vec<QueryConfig>,
     #[serde(default)]
     pub filters: Vec<FilterConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -496,6 +503,7 @@ impl Config {
                 username: username.map(str::to_owned),
             }),
             queries,
+            bookmarks: self.bookmarks,
             filters: self.filters,
             diff: self.diff,
             startup: self.startup,
@@ -650,17 +658,21 @@ impl Config {
 }
 
 /// The scalar and table keys of `new` that differ from `old` (everything
-/// but the query and filter lists) go into `doc`.
+/// but the query, bookmark and filter lists) go into `doc`.
 fn apply_changes(old: &Config, new: &Config, doc: &mut DocumentMut) -> Result<(), ConfigError> {
     let tables = |c: &Config| -> Result<toml::Table, ConfigError> {
         let mut t = toml::Table::try_from(c)?;
         t.remove("queries");
+        t.remove("bookmarks");
         t.remove("filters");
         Ok(t)
     };
     apply_table(&tables(old)?, &tables(new)?, doc.as_table_mut());
     if old.queries != new.queries {
-        apply_queries(&new.queries, doc.as_table_mut());
+        apply_queries("queries", &new.queries, doc.as_table_mut());
+    }
+    if old.bookmarks != new.bookmarks {
+        apply_queries("bookmarks", &new.bookmarks, doc.as_table_mut());
     }
     if old.filters != new.filters {
         apply_filters(&new.filters, doc.as_table_mut());
@@ -742,11 +754,12 @@ fn set_or_remove(t: &mut toml_edit::Table, key: &str, v: Option<toml_edit::Value
     }
 }
 
-/// Rewrites the `[[queries]]` tables, see [`apply_array`].
-fn apply_queries(new: &[QueryConfig], root: &mut toml_edit::Table) {
+/// Rewrites the `[[queries]]` or `[[bookmarks]]` tables (`key`), see
+/// [`apply_array`].
+fn apply_queries(key: &str, new: &[QueryConfig], root: &mut toml_edit::Table) {
     apply_array(
         root,
-        "queries",
+        key,
         new,
         |q| Some((q.name.clone(), q.query.clone())),
         query_of,

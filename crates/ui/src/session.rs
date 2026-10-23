@@ -11,7 +11,7 @@ use crate::{
     theme::{ColorModes, ThemeName},
 };
 
-/// A named Gerrit query shown as a dashboard section.
+/// A named Gerrit query: a dashboard section, or a bookmark.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedQuery {
     pub name: String,
@@ -51,6 +51,13 @@ pub trait Backend: Send + Sync + 'static {
     /// Writes the saved queries to the config file, keeping the rest of it
     /// as it is. Returns the list now in effect.
     fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError>;
+
+    /// Writes the bookmarks (`[[bookmarks]]`) to the config file, keeping
+    /// the rest of it as it is. Returns the list now in effect. Defaults to
+    /// accepting them without saving, for backends with no config file.
+    fn save_bookmarks(&self, bookmarks: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+        Ok(bookmarks.to_vec())
+    }
 
     /// Writes the file filters (`[[filters]]`) to the config file, keeping
     /// the rest of it as it is. Returns the list now in effect.
@@ -105,6 +112,8 @@ pub struct Startup {
     /// `None` when there is no config yet: start on the login page.
     pub server: Option<ServerSetup>,
     pub queries: Vec<SavedQuery>,
+    /// The bookmarks (`[[bookmarks]]`): searches the dashboard has buttons for.
+    pub bookmarks: Vec<SavedQuery>,
     /// The file filter rules (`[[filters]]`).
     pub filters: Vec<FileFilter>,
     pub diff: LocalDiff,

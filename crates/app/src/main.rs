@@ -51,6 +51,7 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
         },
         server,
         queries: queries_to_ui(&config.queries),
+        bookmarks: queries_to_ui(&config.bookmarks),
         filters: config.file_filters(),
         start_page: startup_to_ui(&config.startup_page()),
         diff: LocalDiff {

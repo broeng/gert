@@ -502,6 +502,7 @@ fn shell_with_many_files(
     let http = RouteHttpClient::new();
     http.route("/diff", 200, diff_body());
     let startup = crate::session::Startup {
+        bookmarks: Vec::new(),
         env: env_with(store, &http),
         server: Some(setup()),
         queries: vec![crate::session::SavedQuery {
