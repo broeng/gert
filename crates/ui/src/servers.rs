@@ -16,6 +16,7 @@ use gpui_kit::{Entity, Subscription, Task};
 use crate::{
     outbox::DraftOutbox,
     session::{ServerKey, ServerSetup, Session},
+    syntax_cache::SyntaxCache,
 };
 
 /// The `app_state` key under which the slug of the last active server is
@@ -50,6 +51,11 @@ pub(crate) struct ServerEntry {
     pub connection: Connection,
     /// The shell's subscriptions to `outbox`.
     pub outbox_subs: Vec<Subscription>,
+    /// Syntax colors computed for this server's diffs. One per server: a
+    /// `DiffKey` is a change number plus SHAs, and change numbers repeat
+    /// across servers, so a shared cache could serve one server's colors
+    /// for another's file. Made on first use.
+    pub syntax: Option<Entity<SyntaxCache>>,
     /// Reading the password from the keyring.
     pub credentials_task: Option<Task<()>>,
     /// Saving the bookmarks.
@@ -64,6 +70,7 @@ impl ServerEntry {
             outbox: None,
             connection: Connection::Connecting,
             outbox_subs: Vec::new(),
+            syntax: None,
             credentials_task: None,
             bookmarks_task: None,
         }
