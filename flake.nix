@@ -4,6 +4,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    # Only used by the `nixgl` app, for Nix on non-NixOS Linux hosts.
+    nixGL = {
+      url = "github:nix-community/nixGL";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -11,7 +16,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, crane, rust-overlay, ... }:
+  outputs = { self, nixpkgs, flake-utils, crane, rust-overlay, nixGL, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -86,6 +91,16 @@
         };
         devGerrit = mkDevGerrit "dev-gerrit" "run";
         devGerritSeed = mkDevGerrit "dev-gerrit-seed" "seed";
+
+        # gert under nixGL's Intel wrappers. Nix-built GPU apps
+        # on non-NixOS hosts cannot find the host's Vulkan/GL drivers; see the
+        # README. `nixVulkanIntel`/`nixGLIntel` need no --impure; the NVIDIA
+        # variants do and are not covered here.
+        gertNixGL = pkgs.writeShellScriptBin "gert-nixgl" ''
+          exec ${nixGL.packages.${system}.nixVulkanIntel}/bin/nixVulkanIntel \
+            ${nixGL.packages.${system}.nixGLIntel}/bin/nixGLIntel \
+            ${gert}/bin/gert "$@"
+        '';
       in
       {
         packages = {
@@ -98,6 +113,8 @@
           default = flake-utils.lib.mkApp { drv = gert; };
           dev-gerrit = flake-utils.lib.mkApp { drv = devGerrit; };
           dev-gerrit-seed = flake-utils.lib.mkApp { drv = devGerritSeed; };
+        } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          nixgl = flake-utils.lib.mkApp { drv = gertNixGL; };
         };
 
         devShells.default = craneLib.devShell {
