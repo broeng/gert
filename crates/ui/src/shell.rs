@@ -585,6 +585,22 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn server_keys_for_test(&self) -> Vec<String> {
+        self.servers
+            .keys()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_url_for_test(&self, key: &str) -> Option<(String, Option<String>)> {
+        self.servers
+            .get(&ServerKey::new(key))
+            .map(|e| (e.setup.base_url.clone(), e.setup.username.clone()))
+    }
+
+    #[cfg(test)]
     pub(crate) fn server_name_for_test(&self, key: &str) -> Option<String> {
         self.servers
             .get(&ServerKey::new(key))
@@ -890,9 +906,11 @@ impl Shell {
         let (start, layout) = (self.start_page.clone(), self.layout.clone());
         let filters = self.filters.clone();
         let server = self.session().map(|s| s.backend().clone());
+        let (servers, active) = (self.servers.rows(), self.servers.active_key().cloned());
         let page = cx.new(|cx| {
             SettingsPage::new(
-                env, server, queries, bookmarks, start, layout, filters, window, cx,
+                env, server, servers, active, queries, bookmarks, start, layout, filters, window,
+                cx,
             )
         });
         self.page_subs.push(cx.subscribe_in(
@@ -912,6 +930,13 @@ impl Shell {
                     }
                 }
                 SettingsEvent::StartupSaved(page) => this.start_page = page.clone(),
+                SettingsEvent::AddServer => {
+                    this.open_add_server(String::new(), None, None, window, cx)
+                }
+                SettingsEvent::ServersSaved { servers, relogin } => {
+                    this.servers_saved(servers, relogin.as_deref(), window, cx)
+                }
+                SettingsEvent::ServerRemoved { key } => this.server_removed(key, window, cx),
                 SettingsEvent::ManageFilters { select, add } => {
                     let context = FiltersContext {
                         select: select.clone(),
@@ -1154,6 +1179,97 @@ impl Shell {
         }
         self.show(window, cx);
         self.load_diff_preferences(cx);
+    }
+
+    /// The settings page wrote the server list: take over the order, the
+    /// names and the colors, and the new session if the URL or user changed
+    /// (the page already stored the password under the new account).
+    fn servers_saved(
+        &mut self,
+        list: &[ServerConfig],
+        relogin: Option<&LoginOutcome>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.servers.apply_list(list);
+        if let Some(outcome) = relogin {
+            self.relogin(outcome, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// A configured server logged in with a new URL or user (settings): it
+    /// keeps its place, name, color and lists, and gets a session for the
+    /// new login. The cache row is the same one, now at the new URL.
+    fn relogin(&mut self, outcome: &LoginOutcome, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(known) = self.servers.get(&outcome.key).map(|e| e.setup.clone()) else {
+            return;
+        };
+        let setup = ServerSetup {
+            base_url: outcome.base_url.clone(),
+            username: outcome.username.clone(),
+            server: outcome.server,
+            ..known
+        };
+        let auth = match (&outcome.username, &outcome.password) {
+            (Some(username), Some(password)) => Auth::Basic {
+                username: username.clone(),
+                password: password.clone(),
+            },
+            _ => Auth::Anonymous,
+        };
+        let key = outcome.key.clone();
+        let session = match Session::new(&self.env, &setup, Some(auth)) {
+            Ok(session) => Some(session),
+            Err(e) => {
+                log::warn!("server {key}: invalid configuration: {e}");
+                None
+            }
+        };
+        let ok = session.is_some();
+        self.servers.upsert(setup);
+        self.install_session(&key, session, window, cx);
+        self.servers.set_connection(
+            &key,
+            if ok {
+                Connection::Online
+            } else {
+                Connection::Offline
+            },
+        );
+        if self.servers.active_key() == Some(&key) {
+            self.load_diff_preferences(cx);
+        }
+    }
+
+    /// The settings page removed server `key` (its cache, password and
+    /// config entry are gone): forget it here too. If it was the active
+    /// one, the first remaining server takes over, or, with none left, the
+    /// login page opens to add one.
+    fn server_removed(&mut self, key: &ServerKey, window: &mut Window, cx: &mut Context<Self>) {
+        let was_active = self.servers.active_key() == Some(key);
+        self.servers.remove(key);
+        self.nav.forget_server(key);
+        if self
+            .prefill
+            .as_ref()
+            .is_some_and(|p| p.server.as_ref() == Some(key))
+        {
+            self.prefill = None;
+        }
+        if !was_active {
+            return cx.notify();
+        }
+        self.drop_reply(cx);
+        self.drop_menu();
+        self.drop_filters_dialog();
+        if let Some(first) = self.servers.keys().first().cloned() {
+            let start = self.start_route();
+            self.nav.visit(&first, start);
+        } else {
+            self.pending_link = None;
+        }
+        self.show(window, cx);
     }
 
     /// Writes the servers to the config with the name the user gave the one

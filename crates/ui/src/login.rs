@@ -68,15 +68,21 @@ pub fn credentials_page_url(base_url: &str) -> String {
     )
 }
 
-/// Checks the credentials against the server, then stores them. Blocks on
-/// SQLite and the keyring; run it on the background executor.
-pub async fn login(env: &Env, req: LoginRequest) -> Result<LoginOutcome, LoginError> {
-    let base_url = normalize_base_url(&req.base_url)?;
-    let anonymous = req.username.is_none();
-    let auth = match (&req.username, &req.password) {
+/// Asks the server a cheap question with these credentials: who they are
+/// (or, anonymously, its version). Nothing is stored. Shared by the login
+/// and the settings page's "Test connection".
+pub async fn check_credentials(
+    env: &Env,
+    base_url: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<(), LoginError> {
+    let base_url = normalize_base_url(base_url)?;
+    let anonymous = username.is_none();
+    let auth = match (username, password) {
         (Some(u), Some(p)) => Auth::Basic {
-            username: u.clone(),
-            password: p.clone(),
+            username: u.to_owned(),
+            password: p.to_owned(),
         },
         (None, _) => Auth::Anonymous,
         (Some(_), None) => return Err(LoginError::Input("enter the HTTP password".into())),
@@ -89,13 +95,24 @@ pub async fn login(env: &Env, req: LoginRequest) -> Result<LoginOutcome, LoginEr
         client.account_self().await.map(|_| ())
     };
     match checked {
-        Ok(()) => {}
-        Err(ApiError::Unauthorized) if anonymous => {
-            return Err(LoginError::AnonymousDenied);
-        }
-        Err(ApiError::Unauthorized) => return Err(LoginError::Unauthorized),
-        Err(e) => return Err(LoginError::Server(e.to_string())),
+        Ok(()) => Ok(()),
+        Err(ApiError::Unauthorized) if anonymous => Err(LoginError::AnonymousDenied),
+        Err(ApiError::Unauthorized) => Err(LoginError::Unauthorized),
+        Err(e) => Err(LoginError::Server(e.to_string())),
     }
+}
+
+/// Checks the credentials against the server, then stores them. Blocks on
+/// SQLite and the keyring; run it on the background executor.
+pub async fn login(env: &Env, req: LoginRequest) -> Result<LoginOutcome, LoginError> {
+    let base_url = normalize_base_url(&req.base_url)?;
+    check_credentials(
+        env,
+        &base_url,
+        req.username.as_deref(),
+        req.password.as_deref(),
+    )
+    .await?;
     let key = req
         .server
         .clone()
@@ -149,6 +166,13 @@ pub(crate) mod tests {
         pub saved_startup: Mutex<Vec<crate::session::StartupPage>>,
         pub saved_advance: Mutex<Vec<bool>>,
         pub saved_theme: Mutex<Vec<crate::theme::ThemeName>>,
+        /// The password `load_password` finds, for every account.
+        pub password: Option<String>,
+        pub saved_servers: Mutex<Vec<Vec<crate::session::ServerConfig>>>,
+        /// The keys of the servers removed, in order.
+        pub removed: Mutex<Vec<String>>,
+        /// The (url, user) logins forgotten.
+        pub forgotten: Mutex<Vec<(String, String)>>,
     }
 
     impl Backend for FakeBackend {
@@ -161,6 +185,37 @@ pub(crate) mod tests {
             f: &[crate::filters::FileFilter],
         ) -> Result<Vec<crate::filters::FileFilter>, BackendError> {
             Ok(f.to_vec())
+        }
+
+        fn save_servers(
+            &self,
+            servers: &[crate::session::ServerConfig],
+        ) -> Result<Vec<crate::session::ServerConfig>, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_servers.lock().unwrap().push(servers.to_vec());
+            Ok(servers.to_vec())
+        }
+
+        fn remove_server(
+            &self,
+            removed: &crate::session::ServerConfig,
+            remaining: &[crate::session::ServerConfig],
+        ) -> Result<Vec<crate::session::ServerConfig>, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.removed.lock().unwrap().push(removed.key.to_string());
+            self.save_servers(remaining)
+        }
+
+        fn forget_login(&self, url: &str, user: &str) -> Result<(), BackendError> {
+            self.forgotten
+                .lock()
+                .unwrap()
+                .push((url.to_owned(), user.to_owned()));
+            Ok(())
         }
 
         fn save_startup_page(
@@ -196,7 +251,7 @@ pub(crate) mod tests {
 
     impl ServerBackend for FakeBackend {
         fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
-            Ok(None)
+            Ok(self.password.clone())
         }
         fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
             if self.fail {

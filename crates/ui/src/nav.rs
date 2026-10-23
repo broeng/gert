@@ -221,6 +221,23 @@ impl NavState {
         self.entries[self.index].server = server;
     }
 
+    /// Drops every entry of `server` (it was removed). The position stays
+    /// on the nearest entry at or before the old one; if nothing is left, the
+    /// history starts over on the login page.
+    pub fn forget_server(&mut self, server: &ServerKey) {
+        let of_server = |e: &Entry| e.server.as_ref() == Some(server);
+        let kept_through = self.entries[..=self.index]
+            .iter()
+            .filter(|e| !of_server(e))
+            .count();
+        self.entries.retain(|e| !of_server(e));
+        if self.entries.is_empty() {
+            *self = Self::new(Route::Login);
+        } else {
+            self.index = kept_through.saturating_sub(1).min(self.entries.len() - 1);
+        }
+    }
+
     /// Forgets all history and starts over at `route` on `server`.
     pub fn reset_for(&mut self, server: Option<ServerKey>, route: Route) {
         *self = Self::new_for(server, route);
@@ -501,5 +518,25 @@ mod tests {
         nav.reset_for(None, Route::Dashboard);
         assert!(!nav.can_go_back());
         assert_eq!(nav.current(), &Route::Dashboard);
+    }
+
+    #[test]
+    fn forgetting_a_server_drops_its_entries_and_keeps_the_place() {
+        let (a, b) = (ServerKey::new("a"), ServerKey::new("b"));
+        let mut nav = NavState::new_for(Some(a.clone()), Route::Dashboard);
+        nav.push_to(Some(b.clone()), Route::Dashboard);
+        nav.push_to(Some(b.clone()), Route::Settings);
+        nav.push_to(Some(a.clone()), c(1));
+        nav.back();
+        nav.back();
+        // On b's dashboard; b goes: back on a's dashboard.
+        nav.forget_server(&b);
+        assert_eq!(nav.current(), &Route::Dashboard);
+        assert_eq!(nav.current_server(), Some(&a));
+        assert!(nav.can_go_forward());
+        assert!(!nav.can_go_back());
+        nav.forget_server(&a);
+        assert_eq!(nav.current(), &Route::Login);
+        assert_eq!(nav.current_server(), None);
     }
 }
