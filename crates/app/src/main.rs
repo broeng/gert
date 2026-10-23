@@ -55,13 +55,15 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
     let advance_after_vote = config.advance_after_vote();
     let theme = config.theme();
     let color_modes = config.color_modes();
+    let store = Arc::new(Mutex::new(store));
     let startup = Startup {
         env: Env {
             http: Arc::new(http),
-            store: Arc::new(Mutex::new(store)),
+            store: store.clone(),
             backend: Arc::new(AppBackend {
                 config_file: paths.config_file,
-                keyring: Keyring,
+                keyring: Arc::new(Keyring),
+                store,
             }),
         },
         servers,

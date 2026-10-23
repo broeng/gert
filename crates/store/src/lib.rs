@@ -173,6 +173,15 @@ impl Store {
         Ok(())
     }
 
+    /// Removes the server configured as `slug`, as [`Store::delete_server`]
+    /// does. False if no row has that slug (nothing was cached).
+    pub fn delete_server_by_slug(&mut self, slug: &str) -> Result<bool, Error> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM servers WHERE slug = ?1", [slug])?;
+        Ok(removed > 0)
+    }
+
     /// Gives an existing server a new URL, keeping its id and so its cache.
     /// Fails with [`Error::ServerUrlTaken`] if another row has that URL, and
     /// with [`Error::NoSuchServer`] for an unknown id.

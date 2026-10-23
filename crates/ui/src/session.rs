@@ -130,6 +130,28 @@ pub trait Backend: Send + Sync + 'static {
         Ok(servers.to_vec())
     }
 
+    /// Removes server `removed` for good: its cached rows, its keyring
+    /// secret and its `[[servers]]` entry. `remaining` is the list of the
+    /// servers that stay; it is written as by `save_servers`. Nothing is
+    /// asked and nothing is kept: a server added again starts from scratch.
+    /// Defaults to just writing the list, for backends with no cache or
+    /// keyring.
+    fn remove_server(
+        &self,
+        _removed: &ServerConfig,
+        remaining: &[ServerConfig],
+    ) -> Result<Vec<ServerConfig>, BackendError> {
+        self.save_servers(remaining)
+    }
+
+    /// Drops the keyring secret of the login `username` at `base_url`,
+    /// which a server has left behind by changing its URL or user. A secret
+    /// another configured server still uses is kept. Defaults to doing
+    /// nothing.
+    fn forget_login(&self, _base_url: &str, _username: &str) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     /// Writes the file filters (`[[filters]]`) to the config file, keeping
     /// the rest of it as it is. Returns the list now in effect.
     fn save_filters(&self, filters: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError>;

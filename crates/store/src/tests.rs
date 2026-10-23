@@ -576,6 +576,21 @@ fn delete_server_purges_only_that_server() {
 }
 
 #[test]
+fn delete_server_by_slug_purges_the_slugged_row_only() {
+    let (mut s, a) = store();
+    let work = s.server_for_slug("work", "https://w.example").unwrap();
+    let other = s.server_for_slug("other", "https://w.example").unwrap();
+    fill_server(&mut s, work, "from-work");
+    fill_server(&mut s, other, "from-other");
+    fill_server(&mut s, a, "from-a");
+    assert!(s.delete_server_by_slug("work").unwrap());
+    assert!(s.load_query(work, "q").unwrap().is_none());
+    assert!(s.load_query(other, "q").unwrap().is_some());
+    assert!(s.load_query(a, "q").unwrap().is_some());
+    assert!(!s.delete_server_by_slug("work").unwrap());
+}
+
+#[test]
 fn set_server_url_keeps_the_id_and_the_cache() {
     let (mut s, a) = store();
     let b = s.server_id("https://b.example").unwrap();

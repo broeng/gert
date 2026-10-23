@@ -43,7 +43,18 @@ pub fn normalize_url(url: &str) -> String {
     format!("{}{}", url[..host_end].to_lowercase(), &url[host_end..])
 }
 
-/// Reads and writes the password of one server login.
+/// Where the passwords live. The OS keyring in the app; tests use
+/// [`MemorySecrets`] so that no real keyring is touched.
+pub trait SecretStore: Send + Sync + 'static {
+    /// May block (D-Bus, Keychain); call from a background thread.
+    fn get(&self, server_url: &str, username: &str) -> Result<Option<String>, SecretError>;
+    /// May block; call from a background thread.
+    fn set(&self, server_url: &str, username: &str, password: &str) -> Result<(), SecretError>;
+    /// Removes the password; fine if there is none. May block.
+    fn delete(&self, server_url: &str, username: &str) -> Result<(), SecretError>;
+}
+
+/// Reads and writes the password of one server login in the OS keyring.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Keyring;
 
@@ -54,9 +65,10 @@ impl Keyring {
             &account_key(server_url, username),
         )?)
     }
+}
 
-    /// Blocks on D-Bus or Keychain; call from a background thread.
-    pub fn get(&self, server_url: &str, username: &str) -> Result<Option<String>, SecretError> {
+impl SecretStore for Keyring {
+    fn get(&self, server_url: &str, username: &str) -> Result<Option<String>, SecretError> {
         match Self::entry(server_url, username)?.get_password() {
             Ok(p) => Ok(Some(p)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -64,9 +76,49 @@ impl Keyring {
         }
     }
 
-    /// Blocks on D-Bus or Keychain; call from a background thread.
-    pub fn set(&self, server_url: &str, username: &str, password: &str) -> Result<(), SecretError> {
+    fn set(&self, server_url: &str, username: &str, password: &str) -> Result<(), SecretError> {
         Ok(Self::entry(server_url, username)?.set_password(password)?)
+    }
+
+    fn delete(&self, server_url: &str, username: &str) -> Result<(), SecretError> {
+        match Self::entry(server_url, username)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Passwords kept in memory, keyed like the keyring accounts. For tests.
+#[derive(Debug, Default)]
+pub struct MemorySecrets(std::sync::Mutex<std::collections::HashMap<String, String>>);
+
+impl MemorySecrets {
+    fn map(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, String>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The accounts that hold a password, sorted.
+    pub fn accounts(&self) -> Vec<String> {
+        let mut accounts: Vec<String> = self.map().keys().cloned().collect();
+        accounts.sort();
+        accounts
+    }
+}
+
+impl SecretStore for MemorySecrets {
+    fn get(&self, server_url: &str, username: &str) -> Result<Option<String>, SecretError> {
+        Ok(self.map().get(&account_key(server_url, username)).cloned())
+    }
+
+    fn set(&self, server_url: &str, username: &str, password: &str) -> Result<(), SecretError> {
+        self.map()
+            .insert(account_key(server_url, username), password.to_owned());
+        Ok(())
+    }
+
+    fn delete(&self, server_url: &str, username: &str) -> Result<(), SecretError> {
+        self.map().remove(&account_key(server_url, username));
+        Ok(())
     }
 }
 

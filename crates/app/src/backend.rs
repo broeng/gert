@@ -1,6 +1,10 @@
 //! The keyring and config persistence the UI asks for.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use store::Store;
 
 use ui::{
     Backend, BackendError, ColorModes, SavedQuery, ServerBackend, ServerConfig as UiServerConfig,
@@ -9,12 +13,14 @@ use ui::{
 
 use crate::{
     config::{Config, FilterConfig, QueryConfig, ServerConfig, StartupConfig, StartupPage},
-    secrets::Keyring,
+    secrets::SecretStore,
 };
 
 pub struct AppBackend {
     pub config_file: PathBuf,
-    pub keyring: Keyring,
+    pub keyring: Arc<dyn SecretStore>,
+    /// The cache, for purging a removed server.
+    pub store: Arc<Mutex<Store>>,
 }
 
 pub fn queries_to_ui(queries: &[QueryConfig]) -> Vec<SavedQuery> {
@@ -49,7 +55,7 @@ fn dev_password_from(base_url: &str, value: Option<String>) -> Option<String> {
 /// config file, named by the server's id.
 pub struct AppServerBackend {
     config_file: PathBuf,
-    keyring: Keyring,
+    keyring: Arc<dyn SecretStore>,
     id: String,
 }
 
@@ -135,6 +141,16 @@ impl ServerBackend for AppServerBackend {
     }
 }
 
+/// Whether a server other than `slug` logs in as `username` at `url`, so
+/// that the keyring account is shared.
+fn uses_account(config: &Config, slug: &str, url: &str, username: &str) -> bool {
+    config.servers.iter().any(|s| {
+        s.id != slug
+            && s.username.as_deref() == Some(username)
+            && crate::secrets::normalize_url(&s.url) == crate::secrets::normalize_url(url)
+    })
+}
+
 /// The UI's form of a configured server.
 pub fn server_to_ui(s: &ServerConfig) -> UiServerConfig {
     UiServerConfig {
@@ -150,7 +166,7 @@ impl Backend for AppBackend {
     fn for_server(self: Arc<Self>, key: &ServerKey) -> Arc<dyn ServerBackend> {
         Arc::new(AppServerBackend {
             config_file: self.config_file.clone(),
-            keyring: self.keyring,
+            keyring: self.keyring.clone(),
             id: key.as_str().to_owned(),
         })
     }
@@ -189,6 +205,52 @@ impl Backend for AppBackend {
         })
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(config.servers.iter().map(server_to_ui).collect())
+    }
+
+    fn remove_server(
+        &self,
+        removed: &UiServerConfig,
+        remaining: &[UiServerConfig],
+    ) -> Result<Vec<UiServerConfig>, BackendError> {
+        let slug = removed.key.as_str();
+        // What the file says wins over what the UI last saw.
+        let config = Config::load(&self.config_file)
+            .map_err(|e| BackendError(e.to_string()))?
+            .unwrap_or_default();
+        let (url, username) = config
+            .server(slug)
+            .map_or((&removed.url, &removed.username), |s| (&s.url, &s.username));
+        // The cache and the secret first: if either fails the entry stays
+        // and the user can try again. The secret stays when another entry
+        // logs in with the same account.
+        self.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .delete_server_by_slug(slug)
+            .map_err(|e| BackendError(e.to_string()))?;
+        if let Some(user) = username
+            && !uses_account(&config, slug, url, user)
+        {
+            self.keyring
+                .delete(url, user)
+                .map_err(|e| BackendError(e.to_string()))?;
+        }
+        self.save_servers(remaining)
+    }
+
+    fn forget_login(&self, base_url: &str, username: &str) -> Result<(), BackendError> {
+        let config = Config::load(&self.config_file)
+            .map_err(|e| BackendError(e.to_string()))?
+            .unwrap_or_default();
+        if config.servers.iter().any(|s| {
+            s.username.as_deref() == Some(username)
+                && crate::secrets::normalize_url(&s.url) == crate::secrets::normalize_url(base_url)
+        }) {
+            return Ok(());
+        }
+        self.keyring
+            .delete(base_url, username)
+            .map_err(|e| BackendError(e.to_string()))
     }
 
     fn save_filters(&self, filters: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
@@ -270,13 +332,18 @@ pub fn startup_to_ui(page: &StartupPage) -> UiStartupPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::MemorySecrets;
+
+    fn mem_store() -> Arc<Mutex<Store>> {
+        Arc::new(Mutex::new(Store::open_in_memory().unwrap()))
+    }
 
     impl AppBackend {
         /// The backend of server `id`, without going through `Arc`.
         fn server(&self, id: &str) -> AppServerBackend {
             AppServerBackend {
                 config_file: self.config_file.clone(),
-                keyring: self.keyring,
+                keyring: self.keyring.clone(),
                 id: id.to_owned(),
             }
         }
@@ -312,7 +379,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let b = AppBackend {
             config_file: dir.join("config.toml"),
-            keyring: Keyring,
+            keyring: Arc::new(MemorySecrets::default()),
+            store: mem_store(),
         };
         let queries = b
             .server("g")
@@ -331,7 +399,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let b = AppBackend {
             config_file: dir.join("config.toml"),
-            keyring: Keyring,
+            keyring: Arc::new(MemorySecrets::default()),
+            store: mem_store(),
         };
         std::fs::write(
             &b.config_file,
@@ -356,7 +425,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let b = AppBackend {
             config_file: dir.join("config.toml"),
-            keyring: Keyring,
+            keyring: Arc::new(MemorySecrets::default()),
+            store: mem_store(),
         };
         std::fs::write(
             &b.config_file,
@@ -389,7 +459,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let b = AppBackend {
             config_file: dir.join("config.toml"),
-            keyring: Keyring,
+            keyring: Arc::new(MemorySecrets::default()),
+            store: mem_store(),
         };
         std::fs::write(
             &b.config_file,
@@ -419,7 +490,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let b = AppBackend {
             config_file: dir.join("config.toml"),
-            keyring: Keyring,
+            keyring: Arc::new(MemorySecrets::default()),
+            store: mem_store(),
         };
         std::fs::write(
             &b.config_file,
@@ -455,7 +527,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let b = AppBackend {
             config_file: dir.join("config.toml"),
-            keyring: Keyring,
+            keyring: Arc::new(MemorySecrets::default()),
+            store: mem_store(),
         };
         std::fs::write(
             &b.config_file,
@@ -546,7 +619,8 @@ action = "dim"
         std::fs::create_dir_all(&dir).unwrap();
         let b = AppBackend {
             config_file: dir.join("config.toml"),
-            keyring: Keyring,
+            keyring: Arc::new(MemorySecrets::default()),
+            store: mem_store(),
         };
         std::fs::write(&b.config_file, TWO).unwrap();
         b
@@ -686,6 +760,130 @@ action = "dim"
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
         assert_eq!(cfg.filters[0].servers, vec!["oss".to_owned()]);
         assert_eq!(cfg.filters[0].globs, vec!["*.lock".to_owned()]);
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
+    }
+
+    /// Two servers, with a password and a cache for each.
+    fn stocked(name: &str) -> (AppBackend, Arc<MemorySecrets>, Arc<Mutex<Store>>) {
+        let mut b = two_servers(name);
+        let secrets = Arc::new(MemorySecrets::default());
+        b.keyring = secrets.clone();
+        let store = b.store.clone();
+        {
+            let mut s = store.lock().unwrap();
+            for (slug, url) in [
+                ("work", "https://gerrit.work.example"),
+                ("oss", "https://gerrit.oss.example"),
+            ] {
+                let id = s.server_for_slug(slug, url).unwrap();
+                s.set_app_state(&format!("seen-{slug}"), "1").unwrap();
+                s.save_query_page(id, "q", &[], false, "2024-06-15T10:00:00Z".parse().unwrap())
+                    .unwrap();
+            }
+        }
+        secrets
+            .set("https://gerrit.work.example", "jdoe", "pw")
+            .unwrap();
+        (b, secrets, store)
+    }
+
+    fn ui_servers(b: &AppBackend) -> Vec<UiServerConfig> {
+        Config::load(&b.config_file)
+            .unwrap()
+            .unwrap()
+            .servers
+            .iter()
+            .map(server_to_ui)
+            .collect()
+    }
+
+    fn cached(store: &Mutex<Store>, slug: &str, url: &str) -> bool {
+        let mut s = store.lock().unwrap();
+        let id = s.server_for_slug(slug, url).unwrap();
+        s.load_query(id, "q").unwrap().is_some()
+    }
+
+    #[test]
+    fn removing_a_server_purges_config_cache_and_secret() {
+        let (b, secrets, store) = stocked("remove");
+        let all = ui_servers(&b);
+        let left = b.remove_server(&all[0], &all[1..]).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].key.as_str(), "oss");
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert!(cfg.server("work").is_none());
+        assert_eq!(cfg.server("oss").unwrap().queries[0].name, "Open");
+        assert!(secrets.accounts().is_empty(), "{:?}", secrets.accounts());
+        assert!(!cached(&store, "work", "https://gerrit.work.example"));
+        // The other server's cache is still there.
+        assert!(cached(&store, "oss", "https://gerrit.oss.example"));
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(text.contains("[[filters]]"), "{text}");
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
+    }
+
+    #[test]
+    fn removing_the_last_server_leaves_an_empty_config() {
+        let (b, secrets, store) = stocked("remove-last");
+        let all = ui_servers(&b);
+        b.remove_server(&all[0], &all[1..]).unwrap();
+        let all = ui_servers(&b);
+        assert!(b.remove_server(&all[0], &[]).unwrap().is_empty());
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert!(cfg.servers.is_empty());
+        assert!(secrets.accounts().is_empty());
+        assert!(!cached(&store, "oss", "https://gerrit.oss.example"));
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
+    }
+
+    #[test]
+    fn removing_a_server_keeps_a_secret_another_server_shares() {
+        let (b, secrets, _) = stocked("remove-shared");
+        Config::update(&b.config_file, |c| {
+            let mut twin = c.servers[0].clone();
+            twin.id = "work-2".into();
+            c.servers.push(twin);
+        })
+        .unwrap();
+        let all = ui_servers(&b);
+        let rest: Vec<_> = all[1..].to_vec();
+        b.remove_server(&all[0], &rest).unwrap();
+        assert_eq!(secrets.accounts(), ["jdoe@https://gerrit.work.example"]);
+        let all = ui_servers(&b);
+        let twin = all.iter().find(|s| s.key.as_str() == "work-2").unwrap();
+        let rest: Vec<_> = all.iter().filter(|s| s.key != twin.key).cloned().collect();
+        b.remove_server(twin, &rest).unwrap();
+        assert!(secrets.accounts().is_empty());
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
+    }
+
+    #[test]
+    fn changing_the_url_moves_the_secret_and_keeps_the_cache() {
+        let (b, secrets, store) = stocked("move-secret");
+        let work = b.server("work");
+        // The flow of the settings page: the login with the new URL first
+        // (secret, config, cache row), then the old secret goes.
+        work.save_login("https://gerrit.moved.example", Some("jdoe"), Some("new"))
+            .unwrap();
+        let id = store
+            .lock()
+            .unwrap()
+            .server_for_slug("work", "https://gerrit.moved.example")
+            .unwrap();
+        b.forget_login("https://gerrit.work.example", "jdoe")
+            .unwrap();
+        assert_eq!(secrets.accounts(), ["jdoe@https://gerrit.moved.example"]);
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(
+            cfg.server("work").unwrap().url,
+            "https://gerrit.moved.example"
+        );
+        // Same row, so the cache survived the move.
+        assert!(store.lock().unwrap().load_query(id, "q").unwrap().is_some());
+        // Forgetting a login that is still in use does nothing.
+        b.forget_login("https://gerrit.moved.example/", "jdoe")
+            .unwrap();
+        assert_eq!(secrets.accounts().len(), 1);
         let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
     }
 }
