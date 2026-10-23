@@ -56,6 +56,10 @@ pub(crate) struct ServerEntry {
     /// across servers, so a shared cache could serve one server's colors
     /// for another's file. Made on first use.
     pub syntax: Option<Entity<SyntaxCache>>,
+    /// The server's own diff preferences (the user's settings on that
+    /// server), as last loaded; the shell's shared settings show the
+    /// active server's.
+    pub diff_prefs: Option<model::DiffPreferences>,
     /// Reading the password from the keyring.
     pub credentials_task: Option<Task<()>>,
     /// Saving the bookmarks.
@@ -71,6 +75,7 @@ impl ServerEntry {
             connection: Connection::Connecting,
             outbox_subs: Vec::new(),
             syntax: None,
+            diff_prefs: None,
             credentials_task: None,
             bookmarks_task: None,
         }

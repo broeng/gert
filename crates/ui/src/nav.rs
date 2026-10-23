@@ -3,6 +3,8 @@
 
 use model::{ChangeNumber, PatchSetNumber, ThreadId};
 
+use crate::session::ServerKey;
+
 /// A page the user can be on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -60,6 +62,11 @@ impl Route {
 
 #[derive(Clone, Debug)]
 struct Entry {
+    /// The server the page belongs to. Every route of a signed-in session
+    /// has one (settings and the login page take the server that was active
+    /// when they were opened, so that coming back to them switches to it);
+    /// `None` only before any server is known.
+    server: Option<ServerKey>,
     route: Route,
     /// The change that was selected when the user left this page.
     selected: Option<ChangeNumber>,
@@ -75,8 +82,13 @@ pub struct NavState {
 
 impl NavState {
     pub fn new(initial: Route) -> Self {
+        Self::new_for(None, initial)
+    }
+
+    pub fn new_for(server: Option<ServerKey>, initial: Route) -> Self {
         Self {
             entries: vec![Entry {
+                server,
                 route: initial,
                 selected: None,
                 change_view: None,
@@ -87,6 +99,11 @@ impl NavState {
 
     pub fn current(&self) -> &Route {
         &self.entries[self.index].route
+    }
+
+    /// The server the current page belongs to.
+    pub fn current_server(&self) -> Option<&ServerKey> {
+        self.entries[self.index].server.as_ref()
     }
 
     pub fn can_go_back(&self) -> bool {
@@ -115,19 +132,57 @@ impl NavState {
         self.entries[self.index].change_view.clone()
     }
 
-    /// Navigates to a new page, dropping the forward history. Pushing the
-    /// current route again does nothing.
+    /// Navigates to a new page of the current server, dropping the forward
+    /// history. Pushing the current route again does nothing.
     pub fn push(&mut self, route: Route) {
-        if *self.current() == route {
+        let server = self.current_server().cloned();
+        self.push_to(server, route);
+    }
+
+    /// Like [`Self::push`], on `server` (which may be another one than the
+    /// current page's). The same route on another server is a new page.
+    pub fn push_to(&mut self, server: Option<ServerKey>, route: Route) {
+        if *self.current() == route && self.current_server() == server.as_ref() {
             return;
         }
         self.entries.truncate(self.index + 1);
         self.entries.push(Entry {
+            server,
             route,
             selected: None,
             change_view: None,
         });
         self.index += 1;
+    }
+
+    /// Moves to `server`'s own place in the history: a new entry at the end
+    /// that repeats the most recent entry of that server (route, selection
+    /// and change page state), so that Back returns to where we came from.
+    /// A server with no entry yet (its first visit) gets `start` instead.
+    /// Does nothing when the current page already belongs to it. Returns
+    /// whether it came back to an earlier page.
+    pub fn visit(&mut self, server: &ServerKey, start: Route) -> bool {
+        if self.current_server() == Some(server) {
+            return true;
+        }
+        // The forward entries count: they were visited after the ones
+        // behind us.
+        let last = self
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.server.as_ref() == Some(server))
+            .cloned();
+        self.entries.truncate(self.index + 1);
+        let found = last.is_some();
+        self.entries.push(last.unwrap_or(Entry {
+            server: Some(server.clone()),
+            route: start,
+            selected: None,
+            change_view: None,
+        }));
+        self.index += 1;
+        found
     }
 
     /// Swaps the current page for `route` without adding a history entry,
@@ -137,15 +192,23 @@ impl NavState {
     pub fn replace(&mut self, route: Route) {
         self.entries.truncate(self.index + 1);
         self.entries[self.index] = Entry {
+            server: self.entries[self.index].server.clone(),
             route,
             selected: None,
             change_view: None,
         };
     }
 
-    /// Forgets all history and starts over at `route` (login, logout).
+    /// Forgets all history and starts over at `route` (login, logout), on
+    /// the server of the current page.
     pub fn reset(&mut self, route: Route) {
-        *self = Self::new(route);
+        let server = self.current_server().cloned();
+        *self = Self::new_for(server, route);
+    }
+
+    /// Like [`Self::reset`], on `server`.
+    pub fn reset_for(&mut self, server: Option<ServerKey>, route: Route) {
+        *self = Self::new_for(server, route);
     }
 
     pub fn back(&mut self) -> bool {
@@ -178,6 +241,7 @@ impl NavState {
                 self.entries[..self.index]
                     .iter()
                     .rev()
+                    .filter(|e| e.server == self.entries[self.index].server)
                     .map(|e| &e.route)
                     .find(|r| r.is_list())
                     .cloned()
@@ -194,7 +258,7 @@ impl NavState {
         };
         match self.entries[..self.index]
             .iter()
-            .rposition(|e| e.route == target)
+            .rposition(|e| e.route == target && e.server == self.entries[self.index].server)
         {
             Some(i) => self.index = i,
             None => self.push(target),
@@ -359,6 +423,60 @@ mod tests {
         assert!(!nav.up());
         let mut nav = NavState::new(Route::Login);
         assert!(!nav.up());
+    }
+
+    fn key(k: &str) -> ServerKey {
+        ServerKey::new(k)
+    }
+
+    #[test]
+    fn the_same_route_on_another_server_is_a_new_page() {
+        let mut nav = NavState::new_for(Some(key("a")), c(1));
+        nav.push(c(1));
+        assert!(!nav.can_go_back());
+        nav.push_to(Some(key("b")), c(1));
+        assert_eq!(nav.current_server(), Some(&key("b")));
+        assert!(nav.back());
+        assert_eq!(nav.current_server(), Some(&key("a")));
+        // Pushes stay on the server of the page they leave.
+        assert!(nav.forward());
+        nav.push(c(2));
+        assert_eq!(nav.current_server(), Some(&key("b")));
+    }
+
+    #[test]
+    fn visiting_a_server_repeats_its_last_page_and_back_returns() {
+        let mut nav = NavState::new_for(Some(key("a")), Route::Dashboard);
+        nav.push(c(1));
+        nav.set_change_view(Some(ChangeView {
+            file: Some("f".into()),
+            ..Default::default()
+        }));
+        // First visit of b: its start page.
+        assert!(!nav.visit(&key("b"), Route::Dashboard));
+        assert_eq!(nav.current(), &Route::Dashboard);
+        assert_eq!(nav.current_server(), Some(&key("b")));
+        nav.push(c(1));
+        // Back to a: its last page, with the saved state.
+        assert!(nav.visit(&key("a"), Route::Dashboard));
+        assert_eq!(nav.current(), &c(1));
+        assert_eq!(nav.current_server(), Some(&key("a")));
+        assert_eq!(nav.change_view().and_then(|v| v.file).as_deref(), Some("f"));
+        // Back goes to where we came from: b's change.
+        assert!(nav.back());
+        assert_eq!(nav.current_server(), Some(&key("b")));
+        assert_eq!(nav.current(), &c(1));
+        // Visiting the current server changes nothing.
+        let before = nav.can_go_forward();
+        assert!(nav.visit(&key("b"), Route::Dashboard));
+        assert_eq!(nav.can_go_forward(), before);
+    }
+
+    #[test]
+    fn up_does_not_cross_servers() {
+        let mut nav = NavState::new_for(Some(key("a")), s("q"));
+        nav.push_to(Some(key("b")), c(2));
+        assert_eq!(nav.up_target(), Some(Route::Dashboard));
     }
 
     #[test]
