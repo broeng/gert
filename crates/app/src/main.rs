@@ -10,7 +10,10 @@ use gert::{
 };
 use gpui_kit::*;
 use store::Store;
-use ui::{ColorModes, Env, LocalDiff, ServerKey, ServerSetup, Shell, Startup, ThemeName};
+use ui::{
+    ACTIVE_SERVER_STATE, ColorModes, Env, LocalDiff, ServerKey, ServerSetup, Shell, Startup,
+    ThemeName,
+};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -41,7 +44,13 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
             bookmarks: queries_to_ui(&s.bookmarks),
         });
     }
-    let active = servers.first().map(|s| s.key.clone());
+    // The server shown last time; the UI falls back to the first one if it
+    // is no longer configured.
+    let active = store
+        .app_state(ACTIVE_SERVER_STATE)?
+        .map(|slug| ServerKey::new(&slug))
+        .filter(|key| servers.iter().any(|s| s.key == *key))
+        .or_else(|| servers.first().map(|s| s.key.clone()));
     let http = GpuiHttpClient::new().context("creating the HTTP client")?;
     let advance_after_vote = config.advance_after_vote();
     let theme = config.theme();

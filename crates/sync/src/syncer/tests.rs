@@ -568,3 +568,38 @@ fn refreshing_a_diff_prunes_old_cache_rows() {
     assert!(f.syncer.cached_diff(&diff_key("old.rs")).unwrap().is_none());
     assert!(f.syncer.cached_diff(&diff_key("new.rs")).unwrap().is_some());
 }
+
+#[test]
+fn two_servers_in_one_store_keep_the_same_numbers_and_queries_apart() {
+    let mut store = Store::open_in_memory().unwrap();
+    let a = store.server_for_slug("a", "https://a.example").unwrap();
+    let b = store.server_for_slug("b", "https://b.example").unwrap();
+    let store = Arc::new(Mutex::new(store));
+    let syncer = |url: &str, id| {
+        let http = FakeHttpClient::new();
+        let client = GerritClient::new(Arc::new(http.clone()), url, Auth::Anonymous).unwrap();
+        (http, Syncer::new(client, store.clone(), id))
+    };
+    let (http_a, sync_a) = syncer("https://a.example", a);
+    let (http_b, sync_b) = syncer("https://b.example", b);
+    // Change 1 and the query "q" exist on both, with different content.
+    http_a.push_response(200, page(&[(2, U1), (1, U1)], false));
+    http_b.push_response(200, page(&[(1, U2)], true));
+    block_on(sync_a.refresh_query("q", 25)).unwrap();
+    block_on(sync_b.refresh_query("q", 25)).unwrap();
+
+    let (qa, qb) = (
+        sync_a.cached_query("q").unwrap().unwrap(),
+        sync_b.cached_query("q").unwrap().unwrap(),
+    );
+    assert_eq!(numbers(&qa), [2, 1]);
+    assert_eq!(numbers(&qb), [1]);
+    assert_ne!(qa.changes[1].updated, qb.changes[0].updated);
+    assert!(!qa.more_changes && qb.more_changes);
+
+    // A refresh on one leaves the other's cache alone.
+    http_a.push_response(200, page(&[(1, U2)], false));
+    block_on(sync_a.refresh_query("q", 25)).unwrap();
+    assert_eq!(numbers(&sync_b.cached_query("q").unwrap().unwrap()), [1]);
+    assert_eq!(numbers(&sync_a.cached_query("q").unwrap().unwrap()), [1]);
+}

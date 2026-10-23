@@ -21,6 +21,7 @@ mod pages;
 mod reply;
 mod reviewed;
 mod row;
+mod servers;
 mod session;
 mod settings;
 mod shell;
@@ -36,6 +37,7 @@ mod testing;
 mod tests;
 
 pub use login::{LoginError, LoginOutcome, LoginRequest};
+pub use servers::{ACTIVE_SERVER_STATE, Connection};
 pub use session::{
     Backend, BackendError, Env, LocalDiff, SavedQuery, ServerBackend, ServerConfig, ServerKey,
     ServerSetup, Startup, StartupPage, server_name_from_url,
