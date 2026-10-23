@@ -2112,6 +2112,15 @@ impl Shell {
                                     })),
                             )
                             .child(
+                                Button::new("add-server")
+                                    .label("+")
+                                    .small()
+                                    .tooltip("Add server (Ctrl-Shift-A)")
+                                    .on_click(cx.listener(|this, _, w, cx| {
+                                        this.add_server(&AddServer, w, cx)
+                                    })),
+                            )
+                            .child(
                                 Button::new("home")
                                     .label(server_label(&session.base_url))
                                     .small()
