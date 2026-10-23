@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use ui::{
-    Backend, BackendError, SavedQuery, StartupPage as UiStartupPage, ThemeName, filters::FileFilter,
+    Backend, BackendError, ColorModes, SavedQuery, StartupPage as UiStartupPage, ThemeName,
+    filters::FileFilter,
 };
 
 use crate::{
@@ -136,6 +137,16 @@ impl Backend for AppBackend {
         })
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(config.theme())
+    }
+
+    fn save_color_modes(&self, modes: ColorModes) -> Result<ColorModes, BackendError> {
+        let config = Config::update(&self.config_file, |c| {
+            let appearance = c.appearance.get_or_insert_with(Default::default);
+            appearance.mode = Some(modes.ui.key().to_owned());
+            appearance.diff_mode = Some(modes.diff.key().to_owned());
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        Ok(config.color_modes())
     }
 }
 
@@ -331,6 +342,18 @@ mod tests {
         assert!(text.contains("# opens on start"), "{text}");
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
         assert_eq!(cfg.theme(), ThemeName::Solarized);
+
+        let modes = ColorModes {
+            ui: ui::ColorMode::Dark,
+            diff: ui::ColorMode::Light,
+        };
+        assert_eq!(b.save_color_modes(modes).unwrap(), modes);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(text.contains("mode = \"dark\""), "{text}");
+        assert!(text.contains("diff_mode = \"light\""), "{text}");
+        assert!(text.contains("theme = \"solarized\""), "{text}");
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(cfg.color_modes(), modes);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,7 +3,7 @@
 
 use std::{borrow::Cow, ops::Range, sync::Arc};
 
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Theme;
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::*;
 use model::DiffSide;
@@ -51,10 +51,9 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn new(focused: bool, cx: &App) -> Self {
-        let t = cx.theme();
+    pub fn new(focused: bool, t: &Theme, cx: &App) -> Self {
         let dark = t.is_dark();
-        let diff = crate::theme::diff_colors(cx);
+        let diff = crate::theme::diff_colors(t, cx);
         let (cursor, cursor_alpha) = if focused {
             (t.primary, if dark { 0.16 } else { 0.12 })
         } else {
@@ -174,12 +173,11 @@ impl Style {
         family: Option<SharedString>,
         line_length: u32,
         hide_numbers: bool,
-        focused: bool,
+        palette: Palette,
         (max_old, max_new): (u32, u32),
+        t: &Theme,
         window: &Window,
-        cx: &App,
     ) -> Self {
-        let t = cx.theme();
         let size = t.mono_font_size;
         let family = family.unwrap_or_else(|| t.mono_font_family.clone());
         let font_id = window.text_system().resolve_font(&font(family));
@@ -189,7 +187,7 @@ impl Style {
             .map_or(size * 0.6, |s| s.width);
         let gutter = |max: u32| char_w * (digits(max).max(3) as f32) + px(8. + 6.);
         Self {
-            palette: Palette::new(focused, cx),
+            palette,
             row_height: row_height(size),
             old_gutter: gutter(max_old),
             new_gutter: gutter(max_new),

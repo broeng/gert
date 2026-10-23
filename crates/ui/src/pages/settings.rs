@@ -1,7 +1,8 @@
 //! The settings page: the saved queries of the dashboard, the startup page,
-//! the review flow (advance after a vote), the theme and the file filters.
+//! the review flow (advance after a vote), the theme, the light/dark mode of
+//! the UI and of the diff view, and the file filters.
 //! The cursor walks the query rows, then the startup row, the advance row
-//! and the theme row, then the filter rows (one empty-state row when there
+//! the theme row and the two mode rows, then the filter rows (one empty-state row when there
 //! are none).
 //!
 //! The filters are edited in the Manage filters dialog, which the shell
@@ -28,7 +29,7 @@ use crate::{
     hint::Hint,
     session::{Env, SavedQuery, StartupPage},
     settings::{FileFilters, PageLayout},
-    theme::{self as app_theme, ThemeName},
+    theme::{self as app_theme, ColorMode, ColorModes, ThemeName},
 };
 
 /// What the page tells the shell.
@@ -258,9 +259,41 @@ impl SettingsPage {
         self.queries.len() + 2
     }
 
+    fn mode_row(&self) -> usize {
+        self.queries.len() + 3
+    }
+
+    fn diff_mode_row(&self) -> usize {
+        self.queries.len() + 4
+    }
+
     /// The first filter row (the empty-state row when there are no rules).
     fn filters_row(&self) -> usize {
-        self.queries.len() + 3
+        self.queries.len() + 5
+    }
+
+    /// Switches the mode of the row under the cursor to the next one.
+    fn cycle_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let modes = app_theme::color_modes(cx);
+        if self.cursor == self.mode_row() {
+            self.save_modes(
+                ColorModes {
+                    ui: modes.ui.next(),
+                    ..modes
+                },
+                window,
+                cx,
+            );
+        } else {
+            self.save_modes(
+                ColorModes {
+                    diff: modes.diff.next(),
+                    ..modes
+                },
+                window,
+                cx,
+            );
+        }
     }
 
     /// The last row the cursor can be on.
@@ -313,6 +346,8 @@ impl SettingsPage {
             self.start_startup_edit(window, cx);
         } else if self.cursor == self.theme_row() {
             self.save_theme(app_theme::current(cx).next(), window, cx);
+        } else if self.cursor == self.mode_row() || self.cursor == self.diff_mode_row() {
+            self.cycle_mode(window, cx);
         } else {
             self.save_advance(!self.layout.read(cx).advance_after_vote(), window, cx);
         }
@@ -332,6 +367,8 @@ impl SettingsPage {
             self.save_advance(!self.layout.read(cx).advance_after_vote(), window, cx);
         } else if self.cursor == self.theme_row() {
             self.save_theme(app_theme::current(cx).next(), window, cx);
+        } else if self.cursor == self.mode_row() || self.cursor == self.diff_mode_row() {
+            self.cycle_mode(window, cx);
         }
     }
 
@@ -644,6 +681,32 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// Writes the light/dark modes; on success they apply at once.
+    fn save_modes(&mut self, modes: ColorModes, window: &mut Window, cx: &mut Context<Self>) {
+        self.busy = true;
+        let backend = self.env.backend.clone();
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.save_color_modes(modes) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(saved) => app_theme::set_color_modes(saved, window, cx),
+                    Err(e) => {
+                        this.hint
+                            .say(format!("Could not save the mode: {e}"), true, cx, |p| {
+                                &mut p.hint
+                            });
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     // ---- rendering ----
 
     fn key_context(&self) -> &'static str {
@@ -876,7 +939,20 @@ impl SettingsPage {
         selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.section_rows(title, note, vec![(row.into_any_element(), selected)], cx)
+    }
+
+    /// A titled card with one or more rows, each of which the cursor can be
+    /// on (the `bool` says whether it is).
+    fn section_rows(
+        &self,
+        title: &'static str,
+        note: &'static str,
+        rows: Vec<(AnyElement, bool)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
+        let count = rows.len();
         v_flex()
             .w_full()
             .child(card::frame(
@@ -892,21 +968,23 @@ impl SettingsPage {
                 false,
                 cx,
             ))
-            .child(card::frame(
-                card::row_separator(cx).child(
-                    h_flex()
-                        .id(title)
-                        .px_3()
-                        .py_1p5()
-                        .gap_3()
-                        .items_center()
-                        .when(selected, |d| d.bg(theme.list_active))
-                        .child(row),
-                ),
-                false,
-                true,
-                cx,
-            ))
+            .children(rows.into_iter().enumerate().map(|(i, (row, selected))| {
+                card::frame(
+                    card::row_separator(cx).child(
+                        h_flex()
+                            .id((title, i))
+                            .px_3()
+                            .py_1p5()
+                            .gap_3()
+                            .items_center()
+                            .when(selected, |d| d.bg(theme.list_active))
+                            .child(row),
+                    ),
+                    false,
+                    i + 1 == count,
+                    cx,
+                )
+            }))
             .into_any_element()
     }
 
@@ -1050,7 +1128,10 @@ impl SettingsPage {
 
     fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = app_theme::current(cx);
+        let modes = app_theme::color_modes(cx);
         let busy = self.busy;
+        let browsing = self.mode == Mode::Browsing;
+        let theme_row = self.theme_row();
         let choose = h_flex()
             .gap_1()
             .flex_none()
@@ -1067,17 +1148,71 @@ impl SettingsPage {
                         }
                     }))
             }));
-        let row = h_flex()
+        let theme_line = h_flex()
             .w_full()
             .gap_3()
             .items_center()
             .child(div().w(px(200.)).flex_none().child("Theme"))
             .child(choose);
-        self.section(
+        let mode_line =
+            |label: &'static str, id: &'static str, diff: bool, cx: &mut Context<Self>| {
+                let now = if diff { modes.diff } else { modes.ui };
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .items_center()
+                    .child(div().w(px(200.)).flex_none().child(label))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .flex_none()
+                            .children(ColorMode::ALL.into_iter().map(|mode| {
+                                Button::new((id, mode as usize))
+                                    .label(mode.label())
+                                    .small()
+                                    .when(mode == now, |b| b.primary())
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, w, cx| {
+                                        this.cursor = if diff {
+                                            this.diff_mode_row()
+                                        } else {
+                                            this.mode_row()
+                                        };
+                                        let modes = app_theme::color_modes(cx);
+                                        let next = if diff {
+                                            ColorModes {
+                                                diff: mode,
+                                                ..modes
+                                            }
+                                        } else {
+                                            ColorModes { ui: mode, ..modes }
+                                        };
+                                        if this.can_change() && next != modes {
+                                            this.save_modes(next, w, cx);
+                                        }
+                                    }))
+                            })),
+                    )
+            };
+        let ui_line = mode_line("Light or dark", "ui-mode", false, cx);
+        let diff_line = mode_line("Light or dark in diffs", "diff-mode", true, cx);
+        self.section_rows(
             "Appearance",
-            "Light or dark follows the system setting. Space switches the theme.",
-            row,
-            self.cursor == self.theme_row() && self.mode == Mode::Browsing,
+            "Space switches the theme or mode under the cursor.",
+            vec![
+                (
+                    theme_line.into_any_element(),
+                    self.cursor == theme_row && browsing,
+                ),
+                (
+                    ui_line.into_any_element(),
+                    self.cursor == self.mode_row() && browsing,
+                ),
+                (
+                    diff_line.into_any_element(),
+                    self.cursor == self.diff_mode_row() && browsing,
+                ),
+            ],
             cx,
         )
     }

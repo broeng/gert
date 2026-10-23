@@ -40,5 +40,5 @@ pub use session::{
     Backend, BackendError, Env, LocalDiff, SavedQuery, ServerSetup, Startup, StartupPage,
 };
 pub use shell::{Shell, init};
-pub use theme::{ThemeName, set as set_theme};
+pub use theme::{ColorMode, ColorModes, ThemeName, set as set_theme, set_color_modes};
 pub use window::{application, ensure_maximized, window_options};

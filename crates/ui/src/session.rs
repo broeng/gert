@@ -6,7 +6,10 @@ use gerrit_api::{Auth, GerritClient, HttpClient};
 use store::{ServerId, Store};
 use sync::Syncer;
 
-use crate::{filters::FileFilter, theme::ThemeName};
+use crate::{
+    filters::FileFilter,
+    theme::{ColorModes, ThemeName},
+};
 
 /// A named Gerrit query shown as a dashboard section.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +64,13 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Writes `[appearance] theme`. Returns the theme now in effect.
     fn save_theme(&self, theme: ThemeName) -> Result<ThemeName, BackendError>;
+
+    /// Writes `[appearance] mode` and `diff_mode`. Returns the modes now in
+    /// effect. Defaults to accepting them without saving, for backends with
+    /// no config file.
+    fn save_color_modes(&self, modes: ColorModes) -> Result<ColorModes, BackendError> {
+        Ok(modes)
+    }
 }
 
 /// The pieces every page needs, handed over by `app`.

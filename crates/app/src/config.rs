@@ -31,6 +31,8 @@
 //! # Optional: look. The light or dark variant follows the system setting.
 //! [appearance]
 //! theme = "cwc"                        # or "solarized"
+//! mode = "system"                      # or "light", "dark": the UI
+//! diff_mode = "system"                 # or "light", "dark": the diff view
 //!
 //! # Optional: local overrides of the diff view. Every key is optional. They
 //! # win over the preferences stored on the server (Settings > Preferences >
@@ -65,8 +67,8 @@ use directories::ProjectDirs;
 use model::{DiffContext, DiffPreferences, DiffViewMode, Whitespace};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item};
-use ui::ThemeName;
 use ui::filters::{FileFilter, FilterAction, format_hex_color, parse_hex_color, validate_glob};
+use ui::{ColorMode, ColorModes, ThemeName};
 
 use crate::APP_NAME;
 
@@ -176,6 +178,13 @@ pub struct AppearanceConfig {
     /// default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// A [`ColorMode`] key for the UI; one this client does not know falls
+    /// back to following the system.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// The same for the diff view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_mode: Option<String>,
 }
 
 /// `context = 10` or `context = "all"`.
@@ -555,6 +564,27 @@ impl Config {
             );
             default
         })
+    }
+
+    /// Default: following the system, also for a value this client does not
+    /// know (with a warning).
+    pub fn color_modes(&self) -> ColorModes {
+        let appearance = self.appearance.as_ref();
+        let read = |name: &str, value: Option<&String>| {
+            let Some(key) = value else {
+                return ColorMode::default();
+            };
+            ColorMode::from_key(key).unwrap_or_else(|| {
+                log::warn!(
+                    "config: [appearance] {name} = {key:?} is unknown; following the system"
+                );
+                ColorMode::default()
+            })
+        };
+        ColorModes {
+            ui: read("mode", appearance.and_then(|a| a.mode.as_ref())),
+            diff: read("diff_mode", appearance.and_then(|a| a.diff_mode.as_ref())),
+        }
     }
 
     /// Reads the file; `Ok(None)` if it does not exist.
@@ -1196,6 +1226,19 @@ advance_after_vote = false
         assert_eq!(themed.theme(), ThemeName::Solarized);
         let unknown: Config = toml::from_str("[appearance]\ntheme = \"zenburn\"\n").unwrap();
         assert_eq!(unknown.theme(), ThemeName::Cwc);
+
+        assert_eq!(cfg.color_modes(), ColorModes::default());
+        let moded: Config =
+            toml::from_str("[appearance]\nmode = \"Dark\"\ndiff_mode = \"light\"\n").unwrap();
+        assert_eq!(
+            moded.color_modes(),
+            ColorModes {
+                ui: ColorMode::Dark,
+                diff: ColorMode::Light
+            }
+        );
+        let odd_mode: Config = toml::from_str("[appearance]\nmode = \"dim\"\n").unwrap();
+        assert_eq!(odd_mode.color_modes(), ColorModes::default());
 
         let odd: Config = toml::from_str("[startup]\npage = \"inbox\"\n").unwrap();
         assert_eq!(odd.startup_page(), StartupPage::Dashboard);

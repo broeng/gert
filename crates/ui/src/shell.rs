@@ -183,7 +183,7 @@ impl Shell {
             window.focus(&target, cx);
         }));
         subs.push(cx.observe_window_appearance(window, |_, window, cx| {
-            gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
+            crate::theme::sync_appearance(window, cx);
         }));
 
         // The first page is a placeholder; `start` replaces it.
