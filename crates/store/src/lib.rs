@@ -93,7 +93,7 @@ impl Store {
     /// Gets or creates the id for a server. A trailing slash on `base_url`
     /// is ignored.
     pub fn server_id(&mut self, base_url: &str) -> Result<ServerId, Error> {
-        let url = base_url.trim().trim_end_matches('/');
+        let url = normalize_url(base_url);
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT OR IGNORE INTO servers (base_url) VALUES (?1)",
@@ -104,6 +104,62 @@ impl Store {
         })?;
         tx.commit()?;
         Ok(ServerId(id))
+    }
+
+    /// Removes a server and everything cached for it. Every table's
+    /// `server_id` references `servers(id)` with `ON DELETE CASCADE`, so the
+    /// row deletion purges queries, details, file lists, diffs, comments,
+    /// drafts and the rest. Other servers are untouched. Unknown ids are
+    /// ignored.
+    pub fn delete_server(&mut self, server: ServerId) -> Result<(), Error> {
+        self.conn
+            .execute("DELETE FROM servers WHERE id = ?1", [server.0])?;
+        Ok(())
+    }
+
+    /// Gives an existing server a new URL, keeping its id and so its cache.
+    /// Fails with [`Error::ServerUrlTaken`] if another row has that URL, and
+    /// with [`Error::NoSuchServer`] for an unknown id.
+    pub fn set_server_url(&mut self, server: ServerId, base_url: &str) -> Result<(), Error> {
+        let url = normalize_url(base_url);
+        let tx = self.conn.transaction()?;
+        let taken = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM servers WHERE base_url = ?1 AND id <> ?2)",
+            params![url, server.0],
+            |r| r.get::<_, bool>(0),
+        )?;
+        if taken {
+            return Err(Error::ServerUrlTaken(url.to_owned()));
+        }
+        let changed = tx.execute(
+            "UPDATE servers SET base_url = ?1 WHERE id = ?2",
+            params![url, server.0],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoSuchServer);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A value from the application state table, e.g. the last active
+    /// server.
+    pub fn app_state(&self, key: &str) -> Result<Option<String>, Error> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM app_state WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_app_state(&mut self, key: &str, value: &str) -> Result<(), Error> {
+        self.conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     /// Replaces the cached result of `query` with this first page.
@@ -302,6 +358,10 @@ impl Store {
         })
         .transpose()
     }
+}
+
+fn normalize_url(base_url: &str) -> &str {
+    base_url.trim().trim_end_matches('/')
 }
 
 /// SQLite integers are signed; Gerrit change numbers never get near 2^63.

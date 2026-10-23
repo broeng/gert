@@ -11,6 +11,11 @@ pub enum Error {
         "cache database has schema version {found}, but this build only knows up to {supported}"
     )]
     SchemaTooNew { found: u32, supported: u32 },
+    /// Another server row already has this URL.
+    #[error("another server already uses the URL {0}")]
+    ServerUrlTaken(String),
+    #[error("no server with this id")]
+    NoSuchServer,
     #[error("cached timestamp {0:?} is invalid")]
     BadTimestamp(String),
 }

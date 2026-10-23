@@ -174,6 +174,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX drafts_by_change ON drafts (server_id, change_number);
     CREATE INDEX drafts_by_state ON drafts (server_id, state);
     ",
+    // v4 -> v5: small key/value state of the application itself (the last
+    // active server), not tied to a server row.
+    "
+    CREATE TABLE app_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {
