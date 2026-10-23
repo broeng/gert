@@ -28,7 +28,8 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
         .unwrap_or_default();
     let db = paths.cache_db()?;
     let mut store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
-    let server = match &config.server {
+    let first = config.servers.first();
+    let server = match first {
         Some(s) => Some(ServerSetup {
             server: store.server_id(&s.url)?,
             base_url: s.url.clone(),
@@ -50,8 +51,8 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
             }),
         },
         server,
-        queries: queries_to_ui(&config.queries),
-        bookmarks: queries_to_ui(&config.bookmarks),
+        queries: first.map_or_else(Vec::new, |s| queries_to_ui(&s.queries)),
+        bookmarks: first.map_or_else(Vec::new, |s| queries_to_ui(&s.bookmarks)),
         filters: config.file_filters(),
         start_page: startup_to_ui(&config.startup_page()),
         diff: LocalDiff {
