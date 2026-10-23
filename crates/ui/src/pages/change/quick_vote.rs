@@ -18,9 +18,15 @@ use crate::{
 
 impl ChangePage {
     /// The buttons of the header bar.
-    pub(super) fn quick_buttons(&self) -> Vec<QuickButton> {
+    pub(super) fn quick_buttons(&self, cx: &App) -> Vec<QuickButton> {
+        let drafts = self
+            .comments
+            .read(cx)
+            .threads()
+            .iter()
+            .any(|t| t.has_draft());
         self.detail.as_ref().map_or_else(Vec::new, |d| {
-            plan::quick_votes(d, self.session.username.as_deref())
+            plan::quick_votes(d, self.session.username.as_deref(), drafts)
         })
     }
 
@@ -48,7 +54,7 @@ impl ChangePage {
                 .say(why.replace("reply", "vote"), false, cx, |p| &mut p.hint);
             return;
         }
-        let buttons = self.quick_buttons();
+        let buttons = self.quick_buttons(cx);
         let Some(button) = buttons.get(position) else {
             let why = if buttons.is_empty() {
                 "No votes to cast on this change"

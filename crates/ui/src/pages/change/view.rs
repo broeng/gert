@@ -304,7 +304,7 @@ impl ChangePage {
         };
         let voting = self.voting();
         let quick: Vec<_> = self
-            .quick_buttons()
+            .quick_buttons(cx)
             .into_iter()
             .enumerate()
             .map(|(i, q)| {
@@ -320,14 +320,20 @@ impl ChangePage {
                 };
                 // Code-Review is the vote that is cast most, so it stands out.
                 let strong = q.label == "Code-Review";
+                let reject = q.value < 0;
                 let disabled = q.applied || voting;
+                let color = if reject {
+                    cx.theme().danger
+                } else {
+                    cx.theme().primary
+                };
                 Button::new(("quick-vote", i))
                     .label(label)
                     .small()
-                    .custom(crate::theme::vote_button(strong, cx))
+                    .custom(crate::theme::vote_button(strong, reject, cx))
                     // Over the variant's faint idle background; a disabled
                     // button keeps its disabled look.
-                    .when(strong && !disabled, |b| b.bg(cx.theme().primary))
+                    .when(strong && !disabled, |b| b.bg(color))
                     .disabled(disabled)
                     .on_click(cx.listener(move |this, _, _, cx| this.quick_vote(i, cx)))
             })

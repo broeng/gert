@@ -448,8 +448,8 @@ impl ChangePage {
     }
 
     #[cfg(test)]
-    pub(crate) fn quick_buttons_for_test(&self) -> Vec<crate::reply::plan::QuickButton> {
-        self.quick_buttons()
+    pub(crate) fn quick_buttons_for_test(&self, cx: &App) -> Vec<crate::reply::plan::QuickButton> {
+        self.quick_buttons(cx)
     }
 
     #[cfg(test)]

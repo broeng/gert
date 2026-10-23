@@ -172,24 +172,33 @@ pub fn commit_card_background(cx: &App) -> Hsla {
 /// from the caller, and hovers a little lighter. On a light page the faint
 /// tint is too pale for the light accent text, so there the other buttons
 /// use the darker primary for text and a stronger tint on hover; on a dark
-/// page the tint is dark and they turn the full color on hover.
-pub fn vote_button(strong: bool, cx: &App) -> ButtonCustomVariant {
+/// page the tint is dark and they turn the full color on hover. A `reject`
+/// button (a negative vote) does all that in the theme's danger color.
+pub fn vote_button(strong: bool, reject: bool, cx: &App) -> ButtonCustomVariant {
     let theme = cx.theme();
-    let primary = theme.primary;
+    let (primary, primary_foreground, primary_active) = if reject {
+        (theme.danger, theme.danger_foreground, theme.danger_active)
+    } else {
+        (
+            theme.primary,
+            theme.primary_foreground,
+            theme.primary_active,
+        )
+    };
     let (hover, foreground) = if strong {
         (
             hsla(primary.h, primary.s, primary.l + 0.06, 1.),
-            theme.primary_foreground,
+            primary_foreground,
         )
     } else if theme.is_dark() {
-        (primary, theme.primary_foreground)
+        (primary, primary_foreground)
     } else {
-        (primary.opacity(0.35), theme.primary_active)
+        (primary.opacity(0.35), primary_active)
     };
     ButtonCustomVariant::new(cx)
         .color(primary)
         .hover(hover)
-        .active(theme.primary_active)
+        .active(primary_active)
         .foreground(foreground)
 }
 

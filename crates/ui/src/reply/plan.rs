@@ -144,8 +144,10 @@ impl QuickButton {
 /// The quick-vote buttons, in the order of the reply dialog's rows. None for
 /// anonymous sessions (`me` is `None`) and for closed changes. A label whose
 /// highest permitted value is not positive (a veto-only label) has no
-/// button: a quick vote is for approving.
-pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>) -> Vec<QuickButton> {
+/// button: a quick vote is for approving. Except that while the user has
+/// `drafts` to publish, Code-Review is cast at its lowest permitted value
+/// instead: comments on a change say it is not ready yet.
+pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>, drafts: bool) -> Vec<QuickButton> {
     if me.is_none() || detail.summary.status != ChangeStatus::New {
         return Vec::new();
     }
@@ -153,10 +155,16 @@ pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>) -> Vec<QuickButton> 
         .into_iter()
         .filter_map(|row| {
             let max = row.choices.iter().map(|c| c.value).max()?;
+            let min = row.choices.iter().map(|c| c.value).min()?;
+            let value = if drafts && row.label == "Code-Review" && min < 0 {
+                min
+            } else {
+                max
+            };
             (max > 0).then_some(QuickButton {
-                applied: row.current == max,
+                applied: row.current == value,
                 label: row.label,
-                value: max,
+                value,
             })
         })
         .collect()
@@ -785,7 +793,7 @@ mod tests {
     // ---- quick votes ----
 
     fn qv(d: &ChangeDetail, me: &str) -> Vec<(String, i32, bool)> {
-        quick_votes(d, Some(me))
+        quick_votes(d, Some(me), false)
             .into_iter()
             .map(|q| (q.label, q.value, q.applied))
             .collect()
@@ -802,7 +810,10 @@ mod tests {
                 ("Verified".into(), 1, false)
             ]
         );
-        assert_eq!(quick_votes(&d, Some("bob"))[0].text(), "Code-Review +2");
+        assert_eq!(
+            quick_votes(&d, Some("bob"), false)[0].text(),
+            "Code-Review +2"
+        );
     }
 
     #[test]
@@ -822,16 +833,32 @@ mod tests {
     }
 
     #[test]
+    fn drafts_turn_the_code_review_quick_vote_into_the_lowest() {
+        let mut d = change();
+        with_labels(&mut d);
+        let votes = quick_votes(&d, Some("bob"), true);
+        assert_eq!(votes[0].text(), "Code-Review -2");
+        assert!(!votes[0].applied);
+        assert_eq!(votes[1].text(), "Verified +1", "only Code-Review turns");
+        d.votes.get_mut("Code-Review").unwrap()[1].value = -2; // bob
+        assert!(quick_votes(&d, Some("bob"), true)[0].applied);
+    }
+
+    #[test]
     fn no_quick_votes_when_anonymous_closed_or_veto_only() {
         let mut d = change();
         with_labels(&mut d);
         d.permitted_labels.insert("Blocked".to_owned(), vec![-1, 0]);
-        assert_eq!(quick_votes(&d, Some("bob")).len(), 2, "no button for -1/0");
-        assert!(quick_votes(&d, None).is_empty());
+        assert_eq!(
+            quick_votes(&d, Some("bob"), false).len(),
+            2,
+            "no button for -1/0"
+        );
+        assert!(quick_votes(&d, None, false).is_empty());
         d.summary.status = ChangeStatus::Merged;
-        assert!(quick_votes(&d, Some("bob")).is_empty());
+        assert!(quick_votes(&d, Some("bob"), false).is_empty());
         d.summary.status = ChangeStatus::Abandoned;
-        assert!(quick_votes(&d, Some("bob")).is_empty());
+        assert!(quick_votes(&d, Some("bob"), false).is_empty());
     }
 
     #[test]
