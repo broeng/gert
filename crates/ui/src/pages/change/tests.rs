@@ -1180,7 +1180,7 @@ fn the_buttons_follow_the_dialog_order_and_show_an_applied_vote(cx: &mut TestApp
         cx.update(|cx| {
             f.page
                 .read(cx)
-                .quick_buttons_for_test()
+                .quick_buttons_for_test(cx)
                 .into_iter()
                 .map(|b| (b.text(), b.applied))
                 .collect::<Vec<_>>()

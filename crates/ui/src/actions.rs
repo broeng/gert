@@ -294,7 +294,7 @@ pub fn change_entries() -> Vec<Entry> {
         e(
             "Shift-V, V 1 to V 9",
             KeyBinding::new("shift-v", QuickVote { position: 0 }, Some(k)),
-            "Quick vote: the first button of the header (normally Code-Review +2) / the button with that number",
+            "Quick vote: the first button of the header (normally Code-Review +2, or -2 while you have drafts) / the button with that number",
         ),
         e(
             "",
