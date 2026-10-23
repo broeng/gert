@@ -1012,6 +1012,7 @@ fn rule(name: &str, glob: &str, action: FilterAction) -> FileFilter {
         name: name.into(),
         globs: vec![glob.into()],
         projects: Vec::new(),
+        servers: Vec::new(),
         action,
         enabled: true,
     }

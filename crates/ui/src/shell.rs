@@ -991,6 +991,7 @@ impl Shell {
                         paths,
                         select: None,
                         start_adding: false,
+                        ..Default::default()
                     };
                     this.open_filters_dialog(context, window, cx)
                 }
@@ -1540,6 +1541,16 @@ impl Shell {
         }
         let env = self.env.clone();
         let filters = self.filters.clone();
+        let context = FiltersContext {
+            servers: self
+                .servers
+                .rows()
+                .into_iter()
+                .map(|r| (r.key, r.name))
+                .collect(),
+            server: self.servers.active_key().cloned(),
+            ..context
+        };
         let dialog = cx.new(|cx| FiltersDialog::new(env, filters, context, window, cx));
         self.filters_dialog_subs.push(cx.subscribe_in(
             &dialog,

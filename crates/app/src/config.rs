@@ -83,7 +83,7 @@ use model::{DiffContext, DiffPreferences, DiffViewMode, Whitespace};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item};
 use ui::filters::{FileFilter, FilterAction, format_hex_color, parse_hex_color, validate_glob};
-use ui::{ColorMode, ColorModes, ThemeName, server_name_from_url};
+use ui::{ColorMode, ColorModes, ServerKey, ThemeName, server_name_from_url};
 
 use crate::APP_NAME;
 
@@ -383,8 +383,7 @@ pub struct FilterConfig {
     pub globs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
-    /// Ids of the servers the rule applies to; empty: all of them. Kept
-    /// and written back, but not applied yet.
+    /// Ids of the servers the rule applies to; empty: all of them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub servers: Vec<String>,
     pub action: String,
@@ -443,6 +442,7 @@ impl FilterConfig {
             name: name.to_owned(),
             globs,
             projects: self.projects.clone(),
+            servers: self.servers.iter().map(ServerKey::new).collect(),
             action,
             enabled: self.enabled.unwrap_or(true),
         })
@@ -464,7 +464,7 @@ impl FilterConfig {
             name: f.name.clone(),
             globs: f.globs.clone(),
             projects: f.projects.clone(),
-            servers: Vec::new(),
+            servers: f.servers.iter().map(ToString::to_string).collect(),
             action: action.to_owned(),
             color,
             bold,
@@ -1724,6 +1724,7 @@ action = "hide"
             name: "Docs".into(),
             globs: vec!["docs/**".into()],
             projects: Vec::new(),
+            servers: Vec::new(),
             action: FilterAction::Hide,
             enabled: true,
         };

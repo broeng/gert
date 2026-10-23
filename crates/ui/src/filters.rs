@@ -9,6 +9,8 @@ use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use gpui_kit::{Rgba, rgb};
 use model::{COMMIT_MSG_PATH, MERGE_LIST_PATH};
 
+use crate::session::ServerKey;
+
 /// What a matching rule does to a file.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FilterAction {
@@ -25,6 +27,8 @@ pub struct FileFilter {
     pub globs: Vec<String>,
     /// Exact project names; empty means every project.
     pub projects: Vec<String>,
+    /// The servers the rule is for; empty means every server.
+    pub servers: Vec<ServerKey>,
     pub action: FilterAction,
     /// Whether the rule is on at the start of a session.
     pub enabled: bool,
@@ -63,9 +67,11 @@ pub fn next_unskipped(
     }
 }
 
-/// Whether the rule is scoped to `project` (or to every project).
-pub fn applies_to(rule: &FileFilter, project: &str) -> bool {
-    rule.projects.is_empty() || rule.projects.iter().any(|p| p == project)
+/// Whether the rule is for changes of `project` on `server`: both
+/// restrictions must hold, and an empty one holds for everything.
+pub fn applies_to(rule: &FileFilter, server: &ServerKey, project: &str) -> bool {
+    (rule.servers.is_empty() || rule.servers.contains(server))
+        && (rule.projects.is_empty() || rule.projects.iter().any(|p| p == project))
 }
 
 /// `#rrggbb` (case-insensitive) as a color.
@@ -114,16 +120,17 @@ pub struct FileMatcher {
     rules: Vec<CompiledRule>,
 }
 
-/// Compiles the rules that apply to `project` and are `active`. A glob that
-/// does not compile is skipped with a warning.
+/// Compiles the rules that apply to `project` on `server` and are `active`.
+/// A glob that does not compile is skipped with a warning.
 pub fn compile(
     rules: &[FileFilter],
+    server: &ServerKey,
     project: &str,
     active: impl Fn(&FileFilter) -> bool,
 ) -> FileMatcher {
     let mut out = Vec::new();
     for rule in rules {
-        if !applies_to(rule, project) || !active(rule) {
+        if !applies_to(rule, server, project) || !active(rule) {
             continue;
         }
         let mut builder = GlobSetBuilder::new();
@@ -234,6 +241,7 @@ mod tests {
             name: name.into(),
             globs: globs.iter().map(|g| (*g).into()).collect(),
             projects: Vec::new(),
+            servers: Vec::new(),
             action,
             enabled: true,
         }
@@ -247,7 +255,7 @@ mod tests {
     }
 
     fn matcher(rules: &[FileFilter]) -> FileMatcher {
-        compile(rules, "proj", |r| r.enabled)
+        compile(rules, &ServerKey::new("s"), "proj", |r| r.enabled)
     }
 
     fn names(m: &FileMatcher, path: &str) -> Vec<String> {
@@ -307,15 +315,39 @@ mod tests {
     fn projects_scope_the_rules() {
         let mut scoped = rule("only", &["*.rs"], FilterAction::Hide);
         scoped.projects = vec!["a/b".into()];
-        assert!(applies_to(&scoped, "a/b"));
-        assert!(!applies_to(&scoped, "a/bc"));
-        assert!(!applies_to(&scoped, "a"));
+        let s = ServerKey::new("s");
+        assert!(applies_to(&scoped, &s, "a/b"));
+        assert!(!applies_to(&scoped, &s, "a/bc"));
+        assert!(!applies_to(&scoped, &s, "a"));
         let everywhere = rule("all", &["*.rs"], FilterAction::Hide);
-        assert!(applies_to(&everywhere, "anything"));
+        assert!(applies_to(&everywhere, &s, "anything"));
 
         let rules = [scoped];
-        assert!(compile(&rules, "a/b", |_| true).style("x.rs").hidden);
-        assert!(compile(&rules, "other", |_| true).is_empty());
+        assert!(compile(&rules, &s, "a/b", |_| true).style("x.rs").hidden);
+        assert!(compile(&rules, &s, "other", |_| true).is_empty());
+    }
+
+    #[test]
+    fn servers_scope_the_rules() {
+        let (a, b) = (ServerKey::new("a"), ServerKey::new("b"));
+        let mut only_a = rule("a-only", &["*.rs"], FilterAction::Hide);
+        only_a.servers = vec![a.clone()];
+        let everywhere = rule("all", &["*.md"], FilterAction::Dim);
+        // A rule without servers is for every server, as before.
+        assert!(applies_to(&everywhere, &a, "p") && applies_to(&everywhere, &b, "p"));
+        assert!(applies_to(&only_a, &a, "p"));
+        assert!(!applies_to(&only_a, &b, "p"));
+        // Both restrictions have to hold.
+        only_a.projects = vec!["p".into()];
+        assert!(applies_to(&only_a, &a, "p"));
+        assert!(!applies_to(&only_a, &a, "q"));
+        assert!(!applies_to(&only_a, &b, "p"));
+
+        let rules = [only_a, everywhere];
+        let on_a = compile(&rules, &a, "p", |_| true);
+        assert!(on_a.style("x.rs").hidden && on_a.style("x.md").dimmed);
+        let on_b = compile(&rules, &b, "p", |_| true);
+        assert!(!on_b.style("x.rs").hidden && on_b.style("x.md").dimmed);
     }
 
     #[test]
@@ -324,10 +356,10 @@ mod tests {
             rule("a", &["*.rs"], FilterAction::Hide),
             rule("b", &["*.md"], FilterAction::Hide),
         ];
-        let m = compile(&rules, "p", |r| r.name == "b");
+        let m = compile(&rules, &ServerKey::new("s"), "p", |r| r.name == "b");
         assert!(!m.style("x.rs").hidden);
         assert!(m.style("x.md").hidden);
-        assert!(compile(&rules, "p", |_| false).is_empty());
+        assert!(compile(&rules, &ServerKey::new("s"), "p", |_| false).is_empty());
     }
 
     #[test]

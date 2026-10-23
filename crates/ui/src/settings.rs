@@ -10,7 +10,7 @@ use model::{DiffPreferences, ResolvedDiffPreferences, resolve_diff_preferences};
 
 use crate::{
     filters::{FileFilter, FileMatcher, applies_to, compile},
-    session::LocalDiff,
+    session::{LocalDiff, ServerKey},
 };
 
 pub struct DiffSettings {
@@ -133,12 +133,12 @@ impl FileFilters {
         &self.rules
     }
 
-    /// The rules that apply to `project`, in config order. These get a
-    /// toggle button on that project's changes.
-    pub fn applicable(&self, project: &str) -> Vec<&FileFilter> {
+    /// The rules that apply to `project` on `server`, in config order.
+    /// These get a toggle button on that project's changes.
+    pub fn applicable(&self, server: &ServerKey, project: &str) -> Vec<&FileFilter> {
         self.rules
             .iter()
-            .filter(|r| applies_to(r, project))
+            .filter(|r| applies_to(r, server, project))
             .collect()
     }
 
@@ -169,9 +169,10 @@ impl FileFilters {
         cx.notify();
     }
 
-    /// The matcher for the changes of `project`, with the rules that are on.
-    pub fn matcher(&self, project: &str) -> FileMatcher {
-        compile(&self.rules, project, |r| self.is_active(r))
+    /// The matcher for the changes of `project` on `server`, with the rules
+    /// that are on.
+    pub fn matcher(&self, server: &ServerKey, project: &str) -> FileMatcher {
+        compile(&self.rules, server, project, |r| self.is_active(r))
     }
 }
 
@@ -246,6 +247,7 @@ mod tests {
                 name: name.into(),
                 globs: vec![glob.into()],
                 projects: Vec::new(),
+                servers: Vec::new(),
                 action: FilterAction::Hide,
                 enabled,
             }
@@ -262,8 +264,8 @@ mod tests {
             filters.read_with(cx, |f, _| {
                 assert!(f.is_active(&f.rules()[0]));
                 assert!(!f.is_active(&f.rules()[1]));
-                assert!(f.matcher("p").style("x.a").hidden);
-                assert!(!f.matcher("p").style("x.b").hidden);
+                assert!(f.matcher(&ServerKey::new("s"), "p").style("x.a").hidden);
+                assert!(!f.matcher(&ServerKey::new("s"), "p").style("x.b").hidden);
             });
 
             filters.update(cx, |f, cx| {
@@ -274,8 +276,8 @@ mod tests {
             filters.read_with(cx, |f, _| {
                 assert!(!f.is_active(&f.rules()[0]));
                 assert!(f.is_active(&f.rules()[1]));
-                assert!(!f.matcher("p").style("x.a").hidden);
-                assert!(f.matcher("p").style("x.b").hidden);
+                assert!(!f.matcher(&ServerKey::new("s"), "p").style("x.a").hidden);
+                assert!(f.matcher(&ServerKey::new("s"), "p").style("x.b").hidden);
             });
             assert!(notified.get() >= 1);
 
@@ -306,14 +308,40 @@ mod tests {
             });
             filters.read_with(cx, |f, _| {
                 let names = |p: &str| {
-                    f.applicable(p)
+                    f.applicable(&ServerKey::new("s"), p)
                         .into_iter()
                         .map(|r| r.name.clone())
                         .collect::<Vec<_>>()
                 };
                 assert_eq!(names("p1"), ["first", "scoped", "last"]);
                 assert_eq!(names("p2"), ["first", "last"]);
-                assert!(f.matcher("p2").style("x.s").rules.is_empty());
+                assert!(
+                    f.matcher(&ServerKey::new("s"), "p2")
+                        .style("x.s")
+                        .rules
+                        .is_empty()
+                );
+            });
+        }
+
+        #[gpui_kit::test]
+        fn a_rule_for_some_servers_only_touches_their_changes(cx: &mut TestAppContext) {
+            let (a, b) = (ServerKey::new("a"), ServerKey::new("b"));
+            let mut only_a = rule("only-a", "*.a", true);
+            only_a.servers = vec![a.clone()];
+            let filters = cx.new(|_| FileFilters::new(vec![only_a, rule("all", "*.z", true)]));
+            filters.read_with(cx, |f, _| {
+                let names = |s: &ServerKey| {
+                    f.applicable(s, "p")
+                        .into_iter()
+                        .map(|r| r.name.clone())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(names(&a), ["only-a", "all"]);
+                assert_eq!(names(&b), ["all"]);
+                assert!(f.matcher(&a, "p").style("x.a").hidden);
+                assert!(!f.matcher(&b, "p").style("x.a").hidden);
+                assert!(f.matcher(&b, "p").style("x.z").hidden);
             });
         }
     }

@@ -1113,6 +1113,7 @@ fn demo_filters() -> Vec<FileFilter> {
         name: name.into(),
         globs: vec![glob.into()],
         projects: Vec::new(),
+        servers: Vec::new(),
         action,
         enabled: true,
     };
