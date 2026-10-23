@@ -716,7 +716,10 @@ impl ChangePage {
     /// project, and lists the ones that stay visible.
     fn compute_styles(&mut self, cx: &App) {
         let matcher = match &self.detail {
-            Some(d) => self.filters.read(cx).matcher(&d.summary.project),
+            Some(d) => self
+                .filters
+                .read(cx)
+                .matcher(&self.session.key, &d.summary.project),
             None => FileMatcher::default(),
         };
         self.styles = self
@@ -760,7 +763,7 @@ impl ChangePage {
         let name = self
             .filters
             .read(cx)
-            .applicable(&d.summary.project)
+            .applicable(&self.session.key, &d.summary.project)
             .get(action.position)
             .map(|r| r.name.clone());
         match name {

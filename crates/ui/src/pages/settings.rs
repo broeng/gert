@@ -149,13 +149,28 @@ fn rule_name(rule: &FileFilter) -> String {
     rule.name.clone()
 }
 
-/// Where a rule applies, for its row.
-fn scope_text(rule: &FileFilter) -> String {
-    if rule.projects.is_empty() {
+/// Where a rule applies, for its row: its projects, and its servers if it
+/// is limited to some. `servers` names the configured ones.
+fn scope_text(rule: &FileFilter, servers: &[ServerRow]) -> String {
+    let projects = if rule.projects.is_empty() {
         "all projects".to_owned()
     } else {
         rule.projects.join(", ")
+    };
+    if rule.servers.is_empty() {
+        return projects;
     }
+    let names: Vec<String> = rule
+        .servers
+        .iter()
+        .map(|k| {
+            servers
+                .iter()
+                .find(|s| s.key == *k)
+                .map_or_else(|| k.to_string(), |s| s.name.clone())
+        })
+        .collect();
+    format!("{projects} on {}", names.join(", "))
 }
 
 pub struct SettingsPage {
@@ -1530,7 +1545,7 @@ impl SettingsPage {
                     .truncate()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(scope_text(rule)),
+                    .child(scope_text(rule, &self.servers)),
             )
             .child(
                 div()

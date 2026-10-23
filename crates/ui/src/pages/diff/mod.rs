@@ -284,7 +284,10 @@ impl DiffPage {
     /// project.
     fn restyle(&mut self, cx: &App) {
         let matcher = match &self.detail {
-            Some(d) => self.filters.read(cx).matcher(&d.summary.project),
+            Some(d) => self
+                .filters
+                .read(cx)
+                .matcher(&self.session.key, &d.summary.project),
             None => FileMatcher::default(),
         };
         self.styles = self.files.iter().map(|f| matcher.style(&f.path)).collect();

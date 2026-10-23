@@ -741,7 +741,7 @@ impl ChangePage {
         let rules: Vec<_> = {
             let filters = self.filters.read(cx);
             filters
-                .applicable(&project)
+                .applicable(&self.session.key, &project)
                 .into_iter()
                 .map(|r| (r.name.clone(), filters.is_active(r), r.action.clone()))
                 .collect()

@@ -44,7 +44,7 @@ use crate::{
     filters::{FileFilter, format_hex_color, parse_hex_color},
     pages::settings::{moved, with_query, without},
     reply::{Look, check, chip},
-    session::Env,
+    session::{Env, ServerKey},
     settings::FileFilters,
 };
 use actions::*;
@@ -85,6 +85,12 @@ pub struct FiltersContext {
     pub select: Option<String>,
     /// Start on a new rule, in the form.
     pub start_adding: bool,
+    /// The configured servers with their names, for the rules' server
+    /// restriction. The field is offered when there are several.
+    pub servers: Vec<(ServerKey, String)>,
+    /// The server of the change the dialog was opened from, for the match
+    /// preview.
+    pub server: Option<ServerKey>,
 }
 
 pub struct FiltersDialog {
@@ -92,6 +98,13 @@ pub struct FiltersDialog {
     filters: Entity<FileFilters>,
     project: Option<String>,
     paths: Option<Vec<String>>,
+    server: Option<ServerKey>,
+    /// The servers a rule can be limited to: the configured ones, then any
+    /// that a rule names but is not configured (so that the restriction can
+    /// still be seen and taken away).
+    choices: Vec<(ServerKey, String)>,
+    /// A focus handle for each of `choices`.
+    server_focus: Vec<FocusHandle>,
     /// The rules as saved (what the backend returned last).
     rules: Vec<FileFilter>,
     cursor: usize,
@@ -190,12 +203,22 @@ impl FiltersDialog {
                 this.refresh(cx);
             }),
         ];
+        let mut choices = context.servers.clone();
+        for key in rules.iter().flat_map(|r| &r.servers) {
+            if !choices.iter().any(|(k, _)| k == key) {
+                choices.push((key.clone(), format!("{key} (not configured)")));
+            }
+        }
+        let server_focus = choices.iter().map(|_| cx.focus_handle()).collect();
         let blank = form::new_rule(context.project.as_deref());
         let mut this = Self {
             env,
             filters,
             project: context.project,
             paths: context.paths,
+            server: context.server,
+            choices,
+            server_focus,
             rules,
             cursor,
             mode: Mode::Browsing,
@@ -274,8 +297,40 @@ impl FiltersDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn offers_servers_for_test(&self) -> bool {
+        self.offers_servers()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn toggle_server_for_test(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.toggle_server(&ServerKey::new(key), cx);
+    }
+
+    #[cfg(test)]
     pub(crate) fn picker_for_test(&self) -> Entity<ColorPickerState> {
         self.picker.clone()
+    }
+
+    /// Whether the form has the servers field: only with several servers
+    /// (or a rule that names one that is gone), as one server makes it
+    /// meaningless.
+    fn offers_servers(&self) -> bool {
+        self.choices.len() > 1
+    }
+
+    /// Adds `key` to the servers of the rule in the form, or takes it away.
+    fn toggle_server(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        if let Some(at) = self.form.servers.iter().position(|k| k == key) {
+            self.form.servers.remove(at);
+        } else {
+            self.form.servers.push(key.clone());
+            // Config order, whichever way they were ticked.
+            let order = |k: &ServerKey| self.choices.iter().position(|(c, _)| c == k);
+            let mut servers = std::mem::take(&mut self.form.servers);
+            servers.sort_by_key(order);
+            self.form.servers = servers;
+        }
+        self.refresh(cx);
     }
 
     // ---- the form ----
@@ -329,8 +384,10 @@ impl FiltersDialog {
         };
         self.problem = form::problem(&rule, &self.rules, index);
         self.dirty = rule != self.baseline;
-        self.preview = match (&self.project, &self.paths) {
-            (Some(project), Some(paths)) => Some(form::preview(&rule, project, paths)),
+        self.preview = match (&self.project, &self.paths, &self.server) {
+            (Some(project), Some(paths), Some(server)) => {
+                Some(form::preview(&rule, server, project, paths))
+            }
             _ => None,
         };
         cx.notify();
@@ -454,6 +511,9 @@ impl FiltersDialog {
             self.globs.read(cx).focus_handle(cx),
             self.projects.read(cx).focus_handle(cx),
         ];
+        if self.offers_servers() {
+            v.extend(self.server_focus.iter().cloned());
+        }
         if self.project.is_some() {
             v.push(self.only_focus.clone());
         }
@@ -891,6 +951,33 @@ impl FiltersDialog {
                         )
                     }),
             )
+            .when(self.offers_servers(), |d| {
+                let checks: Vec<_> = self
+                    .choices
+                    .iter()
+                    .zip(&self.server_focus)
+                    .enumerate()
+                    .map(|(i, ((key, name), focus))| {
+                        let key = key.clone();
+                        check(
+                            ("filter-server", i),
+                            name.clone(),
+                            self.form.servers.contains(&key),
+                            focus,
+                            false,
+                            window,
+                            cx,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_server(&key, cx)))
+                    })
+                    .collect();
+                d.child(
+                    v_flex()
+                        .gap_1()
+                        .child(self.label("Servers (none ticked: all servers)", cx))
+                        .child(h_flex().flex_wrap().gap_3().children(checks)),
+                )
+            })
             .child(
                 v_flex().gap_1().child(self.label("Action", cx)).child(
                     h_flex()

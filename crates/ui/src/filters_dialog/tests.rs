@@ -89,6 +89,7 @@ fn rule(name: &str, glob: &str, action: FilterAction) -> FileFilter {
         name: name.into(),
         globs: vec![glob.into()],
         projects: Vec::new(),
+        servers: Vec::new(),
         action,
         enabled: true,
     }
@@ -110,6 +111,11 @@ fn ps(n: u32) -> PatchSetRef {
 /// Change 7 of `platform/foo` with four cached files, opened from the
 /// dashboard in a shell that starts with `rules`.
 fn on_the_change(cx: &mut TestAppContext, rules: Vec<FileFilter>) -> Fx {
+    on_the_change_in(cx, rules, false)
+}
+
+/// As [`on_the_change`], with a second configured server `other` if asked.
+fn on_the_change_in(cx: &mut TestAppContext, rules: Vec<FileFilter>, second: bool) -> Fx {
     let mut store = Store::open_in_memory().expect("store");
     let server = store.server_id(URL).expect("server");
     let now = jiff::Timestamp::now();
@@ -139,14 +145,22 @@ fn on_the_change(cx: &mut TestAppContext, rules: Vec<FileFilter>) -> Fx {
         diff: Default::default(),
         start_page: Default::default(),
         filters: rules,
-        servers: vec![ServerSetup {
+        servers: std::iter::once(ServerSetup {
             queries: vec![SavedQuery {
                 name: "Open".into(),
                 query: "status:open".into(),
             }],
             bookmarks: Vec::new(),
             ..setup()
-        }],
+        })
+        .chain(second.then(|| ServerSetup {
+            key: crate::ServerKey::new("other"),
+            name: "Other".into(),
+            base_url: "https://other.example".into(),
+            server: store::ServerId(2),
+            ..setup()
+        }))
+        .collect(),
         active: None,
     };
     let (window, shell) = open(cx, |window, cx| {
@@ -282,6 +296,7 @@ fn a_rule_added_from_a_change_is_scoped_to_its_project_and_hides_its_files(
             name: "Generated".into(),
             globs: vec!["*.pb.go".into()],
             projects: vec!["platform/foo".into()],
+            servers: Vec::new(),
             action: FilterAction::Hide,
             enabled: true,
         }]
@@ -528,4 +543,60 @@ fn enter_on_the_color_field_opens_the_picker(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn space_on_the_color_field_opens_the_picker(cx: &mut TestAppContext) {
     color_field_opens_on(cx, "space");
+}
+
+#[gpui_kit::test]
+fn the_servers_field_is_only_offered_with_several_servers(cx: &mut TestAppContext) {
+    let f = on_the_change(cx, two_rules());
+    let d = open_dialog(cx, &f);
+    assert!(!cx.update(|cx| d.read(cx).offers_servers_for_test()));
+    let f = on_the_change_in(cx, two_rules(), true);
+    let d = open_dialog(cx, &f);
+    assert!(cx.update(|cx| d.read(cx).offers_servers_for_test()));
+}
+
+#[gpui_kit::test]
+fn a_rule_limited_to_other_servers_is_saved_and_leaves_this_change_alone(cx: &mut TestAppContext) {
+    let f = on_the_change_in(cx, Vec::new(), true);
+    let d = open_dialog(cx, &f);
+    press(cx, &f, &["a"]);
+    type_text(cx, &f, "Generated");
+    press(cx, &f, &["tab"]);
+    type_text(cx, &f, "*.pb.go");
+    // Limit it to the server this change is not on.
+    d.update(cx, |d, cx| d.toggle_server_for_test("other", cx));
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(
+            d.read(cx).preview_for_test().as_deref(),
+            Some("This rule does not apply to this change's server")
+        );
+        assert_eq!(
+            d.read(cx).form_for_test(cx).servers,
+            [crate::ServerKey::new("other")]
+        );
+    });
+    press(cx, &f, &[SAVE]);
+    let saved = saves(&f);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0][0].servers, [crate::ServerKey::new("other")]);
+    // It is for the other server, so this change's files are untouched.
+    assert_eq!(visible(cx, &f), PATHS);
+
+    // Moved to this server (and ticking the other one off), it applies.
+    press(cx, &f, &["e"]);
+    d.update(cx, |d, cx| {
+        d.toggle_server_for_test("other", cx);
+        d.toggle_server_for_test("test", cx);
+    });
+    press(cx, &f, &[SAVE]);
+    assert_eq!(saves(&f)[1][0].servers, [crate::ServerKey::new("test")]);
+    assert_eq!(visible(cx, &f), ["/COMMIT_MSG", "src/b.rs", "src/c.rs"]);
+
+    // And with no server ticked it is for all of them again.
+    press(cx, &f, &["e"]);
+    d.update(cx, |d, cx| d.toggle_server_for_test("test", cx));
+    press(cx, &f, &[SAVE]);
+    assert!(saves(&f)[2][0].servers.is_empty());
+    assert_eq!(visible(cx, &f), ["/COMMIT_MSG", "src/b.rs", "src/c.rs"]);
 }

@@ -1768,6 +1768,7 @@ mod settings_page {
             name: name.into(),
             globs: vec![format!("*.{name}")],
             projects: Vec::new(),
+            servers: Vec::new(),
             action,
             enabled: true,
         }

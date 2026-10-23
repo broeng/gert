@@ -4,7 +4,10 @@
 use gpui_kit::Rgba;
 use model::{COMMIT_MSG_PATH, MERGE_LIST_PATH};
 
-use crate::filters::{FileFilter, FilterAction, applies_to, compile, format_hex_color, validate};
+use crate::{
+    filters::{FileFilter, FilterAction, applies_to, compile, format_hex_color, validate},
+    session::ServerKey,
+};
 
 /// The three effects, as the form's choice (the highlight's color and bold
 /// are separate controls).
@@ -53,6 +56,8 @@ pub(crate) struct Form {
     pub globs: String,
     /// One per line.
     pub projects: String,
+    /// The servers the rule is limited to; empty: all of them.
+    pub servers: Vec<ServerKey>,
     pub kind: Kind,
     pub color: Option<Rgba>,
     pub bold: bool,
@@ -69,6 +74,7 @@ impl Form {
             name: rule.name.clone(),
             globs: join_lines(&rule.globs),
             projects: join_lines(&rule.projects),
+            servers: rule.servers.clone(),
             kind: Kind::of(&rule.action),
             color,
             bold,
@@ -90,6 +96,7 @@ impl Form {
             name: self.name.trim().to_owned(),
             globs: split_lines(&self.globs),
             projects: split_lines(&self.projects),
+            servers: self.servers.clone(),
             action,
             enabled: self.enabled,
         }
@@ -116,6 +123,7 @@ pub(crate) fn new_rule(project: Option<&str>) -> FileFilter {
         name: String::new(),
         globs: Vec::new(),
         projects: project.map(str::to_owned).into_iter().collect(),
+        servers: Vec::new(),
         action: FilterAction::Hide,
         enabled: true,
     }
@@ -157,6 +165,8 @@ pub(crate) fn summary(action: &FilterAction) -> String {
 pub(crate) enum Preview {
     /// The rule is scoped to other projects.
     OtherProject,
+    /// The rule is for other servers.
+    OtherServer,
     Matches {
         matched: usize,
         total: usize,
@@ -167,6 +177,7 @@ impl Preview {
     pub(crate) fn text(&self) -> String {
         match self {
             Preview::OtherProject => "This rule does not apply to this change's project".to_owned(),
+            Preview::OtherServer => "This rule does not apply to this change's server".to_owned(),
             Preview::Matches { matched, total } => {
                 let files = if *total == 1 { "file" } else { "files" };
                 format!("Matches {matched} of {total} {files} in this change")
@@ -176,12 +187,21 @@ impl Preview {
 }
 
 /// What `rule` would match among `paths` (the files of a change of
-/// `project`). The commit message and the merge list are not counted.
-pub(crate) fn preview(rule: &FileFilter, project: &str, paths: &[String]) -> Preview {
-    if !applies_to(rule, project) {
+/// `project` on `server`). The commit message and the merge list are not
+/// counted.
+pub(crate) fn preview(
+    rule: &FileFilter,
+    server: &ServerKey,
+    project: &str,
+    paths: &[String],
+) -> Preview {
+    if !rule.servers.is_empty() && !rule.servers.contains(server) {
+        return Preview::OtherServer;
+    }
+    if !applies_to(rule, server, project) {
         return Preview::OtherProject;
     }
-    let matcher = compile(std::slice::from_ref(rule), project, |_| true);
+    let matcher = compile(std::slice::from_ref(rule), server, project, |_| true);
     let files = || {
         paths
             .iter()
@@ -206,6 +226,7 @@ mod tests {
             name: name.into(),
             globs: globs.iter().map(|g| (*g).into()).collect(),
             projects: Vec::new(),
+            servers: Vec::new(),
             action,
             enabled: true,
         }
@@ -223,6 +244,7 @@ mod tests {
     fn a_form_round_trips_through_a_rule() {
         let r = FileFilter {
             projects: vec!["p".into()],
+            servers: vec![ServerKey::new("s")],
             enabled: false,
             ..rule(
                 "Gen",
@@ -323,20 +345,34 @@ mod tests {
             .collect();
         let r = rule("pb", &["*.pb.go"], FilterAction::Hide);
         assert_eq!(
-            preview(&r, "p", &paths),
+            preview(&r, &ServerKey::new("s"), "p", &paths),
             Preview::Matches {
                 matched: 2,
                 total: 3
             }
         );
         assert_eq!(
-            preview(&r, "p", &paths).text(),
+            preview(&r, &ServerKey::new("s"), "p", &paths).text(),
             "Matches 2 of 3 files in this change"
         );
+        let s = ServerKey::new("s");
         let scoped = FileFilter {
             projects: vec!["other".into()],
+            ..r.clone()
+        };
+        assert_eq!(preview(&scoped, &s, "p", &paths), Preview::OtherProject);
+        let elsewhere = FileFilter {
+            servers: vec![ServerKey::new("t")],
+            ..r.clone()
+        };
+        assert_eq!(preview(&elsewhere, &s, "p", &paths), Preview::OtherServer);
+        let here = FileFilter {
+            servers: vec![s.clone(), ServerKey::new("t")],
             ..r
         };
-        assert_eq!(preview(&scoped, "p", &paths), Preview::OtherProject);
+        assert!(matches!(
+            preview(&here, &s, "p", &paths),
+            Preview::Matches { .. }
+        ));
     }
 }

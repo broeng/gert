@@ -258,22 +258,8 @@ impl Backend for AppBackend {
             // The rules the loader ignores stay in the file, after the ones
             // the UI manages; they are still ignored on the next load.
             let ignored = c.ignored_filters();
-            // The UI does not know the `servers` restriction of a rule;
-            // it stays with the rule of the same name.
-            let restriction = |name: &str| {
-                c.filters
-                    .iter()
-                    .find(|f| f.name.trim() == name)
-                    .map(|f| f.servers.clone())
-                    .unwrap_or_default()
-            };
-            let managed: Vec<FilterConfig> = filters
-                .iter()
-                .map(|f| FilterConfig {
-                    servers: restriction(&f.name),
-                    ..FilterConfig::from_filter(f)
-                })
-                .collect();
+            let managed: Vec<FilterConfig> =
+                filters.iter().map(FilterConfig::from_filter).collect();
             c.filters = managed.into_iter().chain(ignored).collect();
         })
         .map_err(|e| BackendError(e.to_string()))?;
@@ -471,6 +457,7 @@ mod tests {
             name: "Gen".into(),
             globs: vec!["*.pb.go".into()],
             projects: Vec::new(),
+            servers: Vec::new(),
             action: FilterAction::Dim,
             enabled: true,
         }];
@@ -504,6 +491,7 @@ mod tests {
             name: "Other".into(),
             globs: vec!["*.lock".into()],
             projects: Vec::new(),
+            servers: Vec::new(),
             action: FilterAction::Hide,
             enabled: true,
         }];
@@ -746,20 +734,37 @@ action = "dim"
     }
 
     #[test]
-    fn saving_filters_keeps_the_servers_restriction_of_a_rule() {
+    fn the_servers_restriction_of_a_rule_is_loaded_and_saved() {
         use ui::filters::FilterAction;
         let b = two_servers("filter-servers");
-        let new = [FileFilter {
-            name: "Gen".into(),
-            globs: vec!["*.lock".into()],
-            projects: Vec::new(),
-            action: FilterAction::Hide,
-            enabled: true,
-        }];
+        // The rule of the file reaches the UI with its servers.
+        let loaded = Config::load(&b.config_file)
+            .unwrap()
+            .unwrap()
+            .file_filters();
+        assert_eq!(loaded[0].servers, [ServerKey::new("oss")]);
+        // What the UI saves is what is written, restriction included: a
+        // rule the UI made without servers has none afterwards.
+        let new = [
+            FileFilter {
+                servers: vec![ServerKey::new("work"), ServerKey::new("oss")],
+                ..loaded[0].clone()
+            },
+            FileFilter {
+                name: "Lock".into(),
+                globs: vec!["*.lock".into()],
+                projects: Vec::new(),
+                servers: Vec::new(),
+                action: FilterAction::Hide,
+                enabled: true,
+            },
+        ];
         assert_eq!(b.save_filters(&new).unwrap(), new);
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
-        assert_eq!(cfg.filters[0].servers, vec!["oss".to_owned()]);
-        assert_eq!(cfg.filters[0].globs, vec!["*.lock".to_owned()]);
+        assert_eq!(cfg.filters[0].servers, ["work", "oss"]);
+        assert!(cfg.filters[1].servers.is_empty());
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert_eq!(text.matches("servers = ").count(), 1, "{text}");
         let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
     }
 
