@@ -7,7 +7,9 @@ use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
@@ -768,9 +770,10 @@ impl ChangeListPage {
             })
     }
 
-    /// The dashboard's bookmark buttons.
+    /// The bookmark buttons, on the dashboard and on search results; the one
+    /// whose query is being shown is highlighted.
     fn render_bookmarks(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if self.kind != ListKind::Dashboard || self.bookmarks.is_empty() {
+        if self.bookmarks.is_empty() {
             return None;
         }
         Some(
@@ -783,9 +786,11 @@ impl ChangeListPage {
                 .border_color(cx.theme().border)
                 .children(self.bookmarks.iter().enumerate().map(|(i, b)| {
                     let query = b.query.clone();
+                    let current = self.search_query() == Some(b.query.as_str());
                     Button::new(("bookmark", i))
                         .label(b.name.clone())
                         .small()
+                        .selected(current)
                         .on_click(
                             cx.listener(move |_, _, _, cx| {
                                 cx.emit(ListEvent::Search(query.clone()))
