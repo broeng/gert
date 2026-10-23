@@ -659,6 +659,16 @@ mod settings_page {
         start_page: StartupPage,
         filters: Vec<FileFilter>,
     ) -> Fixture {
+        fixture_full(cx, fail, start_page, filters, Vec::new())
+    }
+
+    fn fixture_full(
+        cx: &mut TestAppContext,
+        fail: bool,
+        start_page: StartupPage,
+        filters: Vec<FileFilter>,
+        bookmarks: Vec<crate::session::SavedQuery>,
+    ) -> Fixture {
         let backend = Arc::new(FakeBackend {
             fail,
             ..Default::default()
@@ -671,7 +681,7 @@ mod settings_page {
             )
         };
         let startup = Startup {
-            bookmarks: Vec::new(),
+            bookmarks,
             env,
             server: Some(setup()),
             queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
@@ -808,6 +818,65 @@ mod settings_page {
         assert_eq!(f.backend.saved_queries.lock().unwrap().len(), 3);
     }
 
+    fn bookmark_names(cx: &mut TestAppContext, f: &Fixture) -> Vec<String> {
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            let page = page.read(cx);
+            page.bookmarks_for_test()
+                .iter()
+                .map(|q| q.name.clone())
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn bookmarks_are_added_edited_moved_and_deleted_below_the_queries(cx: &mut TestAppContext) {
+        let f = fixture_full(cx, false, StartupPage::Dashboard, Vec::new(), Vec::new());
+        open_settings(cx, &f);
+        // Two queries, then the empty bookmarks row.
+        press(cx, &f, "j");
+        press(cx, &f, "j");
+        assert_eq!(page_state(cx, &f).0, 2);
+        let (name, query) = inputs(cx, &f);
+        press(cx, &f, "a");
+        type_into(cx, &f, &name, "First");
+        type_into(cx, &f, &query, "is:open");
+        press(cx, &f, "enter");
+        press(cx, &f, "a");
+        type_into(cx, &f, &name, "Second");
+        type_into(cx, &f, &query, "is:wip");
+        press(cx, &f, "enter");
+        assert_eq!(bookmark_names(cx, &f), ["First", "Second"]);
+        assert_eq!(names(cx, &f), ["Open", "Mine"]);
+        // The cursor stays on the bookmark it added.
+        assert_eq!(page_state(cx, &f).0, 3);
+
+        press(cx, &f, "shift-k");
+        assert_eq!(bookmark_names(cx, &f), ["Second", "First"]);
+        assert_eq!(page_state(cx, &f).0, 2);
+        // The first bookmark cannot move into the queries.
+        press(cx, &f, "shift-k");
+        assert_eq!(bookmark_names(cx, &f), ["Second", "First"]);
+
+        press(cx, &f, "e");
+        type_into(cx, &f, &name, "Renamed");
+        press(cx, &f, "enter");
+        assert_eq!(bookmark_names(cx, &f), ["Renamed", "First"]);
+
+        press(cx, &f, "d");
+        press(cx, &f, "y");
+        assert_eq!(bookmark_names(cx, &f), ["First"]);
+        let saved = f.backend.saved_bookmarks.lock().unwrap().clone();
+        assert_eq!(saved.len(), 5);
+        assert!(f.backend.saved_queries.lock().unwrap().is_empty());
+        // The shell, and so the dashboard's row, follows.
+        press(cx, &f, "u");
+        cx.update(|cx| {
+            let list = f.shell.read(cx).list_page_for_test().expect("dashboard");
+            assert_eq!(list.read(cx).bookmarks_for_test(), ["First"]);
+        });
+    }
+
     #[gpui_kit::test]
     fn a_failed_save_changes_nothing_and_says_so(cx: &mut TestAppContext) {
         let f = fixture(cx, true);
@@ -836,8 +905,8 @@ mod settings_page {
         let f = fixture(cx, false);
         open_settings(cx, &f);
         assert!(advance_on(cx, &f));
-        // Two query rows, the startup row, then the advance row.
-        for _ in 0..3 {
+        // Two query rows, the empty bookmarks row, the startup row, then the advance row.
+        for _ in 0..4 {
             press(cx, &f, "j");
         }
         press(cx, &f, "space");
@@ -852,7 +921,7 @@ mod settings_page {
     fn a_failed_advance_save_keeps_the_old_value(cx: &mut TestAppContext) {
         let f = fixture(cx, true);
         open_settings(cx, &f);
-        for _ in 0..3 {
+        for _ in 0..4 {
             press(cx, &f, "j");
         }
         press(cx, &f, "space");
@@ -876,8 +945,8 @@ mod settings_page {
             })
         };
         assert_eq!(applied(cx).0, ThemeName::Cwc);
-        // Two query rows, the startup and advance rows, then the theme row.
-        for _ in 0..4 {
+        // Two query rows, the empty bookmarks row, the startup and advance rows, then the theme row.
+        for _ in 0..5 {
             press(cx, &f, "j");
         }
         press(cx, &f, "space");
@@ -903,9 +972,10 @@ mod settings_page {
             cx.update(|cx| gpui_kit::component::ActiveTheme::theme(cx).is_dark())
         };
         assert_eq!(cx.update(|cx| color_modes(cx)), ColorModes::default());
-        // Two query rows, the startup, advance and theme rows, then the UI
+        // Two query rows, the empty bookmarks row, the startup, advance and theme
+        // rows, then the UI
         // mode row: system, light, dark.
-        for _ in 0..5 {
+        for _ in 0..6 {
             press(cx, &f, "j");
         }
         press(cx, &f, "space");
@@ -930,7 +1000,7 @@ mod settings_page {
     fn a_failed_theme_save_keeps_the_theme(cx: &mut TestAppContext) {
         let f = fixture(cx, true);
         open_settings(cx, &f);
-        for _ in 0..4 {
+        for _ in 0..5 {
             press(cx, &f, "j");
         }
         press(cx, &f, "space");
@@ -946,7 +1016,7 @@ mod settings_page {
     fn a_startup_query_needs_text_and_is_saved(cx: &mut TestAppContext) {
         let f = fixture(cx, false);
         open_settings(cx, &f);
-        for _ in 0..2 {
+        for _ in 0..3 {
             press(cx, &f, "j");
         }
         // Space on "dashboard" starts typing the query; empty is refused.
@@ -1043,9 +1113,10 @@ mod settings_page {
         })
     }
 
-    /// Cursor on the first filter row: 2 queries, startup, advance, theme, two modes.
+    /// Cursor on the first filter row: 2 queries, the empty bookmarks row,
+    /// startup, advance, theme, two modes.
     fn to_filters(cx: &mut TestAppContext, f: &Fixture) {
-        for _ in 0..7 {
+        for _ in 0..8 {
             press(cx, f, "j");
         }
     }
@@ -1056,13 +1127,13 @@ mod settings_page {
         open_settings(cx, &f);
         assert_eq!(page_state(cx, &f).1, ["gen", "lock"]);
         to_filters(cx, &f);
-        assert_eq!(page_state(cx, &f).0, 7);
+        assert_eq!(page_state(cx, &f).0, 8);
         press(cx, &f, "j");
         press(cx, &f, "j");
         // The last rule is the last row.
-        assert_eq!(page_state(cx, &f).0, 8);
+        assert_eq!(page_state(cx, &f).0, 9);
         press(cx, &f, "k");
-        assert_eq!(page_state(cx, &f).0, 7);
+        assert_eq!(page_state(cx, &f).0, 8);
     }
 
     #[gpui_kit::test]
@@ -1077,7 +1148,7 @@ mod settings_page {
         assert_eq!(dialog_state(cx, &f), None);
         // Focus is back on the page: the cursor still works.
         press(cx, &f, "k");
-        assert_eq!(page_state(cx, &f).0, 7);
+        assert_eq!(page_state(cx, &f).0, 8);
         press(cx, &f, "d");
         // Deleting is the dialog's business, with its confirmation.
         assert_eq!(dialog_state(cx, &f), Some((0, "browsing")));
@@ -1110,7 +1181,7 @@ mod settings_page {
         open_settings(cx, &f);
         to_filters(cx, &f);
         press(cx, &f, "j");
-        assert_eq!(page_state(cx, &f), (7, Vec::new()));
+        assert_eq!(page_state(cx, &f), (8, Vec::new()));
         press(cx, &f, "enter");
         assert_eq!(dialog_state(cx, &f), Some((0, "adding")));
     }
@@ -1135,7 +1206,7 @@ mod settings_page {
             })
         });
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (7, vec!["lock".into(), "gen".into()]));
+        assert_eq!(page_state(cx, &f), (8, vec!["lock".into(), "gen".into()]));
         // Removing the rule under the cursor clamps it.
         cx.update(|cx| {
             filters.update(cx, |ff, cx| {
@@ -1143,10 +1214,10 @@ mod settings_page {
             })
         });
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (7, vec!["gen".into()]));
+        assert_eq!(page_state(cx, &f), (8, vec!["gen".into()]));
         cx.update(|cx| filters.update(cx, |ff, cx| ff.set_rules(Vec::new(), cx)));
         cx.run_until_parked();
-        assert_eq!(page_state(cx, &f), (7, Vec::new()));
+        assert_eq!(page_state(cx, &f), (8, Vec::new()));
     }
 }
 
