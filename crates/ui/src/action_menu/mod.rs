@@ -65,6 +65,7 @@ use tags::Tags;
 
 use crate::{
     reply::{Look, chip},
+    servers::ServerBadge,
     session::{Session, is_unauthorized},
 };
 use actions::*;
@@ -404,6 +405,8 @@ pub struct ActionDialog {
     pending_focus: Option<FocusHandle>,
     task: Option<Task<()>>,
     _subs: Vec<Subscription>,
+    /// The server this writes to, named when there are several.
+    server_badge: Option<ServerBadge>,
 }
 
 impl EventEmitter<ActionEvent> for ActionDialog {}
@@ -415,6 +418,19 @@ impl Focusable for ActionDialog {
 }
 
 impl ActionDialog {
+    /// Names the server the action runs on in the dialog (several servers only).
+    pub fn set_server_badge(&mut self, badge: Option<ServerBadge>, cx: &mut Context<Self>) {
+        if self.server_badge != badge {
+            self.server_badge = badge;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_badge_for_test(&self) -> Option<&ServerBadge> {
+        self.server_badge.as_ref()
+    }
+
     /// Opens the menu for `detail` with the focus in the dialog.
     pub fn new(
         session: Session,
@@ -535,6 +551,7 @@ impl ActionDialog {
             confirm_focus: cx.focus_handle(),
             pending_focus: None,
             task: None,
+            server_badge: None,
             _subs: subs,
         };
         window.focus(&this.focus, cx);
@@ -1484,7 +1501,21 @@ impl Render for ActionDialog {
                             .px_4()
                             .pt_3()
                             .pb_1()
-                            .child(div().text_base().font_semibold().child(title))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().text_base().font_semibold().child(title))
+                                    .children(self.server_badge.as_ref().map(|b| {
+                                        h_flex()
+                                            .gap_1()
+                                            .items_center()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child("on")
+                                            .child(b.pill(cx))
+                                    })),
+                            )
                             .child(
                                 div()
                                     .text_xs()
