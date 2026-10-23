@@ -325,12 +325,18 @@ impl Shell {
             }
             return self.show(window, cx);
         }
-        self.nav.reset(match &self.start_page {
-            StartupPage::Dashboard => Route::Dashboard,
-            StartupPage::Search(q) => Route::Search(q.clone()),
-        });
+        self.nav.reset_for(Some(active), self.start_route());
         self.show(window, cx);
         self.load_diff_preferences(cx);
+    }
+
+    /// The page a server opens on when it is shown for the first time (the
+    /// `[startup]` setting).
+    fn start_route(&self) -> Route {
+        match &self.start_page {
+            StartupPage::Dashboard => Route::Dashboard,
+            StartupPage::Search(q) => Route::Search(q.clone()),
+        }
     }
 
     /// Gives server `key` a session that reads the cache, and starts
@@ -437,13 +443,11 @@ impl Shell {
         }
     }
 
-    /// A refresh worked, so the active server is reachable: upload the
+    /// A refresh of server `key` worked, so it is reachable: upload its
     /// drafts that waited.
-    fn server_reachable(&mut self, cx: &mut Context<Self>) {
-        if let Some(key) = self.servers.active_key().cloned() {
-            self.servers.set_connection(&key, Connection::Online);
-        }
-        if let Some(outbox) = self.active_outbox().cloned() {
+    fn server_reachable(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        self.servers.set_connection(key, Connection::Online);
+        if let Some(outbox) = self.servers.get(key).and_then(|e| e.outbox.clone()) {
             outbox.update(cx, |o, cx| o.retry_all(cx));
         }
     }
@@ -456,16 +460,16 @@ impl Shell {
         }
     }
 
-    /// Reads the cached diff preferences of the signed-in user right away,
-    /// then refreshes them from the server in the background (a session
-    /// without credentials yet reads the cache only). Anonymous sessions
-    /// have none, so only the local settings apply.
+    /// Reads the cached diff preferences of the signed-in user of the
+    /// active server right away, then refreshes them from the server in the
+    /// background (a session without credentials yet reads the cache only).
+    /// Anonymous sessions have none, so only the local settings apply.
     fn load_diff_preferences(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session().cloned() else {
             return;
         };
-        let settings = self.settings.clone();
-        self.prefs_task = Some(cx.spawn(async move |_, cx| {
+        let key = session.key.clone();
+        self.prefs_task = Some(cx.spawn(async move |this, cx| {
             let syncer = session.syncer().clone();
             let cached = {
                 let syncer = syncer.clone();
@@ -474,7 +478,10 @@ impl Shell {
             };
             match cached {
                 Ok(c) => {
-                    settings.update(cx, |s, cx| s.set_server(c.map(|c| c.preferences), cx));
+                    this.update(cx, |this, cx| {
+                        this.set_server_prefs(&key, c.map(|c| c.preferences), cx)
+                    })
+                    .ok();
                 }
                 Err(e) => log::warn!("reading cached diff preferences: {e}"),
             }
@@ -486,12 +493,33 @@ impl Shell {
                 .await
             {
                 Ok(Some(prefs)) => {
-                    settings.update(cx, |s, cx| s.set_server(Some(prefs), cx));
+                    this.update(cx, |this, cx| {
+                        this.set_server_prefs(&session.key, Some(prefs), cx)
+                    })
+                    .ok();
                 }
                 Ok(None) => {}
                 Err(e) => log::warn!("refreshing diff preferences: {e}"),
             }
         }));
+    }
+
+    /// The diff preferences of server `key` arrived. They are remembered
+    /// with the server, and shown by the shared settings if it is the
+    /// active one (a late answer for a server we switched away from must
+    /// not change what the pages of the new one use).
+    fn set_server_prefs(
+        &mut self,
+        key: &ServerKey,
+        prefs: Option<model::DiffPreferences>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(entry) = self.servers.get_mut(key) {
+            entry.diff_prefs = prefs.clone();
+        }
+        if self.servers.active_key() == Some(key) {
+            self.settings.update(cx, |s, cx| s.set_server(prefs, cx));
+        }
     }
 
     /// The password of server `key` could not be had. The active server
@@ -523,8 +551,28 @@ impl Shell {
     ) {
         self.install_session(&setup.key, None, window, cx);
         self.prefill = Some(prefill_from(setup, notice));
-        self.nav.reset(Route::Login);
+        self.nav.reset_for(Some(setup.key.clone()), Route::Login);
         self.show(window, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_for_test(&self) -> Option<&ServerKey> {
+        self.servers.active_key()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn navigate_for_test(
+        &mut self,
+        route: Route,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate(route, window, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn back_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_back(&GoBack, window, cx);
     }
 
     #[cfg(test)]
@@ -614,6 +662,7 @@ impl Shell {
 
     /// Builds the page for the current route and focuses it.
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.adopt_nav_server(cx);
         self.page_subs.clear();
         self.drop_reply(cx);
         self.drop_menu();
@@ -671,6 +720,85 @@ impl Shell {
         cx.notify();
     }
 
+    /// Makes the server of the page the history is on the active one. Back,
+    /// forward, up and the jump actions all end in `show`, so the server
+    /// follows the page whichever way we got there.
+    fn adopt_nav_server(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.nav.current_server().cloned() else {
+            return;
+        };
+        if self.servers.set_active(&key) != Some(true) {
+            return;
+        }
+        self.persist_active(cx);
+        // The preferences of the server we left must not linger.
+        let prefs = self.servers.get(&key).and_then(|e| e.diff_prefs.clone());
+        self.settings.update(cx, |s, cx| s.set_server(prefs, cx));
+        self.load_diff_preferences(cx);
+        let setup = self
+            .servers
+            .get(&key)
+            .filter(|e| e.session.is_none())
+            .map(|e| e.setup.clone());
+        if let Some(setup) = setup {
+            self.prefill = Some(prefill_from(
+                &setup,
+                "The saved credentials of this server are not available. Please log in again."
+                    .into(),
+            ));
+        }
+    }
+
+    /// Shows server `key`: its own last page, or its start page on the
+    /// first visit in this session. The page we leave stays behind in the
+    /// one shared history, so Back returns to it (and to its server).
+    /// Does nothing for an unknown server or the active one.
+    pub(crate) fn switch_to(
+        &mut self,
+        key: &ServerKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.servers.get(key).is_none() || self.servers.active_key() == Some(key) {
+            return;
+        }
+        self.remember_selection(cx);
+        let start = self.start_route();
+        self.nav.visit(key, start);
+        self.show(window, cx);
+    }
+
+    /// Opens `route` on server `key`, switching to it if it is not the
+    /// active one. (`navigate` stays on the active server.)
+    // Used by the link handling (S3) and the tests for now.
+    #[allow(dead_code)]
+    pub(crate) fn go_to(
+        &mut self,
+        key: &ServerKey,
+        route: Route,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.servers.get(key).is_none() {
+            return;
+        }
+        self.remember_selection(cx);
+        self.nav.push_to(Some(key.clone()), route);
+        self.show(window, cx);
+    }
+
+    /// `ctrl-1` .. `ctrl-9`: the nth server in config order.
+    fn switch_server(
+        &mut self,
+        action: &SwitchServer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(key) = self.servers.keys().get(action.position).cloned() {
+            self.switch_to(&key, window, cx);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn list_page(
         &mut self,
@@ -682,21 +810,22 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Page {
+        let owner = session.key.clone();
         let page = cx.new(|cx| ChangeListPage::new(session, kind, specs, restore, active, cx));
         let bookmarks = self.bookmarks();
         page.update(cx, |p, cx| p.set_bookmarks(bookmarks, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
-            |this, page, ev: &ListEvent, window, cx| match ev {
+            move |this, page, ev: &ListEvent, window, cx| match ev {
                 ListEvent::Open(n) => {
                     this.nav.set_selected(page.read(cx).selected_number());
                     this.navigate(Route::Change(*n), window, cx);
                 }
                 ListEvent::Search(q) => this.search(q.clone(), window, cx),
                 ListEvent::SaveBookmarks(list) => this.save_bookmarks(list.clone(), cx),
-                ListEvent::Unauthorized => this.unauthorized(window, cx),
-                ListEvent::Refreshed => this.server_reachable(cx),
+                ListEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
+                ListEvent::Refreshed => this.server_reachable(&owner, cx),
             },
         ));
         Page::List(page)
@@ -758,6 +887,7 @@ impl Shell {
         let filters = self.filters.clone();
         let syntax = self.syntax_cache(cx);
         let outbox = self.outbox_for(&session, cx);
+        let owner = session.key.clone();
         let page = cx.new(|cx| {
             ChangePage::new(
                 session, settings, layout, filters, syntax, number, view, active, outbox, cx,
@@ -766,9 +896,9 @@ impl Shell {
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
-            |this, _, ev: &ChangeEvent, window, cx| match ev {
-                ChangeEvent::Unauthorized => this.unauthorized(window, cx),
-                ChangeEvent::Refreshed => this.server_reachable(cx),
+            move |this, _, ev: &ChangeEvent, window, cx| match ev {
+                ChangeEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
+                ChangeEvent::Refreshed => this.server_reachable(&owner, cx),
                 ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 ChangeEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 ChangeEvent::ManageFilters { project } => {
@@ -818,13 +948,14 @@ impl Shell {
         let outbox = self.outbox_for(&session, cx);
         let filters = self.filters.clone();
         let syntax = self.syntax_cache(cx);
+        let owner = session.key.clone();
         let page =
             cx.new(|cx| DiffPage::new(session, settings, filters, syntax, route, outbox, cx));
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
-            |this, _, ev: &DiffPageEvent, window, cx| match ev {
-                DiffPageEvent::Unauthorized => this.unauthorized(window, cx),
+            move |this, _, ev: &DiffPageEvent, window, cx| match ev {
+                DiffPageEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
                 DiffPageEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 DiffPageEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 // Like PolyGerrit, stepping through files does not stack
@@ -930,7 +1061,7 @@ impl Shell {
                 if self.servers.set_active(&key) == Some(true) {
                     self.persist_active(cx);
                 }
-                self.nav.reset(Route::Dashboard);
+                self.nav.reset_for(Some(key), Route::Dashboard);
                 self.show(window, cx);
                 self.load_diff_preferences(cx);
             }
@@ -938,14 +1069,6 @@ impl Shell {
                 self.prefill = Some(prefill_from(&setup, e.to_string()));
                 self.show(window, cx);
             }
-        }
-    }
-
-    /// The active server refused our credentials: back to the login page,
-    /// with the server filled in.
-    fn unauthorized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(key) = self.servers.active_key().cloned() {
-            self.unauthorized_for(&key, window, cx);
         }
     }
 
@@ -975,7 +1098,7 @@ impl Shell {
             }
         }
         if active {
-            self.nav.reset(Route::Login);
+            self.nav.reset_for(Some(key.clone()), Route::Login);
             self.show(window, cx);
         }
     }
@@ -992,13 +1115,14 @@ impl Shell {
         if self.reply.is_some() || self.menu.is_some() || self.filters_dialog.is_some() {
             return;
         }
+        let owner = session.key.clone();
         let dialog = cx.new(|cx| ReplyDialog::new(session, outbox, detail, window, cx));
         self.reply_subs.push(cx.subscribe_in(
             &dialog,
             window,
-            |this, _, ev: &ReplyEvent, window, cx| match ev {
+            move |this, _, ev: &ReplyEvent, window, cx| match ev {
                 ReplyEvent::Close => this.close_reply(window, cx),
-                ReplyEvent::Unauthorized => this.unauthorized(window, cx),
+                ReplyEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
                 ReplyEvent::Sent(sent) => this.reply_sent(sent, window, cx),
             },
         ));
@@ -1044,13 +1168,14 @@ impl Shell {
         if self.menu.is_some() || self.reply.is_some() || self.filters_dialog.is_some() {
             return;
         }
+        let owner = session.key.clone();
         let dialog = cx.new(|cx| ActionDialog::new(session, detail, window, cx));
         self.menu_subs.push(cx.subscribe_in(
             &dialog,
             window,
-            |this, _, ev: &ActionEvent, window, cx| match ev {
+            move |this, _, ev: &ActionEvent, window, cx| match ev {
                 ActionEvent::Close => this.close_menu(window, cx),
-                ActionEvent::Unauthorized => this.unauthorized(window, cx),
+                ActionEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
                 ActionEvent::Done(done) => this.action_done(done, window, cx),
                 ActionEvent::Refreshed(detail) => match &this.page {
                     Page::Change(p) => p.update(cx, |p, cx| p.detail_refreshed(detail, cx)),
@@ -1629,6 +1754,7 @@ impl Render for Shell {
                     .on_action(cx.listener(Self::go_forward))
                     .on_action(cx.listener(Self::go_up))
                     .on_action(cx.listener(Self::open_settings))
+                    .on_action(cx.listener(Self::switch_server))
                     .on_action(cx.listener(Self::focus_search))
                     .on_action(cx.listener(Self::open_goto))
                     .on_action(cx.listener(Self::toggle_help))

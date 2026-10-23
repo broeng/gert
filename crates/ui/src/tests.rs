@@ -441,6 +441,7 @@ mod drafts {
     use super::{env_with, open, seeded, setup, spec};
     use crate::{
         filters::FileFilter,
+        nav::Route,
         outbox::DraftOutbox,
         pages::list::ListEvent,
         session::{Backend, BackendError, SavedQuery, Startup, StartupPage},
@@ -691,6 +692,22 @@ mod drafts {
         active: Option<&str>,
         http: &RouteHttpClient,
     ) -> (Entity<Shell>, std::sync::Arc<std::sync::Mutex<Store>>) {
+        let (_, shell, shared) = start_two_in(cx, store, ids, active, http);
+        (shell, shared)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn start_two_in(
+        cx: &mut TestAppContext,
+        store: Store,
+        ids: [store::ServerId; 2],
+        active: Option<&str>,
+        http: &RouteHttpClient,
+    ) -> (
+        gpui_kit::AnyWindowHandle,
+        Entity<Shell>,
+        std::sync::Arc<std::sync::Mutex<Store>>,
+    ) {
         let mut env = env_with(store, http);
         env.backend = std::sync::Arc::new(Keyring);
         let shared = env.store.clone();
@@ -711,11 +728,30 @@ mod drafts {
             servers: vec![server("a", A, ids[0]), server("b", B, ids[1])],
             active: active.map(crate::ServerKey::new),
         };
-        let (_window, shell) = open(cx, |window, cx| {
+        let (window, shell) = open(cx, |window, cx| {
             cx.new(|cx| Shell::new(startup, window, cx))
         });
         cx.run_until_parked();
-        (shell, shared)
+        (window, shell, shared)
+    }
+
+    fn key(k: &str) -> crate::ServerKey {
+        crate::ServerKey::new(k)
+    }
+
+    /// Where the shell is: the active server and the route.
+    fn place(cx: &mut TestAppContext, shell: &Entity<Shell>) -> (String, Route) {
+        cx.update(|cx| {
+            let s = shell.read(cx);
+            (
+                s.active_for_test().expect("active").to_string(),
+                s.route().clone(),
+            )
+        })
+    }
+
+    fn at(server: &str, route: Route) -> (String, Route) {
+        (server.to_owned(), route)
     }
 
     fn counts_of(cx: &mut TestAppContext, shell: &Entity<Shell>, key: &str) -> (usize, usize) {
@@ -815,6 +851,152 @@ mod drafts {
             assert!(b.update(cx, |c, _| c.get(&key)).is_none());
             assert!(matches!(a.update(cx, |c, _| c.get(&key)), Some(None)));
         });
+    }
+
+    #[gpui_kit::test]
+    fn back_and_switching_cross_servers_and_land_on_the_last_page(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestWindowExt as _;
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, false);
+        let (window, shell, shared) = start_two_in(cx, store, ids, Some("a"), &http);
+        let c7 = || Route::Change(ChangeNumber(7));
+        let run = |cx: &mut TestAppContext, f: &dyn Fn(&mut Shell, &mut gpui_kit::Window, &mut gpui_kit::Context<Shell>)| {
+            cx.update_window(window, |_, window, cx| {
+                shell.update(cx, |s, cx| f(s, window, cx))
+            })
+            .expect("update");
+            cx.run_until_parked();
+        };
+        assert_eq!(place(cx, &shell), at("a", Route::Dashboard));
+
+        run(cx, &|s, w, cx| s.navigate_for_test(c7(), w, cx));
+        assert_eq!(place(cx, &shell), at("a", c7()));
+
+        // First visit of b: its start page, not a's change.
+        run(cx, &|s, w, cx| s.switch_to(&key("b"), w, cx));
+        assert_eq!(place(cx, &shell), at("b", Route::Dashboard));
+        // Change numbers collide; b's 7 is another change.
+        run(cx, &|s, w, cx| s.navigate_for_test(c7(), w, cx));
+        assert_eq!(place(cx, &shell), at("b", c7()));
+        assert!(
+            cx.update(|cx| shell.read(cx).change_page_for_test())
+                .is_some()
+        );
+
+        // Back crosses servers: b's dashboard, then a's change 7.
+        run(cx, &|s, w, cx| s.back_for_test(w, cx));
+        assert_eq!(place(cx, &shell), at("b", Route::Dashboard));
+        run(cx, &|s, w, cx| s.back_for_test(w, cx));
+        assert_eq!(place(cx, &shell), at("a", c7()));
+
+        // Switching lands on the server's last page, and is remembered.
+        run(cx, &|s, w, cx| s.switch_to(&key("b"), w, cx));
+        assert_eq!(place(cx, &shell), at("b", c7()));
+        assert_eq!(
+            shared
+                .lock()
+                .expect("lock")
+                .app_state(crate::ACTIVE_SERVER_STATE)
+                .expect("state")
+                .as_deref(),
+            Some("b")
+        );
+        run(cx, &|s, w, cx| s.switch_to(&key("a"), w, cx));
+        assert_eq!(place(cx, &shell), at("a", c7()));
+        // An unknown server and the active one change nothing.
+        run(cx, &|s, w, cx| s.switch_to(&key("nope"), w, cx));
+        run(cx, &|s, w, cx| s.switch_to(&key("a"), w, cx));
+        assert_eq!(place(cx, &shell), at("a", c7()));
+
+        // Ctrl-2 and Ctrl-1 jump by config order; Ctrl-3 has no server.
+        cx.update_window(window, |_, window, cx| window.press("ctrl-2", cx))
+            .expect("press");
+        assert_eq!(place(cx, &shell), at("b", c7()));
+        cx.update_window(window, |_, window, cx| window.press("ctrl-3", cx))
+            .expect("press");
+        assert_eq!(place(cx, &shell), at("b", c7()));
+        cx.update_window(window, |_, window, cx| window.press("ctrl-1", cx))
+            .expect("press");
+        assert_eq!(place(cx, &shell), at("a", c7()));
+    }
+
+    #[gpui_kit::test]
+    fn diff_preferences_follow_the_active_server(cx: &mut TestAppContext) {
+        use model::DiffPreferences;
+        let http = RouteHttpClient::new();
+        let (mut store, ids) = two_server_store(false, false);
+        let now = "2024-06-15T10:05:00Z".parse().expect("ts");
+        for (id, tab) in ids.into_iter().zip([4, 8]) {
+            store
+                .save_diff_preferences(
+                    id,
+                    &DiffPreferences {
+                        tab_size: Some(tab),
+                        ..Default::default()
+                    },
+                    now,
+                )
+                .expect("prefs");
+        }
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        let tab = |cx: &mut TestAppContext| {
+            cx.update(|cx| shell.read(cx).settings().read(cx).resolved().tab_size)
+        };
+        assert_eq!(tab(cx), 4);
+        let switch = |cx: &mut TestAppContext, to: &'static str| {
+            cx.update_window(window, |_, window, cx| {
+                shell.update(cx, |s, cx| s.switch_to(&key(to), window, cx))
+            })
+            .expect("update");
+            cx.run_until_parked();
+        };
+        switch(cx, "b");
+        assert_eq!(tab(cx), 8);
+        switch(cx, "a");
+        assert_eq!(tab(cx), 4);
+        // Going back in the history changes the server too.
+        switch(cx, "b");
+        cx.update_window(window, |_, window, cx| {
+            shell.update(cx, |s, cx| s.back_for_test(window, cx))
+        })
+        .expect("update");
+        cx.run_until_parked();
+        assert_eq!(tab(cx), 4);
+    }
+
+    #[gpui_kit::test]
+    fn the_shown_pages_use_their_own_servers_outbox_and_requests(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        http.route("/revisions/sha1/drafts", 503, "down");
+        // Both servers have a draft on change 7 that cannot go up yet.
+        let (store, ids) = two_server_store(true, true);
+        let (window, shell, _) = start_two_in(cx, store, ids, Some("a"), &http);
+        assert_eq!(counts_of(cx, &shell, "a"), (1, 0));
+        assert_eq!(counts_of(cx, &shell, "b"), (1, 0));
+
+        cx.update_window(window, |_, window, cx| {
+            shell.update(cx, |s, cx| s.switch_to(&key("b"), window, cx))
+        })
+        .expect("update");
+        cx.run_until_parked();
+        // The indicator follows the active server.
+        cx.update(|cx| {
+            let b = shell.read(cx).outbox_of_for_test(&key("b")).expect("b");
+            assert_eq!(shell.read(cx).outbox_for_test(), Some(b));
+        });
+        let before = http.requested().len();
+        http.route("/revisions/sha1/drafts", 201, RECEIPT);
+        cx.update(|cx| shell.update(cx, |s, cx| s.retry_drafts_for_test(cx)));
+        cx.run_until_parked();
+        let uploads: Vec<String> = http.requested()[before..]
+            .iter()
+            .filter(|r| r.contains("/revisions/sha1/drafts"))
+            .cloned()
+            .collect();
+        assert_eq!(uploads.len(), 1, "{uploads:?}");
+        assert!(uploads[0].contains("/gb/"), "{uploads:?}");
+        assert_eq!(counts_of(cx, &shell, "b"), (0, 0));
+        assert_eq!(counts_of(cx, &shell, "a"), (1, 0));
     }
 
     #[gpui_kit::test]

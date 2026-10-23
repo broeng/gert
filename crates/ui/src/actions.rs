@@ -129,6 +129,14 @@ pub struct ToggleFilter {
     pub position: usize,
 }
 
+/// `ctrl-1` .. `ctrl-9`: show the server at `position` (0 is the first in
+/// the config).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = ui, no_json)]
+pub struct SwitchServer {
+    pub position: usize,
+}
+
 /// Key context of the root view.
 pub const SHELL: &str = "Shell";
 /// Key context of the dashboard and search result pages.
@@ -729,6 +737,51 @@ pub fn global_entries() -> Vec<Entry> {
             },
             KeyBinding::new("secondary-,", OpenSettings, Some(SETTINGS_OPEN)),
             "Open the settings",
+        ),
+        e(
+            "Ctrl-1 to Ctrl-9",
+            KeyBinding::new("ctrl-1", SwitchServer { position: 0 }, Some(SETTINGS_OPEN)),
+            "Show the 1st to 9th configured server (its last page; nothing with fewer servers)",
+        ),
+        e(
+            "",
+            KeyBinding::new("ctrl-2", SwitchServer { position: 1 }, Some(SETTINGS_OPEN)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("ctrl-3", SwitchServer { position: 2 }, Some(SETTINGS_OPEN)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("ctrl-4", SwitchServer { position: 3 }, Some(SETTINGS_OPEN)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("ctrl-5", SwitchServer { position: 4 }, Some(SETTINGS_OPEN)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("ctrl-6", SwitchServer { position: 5 }, Some(SETTINGS_OPEN)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("ctrl-7", SwitchServer { position: 6 }, Some(SETTINGS_OPEN)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("ctrl-8", SwitchServer { position: 7 }, Some(SETTINGS_OPEN)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("ctrl-9", SwitchServer { position: 8 }, Some(SETTINGS_OPEN)),
+            "",
         ),
         e(
             "u",
