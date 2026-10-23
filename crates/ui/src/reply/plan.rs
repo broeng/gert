@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use model::{
     Account, AccountId, AttentionSetInput, ChangeDetail, ChangeNumber, ChangeStatus, Draft,
-    DraftHandling, DraftSync, Entry, LocalDraftId, PATCHSET_LEVEL_PATH, PatchSetNumber,
-    RelatedChange, ReviewInput, Thread,
+    DraftSync, Entry, LocalDraftId, PATCHSET_LEVEL_PATH, PatchSetNumber, RelatedChange,
+    ReviewInput, Thread,
 };
 
 use crate::pages::change::threads::location_text;
@@ -145,9 +145,9 @@ impl QuickButton {
 /// anonymous sessions (`me` is `None`) and for closed changes. A label whose
 /// highest permitted value is not positive (a veto-only label) has no
 /// button: a quick vote is for approving. Except that while the user has
-/// `drafts` to publish, Code-Review is cast at its lowest permitted value
-/// instead: comments on a change say it is not ready yet.
-pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>, drafts: bool) -> Vec<QuickButton> {
+/// `objections` (see [`drafts_object`]), Code-Review is cast at its lowest
+/// permitted value instead: comments on a change say it is not ready yet.
+pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>, objections: bool) -> Vec<QuickButton> {
     if me.is_none() || detail.summary.status != ChangeStatus::New {
         return Vec::new();
     }
@@ -156,7 +156,7 @@ pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>, drafts: bool) -> Vec
         .filter_map(|row| {
             let max = row.choices.iter().map(|c| c.value).max()?;
             let min = row.choices.iter().map(|c| c.value).min()?;
-            let value = if drafts && row.label == "Code-Review" && min < 0 {
+            let value = if objections && row.label == "Code-Review" && min < 0 {
                 min
             } else {
                 max
@@ -170,12 +170,20 @@ pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>, drafts: bool) -> Vec
         .collect()
 }
 
-/// The review of a quick vote: that label only. No message, and the drafts
-/// stay drafts (the default would publish them all).
+/// Whether the user's drafts say the change needs work: any draft but a
+/// plain "Ack" or "Done" (the web UI's quick replies, which agree).
+pub fn drafts_object(threads: &[Thread]) -> bool {
+    threads.iter().flat_map(|t| &t.entries).any(|e| match e {
+        Entry::Draft(d) => !matches!(d.message.trim(), "Ack" | "Done"),
+        _ => false,
+    })
+}
+
+/// The review of a quick vote: that label only, no message, and every
+/// draft published with it (the default), as the reply dialog would.
 pub fn quick_vote_input(vote: &QuickButton) -> ReviewInput {
     ReviewInput {
         labels: BTreeMap::from([(vote.label.clone(), vote.value)]),
-        drafts: DraftHandling::Keep,
         ..ReviewInput::default()
     }
 }
@@ -474,8 +482,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use model::{
-        Account, AttentionEntry, ChangeStatus, DraftSync, LabelValue, LabelVote, Location,
-        ReviewInput, Thread,
+        Account, AttentionEntry, ChangeStatus, DraftHandling, DraftSync, LabelValue, LabelVote,
+        Location, ReviewInput, Thread,
     };
 
     use super::*;
@@ -845,6 +853,24 @@ mod tests {
     }
 
     #[test]
+    fn only_drafts_other_than_ack_or_done_object() {
+        let with = |messages: &[&str]| {
+            // A published comment is not an objection of the user's.
+            let mut t = thread("c1", Location::Line(3), "Why?", true);
+            t.entries.extend(
+                messages
+                    .iter()
+                    .map(|m| Entry::Draft(draft(1, Location::Line(3), m, DraftSync::Synced))),
+            );
+            vec![t]
+        };
+        assert!(!drafts_object(&[]));
+        assert!(!drafts_object(&with(&["Ack", " Done\n"])));
+        assert!(drafts_object(&with(&["Done", "Please rename this"])));
+        assert!(drafts_object(&with(&["Done, but see below"])));
+    }
+
+    #[test]
     fn no_quick_votes_when_anonymous_closed_or_veto_only() {
         let mut d = change();
         with_labels(&mut d);
@@ -862,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quick_vote_sends_only_its_label_and_keeps_drafts() {
+    fn a_quick_vote_sends_only_its_label_and_publishes_drafts() {
         let input = quick_vote_input(&QuickButton {
             label: "Code-Review".into(),
             value: 2,
@@ -870,7 +896,7 @@ mod tests {
         });
         assert_eq!(input.labels, BTreeMap::from([("Code-Review".into(), 2)]));
         assert_eq!(input.message, None);
-        assert_eq!(input.drafts, DraftHandling::Keep);
+        assert_eq!(input.drafts, DraftHandling::PublishAllRevisions);
         assert!(input.add_to_attention_set.is_empty());
     }
 

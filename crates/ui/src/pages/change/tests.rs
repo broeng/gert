@@ -1091,14 +1091,14 @@ fn hint(cx: &mut TestAppContext, f: &Fixture) -> Option<(String, bool)> {
 }
 
 #[gpui_kit::test]
-fn shift_v_posts_the_first_vote_only_and_keeps_the_drafts(cx: &mut TestAppContext) {
+fn shift_v_posts_the_first_vote_only_and_publishes_the_drafts(cx: &mut TestAppContext) {
     let f = voting_page(cx, model::ChangeStatus::Merged, ok_review);
     press(cx, &f, &["shift-v"]);
     cx.run_until_parked();
     let bodies = reviews(&f);
     assert_eq!(bodies.len(), 1, "{:?}", f.http.sent());
     assert_eq!(bodies[0]["labels"], serde_json::json!({"Code-Review": 2}));
-    assert_eq!(bodies[0]["drafts"], "KEEP");
+    assert_eq!(bodies[0]["drafts"], "PUBLISH_ALL_REVISIONS");
     assert!(bodies[0].get("message").is_none(), "{}", bodies[0]);
     // The change is fetched again afterwards.
     let seen = f.http.requested();
