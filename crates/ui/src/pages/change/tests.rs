@@ -419,9 +419,6 @@ fn an_inline_diff_is_folded_and_shift_x_opens_it_without_a_request(cx: &mut Test
         let view = f.page.read(cx).inline_view("/COMMIT_MSG").expect("view");
         assert_eq!(view.read(cx).status(), None);
     });
-    // Esc hands the focus back to the file list: j moves the page cursor.
-    press(cx, &f, &["escape", "j"]);
-    assert_eq!(cursor(cx, &f).as_deref(), Some("src/a.rs"));
 }
 
 /// The real key path: the shell around a change page with many files. An
@@ -437,13 +434,12 @@ fn esc_works_after_the_focused_inline_diff_scrolled_out_of_the_list(cx: &mut Tes
     // Scroll far away, like the mouse wheel does.
     cx.update(|cx| page.update(cx, |p, _| p.scroll_to_end_for_test()));
     cx.run_until_parked();
-    keys(cx, window, &["escape", "j"]);
-    cx.update(|cx| assert_eq!(page.read(cx).cursor_path(), Some("src/f000.rs")));
-    drop(shell);
+    keys(cx, window, &["escape"]);
+    cx.update(|cx| assert_eq!(shell.read(cx).route(), &crate::nav::Route::Dashboard));
 }
 
 /// Esc closes the help overlay in one press, also when an inline diff has
-/// the focus (where Esc otherwise hands the focus back to the file list),
+/// the focus,
 /// and the page keys do nothing while it is open.
 #[gpui_kit::test]
 fn esc_closes_the_help_overlay_from_an_inline_diff(cx: &mut TestAppContext) {
@@ -455,8 +451,14 @@ fn esc_closes_the_help_overlay_from_an_inline_diff(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(page.read(cx).cursor_path(), Some("/COMMIT_MSG")));
     keys(cx, window, &["escape"]);
     cx.update(|cx| assert!(!shell.read(cx).help_open_for_test()));
-    keys(cx, window, &["escape", "j"]);
-    cx.update(|cx| assert_eq!(page.read(cx).cursor_path(), Some("src/f000.rs")));
+    // The next Esc leaves the page, whatever has the focus.
+    keys(cx, window, &["escape"]);
+    cx.update(|cx| {
+        assert_ne!(
+            shell.read(cx).route(),
+            &crate::nav::Route::Change(model::ChangeNumber(7))
+        )
+    });
 }
 
 fn keys(cx: &mut TestAppContext, window: AnyWindowHandle, keys: &[&'static str]) {
@@ -695,9 +697,6 @@ fn a_patchset_level_thread_opens_as_a_card_on_the_page(cx: &mut TestAppContext) 
         );
     })
     .expect("window");
-    // Esc hands the focus back to the page.
-    press(cx, &f, &["escape", "j"]);
-    assert_eq!(cursor(cx, &f).as_deref(), Some("src/a.rs"));
 }
 
 fn type_text(cx: &mut TestAppContext, f: &Fixture, text: &str) {

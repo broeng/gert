@@ -1097,7 +1097,9 @@ impl Shell {
         if self.help {
             self.toggle_help(&ToggleHelp, window, cx);
         } else {
-            cx.propagate();
+            // Esc leaves the page: diff to change, change to its list,
+            // settings to the dashboard.
+            self.go_up(&GoUp, window, cx);
         }
     }
 
