@@ -1141,6 +1141,9 @@ fn main() {
     let mut chain = None;
     let mut csd = false;
     let mut drafts = Drafts::Ok;
+    let mut server_count = 1usize;
+    let mut keys: Vec<String> = Vec::new();
+    let mut open_link = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dark" => mode = Some(ThemeMode::Dark),
@@ -1159,6 +1162,26 @@ fn main() {
             "--files" => files = args.next().and_then(|n| n.parse().ok()),
             "--changes" => changes = args.next().and_then(|n| n.parse().ok()),
             "--chain" => chain = args.next().and_then(|n| n.parse().ok()),
+            // Dev: configure this many servers (all answered by the same
+            // fake) to see the server chip, switcher and badges.
+            "--servers" => {
+                server_count = args
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 9)
+            }
+            // Dev: fire these actions (`ui::ToggleServerSwitcher,...`, comma
+            // separated) one after the other, for screenshots without a
+            // keyboard.
+            "--actions" => {
+                keys = args
+                    .next()
+                    .map(|a| a.split(',').map(str::to_owned).collect())
+                    .unwrap_or_default()
+            }
+            // Dev: open this change link or number two seconds after the start.
+            "--open" => open_link = args.next(),
             "--drafts" => {
                 drafts = match args.next().as_deref() {
                     Some("fail") => Drafts::Fail,
@@ -1183,10 +1206,35 @@ fn main() {
         eprintln!("review: {e}");
         std::process::exit(2);
     });
-    let server_id = store.server_id(URL).unwrap_or_else(|e| {
-        eprintln!("review: {e}");
-        std::process::exit(2);
-    });
+    const NAMES: [&str; 9] = [
+        "demo", "work", "android", "chromium", "infra", "labs", "mirror", "staging", "legacy",
+    ];
+    let servers: Vec<ServerSetup> = (0..server_count)
+        .map(|i| {
+            let url = if i == 0 {
+                URL.to_owned()
+            } else {
+                format!("https://{}.example.org", NAMES[i])
+            };
+            let server = store.server_for_slug(NAMES[i], &url).unwrap_or_else(|e| {
+                eprintln!("review: {e}");
+                std::process::exit(2);
+            });
+            ServerSetup {
+                base_url: url,
+                username: (i != 2).then(|| "alice".to_owned()),
+                server,
+                key: ui::ServerKey::new(NAMES[i]),
+                name: NAMES[i].into(),
+                color: None,
+                queries: vec![SavedQuery {
+                    name: "Open changes".into(),
+                    query: "status:open".into(),
+                }],
+                bookmarks: Vec::new(),
+            }
+        })
+        .collect();
     let startup = Startup {
         env: Env {
             http: Arc::new(http),
@@ -1199,19 +1247,7 @@ fn main() {
         },
         start_page: Default::default(),
         filters: demo_filters(),
-        servers: vec![ServerSetup {
-            base_url: URL.into(),
-            username: Some("alice".into()),
-            server: server_id,
-            key: ui::ServerKey::new("demo"),
-            name: "demo".into(),
-            color: None,
-            queries: vec![SavedQuery {
-                name: "Open changes".into(),
-                query: "status:open".into(),
-            }],
-            bookmarks: Vec::new(),
-        }],
+        servers,
         active: None,
     };
 
@@ -1234,7 +1270,7 @@ fn main() {
             cx.new(|cx| Shell::new(startup, window, cx).with_app_name("review demo"))
         });
         match opened {
-            Ok((window, _)) => {
+            Ok((window, shell)) => {
                 ui::ensure_maximized(window, cx);
                 if let Some(m) = mode {
                     // The shell follows the system appearance as soon as the
@@ -1245,6 +1281,37 @@ fn main() {
                                 .timer(std::time::Duration::from_millis(400))
                                 .await;
                             cx.update(|cx| Theme::change(m, None, cx));
+                        }
+                    })
+                    .detach();
+                }
+                if let Some(link) = open_link {
+                    cx.spawn(async move |cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(2000))
+                            .await;
+                        cx.update(|cx| {
+                            let _ = window.update(cx, |_, window, cx| {
+                                shell.update(cx, |s, cx| s.open_link(&link, window, cx))
+                            });
+                        });
+                    })
+                    .detach();
+                }
+                if !keys.is_empty() {
+                    cx.spawn(async move |cx| {
+                        for name in keys {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2500))
+                                .await;
+                            cx.update(|cx| match cx.build_action(&name, None) {
+                                Ok(action) => {
+                                    let _ = window.update(cx, |_, window, cx| {
+                                        window.dispatch_action(action, cx)
+                                    });
+                                }
+                                Err(e) => eprintln!("review: action {name}: {e}"),
+                            });
                         }
                     })
                     .detach();
