@@ -124,6 +124,7 @@ pub(crate) mod tests {
         pub saved: Mutex<Vec<Saved>>,
         pub fail: bool,
         pub saved_queries: Mutex<Vec<Vec<SavedQuery>>>,
+        pub saved_bookmarks: Mutex<Vec<Vec<SavedQuery>>>,
         pub saved_startup: Mutex<Vec<crate::session::StartupPage>>,
         pub saved_advance: Mutex<Vec<bool>>,
         pub saved_theme: Mutex<Vec<crate::theme::ThemeName>>,
@@ -139,6 +140,13 @@ pub(crate) mod tests {
             }
             self.saved_queries.lock().unwrap().push(queries.to_vec());
             Ok(queries.to_vec())
+        }
+        fn save_bookmarks(&self, list: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_bookmarks.lock().unwrap().push(list.to_vec());
+            Ok(list.to_vec())
         }
 
         fn save_filters(

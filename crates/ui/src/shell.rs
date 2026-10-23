@@ -570,9 +570,12 @@ impl Shell {
     fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Page {
         let env = self.env.clone();
         let queries = self.queries.clone();
+        let bookmarks = self.bookmarks.clone();
         let (start, layout) = (self.start_page.clone(), self.layout.clone());
         let filters = self.filters.clone();
-        let page = cx.new(|cx| SettingsPage::new(env, queries, start, layout, filters, window, cx));
+        let page = cx.new(|cx| {
+            SettingsPage::new(env, queries, bookmarks, start, layout, filters, window, cx)
+        });
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,
@@ -580,6 +583,7 @@ impl Shell {
                 // The dashboard is built from this list when it is shown
                 // again, from the cache for the queries it already knew.
                 SettingsEvent::QueriesSaved(queries) => this.queries = queries.clone(),
+                SettingsEvent::BookmarksSaved(list) => this.bookmarks = list.clone(),
                 SettingsEvent::StartupSaved(page) => this.start_page = page.clone(),
                 SettingsEvent::ManageFilters { select, add } => {
                     let context = FiltersContext {

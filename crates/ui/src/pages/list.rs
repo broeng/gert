@@ -185,6 +185,11 @@ impl ChangeListPage {
     }
 
     #[cfg(test)]
+    pub(crate) fn bookmarks_for_test(&self) -> Vec<&str> {
+        self.bookmarks.iter().map(|b| b.name.as_str()).collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn scroll_for_test(&self) -> ScrollHandle {
         self.scroll.clone()
     }

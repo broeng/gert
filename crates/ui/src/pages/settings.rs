@@ -36,6 +36,8 @@ use crate::{
 pub enum SettingsEvent {
     /// The saved queries were written; this is the list now in effect.
     QueriesSaved(Vec<SavedQuery>),
+    /// The bookmarks were written; this is the list now in effect.
+    BookmarksSaved(Vec<SavedQuery>),
     /// The startup page was written.
     StartupSaved(StartupPage),
     /// Open the Manage filters dialog: on the rule `select`, or on a new
@@ -43,15 +45,24 @@ pub enum SettingsEvent {
     ManageFilters { select: Option<String>, add: bool },
 }
 
+/// The two lists of name and query pairs the page edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Which {
+    Queries,
+    Bookmarks,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Browsing,
-    /// Editing row `index`; `index == len` is a new row being added.
+    /// Editing item `index` of a list; `index == len` is a new item being
+    /// added.
     Editing {
+        which: Which,
         index: usize,
     },
-    /// Asking whether to delete row `index`.
-    Confirming(usize),
+    /// Asking whether to delete item `index` of a list.
+    Confirming(Which, usize),
     /// Typing the query of the startup page.
     EditingStartup,
 }
@@ -124,6 +135,7 @@ fn scope_text(rule: &FileFilter) -> String {
 pub struct SettingsPage {
     env: Env,
     queries: Vec<SavedQuery>,
+    bookmarks: Vec<SavedQuery>,
     cursor: usize,
     mode: Mode,
     name: Entity<InputState>,
@@ -155,9 +167,11 @@ impl Focusable for SettingsPage {
 }
 
 impl SettingsPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         env: Env,
         queries: Vec<SavedQuery>,
+        bookmarks: Vec<SavedQuery>,
         start_page: StartupPage,
         layout: Entity<PageLayout>,
         filters: Entity<FileFilters>,
@@ -186,6 +200,7 @@ impl SettingsPage {
         Self {
             env,
             queries,
+            bookmarks,
             cursor: 0,
             mode: Mode::Browsing,
             name,
@@ -208,6 +223,11 @@ impl SettingsPage {
     #[cfg(test)]
     pub(crate) fn queries_for_test(&self) -> &[SavedQuery] {
         &self.queries
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bookmarks_for_test(&self) -> &[SavedQuery] {
+        &self.bookmarks
     }
 
     #[cfg(test)]
@@ -246,30 +266,63 @@ impl SettingsPage {
         matches!(self.mode, Mode::Editing { .. } | Mode::EditingStartup)
     }
 
-    /// Cursor positions after the query rows.
+    /// The rows of the bookmarks: one per bookmark, or one empty-state row
+    /// the cursor can be on to add the first.
+    fn bookmark_rows(&self) -> usize {
+        self.bookmarks.len().max(1)
+    }
+
+    /// Cursor positions after the query and bookmark rows.
     fn startup_row(&self) -> usize {
-        self.queries.len()
+        self.queries.len() + self.bookmark_rows()
+    }
+
+    fn list(&self, which: Which) -> &Vec<SavedQuery> {
+        match which {
+            Which::Queries => &self.queries,
+            Which::Bookmarks => &self.bookmarks,
+        }
+    }
+
+    /// The cursor row of item `index` of a list.
+    fn row_of(&self, which: Which, index: usize) -> usize {
+        match which {
+            Which::Queries => index,
+            Which::Bookmarks => self.queries.len() + index,
+        }
+    }
+
+    /// The list the cursor is in and the item it is on. For the empty
+    /// bookmarks row that is item 0 of an empty list, a new item.
+    fn item_under_cursor(&self) -> Option<(Which, usize)> {
+        if self.cursor < self.queries.len() {
+            Some((Which::Queries, self.cursor))
+        } else if self.cursor < self.startup_row() {
+            Some((Which::Bookmarks, self.cursor - self.queries.len()))
+        } else {
+            None
+        }
     }
 
     fn advance_row(&self) -> usize {
-        self.queries.len() + 1
+        self.startup_row() + 1
     }
 
     fn theme_row(&self) -> usize {
-        self.queries.len() + 2
+        self.startup_row() + 2
     }
 
     fn mode_row(&self) -> usize {
-        self.queries.len() + 3
+        self.startup_row() + 3
     }
 
     fn diff_mode_row(&self) -> usize {
-        self.queries.len() + 4
+        self.startup_row() + 4
     }
 
     /// The first filter row (the empty-state row when there are no rules).
     fn filters_row(&self) -> usize {
-        self.queries.len() + 5
+        self.startup_row() + 5
     }
 
     /// Switches the mode of the row under the cursor to the next one.
@@ -340,8 +393,8 @@ impl SettingsPage {
         }
         if self.in_filters() {
             self.manage_filters(self.filter_under_cursor(), self.filter_names.is_empty(), cx);
-        } else if self.cursor < self.queries.len() {
-            self.start_edit(self.cursor, window, cx);
+        } else if let Some((which, index)) = self.item_under_cursor() {
+            self.start_edit(which, index, window, cx);
         } else if self.cursor == self.startup_row() {
             self.start_startup_edit(window, cx);
         } else if self.cursor == self.theme_row() {
@@ -390,7 +443,8 @@ impl SettingsPage {
         if self.in_filters() {
             self.manage_filters(None, true, cx);
         } else if self.can_change() {
-            self.start_edit(self.queries.len(), window, cx);
+            let which = self.item_under_cursor().map_or(Which::Queries, |(w, _)| w);
+            self.start_edit(which, self.list(which).len(), window, cx);
         }
     }
 
@@ -421,16 +475,22 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn start_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let (name, query) = match self.queries.get(index) {
+    fn start_edit(
+        &mut self,
+        which: Which,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (name, query) = match self.list(which).get(index) {
             Some(q) => (q.name.clone(), q.query.clone()),
             None => (String::new(), String::new()),
         };
         self.name.update(cx, |s, cx| s.set_value(name, window, cx));
         self.query
             .update(cx, |s, cx| s.set_value(query, window, cx));
-        self.cursor = index;
-        self.mode = Mode::Editing { index };
+        self.cursor = self.row_of(which, index);
+        self.mode = Mode::Editing { which, index };
         self.invalid = None;
         self.name.update(cx, |s, cx| s.focus(window, cx));
         cx.notify();
@@ -438,12 +498,15 @@ impl SettingsPage {
 
     fn cancel_edit(&mut self, _: &CancelEdit, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.mode, Mode::Editing { .. } | Mode::EditingStartup) && !self.busy {
-            let new_row =
-                matches!(self.mode, Mode::Editing { index } if index >= self.queries.len());
+            let new_row = match self.mode {
+                Mode::Editing { which, index } if index >= self.list(which).len() => Some(which),
+                _ => None,
+            };
             self.leave_edit(window, cx);
-            if new_row {
-                // Back to the last query (the "add" row is gone).
-                self.cursor = self.queries.len().saturating_sub(1);
+            if let Some(which) = new_row {
+                // Back to the last item (the "add" row is gone).
+                let last = self.list(which).len().saturating_sub(1);
+                self.cursor = self.row_of(which, last);
             }
         }
     }
@@ -480,7 +543,7 @@ impl SettingsPage {
             }
             return;
         }
-        let Mode::Editing { index } = self.mode else {
+        let Mode::Editing { which, index } = self.mode else {
             return;
         };
         let name = self.name.read(cx).value().to_string();
@@ -488,8 +551,8 @@ impl SettingsPage {
         match validate(&name, &text) {
             Ok(q) => {
                 self.invalid = None;
-                let list = with_query(&self.queries, index, q);
-                self.save(list, index, window, cx);
+                let list = with_query(self.list(which), index, q);
+                self.save(which, list, index, window, cx);
             }
             Err(why) => {
                 self.invalid = Some(why);
@@ -507,24 +570,25 @@ impl SettingsPage {
             self.manage_filters(Some(i), false, cx);
         } else if self.can_change()
             && self.mode == Mode::Browsing
-            && self.cursor < self.queries.len()
+            && let Some((which, index)) = self.item_under_cursor()
+            && index < self.list(which).len()
         {
-            self.mode = Mode::Confirming(self.cursor);
+            self.mode = Mode::Confirming(which, index);
             cx.notify();
         }
     }
 
     fn confirm_delete(&mut self, _: &ConfirmDelete, window: &mut Window, cx: &mut Context<Self>) {
-        if let Mode::Confirming(i) = self.mode
+        if let Mode::Confirming(which, i) = self.mode
             && self.can_change()
         {
-            let list = without(&self.queries, i);
-            self.save(list, i, window, cx);
+            let list = without(self.list(which), i);
+            self.save(which, list, i, window, cx);
         }
     }
 
     fn cancel_delete(&mut self, _: &CancelDelete, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode, Mode::Confirming(_)) && !self.busy {
+        if matches!(self.mode, Mode::Confirming(..)) && !self.busy {
             self.mode = Mode::Browsing;
             cx.notify();
         }
@@ -544,18 +608,21 @@ impl SettingsPage {
         if !self.can_change() || self.mode != Mode::Browsing {
             return;
         }
-        if let Some((list, to)) = moved(&self.queries, self.cursor, delta) {
-            self.save(list, to, window, cx);
+        if let Some((which, index)) = self.item_under_cursor()
+            && let Some((list, to)) = moved(self.list(which), index, delta)
+        {
+            self.save(which, list, to, window, cx);
         }
     }
 
     // ---- saving ----
 
     /// Writes `list` in the background. On success it becomes the list on
-    /// screen, the cursor goes to `cursor` and the shell is told; on failure
-    /// nothing changes but a hint.
+    /// screen, the cursor goes to its item `cursor` and the shell is told;
+    /// on failure nothing changes but a hint.
     fn save(
         &mut self,
+        which: Which,
         list: Vec<SavedQuery>,
         cursor: usize,
         window: &mut Window,
@@ -565,23 +632,39 @@ impl SettingsPage {
         let backend = self.env.backend.clone();
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { backend.save_queries(&list) })
+                .background_spawn(async move {
+                    match which {
+                        Which::Queries => backend.save_queries(&list),
+                        Which::Bookmarks => backend.save_bookmarks(&list),
+                    }
+                })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match result {
                     Ok(saved) => {
-                        this.queries = saved.clone();
-                        this.cursor = cursor.min(saved.len().saturating_sub(1));
+                        let at = cursor.min(saved.len().saturating_sub(1));
+                        match which {
+                            Which::Queries => this.queries = saved.clone(),
+                            Which::Bookmarks => this.bookmarks = saved.clone(),
+                        }
+                        this.cursor = this.row_of(which, at);
                         this.leave_edit(window, cx);
-                        cx.emit(SettingsEvent::QueriesSaved(saved));
+                        cx.emit(match which {
+                            Which::Queries => SettingsEvent::QueriesSaved(saved),
+                            Which::Bookmarks => SettingsEvent::BookmarksSaved(saved),
+                        });
                     }
                     Err(e) => {
-                        if matches!(this.mode, Mode::Confirming(_)) {
+                        if matches!(this.mode, Mode::Confirming(..)) {
                             this.mode = Mode::Browsing;
                         }
+                        let what = match which {
+                            Which::Queries => "queries",
+                            Which::Bookmarks => "bookmarks",
+                        };
                         this.hint
-                            .say(format!("Could not save the queries: {e}"), true, cx, |p| {
+                            .say(format!("Could not save the {what}: {e}"), true, cx, |p| {
                                 &mut p.hint
                             });
                     }
@@ -713,68 +796,83 @@ impl SettingsPage {
         match self.mode {
             Mode::Browsing => "SettingsPage Browsing",
             Mode::Editing { .. } | Mode::EditingStartup => "SettingsPage Editing",
-            Mode::Confirming(_) => "SettingsPage Confirming",
+            Mode::Confirming(..) => "SettingsPage Confirming",
         }
     }
 
-    fn render_row(&self, i: usize, q: &SavedQuery, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(
+        &self,
+        which: Which,
+        i: usize,
+        q: &SavedQuery,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
-        let selected = i == self.cursor;
+        let row_no = self.row_of(which, i);
+        let selected = row_no == self.cursor;
+        // Element ids of the list's buttons.
+        let [up, down, edit, delete, row_id] = match which {
+            Which::Queries => ["q-up", "q-down", "q-edit", "q-delete", "query-row"],
+            Which::Bookmarks => ["b-up", "b-down", "b-edit", "b-delete", "bookmark-row"],
+        };
+        let len = self.list(which).len();
         let buttons = h_flex()
             .gap_1()
             .flex_none()
             .child(
-                Button::new(("q-up", i))
+                Button::new((up, i))
                     .label("\u{2191}")
                     .small()
                     .disabled(i == 0 || self.busy)
                     .on_click(cx.listener(move |this, _, w, cx| {
-                        this.cursor = i;
+                        this.cursor = row_no;
                         this.move_up(&MoveQueryUp, w, cx)
                     })),
             )
             .child(
-                Button::new(("q-down", i))
+                Button::new((down, i))
                     .label("\u{2193}")
                     .small()
-                    .disabled(i + 1 >= self.queries.len() || self.busy)
+                    .disabled(i + 1 >= len || self.busy)
                     .on_click(cx.listener(move |this, _, w, cx| {
-                        this.cursor = i;
+                        this.cursor = row_no;
                         this.move_down(&MoveQueryDown, w, cx)
                     })),
             )
             .child(
-                Button::new(("q-edit", i))
+                Button::new((edit, i))
                     .label("Edit")
                     .small()
                     .disabled(self.busy)
                     .on_click(cx.listener(move |this, _, w, cx| {
                         if this.mode == Mode::Browsing && this.can_change() {
-                            this.start_edit(i, w, cx);
+                            this.start_edit(which, i, w, cx);
                         }
                     })),
             )
             .child(
-                Button::new(("q-delete", i))
+                Button::new((delete, i))
                     .label("Delete")
                     .small()
                     .disabled(self.busy)
                     .on_click(cx.listener(move |this, _, w, cx| {
-                        this.cursor = i;
+                        this.cursor = row_no;
                         this.delete_query(&DeleteQuery, w, cx)
                     })),
             );
         let row = h_flex()
-            .id(("query-row", i))
+            .id((row_id, i))
             .px_3()
             .py_1p5()
             .gap_3()
             .items_center()
             .when(selected, |d| d.bg(theme.list_active))
-            .on_click(cx.listener(move |this, _, _, cx| this.select(i, cx)));
+            .on_click(cx.listener(move |this, _, _, cx| this.select(row_no, cx)));
         match self.mode {
-            Mode::Editing { index } if index == i => self.render_editor(row, cx),
-            Mode::Confirming(index) if index == i => row
+            Mode::Editing { which: w, index } if w == which && index == i => {
+                self.render_editor(row, cx)
+            }
+            Mode::Confirming(w, index) if w == which && index == i => row
                 .child(
                     div()
                         .flex_1()
@@ -860,38 +958,69 @@ impl SettingsPage {
     }
 
     fn render_queries(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.render_list(Which::Queries, cx)
+    }
+
+    fn render_bookmarks(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.render_list(Which::Bookmarks, cx)
+    }
+
+    /// The card of one list: its rows, the row being added, and the Add button.
+    fn render_list(&self, which: Which, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let adding = matches!(self.mode, Mode::Editing { index } if index >= self.queries.len());
-        let n = self.queries.len();
+        let items = self.list(which).clone();
+        let n = items.len();
+        let adding =
+            matches!(self.mode, Mode::Editing { which: w, index } if w == which && index >= n);
+        let (title, note, empty, add_label, add_id, new_id) = match which {
+            Which::Queries => (
+                "Saved queries",
+                "Each one is a section of the dashboard, in this order.",
+                "No saved queries. Press a to add one.",
+                "Add a query (a)",
+                "add-query",
+                "query-row-new",
+            ),
+            Which::Bookmarks => (
+                "Bookmarks",
+                "Buttons above the change lists, in this order; B 1 to B 9 open the first nine.",
+                "No bookmarks. Press a to add one.",
+                "Add a bookmark (a)",
+                "add-bookmark",
+                "bookmark-row-new",
+            ),
+        };
         let mut body = v_flex().w_full().child(card::frame(
             card::title_bar(cx)
-                .child(div().font_semibold().child("Saved queries"))
+                .child(div().font_semibold().child(title))
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("Each one is a section of the dashboard, in this order."),
+                        .child(note),
                 ),
             true,
             n == 0 && !adding,
             cx,
         ));
         if n == 0 && !adding {
+            // The cursor can rest on the empty bookmarks row, to add the first.
+            let selected = which == Which::Bookmarks && self.cursor == self.row_of(which, 0);
             body = body.child(card::frame(
                 card::row_separator(cx)
                     .px_3()
                     .py_2()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("No saved queries. Press a to add one."),
+                    .when(selected, |d| d.bg(theme.list_active))
+                    .child(empty),
                 false,
                 true,
                 cx,
             ));
         }
-        for i in 0..n {
-            let q = self.queries[i].clone();
-            let row = self.render_row(i, &q, cx);
+        for (i, q) in items.iter().enumerate() {
+            let row = self.render_row(which, i, q, cx);
             body = body.child(card::frame(
                 card::row_separator(cx).child(row),
                 false,
@@ -901,7 +1030,7 @@ impl SettingsPage {
         }
         if adding {
             let row = h_flex()
-                .id("query-row-new")
+                .id(new_id)
                 .px_3()
                 .py_1p5()
                 .gap_3()
@@ -920,11 +1049,14 @@ impl SettingsPage {
             .child(body)
             .child(
                 div().px_4().child(
-                    Button::new("add-query")
-                        .label("Add a query (a)")
+                    Button::new(add_id)
+                        .label(add_label)
                         .small()
                         .disabled(self.busy || self.mode != Mode::Browsing)
-                        .on_click(cx.listener(|this, _, w, cx| this.add_query(&AddQuery, w, cx))),
+                        .on_click(cx.listener(move |this, _, w, cx| {
+                            this.cursor = this.row_of(which, 0);
+                            this.add_query(&AddQuery, w, cx)
+                        })),
                 ),
             )
             .into_any_element()
@@ -1393,6 +1525,7 @@ impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let queries = self.render_queries(cx);
+        let bookmarks = self.render_bookmarks(cx);
         let startup = self.render_startup(cx);
         let review = self.render_review(cx);
         let appearance = self.render_appearance(cx);
@@ -1432,6 +1565,7 @@ impl Render for SettingsPage {
                             .gap_4()
                             .child(div().px_4().text_xl().font_semibold().child("Settings"))
                             .child(queries)
+                            .child(bookmarks)
                             .child(startup)
                             .child(review)
                             .child(appearance)
