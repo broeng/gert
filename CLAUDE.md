@@ -63,7 +63,7 @@ Claude writes most of the code and the user reviews it. So:
     or token and pastes it back into the app. No embedded webview (GPUI has
     none), no browser-cookie scraping.
 - Credentials live in the **OS keyring** (`keyring` crate: Secret Service on
-  Linux, Keychain on macOS). Never write secrets to the config file, logs, or
+  Linux, Keychain on macOS), one entry per `user@url`. Never write secrets to the config file, logs, or
   the cache DB. Debug builds also read `GERT_DEV_PASSWORD` for a server on
   127.0.0.1 / localhost, for headless testing against the dev Gerrit.
 - Every Gerrit JSON response starts with the XSSI guard `)]}'\n`; strip it
@@ -183,8 +183,16 @@ UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
   patch set moved on, thread resolved remotely) is not built yet, so don't
   make choices that would prevent it (keep write state in `store`, not only
   in view state).
-- **Single server** for now. Every cached row carries `server_id`, so
-  multi-server support is a UI and config feature rather than a migration.
+- **Several servers, one active at a time.** Config has `[[servers]]` (slug
+  id, name, url, username, color, nested queries and bookmarks); the slug,
+  not the URL, identifies a server in config, the cache (`servers.slug`) and
+  navigation. Every cached row carries `server_id` and `delete_server`
+  cascades. The `ui::servers` registry holds a session, draft outbox,
+  syntax cache and connection state per server; each page belongs to one
+  server and history entries carry it. Inactive servers are polled slowly
+  for `attention:self` counts shown in the switcher (`Ctrl+K`, `Ctrl+1..9`).
+  There is no merged all-servers view. Removing a server purges its cache
+  rows and keyring secret.
 
 ### Diffs
 
@@ -228,11 +236,12 @@ threads; drafts, replies and votes (reply dialog and quick votes), reviewed
 marks and the attention set; change actions (submit, rebase,
 abandon/restore, WIP/ready, private, reviewers/CC, topic, hashtags) via an
 action menu; file filters (hide, dim, highlight by glob); a settings page;
-opening a change from a web UI link (`g`, or `gert <link>`).
+opening a change from a web UI link (`g`, or `gert <link>`, matched
+against all configured servers); multiple servers with a switcher.
 
 Not built yet: Checks/CI results, desktop notifications, local git
 integration, query autocompletion, a configurable keymap and command palette,
-the general offline outbox, multi-server, inline change edits, Gerrit's own
+the general offline outbox, inline change edits, Gerrit's own
 dashboard sections, and packaging beyond cargo and Nix.
 
 ## Distribution and Nix
