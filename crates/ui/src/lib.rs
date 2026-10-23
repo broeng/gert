@@ -25,6 +25,7 @@ mod servers;
 mod session;
 mod settings;
 mod shell;
+mod switcher;
 mod syntax_cache;
 mod theme;
 mod time_fmt;
