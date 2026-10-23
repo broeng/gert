@@ -4,10 +4,12 @@
 use gerrit_api::{Auth, Error as ApiError, GerritClient};
 use store::ServerId;
 
-use crate::session::{Env, SavedQuery};
+use crate::session::{Env, SavedQuery, ServerKey};
 
 /// What the user typed.
 pub struct LoginRequest {
+    /// The configured server this logs in to again; `None` for a new one.
+    pub server: Option<ServerKey>,
     pub base_url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -16,6 +18,7 @@ pub struct LoginRequest {
 /// A successful login. Holds the password, so it deliberately has no
 /// `Debug`.
 pub struct LoginOutcome {
+    pub key: ServerKey,
     pub base_url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -87,8 +90,12 @@ pub async fn login(env: &Env, req: LoginRequest) -> Result<LoginOutcome, LoginEr
         Err(ApiError::Unauthorized) => return Err(LoginError::Unauthorized),
         Err(e) => return Err(LoginError::Server(e.to_string())),
     }
+    let key = req
+        .server
+        .clone()
+        .unwrap_or_else(|| env.backend.new_server_key(&base_url));
     let queries = env
-        .backend
+        .server_backend(&key)
         .save_login(&base_url, req.username.as_deref(), req.password.as_deref())
         .map_err(|e| LoginError::Save(e.0))?;
     let server = env
@@ -98,6 +105,7 @@ pub async fn login(env: &Env, req: LoginRequest) -> Result<LoginOutcome, LoginEr
         .server_id(&base_url)
         .map_err(|e| LoginError::Save(e.to_string()))?;
     Ok(LoginOutcome {
+        key,
         base_url,
         username: req.username,
         password: req.password,
@@ -115,7 +123,7 @@ pub(crate) mod tests {
     use store::Store;
 
     use super::*;
-    use crate::session::{Backend, BackendError};
+    use crate::session::{Backend, BackendError, ServerBackend};
 
     type Saved = (String, Option<String>, Option<String>);
 
@@ -131,22 +139,8 @@ pub(crate) mod tests {
     }
 
     impl Backend for FakeBackend {
-        fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
-            Ok(None)
-        }
-        fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
-            if self.fail {
-                return Err(BackendError("disk full".into()));
-            }
-            self.saved_queries.lock().unwrap().push(queries.to_vec());
-            Ok(queries.to_vec())
-        }
-        fn save_bookmarks(&self, list: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
-            if self.fail {
-                return Err(BackendError("disk full".into()));
-            }
-            self.saved_bookmarks.lock().unwrap().push(list.to_vec());
-            Ok(list.to_vec())
+        fn for_server(self: Arc<Self>, _: &ServerKey) -> Arc<dyn ServerBackend> {
+            self
         }
 
         fn save_filters(
@@ -185,6 +179,27 @@ pub(crate) mod tests {
             self.saved_theme.lock().unwrap().push(t);
             Ok(t)
         }
+    }
+
+    impl ServerBackend for FakeBackend {
+        fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
+            Ok(None)
+        }
+        fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_queries.lock().unwrap().push(queries.to_vec());
+            Ok(queries.to_vec())
+        }
+        fn save_bookmarks(&self, list: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_bookmarks.lock().unwrap().push(list.to_vec());
+            Ok(list.to_vec())
+        }
+
         fn save_login(
             &self,
             url: &str,
@@ -216,6 +231,7 @@ pub(crate) mod tests {
 
     fn req(user: Option<&str>, pass: Option<&str>) -> LoginRequest {
         LoginRequest {
+            server: None,
             base_url: " https://g.example.com/ ".into(),
             username: user.map(Into::into),
             password: pass.map(Into::into),
@@ -249,6 +265,25 @@ pub(crate) mod tests {
             reqs[0].uri().to_string(),
             "https://g.example.com/a/accounts/self/detail"
         );
+    }
+
+    #[test]
+    fn login_goes_to_the_servers_own_backend() {
+        let http = FakeHttpClient::new();
+        http.push_response(200, ACCOUNT);
+        http.push_response(200, ACCOUNT);
+        let backend = Arc::new(FakeBackend::default());
+        let env = env(&http, backend);
+        // A new server gets a key from the backend ...
+        let out = block_on(login(&env, req(Some("a"), Some("b")))).unwrap();
+        assert_eq!(out.key, ServerKey::new("default"));
+        // ... and logging in again to a configured one keeps its own.
+        let again = LoginRequest {
+            server: Some(ServerKey::new("work")),
+            ..req(Some("a"), Some("b"))
+        };
+        let out = block_on(login(&env, again)).unwrap();
+        assert_eq!(out.key, ServerKey::new("work"));
     }
 
     #[test]

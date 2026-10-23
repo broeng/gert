@@ -11,12 +11,14 @@ use crate::{
     login::{
         LoginError, LoginOutcome, LoginRequest, credentials_page_url, login, normalize_base_url,
     },
-    session::Env,
+    session::{Env, ServerKey},
 };
 
 /// Values to fill in, e.g. after the server rejected the saved password.
 #[derive(Clone, Debug, Default)]
 pub struct LoginPrefill {
+    /// The configured server being logged in to again; `None`: a new one.
+    pub server: Option<ServerKey>,
     pub base_url: String,
     pub username: Option<String>,
     pub notice: Option<String>,
@@ -24,6 +26,7 @@ pub struct LoginPrefill {
 
 pub struct LoginPage {
     env: Env,
+    server: Option<ServerKey>,
     url: Entity<InputState>,
     username: Entity<InputState>,
     password: Entity<InputState>,
@@ -75,6 +78,7 @@ impl LoginPage {
         }
         Self {
             env,
+            server: prefill.server,
             url,
             username,
             password,
@@ -104,6 +108,7 @@ impl LoginPage {
             (Some(username), Some(password))
         };
         let req = LoginRequest {
+            server: self.server.clone(),
             base_url: self.url.read(cx).value().to_string(),
             username,
             password,

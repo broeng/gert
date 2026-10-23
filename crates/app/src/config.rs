@@ -83,7 +83,7 @@ use model::{DiffContext, DiffPreferences, DiffViewMode, Whitespace};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item};
 use ui::filters::{FileFilter, FilterAction, format_hex_color, parse_hex_color, validate_glob};
-use ui::{ColorMode, ColorModes, ThemeName};
+use ui::{ColorMode, ColorModes, ThemeName, server_name_from_url};
 
 use crate::APP_NAME;
 
@@ -365,18 +365,6 @@ pub fn slugify(name: &str) -> String {
     }
     let out = out.trim_end_matches('-');
     if out.is_empty() { "server" } else { out }.to_owned()
-}
-
-/// A display name for a server URL: its host (with the port, if any).
-pub fn server_name_from_url(url: &str) -> String {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.rsplit('@').next().unwrap_or_default();
-    if host.is_empty() {
-        "server".to_owned()
-    } else {
-        host.to_owned()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

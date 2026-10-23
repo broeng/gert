@@ -34,12 +34,11 @@ struct Recorder {
 }
 
 impl Backend for Recorder {
-    fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
-        Ok(None)
-    }
-
-    fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
-        Err(BackendError("not used".into()))
+    fn for_server(
+        self: std::sync::Arc<Self>,
+        _: &crate::ServerKey,
+    ) -> std::sync::Arc<dyn crate::ServerBackend> {
+        self
     }
 
     fn save_filters(&self, f: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
@@ -63,6 +62,16 @@ impl Backend for Recorder {
         t: crate::theme::ThemeName,
     ) -> Result<crate::theme::ThemeName, BackendError> {
         Ok(t)
+    }
+}
+
+impl crate::ServerBackend for Recorder {
+    fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
+        Ok(None)
+    }
+
+    fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+        Err(BackendError("not used".into()))
     }
 
     fn save_login(
@@ -126,16 +135,19 @@ fn on_the_change(cx: &mut TestAppContext, rules: Vec<FileFilter>) -> Fx {
     let mut env = env_with(store, &RouteHttpClient::new());
     env.backend = backend.clone();
     let startup = Startup {
-        bookmarks: Vec::new(),
         env,
-        server: Some(ServerSetup { ..setup() }),
-        queries: vec![SavedQuery {
-            name: "Open".into(),
-            query: "status:open".into(),
-        }],
         diff: Default::default(),
         start_page: Default::default(),
         filters: rules,
+        servers: vec![ServerSetup {
+            queries: vec![SavedQuery {
+                name: "Open".into(),
+                query: "status:open".into(),
+            }],
+            bookmarks: Vec::new(),
+            ..setup()
+        }],
+        active: None,
     };
     let (window, shell) = open(cx, |window, cx| {
         cx.new(|cx| Shell::new(startup, window, cx))

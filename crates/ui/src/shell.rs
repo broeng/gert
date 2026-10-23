@@ -29,7 +29,7 @@ use crate::{
     },
     reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
-    session::{Env, SavedQuery, ServerSetup, Session, Startup, StartupPage},
+    session::{Env, SavedQuery, ServerSetup, Session, Startup, StartupPage, server_name_from_url},
     settings::{DiffSettings, FileFilters, PageLayout},
     syntax_cache::SyntaxCache,
 };
@@ -143,9 +143,8 @@ impl Shell {
     pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let Startup {
             env,
-            server,
-            queries,
-            bookmarks,
+            servers,
+            active,
             filters,
             diff,
             start_page,
@@ -192,6 +191,15 @@ impl Shell {
         }));
 
         // The first page is a placeholder; `start` replaces it.
+        // One server at a time for now: the active one, else the first.
+        let server = active
+            .and_then(|key| servers.iter().position(|s| s.key == key))
+            .unwrap_or(0);
+        let server = servers.into_iter().nth(server);
+        let (queries, bookmarks) = server
+            .as_ref()
+            .map(|s| (s.queries.clone(), s.bookmarks.clone()))
+            .unwrap_or_default();
         let login = cx.new(|cx| LoginPage::new(env.clone(), LoginPrefill::default(), window, cx));
         let mut this = Self {
             env,
@@ -258,8 +266,12 @@ impl Shell {
         } else {
             Some(Auth::Anonymous)
         };
-        match Session::new(&self.env, &setup, auth) {
-            Ok(session) => self.set_session(Some(session), window, cx),
+        let backend = match Session::new(&self.env, &setup, auth) {
+            Ok(session) => {
+                let backend = session.backend().clone();
+                self.set_session(Some(session), window, cx);
+                backend
+            }
             Err(e) => {
                 self.prefill = Some(prefill_from(
                     &setup,
@@ -267,7 +279,7 @@ impl Shell {
                 ));
                 return self.show(window, cx);
             }
-        }
+        };
         self.nav.reset(match &self.start_page {
             StartupPage::Dashboard => Route::Dashboard,
             StartupPage::Search(q) => Route::Search(q.clone()),
@@ -277,7 +289,6 @@ impl Shell {
         let Some(username) = username else {
             return;
         };
-        let backend = self.env.backend.clone();
         let (url, user) = (setup.base_url.clone(), username.clone());
         self.credentials_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -573,8 +584,11 @@ impl Shell {
         let bookmarks = self.bookmarks.clone();
         let (start, layout) = (self.start_page.clone(), self.layout.clone());
         let filters = self.filters.clone();
+        let server = self.session.as_ref().map(|s| s.backend().clone());
         let page = cx.new(|cx| {
-            SettingsPage::new(env, queries, bookmarks, start, layout, filters, window, cx)
+            SettingsPage::new(
+                env, server, queries, bookmarks, start, layout, filters, window, cx,
+            )
         });
         self.page_subs.push(cx.subscribe_in(
             &page,
@@ -711,7 +725,10 @@ impl Shell {
     /// Writes the bookmarks in the background; the buttons follow once the
     /// config file has them. On failure the old list stays.
     fn save_bookmarks(&mut self, list: Vec<SavedQuery>, cx: &mut Context<Self>) {
-        let backend = self.env.backend.clone();
+        let Some(session) = &self.session else {
+            return;
+        };
+        let backend = session.backend().clone();
         self.bookmarks_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { backend.save_bookmarks(&list) })
@@ -740,9 +757,14 @@ impl Shell {
 
     fn logged_in(&mut self, outcome: &LoginOutcome, window: &mut Window, cx: &mut Context<Self>) {
         let setup = ServerSetup {
+            key: outcome.key.clone(),
+            name: server_name_from_url(&outcome.base_url),
             base_url: outcome.base_url.clone(),
             username: outcome.username.clone(),
+            color: None,
             server: outcome.server,
+            queries: outcome.queries.clone(),
+            bookmarks: Vec::new(),
         };
         let auth = match (&outcome.username, &outcome.password) {
             (Some(username), Some(password)) => Auth::Basic {
@@ -775,6 +797,7 @@ impl Shell {
         if let Some(s) = self.session.clone() {
             self.set_session(None, window, cx);
             self.prefill = Some(LoginPrefill {
+                server: Some(s.key),
                 base_url: s.base_url,
                 username: s.username,
                 notice: Some(
@@ -1403,6 +1426,7 @@ fn draft_label(counts: sync::DraftCounts) -> Option<String> {
 
 fn prefill_from(setup: &ServerSetup, notice: String) -> LoginPrefill {
     LoginPrefill {
+        server: Some(setup.key.clone()),
         base_url: setup.base_url.clone(),
         username: setup.username.clone(),
         notice: Some(notice),

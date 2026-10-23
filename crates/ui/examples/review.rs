@@ -56,12 +56,11 @@ const URL: &str = "https://gerrit.example.com";
 struct Demo;
 
 impl Backend for Demo {
-    fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
-        Ok(Some("demo".into()))
-    }
-
-    fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
-        Err(BackendError("the demo has no settings".into()))
+    fn for_server(
+        self: std::sync::Arc<Self>,
+        _: &ui::ServerKey,
+    ) -> std::sync::Arc<dyn ui::ServerBackend> {
+        self
     }
 
     fn save_filters(&self, f: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
@@ -78,6 +77,16 @@ impl Backend for Demo {
 
     fn save_theme(&self, t: ui::ThemeName) -> Result<ui::ThemeName, BackendError> {
         Ok(t)
+    }
+}
+
+impl ui::ServerBackend for Demo {
+    fn load_password(&self, _: &str, _: &str) -> Result<Option<String>, BackendError> {
+        Ok(Some("demo".into()))
+    }
+
+    fn save_queries(&self, _: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+        Err(BackendError("the demo has no settings".into()))
     }
 
     fn save_login(
@@ -1179,27 +1188,31 @@ fn main() {
         std::process::exit(2);
     });
     let startup = Startup {
-        bookmarks: Vec::new(),
         env: Env {
             http: Arc::new(http),
             store: Arc::new(Mutex::new(store)),
             backend: Arc::new(Demo),
         },
-        server: Some(ServerSetup {
-            base_url: URL.into(),
-            username: Some("alice".into()),
-            server: server_id,
-        }),
-        queries: vec![SavedQuery {
-            name: "Open changes".into(),
-            query: "status:open".into(),
-        }],
         diff: LocalDiff {
             preferences: local,
             font_family: font,
         },
         start_page: Default::default(),
         filters: demo_filters(),
+        servers: vec![ServerSetup {
+            base_url: URL.into(),
+            username: Some("alice".into()),
+            server: server_id,
+            key: ui::ServerKey::new("demo"),
+            name: "demo".into(),
+            color: None,
+            queries: vec![SavedQuery {
+                name: "Open changes".into(),
+                query: "status:open".into(),
+            }],
+            bookmarks: Vec::new(),
+        }],
+        active: None,
     };
 
     ui::application().run(move |cx| {

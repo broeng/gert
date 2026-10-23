@@ -13,6 +13,8 @@
 //! (the config file), off the main thread. The list shown is the one the
 //! backend returns, so what is on screen is what is on disk.
 
+use std::sync::Arc;
+
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -27,7 +29,7 @@ use crate::{
     card,
     filters::{FileFilter, FilterAction},
     hint::Hint,
-    session::{Env, SavedQuery, StartupPage},
+    session::{BackendError, Env, SavedQuery, ServerBackend, StartupPage},
     settings::{FileFilters, PageLayout},
     theme::{self as app_theme, ColorMode, ColorModes, ThemeName},
 };
@@ -134,6 +136,9 @@ fn scope_text(rule: &FileFilter) -> String {
 
 pub struct SettingsPage {
     env: Env,
+    /// The backend of the server whose queries and bookmarks are edited;
+    /// `None` when no server is set up.
+    server: Option<Arc<dyn ServerBackend>>,
     queries: Vec<SavedQuery>,
     bookmarks: Vec<SavedQuery>,
     cursor: usize,
@@ -170,6 +175,7 @@ impl SettingsPage {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         env: Env,
+        server: Option<Arc<dyn ServerBackend>>,
         queries: Vec<SavedQuery>,
         bookmarks: Vec<SavedQuery>,
         start_page: StartupPage,
@@ -199,6 +205,7 @@ impl SettingsPage {
         let filter_names = filters.read(cx).rules().iter().map(rule_name).collect();
         Self {
             env,
+            server,
             queries,
             bookmarks,
             cursor: 0,
@@ -629,10 +636,13 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) {
         self.busy = true;
-        let backend = self.env.backend.clone();
+        let backend = self.server.clone();
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
+                    let Some(backend) = backend else {
+                        return Err(BackendError("no server is set up".into()));
+                    };
                     match which {
                         Which::Queries => backend.save_queries(&list),
                         Which::Bookmarks => backend.save_bookmarks(&list),

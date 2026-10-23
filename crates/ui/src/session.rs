@@ -31,16 +31,64 @@ pub enum StartupPage {
 #[error("{0}")]
 pub struct BackendError(pub String);
 
-/// Persistence the `app` crate provides: the keyring and the config file.
-/// Both block, so the UI calls them from the background executor.
-pub trait Backend: Send + Sync + 'static {
+/// The stable id of a configured server: the slug in the config file, also
+/// what names the server to its [`ServerBackend`]. It does not change when
+/// the server is renamed or its URL is edited.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ServerKey(String);
+
+impl ServerKey {
+    pub fn new(slug: impl Into<String>) -> Self {
+        Self(slug.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ServerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A display name for a server URL: its host (with the port, if any).
+pub fn server_name_from_url(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    if host.is_empty() {
+        "server".to_owned()
+    } else {
+        host.to_owned()
+    }
+}
+
+/// What the config file says about one server, without its saved lists:
+/// the unit of [`Backend::save_servers`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerConfig {
+    pub key: ServerKey,
+    pub name: String,
+    pub url: String,
+    /// `None`: anonymous.
+    pub username: Option<String>,
+    /// `"#rrggbb"`; `None`: assigned automatically.
+    pub color: Option<String>,
+}
+
+/// The persistence of one server, bound to it: the keyring entry and the
+/// server's queries and bookmarks in the config file. Everything blocks, so
+/// the UI calls it from the background executor.
+pub trait ServerBackend: Send + Sync + 'static {
     /// The saved HTTP password; `Ok(None)` if there is none.
     fn load_password(&self, base_url: &str, username: &str)
     -> Result<Option<String>, BackendError>;
 
     /// Stores the password in the keyring (when there is one) and writes the
-    /// config. Returns the saved queries now in effect (seeded on first
-    /// login).
+    /// server to the config (adding it if it is new). Returns the saved
+    /// queries now in effect (seeded for a new server).
     fn save_login(
         &self,
         base_url: &str,
@@ -48,15 +96,38 @@ pub trait Backend: Send + Sync + 'static {
         password: Option<&str>,
     ) -> Result<Vec<SavedQuery>, BackendError>;
 
-    /// Writes the saved queries to the config file, keeping the rest of it
-    /// as it is. Returns the list now in effect.
+    /// Writes the saved queries of this server to the config file, keeping
+    /// the rest of it as it is. Returns the list now in effect.
     fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError>;
 
-    /// Writes the bookmarks (`[[bookmarks]]`) to the config file, keeping
-    /// the rest of it as it is. Returns the list now in effect. Defaults to
+    /// Writes the bookmarks of this server to the config file, keeping the
+    /// rest of it as it is. Returns the list now in effect. Defaults to
     /// accepting them without saving, for backends with no config file.
     fn save_bookmarks(&self, bookmarks: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
         Ok(bookmarks.to_vec())
+    }
+}
+
+/// The global persistence the `app` crate provides: the settings that are
+/// not about one server, and the way to a server's own [`ServerBackend`].
+/// It blocks, so the UI calls it from the background executor.
+pub trait Backend: Send + Sync + 'static {
+    /// The backend of server `key`. Takes the `Arc` so that a backend that
+    /// keeps its state in itself (a test fake) can hand itself out.
+    fn for_server(self: Arc<Self>, key: &ServerKey) -> Arc<dyn ServerBackend>;
+
+    /// A key for a server to be added at `base_url`, one no configured
+    /// server has. Defaults to a fixed key, for backends with no config.
+    fn new_server_key(&self, _base_url: &str) -> ServerKey {
+        ServerKey::new("default")
+    }
+
+    /// Writes the list of servers (`[[servers]]`): add, edit, reorder and
+    /// remove. A server that stays keeps its queries and bookmarks. Returns
+    /// the list now in effect. Defaults to accepting it without saving, for
+    /// backends with no config file.
+    fn save_servers(&self, servers: &[ServerConfig]) -> Result<Vec<ServerConfig>, BackendError> {
+        Ok(servers.to_vec())
     }
 
     /// Writes the file filters (`[[filters]]`) to the config file, keeping
@@ -85,15 +156,33 @@ pub trait Backend: Send + Sync + 'static {
 pub struct Env {
     pub http: Arc<dyn HttpClient>,
     pub store: Arc<Mutex<Store>>,
+    /// The global backend; a server's own is `Session::backend`.
     pub backend: Arc<dyn Backend>,
+}
+
+impl Env {
+    /// The backend of server `key`.
+    pub fn server_backend(&self, key: &ServerKey) -> Arc<dyn ServerBackend> {
+        self.backend.clone().for_server(key)
+    }
 }
 
 /// A configured server, possibly seen before.
 #[derive(Clone, Debug)]
 pub struct ServerSetup {
+    pub key: ServerKey,
+    pub name: String,
     pub base_url: String,
     pub username: Option<String>,
+    /// `"#rrggbb"` if the user chose one.
+    pub color: Option<String>,
+    /// The cache's id of the server.
     pub server: ServerId,
+    /// The saved queries (`[[servers.queries]]`): the dashboard sections.
+    pub queries: Vec<SavedQuery>,
+    /// The bookmarks (`[[servers.bookmarks]]`): searches the dashboard has
+    /// buttons for.
+    pub bookmarks: Vec<SavedQuery>,
 }
 
 /// The user's local diff settings from the config file.
@@ -109,11 +198,11 @@ pub struct LocalDiff {
 /// Everything `app` gives the UI at startup.
 pub struct Startup {
     pub env: Env,
-    /// `None` when there is no config yet: start on the login page.
-    pub server: Option<ServerSetup>,
-    pub queries: Vec<SavedQuery>,
-    /// The bookmarks (`[[bookmarks]]`): searches the dashboard has buttons for.
-    pub bookmarks: Vec<SavedQuery>,
+    /// The configured servers, in config order. Empty when there is no
+    /// config yet: start on the login page. The UI works with one for now.
+    pub servers: Vec<ServerSetup>,
+    /// The server to start on; the first one if `None` or unknown.
+    pub active: Option<ServerKey>,
     /// The file filter rules (`[[filters]]`).
     pub filters: Vec<FileFilter>,
     pub diff: LocalDiff,
@@ -124,8 +213,10 @@ pub struct Startup {
 /// A logged-in (or anonymous) connection to one server.
 #[derive(Clone)]
 pub struct Session {
+    pub key: ServerKey,
     pub base_url: String,
     pub username: Option<String>,
+    backend: Arc<dyn ServerBackend>,
     syncer: Syncer,
     can_sync: bool,
 }
@@ -145,11 +236,18 @@ impl Session {
             auth.unwrap_or(Auth::Anonymous),
         )?;
         Ok(Self {
+            key: setup.key.clone(),
+            backend: env.server_backend(&setup.key),
             base_url: setup.base_url.trim_end_matches('/').to_owned(),
             username: setup.username.clone(),
             syncer: Syncer::new(client, env.store.clone(), setup.server),
             can_sync,
         })
+    }
+
+    /// The persistence of this server: password, queries and bookmarks.
+    pub fn backend(&self) -> &Arc<dyn ServerBackend> {
+        &self.backend
     }
 
     pub fn syncer(&self) -> &Syncer {

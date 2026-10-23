@@ -1,14 +1,14 @@
 //! The keyring and config persistence the UI asks for.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use ui::{
-    Backend, BackendError, ColorModes, SavedQuery, StartupPage as UiStartupPage, ThemeName,
-    filters::FileFilter,
+    Backend, BackendError, ColorModes, SavedQuery, ServerBackend, ServerConfig as UiServerConfig,
+    ServerKey, StartupPage as UiStartupPage, ThemeName, filters::FileFilter, server_name_from_url,
 };
 
 use crate::{
-    config::{Config, FilterConfig, QueryConfig, StartupConfig, StartupPage, server_name_from_url},
+    config::{Config, FilterConfig, QueryConfig, ServerConfig, StartupConfig, StartupPage},
     secrets::Keyring,
 };
 
@@ -25,15 +25,6 @@ pub fn queries_to_ui(queries: &[QueryConfig]) -> Vec<SavedQuery> {
             query: q.query.clone(),
         })
         .collect()
-}
-
-fn first_queries(config: &Config) -> Vec<SavedQuery> {
-    queries_to_ui(
-        config
-            .servers
-            .first()
-            .map_or(&[][..], |s| s.queries.as_slice()),
-    )
 }
 
 /// Debug builds only: the HTTP password from `GERT_DEV_PASSWORD`, for
@@ -54,7 +45,49 @@ fn dev_password_from(base_url: &str, value: Option<String>) -> Option<String> {
     value.filter(|p| local && !p.is_empty())
 }
 
-impl Backend for AppBackend {
+/// The persistence of one server: its keyring entry and its part of the
+/// config file, named by the server's id.
+pub struct AppServerBackend {
+    config_file: PathBuf,
+    keyring: Keyring,
+    id: String,
+}
+
+impl AppServerBackend {
+    /// Changes this server's entry of the config, which must exist.
+    fn update_server(
+        &self,
+        change: impl FnOnce(&mut ServerConfig),
+    ) -> Result<ServerConfig, BackendError> {
+        let mut found = false;
+        let config = Config::update(&self.config_file, |c| {
+            if let Some(s) = c.servers.iter_mut().find(|s| s.id == self.id) {
+                found = true;
+                change(s);
+            }
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        match config.server(&self.id) {
+            Some(s) if found => Ok(s.clone()),
+            _ => Err(BackendError(format!(
+                "no server {:?} in the configuration",
+                self.id
+            ))),
+        }
+    }
+}
+
+fn queries_from_ui(queries: &[SavedQuery]) -> Vec<QueryConfig> {
+    queries
+        .iter()
+        .map(|q| QueryConfig {
+            name: q.name.clone(),
+            query: q.query.clone(),
+        })
+        .collect()
+}
+
+impl ServerBackend for AppServerBackend {
     fn load_password(
         &self,
         base_url: &str,
@@ -82,54 +115,80 @@ impl Backend for AppBackend {
                 .set(base_url, user, pass)
                 .map_err(|e| BackendError(e.to_string()))?;
         }
-        // One server for now: a login replaces the first one.
         let config = Config::update(&self.config_file, |c| {
-            let id = c
-                .servers
-                .first()
-                .map(|s| s.id.clone())
-                .unwrap_or_else(|| c.unique_server_id(&server_name_from_url(base_url)));
-            *c = std::mem::take(c).after_login(&id, base_url, username);
+            *c = std::mem::take(c).after_login(&self.id, base_url, username);
         })
         .map_err(|e| BackendError(e.to_string()))?;
-        Ok(first_queries(&config))
+        Ok(config
+            .server(&self.id)
+            .map_or_else(Vec::new, |s| queries_to_ui(&s.queries)))
     }
 
     fn save_queries(&self, queries: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
-        let config = Config::update(&self.config_file, |c| {
-            if let Some(s) = c.servers.first_mut() {
-                s.queries = queries
-                    .iter()
-                    .map(|q| QueryConfig {
-                        name: q.name.clone(),
-                        query: q.query.clone(),
-                    })
-                    .collect();
-            }
-        })
-        .map_err(|e| BackendError(e.to_string()))?;
-        Ok(first_queries(&config))
+        let s = self.update_server(|s| s.queries = queries_from_ui(queries))?;
+        Ok(queries_to_ui(&s.queries))
     }
 
     fn save_bookmarks(&self, bookmarks: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
+        let s = self.update_server(|s| s.bookmarks = queries_from_ui(bookmarks))?;
+        Ok(queries_to_ui(&s.bookmarks))
+    }
+}
+
+/// The UI's form of a configured server.
+pub fn server_to_ui(s: &ServerConfig) -> UiServerConfig {
+    UiServerConfig {
+        key: ServerKey::new(&s.id),
+        name: s.name.clone(),
+        url: s.url.clone(),
+        username: s.username.clone(),
+        color: s.color.clone(),
+    }
+}
+
+impl Backend for AppBackend {
+    fn for_server(self: Arc<Self>, key: &ServerKey) -> Arc<dyn ServerBackend> {
+        Arc::new(AppServerBackend {
+            config_file: self.config_file.clone(),
+            keyring: self.keyring,
+            id: key.as_str().to_owned(),
+        })
+    }
+
+    fn new_server_key(&self, base_url: &str) -> ServerKey {
+        // An unreadable file has no ids to avoid; the save that follows
+        // reports the problem.
+        let config = Config::load(&self.config_file)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        ServerKey::new(config.unique_server_id(&server_name_from_url(base_url)))
+    }
+
+    fn save_servers(
+        &self,
+        servers: &[UiServerConfig],
+    ) -> Result<Vec<UiServerConfig>, BackendError> {
         let config = Config::update(&self.config_file, |c| {
-            if let Some(s) = c.servers.first_mut() {
-                s.bookmarks = bookmarks
-                    .iter()
-                    .map(|q| QueryConfig {
-                        name: q.name.clone(),
-                        query: q.query.clone(),
-                    })
-                    .collect();
-            }
+            let old = std::mem::take(&mut c.servers);
+            c.servers = servers
+                .iter()
+                .map(|s| {
+                    let prev = old.iter().find(|o| o.id == s.key.as_str());
+                    ServerConfig {
+                        id: s.key.as_str().to_owned(),
+                        name: s.name.clone(),
+                        url: s.url.clone(),
+                        username: s.username.clone(),
+                        color: s.color.clone(),
+                        queries: prev.map(|p| p.queries.clone()).unwrap_or_default(),
+                        bookmarks: prev.map(|p| p.bookmarks.clone()).unwrap_or_default(),
+                    }
+                })
+                .collect();
         })
         .map_err(|e| BackendError(e.to_string()))?;
-        Ok(queries_to_ui(
-            config
-                .servers
-                .first()
-                .map_or(&[][..], |s| s.bookmarks.as_slice()),
-        ))
+        Ok(config.servers.iter().map(server_to_ui).collect())
     }
 
     fn save_filters(&self, filters: &[FileFilter]) -> Result<Vec<FileFilter>, BackendError> {
@@ -212,6 +271,17 @@ pub fn startup_to_ui(page: &StartupPage) -> UiStartupPage {
 mod tests {
     use super::*;
 
+    impl AppBackend {
+        /// The backend of server `id`, without going through `Arc`.
+        fn server(&self, id: &str) -> AppServerBackend {
+            AppServerBackend {
+                config_file: self.config_file.clone(),
+                keyring: self.keyring,
+                id: id.to_owned(),
+            }
+        }
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     fn the_dev_password_only_applies_to_a_local_server() {
@@ -244,7 +314,10 @@ mod tests {
             config_file: dir.join("config.toml"),
             keyring: Keyring,
         };
-        let queries = b.save_login("https://g.example.com", None, None).unwrap();
+        let queries = b
+            .server("g")
+            .save_login("https://g.example.com", None, None)
+            .unwrap();
         assert_eq!(queries.len(), 2);
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
         assert_eq!(cfg.servers[0].username, None);
@@ -269,7 +342,7 @@ mod tests {
             name: "B".into(),
             query: "y".into(),
         }];
-        assert_eq!(b.save_queries(&new).unwrap(), new);
+        assert_eq!(b.server("g").save_queries(&new).unwrap(), new);
         let text = std::fs::read_to_string(&b.config_file).unwrap();
         assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
         assert!(text.contains("name = \"B\""), "{text}");
@@ -294,7 +367,7 @@ mod tests {
             name: "Mine".into(),
             query: "owner:self".into(),
         }];
-        assert_eq!(b.save_bookmarks(&new).unwrap(), new);
+        assert_eq!(b.server("g").save_bookmarks(&new).unwrap(), new);
         let text = std::fs::read_to_string(&b.config_file).unwrap();
         assert!(text.contains("# mine") && text.contains("# prod"), "{text}");
         assert!(
@@ -302,7 +375,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("[[servers.queries]]\nname = \"A\""), "{text}");
-        assert_eq!(b.save_bookmarks(&[]).unwrap(), []);
+        assert_eq!(b.server("g").save_bookmarks(&[]).unwrap(), []);
         let text = std::fs::read_to_string(&b.config_file).unwrap();
         assert!(!text.contains("bookmarks"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -437,5 +510,182 @@ mod tests {
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
         assert_eq!(cfg.color_modes(), modes);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const TWO: &str = r##"# two servers
+[[servers]]
+id = "work"
+name = "Work" # the big one
+url = "https://gerrit.work.example"
+username = "jdoe"
+
+# work queries
+[[servers.queries]]
+name = "Mine"
+query = "owner:self"
+
+[[servers]]
+id = "oss"
+name = "OSS"
+url = "https://gerrit.oss.example"
+
+[[servers.queries]]
+name = "Open"
+query = "status:open"
+
+[[filters]]
+name = "Gen"
+globs = ["a"]
+servers = ["oss"]
+action = "dim"
+"##;
+
+    fn two_servers(name: &str) -> AppBackend {
+        let dir = std::env::temp_dir().join(format!("backend-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let b = AppBackend {
+            config_file: dir.join("config.toml"),
+            keyring: Keyring,
+        };
+        std::fs::write(&b.config_file, TWO).unwrap();
+        b
+    }
+
+    fn saved(name: &str, query: &str) -> SavedQuery {
+        SavedQuery {
+            name: name.into(),
+            query: query.into(),
+        }
+    }
+
+    #[test]
+    fn each_server_backend_writes_only_its_own_lists() {
+        let b = two_servers("own-lists");
+        let new = [saved("Merged", "status:merged")];
+        assert_eq!(b.server("oss").save_queries(&new).unwrap(), new);
+        assert_eq!(b.server("oss").save_bookmarks(&new).unwrap(), new);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        for kept in [
+            "# two servers",
+            "# the big one",
+            "# work queries",
+            "query = \"owner:self\"",
+        ] {
+            assert!(text.contains(kept), "lost {kept:?} in\n{text}");
+        }
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(cfg.server("work").unwrap().queries.len(), 1);
+        assert_eq!(cfg.server("work").unwrap().queries[0].name, "Mine");
+        assert!(cfg.server("work").unwrap().bookmarks.is_empty());
+        assert_eq!(cfg.server("oss").unwrap().queries[0].name, "Merged");
+        assert_eq!(cfg.server("oss").unwrap().bookmarks[0].name, "Merged");
+        // Another server's writes do not go through this one.
+        assert_eq!(b.server("work").save_bookmarks(&[]).unwrap(), []);
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(cfg.server("oss").unwrap().bookmarks.len(), 1);
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
+    }
+
+    #[test]
+    fn a_server_that_is_not_configured_is_an_error_and_writes_nothing() {
+        let b = two_servers("unknown");
+        let err = b.server("gone").save_queries(&[]).unwrap_err();
+        assert!(err.0.contains("gone"), "{err}");
+        assert_eq!(std::fs::read_to_string(&b.config_file).unwrap(), TWO);
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
+    }
+
+    #[test]
+    fn login_updates_its_server_and_adds_a_new_one() {
+        let b = two_servers("login");
+        let q = b
+            .server("oss")
+            .save_login("https://gerrit.oss.example", Some("alice"), None)
+            .unwrap();
+        assert_eq!(q, [saved("Open", "status:open")]);
+        let key = b.new_server_key("https://other.example");
+        assert_eq!(key.as_str(), "other-example");
+        b.server(key.as_str())
+            .save_login("https://other.example", None, None)
+            .unwrap();
+        // A second server on the same host gets another id.
+        assert_eq!(
+            b.new_server_key("https://other.example").as_str(),
+            "other-example-2"
+        );
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        let ids: Vec<_> = cfg.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["work", "oss", "other-example"]);
+        assert_eq!(
+            cfg.server("oss").unwrap().username.as_deref(),
+            Some("alice")
+        );
+        assert_eq!(cfg.server("other-example").unwrap().queries.len(), 2);
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(
+            text.contains("# the big one") && text.contains("# work queries"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
+    }
+
+    #[test]
+    fn save_servers_edits_reorders_and_removes_but_keeps_the_lists() {
+        let b = two_servers("save-servers");
+        let ui_servers: Vec<_> = Config::load(&b.config_file)
+            .unwrap()
+            .unwrap()
+            .servers
+            .iter()
+            .map(server_to_ui)
+            .collect();
+        let mut edited = vec![ui_servers[1].clone(), ui_servers[0].clone()];
+        edited[0].name = "Open source".into();
+        edited[0].color = Some("#ff8800".into());
+        let back = b.save_servers(&edited).unwrap();
+        assert_eq!(back, edited);
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(cfg.servers[0].id, "oss");
+        assert_eq!(cfg.servers[0].name, "Open source");
+        assert_eq!(cfg.servers[0].queries[0].name, "Open");
+        assert_eq!(cfg.servers[1].queries[0].name, "Mine");
+        let text = std::fs::read_to_string(&b.config_file).unwrap();
+        assert!(
+            text.contains("# work queries") && text.contains("# the big one"),
+            "{text}"
+        );
+
+        b.save_servers(&edited[..1]).unwrap();
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(cfg.servers.len(), 1);
+        assert!(
+            !std::fs::read_to_string(&b.config_file)
+                .unwrap()
+                .contains("work")
+        );
+
+        let dup = [edited[0].clone(), edited[0].clone()];
+        let err = b.save_servers(&dup).unwrap_err();
+        assert!(err.0.contains("oss"), "{err}");
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
+    }
+
+    #[test]
+    fn saving_filters_keeps_the_servers_restriction_of_a_rule() {
+        use ui::filters::FilterAction;
+        let b = two_servers("filter-servers");
+        let new = [FileFilter {
+            name: "Gen".into(),
+            globs: vec!["*.lock".into()],
+            projects: Vec::new(),
+            action: FilterAction::Hide,
+            enabled: true,
+        }];
+        assert_eq!(b.save_filters(&new).unwrap(), new);
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(cfg.filters[0].servers, vec!["oss".to_owned()]);
+        assert_eq!(cfg.filters[0].globs, vec!["*.lock".to_owned()]);
+        let _ = std::fs::remove_dir_all(b.config_file.parent().unwrap());
     }
 }
