@@ -1,4 +1,6 @@
-//! The login page: server URL, optional username, HTTP password.
+//! The login page: server URL, optional username, HTTP password. For a
+//! server that is not configured yet it also asks for a name, and logging in
+//! adds the server.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -20,6 +22,8 @@ pub struct LoginPrefill {
     /// The configured server being logged in to again; `None`: a new one.
     pub server: Option<ServerKey>,
     pub base_url: String,
+    /// The name of a new server; empty: the host.
+    pub name: Option<String>,
     pub username: Option<String>,
     pub notice: Option<String>,
 }
@@ -28,6 +32,7 @@ pub struct LoginPage {
     env: Env,
     server: Option<ServerKey>,
     url: Entity<InputState>,
+    name: Entity<InputState>,
     username: Entity<InputState>,
     password: Entity<InputState>,
     anonymous: bool,
@@ -54,6 +59,9 @@ impl LoginPage {
     ) -> Self {
         let url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://gerrit.example.com"));
+        let name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Name (default: the host of the URL)")
+        });
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
         let password = cx.new(|cx| {
             InputState::new(window, cx)
@@ -63,11 +71,14 @@ impl LoginPage {
         url.update(cx, |s, cx| {
             s.set_value(prefill.base_url.clone(), window, cx)
         });
+        if let Some(n) = &prefill.name {
+            name.update(cx, |s, cx| s.set_value(n.clone(), window, cx));
+        }
         if let Some(u) = &prefill.username {
             username.update(cx, |s, cx| s.set_value(u.clone(), window, cx));
         }
         let mut subs = Vec::new();
-        for input in [&url, &username, &password] {
+        for input in [&url, &name, &username, &password] {
             subs.push(
                 cx.subscribe_in(input, window, |this, _, ev: &InputEvent, window, cx| {
                     if let InputEvent::PressEnter { .. } = ev {
@@ -80,6 +91,7 @@ impl LoginPage {
             env,
             server: prefill.server,
             url,
+            name,
             username,
             password,
             anonymous: false,
@@ -109,6 +121,7 @@ impl LoginPage {
         };
         let req = LoginRequest {
             server: self.server.clone(),
+            name: Some(self.name.read(cx).value().trim().to_owned()),
             base_url: self.url.read(cx).value().to_string(),
             username,
             password,
@@ -143,6 +156,39 @@ impl LoginPage {
     }
 }
 
+#[cfg(test)]
+impl LoginPage {
+    pub(crate) fn url_for_test(&self, cx: &App) -> String {
+        self.url.read(cx).value().to_string()
+    }
+
+    pub(crate) fn is_new_server_for_test(&self) -> bool {
+        self.server.is_none()
+    }
+
+    pub(crate) fn notice_for_test(&self) -> Option<String> {
+        self.error.as_ref().map(ToString::to_string)
+    }
+
+    /// Types into the fields and presses Log in.
+    pub(crate) fn login_for_test(
+        &mut self,
+        name: &str,
+        username: &str,
+        password: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let set = |input: &Entity<InputState>, text: &str, window: &mut Window, cx: &mut App| {
+            input.update(cx, |s, cx| s.set_value(text.to_owned(), window, cx))
+        };
+        set(&self.name, name, window, cx);
+        set(&self.username, username, window, cx);
+        set(&self.password, password, window, cx);
+        self.submit(window, cx);
+    }
+}
+
 fn describe(e: &LoginError) -> String {
     let s = e.to_string();
     let mut c = s.chars();
@@ -169,6 +215,9 @@ impl Render for LoginPage {
                     .child(div().text_xl().font_semibold().child("Connect to Gerrit"))
                     .child(label("Server URL"))
                     .child(Input::new(&self.url))
+                    .when(self.server.is_none(), |d| {
+                        d.child(label("Name")).child(Input::new(&self.name))
+                    })
                     .child(
                         Checkbox::new("anonymous")
                             .label("Anonymous (read-only, public servers)")

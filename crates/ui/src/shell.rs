@@ -16,7 +16,7 @@ use crate::{
     action_menu::{ActionDialog, ActionEvent, Done},
     actions::{self, *},
     filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
-    goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, parse_link},
+    goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, LinkServer, resolve_link},
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
     outbox::{DraftOutbox, OutboxEvent},
@@ -31,7 +31,7 @@ use crate::{
     row::server_label,
     servers::{ACTIVE_SERVER_STATE, Connection, Servers},
     session::{
-        Env, SavedQuery, ServerKey, ServerSetup, Session, Startup, StartupPage,
+        Env, SavedQuery, ServerConfig, ServerKey, ServerSetup, Session, Startup, StartupPage,
         server_name_from_url,
     },
     settings::{DiffSettings, FileFilters, PageLayout},
@@ -107,6 +107,9 @@ pub struct Shell {
     page: Page,
     page_subs: Vec<Subscription>,
     prefill: Option<LoginPrefill>,
+    /// A link whose server is being added on the login page: opened there
+    /// once the login worked.
+    pending_link: Option<String>,
     search: Entity<InputState>,
     focus: FocusHandle,
     help: bool,
@@ -201,6 +204,7 @@ impl Shell {
             page: Page::Login(login),
             page_subs: Vec::new(),
             prefill: None,
+            pending_link: None,
             search,
             focus: cx.focus_handle(),
             help: false,
@@ -558,13 +562,43 @@ impl Shell {
     ) {
         self.install_session(&setup.key, None, window, cx);
         self.prefill = Some(prefill_from(setup, notice));
-        self.nav.reset_for(Some(setup.key.clone()), Route::Login);
+        self.nav.push_to(Some(setup.key.clone()), Route::Login);
         self.show(window, cx);
     }
 
     #[cfg(test)]
     pub(crate) fn active_for_test(&self) -> Option<&ServerKey> {
         self.servers.active_key()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trail_for_test(&self) -> (Vec<(Option<String>, Route)>, usize) {
+        (self.nav.trail(), self.nav.position())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn login_page_for_test(&self) -> Option<Entity<LoginPage>> {
+        match &self.page {
+            Page::Login(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_name_for_test(&self, key: &str) -> Option<String> {
+        self.servers
+            .get(&ServerKey::new(key))
+            .map(|e| e.setup.name.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unauthorized_for_test(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.unauthorized_for(&ServerKey::new(key), window, cx);
     }
 
     #[cfg(test)]
@@ -678,8 +712,15 @@ impl Shell {
         self.drop_switcher();
         let mut route = self.nav.current().clone();
         if self.session().is_none() && route != Route::Login {
-            self.nav.reset(Route::Login);
+            // The login page goes on top of the history instead of
+            // replacing it, so that the other servers' pages stay.
+            self.nav.push(Route::Login);
             route = Route::Login;
+        }
+        if route != Route::Login {
+            // A link waiting for its server to be added is forgotten once
+            // the user leaves the login page without adding it.
+            self.pending_link = None;
         }
         let active = self.window_active;
         let restore = self.nav.selected();
@@ -777,13 +818,13 @@ impl Shell {
     }
 
     /// Opens `route` on server `key`, switching to it if it is not the
-    /// active one. (`navigate` stays on the active server.)
-    // Used by the link handling (S3) and the tests for now.
-    #[allow(dead_code)]
+    /// active one. (`navigate` stays on the active server.) `view` is the
+    /// state to give a change page.
     pub(crate) fn go_to(
         &mut self,
         key: &ServerKey,
         route: Route,
+        view: Option<ChangeView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -792,6 +833,9 @@ impl Shell {
         }
         self.remember_selection(cx);
         self.nav.push_to(Some(key.clone()), route);
+        if view.is_some() {
+            self.nav.set_change_view(view);
+        }
         self.show(window, cx);
     }
 
@@ -1043,22 +1087,21 @@ impl Shell {
     }
 
     fn logged_in(&mut self, outcome: &LoginOutcome, window: &mut Window, cx: &mut Context<Self>) {
-        // A server that is known keeps its bookmarks (a new login after the
-        // credentials were refused is the usual case).
-        let bookmarks = self
-            .servers
-            .get(&outcome.key)
-            .map(|e| e.setup.bookmarks.clone())
-            .unwrap_or_default();
+        // A server that is known keeps its name, color and bookmarks (a new
+        // login after the credentials were refused is the usual case).
+        let known = self.servers.get(&outcome.key).map(|e| e.setup.clone());
+        let is_new = known.is_none();
         let setup = ServerSetup {
             key: outcome.key.clone(),
-            name: server_name_from_url(&outcome.base_url),
+            name: known
+                .as_ref()
+                .map_or_else(|| outcome.name.clone(), |k| k.name.clone()),
             base_url: outcome.base_url.clone(),
             username: outcome.username.clone(),
-            color: None,
+            color: known.as_ref().and_then(|k| k.color.clone()),
             server: outcome.server,
             queries: outcome.queries.clone(),
-            bookmarks,
+            bookmarks: known.map(|k| k.bookmarks).unwrap_or_default(),
         };
         let auth = match (&outcome.username, &outcome.password) {
             (Some(username), Some(password)) => Auth::Basic {
@@ -1067,24 +1110,130 @@ impl Shell {
             },
             _ => Auth::Anonymous,
         };
-        match Session::new(&self.env, &setup, Some(auth)) {
-            Ok(session) => {
-                self.servers.upsert(setup);
-                let key = outcome.key.clone();
-                self.install_session(&key, Some(session), window, cx);
-                self.servers.set_connection(&key, Connection::Online);
-                if self.servers.set_active(&key) == Some(true) {
-                    self.persist_active(cx);
-                }
-                self.nav.reset_for(Some(key), Route::Dashboard);
-                self.show(window, cx);
-                self.load_diff_preferences(cx);
-            }
+        let session = match Session::new(&self.env, &setup, Some(auth)) {
+            Ok(session) => session,
             Err(e) => {
-                self.prefill = Some(prefill_from(&setup, e.to_string()));
-                self.show(window, cx);
+                self.prefill = Some(LoginPrefill {
+                    server: (!is_new).then_some(setup.key.clone()),
+                    ..prefill_from(&setup, e.to_string())
+                });
+                return self.show(window, cx);
             }
+        };
+        let key = outcome.key.clone();
+        self.servers.upsert(setup);
+        self.install_session(&key, Some(session), window, cx);
+        self.servers.set_connection(&key, Connection::Online);
+        if self.servers.set_active(&key) == Some(true) {
+            self.persist_active(cx);
+            // The preferences of the server we left must not linger.
+            let prefs = self.servers.get(&key).and_then(|e| e.diff_prefs.clone());
+            self.settings.update(cx, |s, cx| s.set_server(prefs, cx));
         }
+        if is_new {
+            self.save_server_names(&outcome.base_url, &outcome.name, cx);
+        }
+        // The link that led to adding the server opens there, else the
+        // dashboard. The login page was a history entry of its own: it
+        // turns into that page, and the history before it stays.
+        let (route, view, key) = self
+            .pending_link
+            .take()
+            .and_then(|text| {
+                resolve_link(&text, &self.link_servers(), Some(&key))
+                    .ok()
+                    .map(|(k, link)| {
+                        let (route, view) = link.route();
+                        (route, view, k)
+                    })
+            })
+            .unwrap_or((Route::Dashboard, None, key));
+        self.nav.replace_to(Some(key), route);
+        if view.is_some() {
+            self.nav.set_change_view(view);
+        }
+        self.show(window, cx);
+        self.load_diff_preferences(cx);
+    }
+
+    /// Writes the servers to the config with the name the user gave the one
+    /// just added. The login saved it under its host name, so nothing is
+    /// needed when they are the same.
+    fn save_server_names(&mut self, base_url: &str, name: &str, cx: &mut Context<Self>) {
+        if name == server_name_from_url(base_url) {
+            return;
+        }
+        let configs: Vec<ServerConfig> = self
+            .servers
+            .keys()
+            .into_iter()
+            .filter_map(|key| {
+                let setup = &self.servers.get(&key)?.setup;
+                Some(ServerConfig {
+                    key,
+                    name: setup.name.clone(),
+                    url: setup.base_url.clone(),
+                    username: setup.username.clone(),
+                    color: setup.color.clone(),
+                })
+            })
+            .collect();
+        let backend = self.env.backend.clone();
+        cx.background_spawn(async move {
+            if let Err(e) = backend.save_servers(&configs) {
+                log::warn!("saving the server name: {e}");
+            }
+        })
+        .detach();
+    }
+
+    // ---- adding a server ----
+
+    /// Opens the login page for a server that is not configured yet, with
+    /// `url` filled in. Nothing is sent to that address until the user logs
+    /// in. A successful login makes the new server the active one and then
+    /// opens `link` (a Go to text) there, if there is one. The page is
+    /// pushed on the history, so Back returns to where the user was.
+    pub(crate) fn open_add_server(
+        &mut self,
+        url: String,
+        link: Option<String>,
+        notice: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let notice = notice.or_else(|| {
+            link.as_ref().map(|_| {
+                format!(
+                    "None of your servers is at {url}. Log in to add it; nothing has been \
+                     sent to it yet."
+                )
+            })
+        });
+        self.remember_selection(cx);
+        self.prefill = Some(LoginPrefill {
+            server: None,
+            base_url: url,
+            name: None,
+            username: None,
+            notice,
+        });
+        self.pending_link = link;
+        let server = self.servers.active_key().cloned();
+        self.nav.push_to(server, Route::Login);
+        self.show(window, cx);
+    }
+
+    /// The add-server action: the login page for a new server, empty.
+    fn add_server(&mut self, _: &AddServer, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.goto.is_some()
+        {
+            return;
+        }
+        self.open_add_server(String::new(), None, None, window, cx);
     }
 
     /// Server `key` refused our credentials. It loses its session (so
@@ -1105,6 +1254,7 @@ impl Shell {
                 self.prefill = Some(LoginPrefill {
                     server: Some(s.key),
                     base_url: s.base_url,
+                    name: None,
                     username: s.username,
                     notice: Some(
                         "The server rejected the saved credentials. Please log in again.".into(),
@@ -1113,7 +1263,7 @@ impl Shell {
             }
         }
         if active {
-            self.nav.reset_for(Some(key.clone()), Route::Login);
+            self.nav.push_to(Some(key.clone()), Route::Login);
             self.show(window, cx);
         }
     }
@@ -1302,28 +1452,44 @@ impl Shell {
     // ---- go to a change ----
 
     /// Opens the change a link from the web UI points at, like the browser
-    /// would. The current page stays behind it in the history. A link that
-    /// does not parse opens the Go to dialog on it, which says why. Does
-    /// nothing before a server is set up.
+    /// would, on whichever configured server the link is for (switching to
+    /// it). The current page stays behind it in the history. A link that
+    /// does not parse opens the Go to dialog on it, which says why; one for
+    /// a server that is not configured offers to add it there. With no
+    /// server at all the offer is the login page.
     pub fn open_link(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.session() else {
-            log::warn!("not opening {text}: no server is set up");
-            return;
-        };
-        match parse_link(text, &session.base_url) {
-            Ok(link) => self.open_change_link(&link, window, cx),
+        let servers = self.link_servers();
+        match resolve_link(text, &servers, self.servers.active_key()) {
+            Ok((key, link)) => self.open_change_link(&key, &link, window, cx),
+            Err(LinkError::UnknownServer(url)) if servers.is_empty() => {
+                self.open_add_server(url, Some(text.trim().to_owned()), None, window, cx)
+            }
+            Err(e) if servers.is_empty() => log::warn!("not opening {text}: {e}"),
             Err(e) => self.show_goto(text.trim().to_owned(), Some(e), window, cx),
         }
     }
 
-    fn open_change_link(&mut self, link: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
+    /// The configured servers, as links see them.
+    fn link_servers(&self) -> Vec<LinkServer> {
+        self.servers
+            .keys()
+            .into_iter()
+            .filter_map(|key| {
+                let base_url = self.servers.get(&key)?.setup.base_url.clone();
+                Some(LinkServer { key, base_url })
+            })
+            .collect()
+    }
+
+    fn open_change_link(
+        &mut self,
+        key: &ServerKey,
+        link: &ChangeLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (route, view) = link.route();
-        self.remember_selection(cx);
-        self.nav.push(route);
-        if view.is_some() {
-            self.nav.set_change_view(view);
-        }
-        self.show(window, cx);
+        self.go_to(key, route, view, window, cx);
     }
 
     /// `g`: the dialog, with the first line of the clipboard in it.
@@ -1353,24 +1519,27 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.goto.is_some()
             || self.switcher.is_some();
-        let Some(base_url) = self.session().map(|s| s.base_url.clone()) else {
-            return;
-        };
-        if modal_open {
+        let servers = self.link_servers();
+        let active = self.servers.active_key().cloned();
+        if modal_open || servers.is_empty() {
             return;
         }
         if self.help {
             self.toggle_help(&ToggleHelp, window, cx);
         }
-        let dialog = cx.new(|cx| GotoDialog::new(base_url, text, error, window, cx));
+        let dialog = cx.new(|cx| GotoDialog::new(servers, active, text, error, window, cx));
         self.goto_subs.push(cx.subscribe_in(
             &dialog,
             window,
             |this, _, ev: &GotoEvent, window, cx| match ev {
                 GotoEvent::Close => this.close_goto(window, cx),
-                GotoEvent::Open(link) => {
+                GotoEvent::Open(key, link) => {
                     this.drop_goto();
-                    this.open_change_link(link, window, cx);
+                    this.open_change_link(key, link, window, cx);
+                }
+                GotoEvent::AddServer { url, text } => {
+                    this.drop_goto();
+                    this.open_add_server(url.clone(), Some(text.clone()), None, window, cx);
                 }
             },
         ));
@@ -1426,6 +1595,7 @@ impl Shell {
                     this.close_switcher(window, cx);
                     this.switch_to(key, window, cx);
                 }
+                SwitcherEvent::AddServer => this.add_server(&AddServer, window, cx),
             },
         ));
         self.switcher = Some(switcher);
@@ -1879,6 +2049,7 @@ fn prefill_from(setup: &ServerSetup, notice: String) -> LoginPrefill {
     LoginPrefill {
         server: Some(setup.key.clone()),
         base_url: setup.base_url.clone(),
+        name: None,
         username: setup.username.clone(),
         notice: Some(notice),
     }
@@ -1910,6 +2081,7 @@ impl Render for Shell {
                     .on_action(cx.listener(Self::open_settings))
                     .on_action(cx.listener(Self::switch_server))
                     .on_action(cx.listener(Self::toggle_server_switcher))
+                    .on_action(cx.listener(Self::add_server))
                     .on_action(cx.listener(Self::focus_search))
                     .on_action(cx.listener(Self::open_goto))
                     .on_action(cx.listener(Self::toggle_help))

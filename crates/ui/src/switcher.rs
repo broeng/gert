@@ -7,6 +7,8 @@
 //! the cursor, Enter (or a click) shows the server. `Ctrl-1` to `Ctrl-9`
 //! keep working in it and close it.
 
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -149,6 +151,8 @@ pub(crate) fn chip(badge: &ServerBadge, connection: Connection, cx: &App) -> Sta
 
 pub enum SwitcherEvent {
     Close,
+    /// The "Add server" button: the login page for a new server.
+    AddServer,
     Pick(ServerKey),
 }
 
@@ -401,10 +405,26 @@ impl Render for ServerSwitcher {
                             }),
                     )
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Enter: show, Esc: close"),
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Enter: show, Esc: close"),
+                            )
+                            .child(
+                                Button::new("switcher-add-server")
+                                    .ghost()
+                                    .small()
+                                    .label("Add server\u{2026}  Ctrl-Shift-A")
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| {
+                                            cx.emit(SwitcherEvent::AddServer)
+                                        }),
+                                    ),
+                            ),
                     ),
             )
     }

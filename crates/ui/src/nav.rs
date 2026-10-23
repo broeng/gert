@@ -97,6 +97,20 @@ impl NavState {
         }
     }
 
+    /// Server and route of every entry, oldest first.
+    #[cfg(test)]
+    pub fn trail(&self) -> Vec<(Option<String>, Route)> {
+        self.entries
+            .iter()
+            .map(|e| (e.server.as_ref().map(ToString::to_string), e.route.clone()))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn position(&self) -> usize {
+        self.index
+    }
+
     pub fn current(&self) -> &Route {
         &self.entries[self.index].route
     }
@@ -199,14 +213,15 @@ impl NavState {
         };
     }
 
-    /// Forgets all history and starts over at `route` (login, logout), on
-    /// the server of the current page.
-    pub fn reset(&mut self, route: Route) {
-        let server = self.current_server().cloned();
-        *self = Self::new_for(server, route);
+    /// Like [`Self::replace`], and the page belongs to `server` from now on
+    /// (a login page that turned into the dashboard of the server just
+    /// added).
+    pub fn replace_to(&mut self, server: Option<ServerKey>, route: Route) {
+        self.replace(route);
+        self.entries[self.index].server = server;
     }
 
-    /// Like [`Self::reset`], on `server`.
+    /// Forgets all history and starts over at `route` on `server`.
     pub fn reset_for(&mut self, server: Option<ServerKey>, route: Route) {
         *self = Self::new_for(server, route);
     }
@@ -483,7 +498,7 @@ mod tests {
     fn reset_clears_history() {
         let mut nav = NavState::new(Route::Login);
         nav.push(Route::Dashboard);
-        nav.reset(Route::Dashboard);
+        nav.reset_for(None, Route::Dashboard);
         assert!(!nav.can_go_back());
         assert_eq!(nav.current(), &Route::Dashboard);
     }

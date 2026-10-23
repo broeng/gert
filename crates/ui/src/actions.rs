@@ -28,6 +28,8 @@ actions!(
         OpenGoto,
         /// `ctrl-k`: the server switcher popup (several servers only).
         ToggleServerSwitcher,
+        /// `ctrl-shift-a`: the login page, to add a server.
+        AddServer,
         /// `b b` on a search: bookmark the query (asks for a label), or take
         /// its bookmark away again.
         ToggleBookmark,
@@ -789,6 +791,11 @@ pub fn global_entries() -> Vec<Entry> {
             "Ctrl-K",
             KeyBinding::new("ctrl-k", ToggleServerSwitcher, Some(SETTINGS_OPEN)),
             "Open the server switcher: type to filter, Enter shows the server (several servers only)",
+        ),
+        e(
+            "Ctrl-Shift-A",
+            KeyBinding::new("ctrl-shift-a", AddServer, Some(SETTINGS_OPEN)),
+            "Add a server: opens the login page for a new one (also in the switcher)",
         ),
         e(
             "u",

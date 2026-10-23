@@ -4,12 +4,15 @@
 use gerrit_api::{Auth, Error as ApiError, GerritClient};
 use store::ServerId;
 
-use crate::session::{Env, SavedQuery, ServerKey};
+use crate::session::{Env, SavedQuery, ServerKey, server_name_from_url};
 
 /// What the user typed.
 pub struct LoginRequest {
     /// The configured server this logs in to again; `None` for a new one.
     pub server: Option<ServerKey>,
+    /// The display name of a new server; empty or `None` names it after
+    /// its host. Ignored when logging in to a configured server again.
+    pub name: Option<String>,
     pub base_url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -19,6 +22,9 @@ pub struct LoginRequest {
 /// `Debug`.
 pub struct LoginOutcome {
     pub key: ServerKey,
+    /// What the user called a new server (its host by default). For a
+    /// server that was configured already the shell keeps its own name.
+    pub name: String,
     pub base_url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -102,10 +108,17 @@ pub async fn login(env: &Env, req: LoginRequest) -> Result<LoginOutcome, LoginEr
         .store
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .server_id(&base_url)
+        .server_for_slug(key.as_str(), &base_url)
         .map_err(|e| LoginError::Save(e.to_string()))?;
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map_or_else(|| server_name_from_url(&base_url), str::to_owned);
     Ok(LoginOutcome {
         key,
+        name,
         base_url,
         username: req.username,
         password: req.password,
@@ -232,6 +245,7 @@ pub(crate) mod tests {
     fn req(user: Option<&str>, pass: Option<&str>) -> LoginRequest {
         LoginRequest {
             server: None,
+            name: None,
             base_url: " https://g.example.com/ ".into(),
             username: user.map(Into::into),
             password: pass.map(Into::into),

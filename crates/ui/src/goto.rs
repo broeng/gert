@@ -13,20 +13,24 @@
 //! Anything after the change that is not a patch set (`/comment/<id>`,
 //! `/edit`, ...) is ignored, as are the query and a `#<line>` fragment.
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, StyledExt as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use model::{ChangeNumber, PatchSetNumber};
 
 use crate::actions::Entry;
 use crate::nav::{ChangeView, DiffRoute, Route};
+use crate::session::ServerKey;
 
 actions!(
     goto,
     [
         /// Esc: close the dialog.
         CloseGoto,
+        /// Ctrl-Enter: add the server of a link that matches none.
+        GotoAddServer,
     ]
 );
 
@@ -45,6 +49,16 @@ pub fn entries() -> Vec<Entry> {
         },
         Entry {
             binding: KeyBinding::new("escape", CloseGoto, Some(IN_FIELD)),
+            keys: "",
+            description: "",
+        },
+        Entry {
+            binding: KeyBinding::new("ctrl-enter", GotoAddServer, Some(GOTO_DIALOG)),
+            keys: "Ctrl-Enter",
+            description: "Add the server of a link that is for none of yours",
+        },
+        Entry {
+            binding: KeyBinding::new("ctrl-enter", GotoAddServer, Some(IN_FIELD)),
             keys: "",
             description: "",
         },
@@ -99,8 +113,11 @@ impl ChangeLink {
 pub enum LinkError {
     #[error("Paste a link to a change, or type its number.")]
     Empty,
-    #[error("This link is for {0}, not for this server.")]
-    OtherServer(String),
+    /// No configured server has this address. Holds the address a server
+    /// for it would have (scheme, host and path prefix), which the Add
+    /// server offer fills into the login page.
+    #[error("None of your servers is at {0}.")]
+    UnknownServer(String),
     #[error("This is not a link to a change.")]
     NotAChange,
 }
@@ -124,7 +141,9 @@ pub fn parse_link(text: &str, base_url: &str) -> Result<ChangeLink, LinkError> {
     let (authority, rest) = split_url(text).ok_or(LinkError::NotAChange)?;
     let (base_authority, base_path) = split_url(base_url).ok_or(LinkError::NotAChange)?;
     if !authority.eq_ignore_ascii_case(base_authority) {
-        return Err(LinkError::OtherServer(authority.to_owned()));
+        return Err(LinkError::UnknownServer(
+            server_origin(text).unwrap_or_else(|| authority.to_owned()),
+        ));
     }
     // The old UI routed in the fragment: `/#/c/123/`.
     let path = match rest.split_once('#') {
@@ -174,6 +193,115 @@ pub fn parse_link(text: &str, base_url: &str) -> Result<ChangeLink, LinkError> {
         link.path = Some(percent_decode(&file));
     }
     Ok(link)
+}
+
+/// A configured server, as far as links are concerned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkServer {
+    pub key: ServerKey,
+    pub base_url: String,
+}
+
+/// Parses `text` against all of `servers`, in config order, and returns the
+/// one it is for with what it points at. A plain change number is for
+/// `active`.
+///
+/// A server matches a link when the host (and port) are the same and the
+/// link's path starts with the server's path prefix, on a segment boundary.
+/// The longest prefix wins, so `https://h/r` beats `https://h` for a link
+/// under `/r/`. Servers at the same address (the same site, different
+/// users) tie: `active` is preferred, else the first in the list.
+pub fn resolve_link(
+    text: &str,
+    servers: &[LinkServer],
+    active: Option<&ServerKey>,
+) -> Result<(ServerKey, ChangeLink), LinkError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(LinkError::Empty);
+    }
+    if number(trimmed).is_some() {
+        let key = active
+            .or(servers.first().map(|s| &s.key))
+            .ok_or(LinkError::NotAChange)?;
+        // A number needs no address to be read against.
+        return parse_link(trimmed, "").map(|l| (key.clone(), l));
+    }
+    let mut candidates: Vec<(usize, &LinkServer)> = servers
+        .iter()
+        .filter_map(|s| prefix_depth(trimmed, &s.base_url).map(|d| (d, s)))
+        .collect();
+    // Stable: ties keep the config order.
+    candidates.sort_by_key(|(depth, s)| (std::cmp::Reverse(*depth), Some(&s.key) != active));
+    if candidates.is_empty() {
+        return Err(match server_origin(trimmed) {
+            Some(origin) => LinkError::UnknownServer(origin),
+            None => LinkError::NotAChange,
+        });
+    }
+    let mut error = LinkError::NotAChange;
+    for (_, server) in candidates {
+        match parse_link(trimmed, &server.base_url) {
+            Ok(link) => return Ok((server.key.clone(), link)),
+            Err(e) => error = e,
+        }
+    }
+    Err(error)
+}
+
+/// How many bytes of path prefix `base_url` has in common with the link
+/// `text` if the link is on that server (same host, path under the prefix);
+/// `None` otherwise.
+fn prefix_depth(text: &str, base_url: &str) -> Option<usize> {
+    let (authority, rest) = split_url(text)?;
+    let (base_authority, base_path) = split_url(base_url)?;
+    if !authority.eq_ignore_ascii_case(base_authority) {
+        return None;
+    }
+    let base_path = base_path.trim_end_matches('/');
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+    let under = path == base_path
+        || path
+            .strip_prefix(base_path)
+            .is_some_and(|r| r.starts_with('/'));
+    // An old-style `/#/c/1` link has the prefix in front of the `#` too.
+    under.then_some(base_path.len())
+}
+
+/// Path segments that start Gerrit's own routes: what comes before the
+/// first of them is the prefix the server is mounted at.
+const ROUTES: [&str; 9] = [
+    "c",
+    "q",
+    "dashboard",
+    "settings",
+    "admin",
+    "x",
+    "plugins",
+    "a",
+    "id",
+];
+
+/// The address a Gerrit server would be added at for the link `text`:
+/// scheme, host and the path prefix in front of Gerrit's own routes
+/// (`https://h/r/c/p/+/1` is `https://h/r`). `None` if `text` is no URL.
+pub fn server_origin(text: &str) -> Option<String> {
+    let text = text.trim();
+    let (authority, rest) = split_url(text)?;
+    let scheme = &text[..text.find("://")?];
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+    let mut prefix = String::new();
+    for segment in path.split('/').filter(|s| !s.is_empty()) {
+        if ROUTES.contains(&segment) || number(segment).is_some() {
+            break;
+        }
+        prefix.push('/');
+        prefix.push_str(segment);
+    }
+    Some(format!(
+        "{}://{authority}{prefix}",
+        scheme.to_ascii_lowercase()
+    ))
 }
 
 /// A positive decimal number.
@@ -229,7 +357,15 @@ fn percent_decode(s: &str) -> String {
 
 /// What the dialog tells the shell.
 pub enum GotoEvent {
-    Open(ChangeLink),
+    /// Open the change on that server.
+    Open(ServerKey, ChangeLink),
+    /// The link is for a server that is not configured: open the login page
+    /// for a new server at `url`. `text` is what was typed, to be opened
+    /// once the server is added.
+    AddServer {
+        url: String,
+        text: String,
+    },
     Close,
 }
 
@@ -237,7 +373,8 @@ pub enum GotoEvent {
 /// the change; a link that does not parse leaves the dialog open and says
 /// why.
 pub struct GotoDialog {
-    base_url: String,
+    servers: Vec<LinkServer>,
+    active: Option<ServerKey>,
     input: Entity<InputState>,
     error: Option<LinkError>,
     focus: FocusHandle,
@@ -257,7 +394,8 @@ impl GotoDialog {
     /// replaces it, and the focus in it. `error` is shown until the text is
     /// edited (a link from the command line that did not parse).
     pub fn new(
-        base_url: String,
+        servers: Vec<LinkServer>,
+        active: Option<ServerKey>,
         text: String,
         error: Option<LinkError>,
         window: &mut Window,
@@ -283,7 +421,8 @@ impl GotoDialog {
             ];
         input.update(cx, |s, cx| s.focus(window, cx));
         Self {
-            base_url,
+            servers,
+            active,
             input,
             error,
             focus: cx.focus_handle(),
@@ -293,13 +432,34 @@ impl GotoDialog {
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value();
-        match parse_link(&text, &self.base_url) {
-            Ok(link) => cx.emit(GotoEvent::Open(link)),
+        match resolve_link(&text, &self.servers, self.active.as_ref()) {
+            Ok((key, link)) => cx.emit(GotoEvent::Open(key, link)),
             Err(e) => {
                 self.error = Some(e);
                 cx.notify();
             }
         }
+    }
+
+    /// The address to offer to add, if the last attempt was a link to a
+    /// server that is not configured.
+    fn offer(&self) -> Option<&str> {
+        match &self.error {
+            Some(LinkError::UnknownServer(url)) => Some(url),
+            _ => None,
+        }
+    }
+
+    fn add_server(&mut self, cx: &mut Context<Self>) {
+        let Some(url) = self.offer().map(str::to_owned) else {
+            return;
+        };
+        let text = self.input.read(cx).value().trim().to_owned();
+        cx.emit(GotoEvent::AddServer { url, text });
+    }
+
+    fn on_add_server(&mut self, _: &GotoAddServer, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_server(cx);
     }
 
     fn close(&mut self, _: &CloseGoto, _: &mut Window, cx: &mut Context<Self>) {
@@ -324,8 +484,27 @@ impl GotoDialog {
     }
 
     #[cfg(test)]
+    pub(crate) fn offer_for_test(&self) -> Option<String> {
+        self.offer().map(str::to_owned)
+    }
+
+    #[cfg(test)]
     pub(crate) fn error_for_test(&self) -> Option<LinkError> {
         self.error.clone()
+    }
+}
+
+impl GotoDialog {
+    fn hint(&self) -> String {
+        match self.servers.as_slice() {
+            [one] => format!(
+                "A link to a change on {}, or its number. Enter: open, Esc: close",
+                one.base_url
+            ),
+            _ => "A link to a change on one of your servers, or a number for this one. \
+                  Enter: open, Esc: close"
+                .to_owned(),
+        }
     }
 }
 
@@ -349,6 +528,7 @@ impl Render for GotoDialog {
                     .key_context(GOTO_DIALOG)
                     .track_focus(&self.focus)
                     .on_action(cx.listener(Self::close))
+                    .on_action(cx.listener(Self::on_add_server))
                     .w(px(640.))
                     .max_w_full()
                     .gap_2()
@@ -365,13 +545,31 @@ impl Render for GotoDialog {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "A link to a change on {}, or its number. Enter: open, Esc: close",
-                                self.base_url
-                            )),
+                            .child(self.hint()),
                     )
                     .when_some(self.error.clone(), |d, e| {
                         d.child(div().text_color(theme.danger).child(e.to_string()))
+                    })
+                    .when_some(self.offer().map(str::to_owned), |d, url| {
+                        d.child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    Button::new("goto-add-server")
+                                        .primary()
+                                        .label("Add server")
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.add_server(cx)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("Log in at {url} (Ctrl-Enter)")),
+                                ),
+                        )
                     }),
             )
     }
@@ -381,8 +579,9 @@ impl Render for GotoDialog {
 mod tests {
     use model::{ChangeNumber, PatchSetNumber};
 
-    use super::{ChangeLink, LinkError, parse_link};
+    use super::{ChangeLink, LinkError, LinkServer, parse_link, resolve_link, server_origin};
     use crate::nav::{ChangeView, DiffRoute, Route};
+    use crate::session::ServerKey;
 
     const BASE: &str = "https://review.example.org";
 
@@ -492,7 +691,7 @@ mod tests {
         assert_eq!(parse_link("  ", BASE), Err(LinkError::Empty));
         assert_eq!(
             parse_link("https://other.org/c/p/+/1", BASE),
-            Err(LinkError::OtherServer("other.org".into()))
+            Err(LinkError::UnknownServer("https://other.org".into()))
         );
         for text in [
             "https://review.example.org/",
@@ -504,6 +703,145 @@ mod tests {
         ] {
             assert_eq!(parse_link(text, BASE), Err(LinkError::NotAChange), "{text}");
         }
+    }
+
+    fn servers(list: &[(&str, &str)]) -> Vec<LinkServer> {
+        list.iter()
+            .map(|(k, u)| LinkServer {
+                key: ServerKey::new(*k),
+                base_url: (*u).to_owned(),
+            })
+            .collect()
+    }
+
+    fn resolved(text: &str, list: &[LinkServer], active: &str) -> Result<String, LinkError> {
+        let active = ServerKey::new(active);
+        resolve_link(text, list, Some(&active)).map(|(k, _)| k.to_string())
+    }
+
+    #[test]
+    fn a_link_goes_to_the_server_with_its_host() {
+        let list = servers(&[
+            ("a", "https://a.example.org"),
+            ("b", "https://b.example.org"),
+        ]);
+        assert_eq!(
+            resolved("https://b.example.org/c/p/+/1", &list, "a"),
+            Ok("b".into())
+        );
+        assert_eq!(
+            resolved("https://A.example.org/c/p/+/1", &list, "b"),
+            Ok("a".into())
+        );
+        // The change comes out as well.
+        let (key, l) = resolve_link("https://b.example.org/c/p/+/9/2", &list, None).unwrap();
+        assert_eq!(key, ServerKey::new("b"));
+        assert_eq!(l, link(9, None, Some(2), None));
+    }
+
+    #[test]
+    fn a_number_is_for_the_active_server() {
+        let list = servers(&[
+            ("a", "https://a.example.org"),
+            ("b", "https://b.example.org"),
+        ]);
+        assert_eq!(resolved(" 12 ", &list, "b"), Ok("b".into()));
+        assert_eq!(
+            resolve_link("12", &list, None).map(|(k, _)| k.to_string()),
+            Ok("a".into())
+        );
+        assert_eq!(resolve_link("12", &[], None), Err(LinkError::NotAChange));
+    }
+
+    #[test]
+    fn the_same_host_with_different_paths_is_told_apart() {
+        let list = servers(&[
+            ("root", "https://h.example.org"),
+            ("r", "https://h.example.org/r"),
+            ("s", "https://h.example.org/s/"),
+        ]);
+        assert_eq!(
+            resolved("https://h.example.org/r/c/p/+/1", &list, "root"),
+            Ok("r".into())
+        );
+        assert_eq!(
+            resolved("https://h.example.org/s/7", &list, "root"),
+            Ok("s".into())
+        );
+        assert_eq!(
+            resolved("https://h.example.org/c/p/+/1", &list, "r"),
+            Ok("root".into())
+        );
+        // `/rr` is not under `/r`; only the root server is left, which
+        // cannot make sense of it.
+        assert_eq!(
+            resolved("https://h.example.org/rr/c/p/+/1", &list, "r"),
+            Err(LinkError::NotAChange)
+        );
+        // The old UI keeps the route in the fragment.
+        assert_eq!(
+            resolved("https://h.example.org/r/#/c/4/", &list, "root"),
+            Ok("r".into())
+        );
+    }
+
+    #[test]
+    fn servers_at_one_address_prefer_the_active_one_else_the_first() {
+        let list = servers(&[
+            ("alice", "https://h.example.org"),
+            ("bob", "https://h.example.org"),
+        ]);
+        let url = "https://h.example.org/c/p/+/1";
+        assert_eq!(resolved(url, &list, "bob"), Ok("bob".into()));
+        assert_eq!(resolved(url, &list, "alice"), Ok("alice".into()));
+        assert_eq!(resolved(url, &list, "elsewhere"), Ok("alice".into()));
+        assert_eq!(
+            resolve_link(url, &list, None).map(|(k, _)| k.to_string()),
+            Ok("alice".into())
+        );
+    }
+
+    #[test]
+    fn a_link_to_no_server_says_where_a_server_would_be() {
+        let list = servers(&[("a", "https://a.example.org")]);
+        let unknown = |text| resolved(text, &list, "a");
+        assert_eq!(
+            unknown("https://new.example.org/c/p/+/1"),
+            Err(LinkError::UnknownServer("https://new.example.org".into()))
+        );
+        assert_eq!(
+            unknown("HTTP://me@new.example.org:8080/gerrit/c/p/+/1/2/a.rs?x=1"),
+            Err(LinkError::UnknownServer(
+                "http://new.example.org:8080/gerrit".into()
+            ))
+        );
+        assert_eq!(unknown("hello"), Err(LinkError::NotAChange));
+        assert_eq!(unknown(" "), Err(LinkError::Empty));
+        // A known host with something that is no change stays that.
+        assert_eq!(
+            unknown("https://a.example.org/q/status:open"),
+            Err(LinkError::NotAChange)
+        );
+    }
+
+    #[test]
+    fn the_origin_stops_at_gerrits_own_routes() {
+        let o = |t| server_origin(t);
+        assert_eq!(o("https://h.org/c/p/+/1"), Some("https://h.org".into()));
+        assert_eq!(
+            o("https://h.org/gerrit/r/c/p/+/1"),
+            Some("https://h.org/gerrit/r".into())
+        );
+        assert_eq!(
+            o("https://h.org/gerrit/#/c/1/"),
+            Some("https://h.org/gerrit".into())
+        );
+        assert_eq!(
+            o("https://h.org/gerrit/123"),
+            Some("https://h.org/gerrit".into())
+        );
+        assert_eq!(o("https://h.org"), Some("https://h.org".into()));
+        assert_eq!(o("h.org/c/1"), None);
     }
 
     #[test]
