@@ -1,5 +1,6 @@
 //! Quick votes: the header bar's buttons that cast the highest permitted
-//! value of a label with one key, and moving on to the next change of the
+//! value of a label with one key (Code-Review's lowest while the user's
+//! drafts object), publishing the drafts with it, and moving on to the next change of the
 //! relation chain after a vote (also after a vote in the reply dialog).
 
 use gpui_kit::*;
@@ -19,14 +20,9 @@ use crate::{
 impl ChangePage {
     /// The buttons of the header bar.
     pub(super) fn quick_buttons(&self, cx: &App) -> Vec<QuickButton> {
-        let drafts = self
-            .comments
-            .read(cx)
-            .threads()
-            .iter()
-            .any(|t| t.has_draft());
+        let objections = plan::drafts_object(&self.comments.read(cx).threads());
         self.detail.as_ref().map_or_else(Vec::new, |d| {
-            plan::quick_votes(d, self.session.username.as_deref(), drafts)
+            plan::quick_votes(d, self.session.username.as_deref(), objections)
         })
     }
 
@@ -108,6 +104,10 @@ impl ChangePage {
         cx: &mut Context<Self>,
     ) {
         self.voting = None;
+        // The drafts were published, or some uploaded on the way: show them
+        // as they are now.
+        let change = self.number;
+        self.outbox.update(cx, |o, cx| o.published(change, cx));
         match result {
             Ok(outcome) => {
                 match outcome.comments {
