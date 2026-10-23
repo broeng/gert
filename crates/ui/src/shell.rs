@@ -129,9 +129,6 @@ pub struct Shell {
     /// The file filter rules and their session toggles; the pages get it
     /// with the change and diff pages.
     filters: Entity<FileFilters>,
-    /// Syntax colors computed so far, and the worker that makes more; the
-    /// diff page gets it (the change page will, to queue its first file).
-    syntax: Entity<SyntaxCache>,
     prefs_task: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -216,7 +213,6 @@ impl Shell {
             settings: cx.new(|_| DiffSettings::new(diff)),
             layout: cx.new(|_| PageLayout::default()),
             filters: cx.new(|_| FileFilters::new(filters)),
-            syntax: cx.new(|_| SyntaxCache::new()),
             prefs_task: None,
             _subs: subs,
         };
@@ -246,6 +242,18 @@ impl Shell {
     /// The session of the active server.
     fn session(&self) -> Option<&Session> {
         self.servers.active()?.session.as_ref()
+    }
+
+    /// The syntax colors computed so far for the active server's diffs, and
+    /// the worker that makes more; the pages share it.
+    fn syntax_cache(&mut self, cx: &mut Context<Self>) -> Entity<SyntaxCache> {
+        match self.servers.active_mut() {
+            Some(entry) => entry
+                .syntax
+                .get_or_insert_with(|| cx.new(|_| SyntaxCache::new()))
+                .clone(),
+            None => cx.new(|_| SyntaxCache::new()),
+        }
     }
 
     /// The outbox of the active server.
@@ -551,6 +559,17 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn syntax_of_for_test(
+        &mut self,
+        key: &ServerKey,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<SyntaxCache>> {
+        self.servers.get(key)?;
+        self.servers.set_active(key);
+        Some(self.syntax_cache(cx))
+    }
+
+    #[cfg(test)]
     pub(crate) fn connection_for_test(&self, key: &str) -> Option<Connection> {
         self.servers.connection(&ServerKey::new(key))
     }
@@ -737,7 +756,7 @@ impl Shell {
         let settings = self.settings.clone();
         let layout = self.layout.clone();
         let filters = self.filters.clone();
-        let syntax = self.syntax.clone();
+        let syntax = self.syntax_cache(cx);
         let outbox = self.outbox_for(&session, cx);
         let page = cx.new(|cx| {
             ChangePage::new(
@@ -798,7 +817,7 @@ impl Shell {
         let settings = self.settings.clone();
         let outbox = self.outbox_for(&session, cx);
         let filters = self.filters.clone();
-        let syntax = self.syntax.clone();
+        let syntax = self.syntax_cache(cx);
         let page =
             cx.new(|cx| DiffPage::new(session, settings, filters, syntax, route, outbox, cx));
         self.page_subs.push(cx.subscribe_in(

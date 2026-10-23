@@ -790,6 +790,34 @@ mod drafts {
     }
 
     #[gpui_kit::test]
+    fn highlights_of_two_servers_do_not_share_a_cache(cx: &mut TestAppContext) {
+        let http = RouteHttpClient::new();
+        let (store, ids) = two_server_store(false, false);
+        let (shell, _) = start_two(cx, store, ids, Some("a"), &http);
+        let key = model::DiffKey {
+            change: ChangeNumber(7),
+            base: None,
+            target: PatchSetRef {
+                number: PatchSetNumber(1),
+                sha: "sha1".into(),
+            },
+            path: "f.rs".into(),
+            whitespace: model::Whitespace::IgnoreNone,
+        };
+        cx.update(|cx| {
+            let (a, b) = shell.update(cx, |s, cx| {
+                let a = s.syntax_of_for_test(&crate::ServerKey::new("a"), cx);
+                let b = s.syntax_of_for_test(&crate::ServerKey::new("b"), cx);
+                (a.expect("a"), b.expect("b"))
+            });
+            a.update(cx, |c, _| c.insert(key.clone(), None));
+            // The same change number, SHAs and path on the other server.
+            assert!(b.update(cx, |c, _| c.get(&key)).is_none());
+            assert!(matches!(a.update(cx, |c, _| c.get(&key)), Some(None)));
+        });
+    }
+
+    #[gpui_kit::test]
     fn a_refused_server_is_marked_and_the_other_one_is_left_alone(cx: &mut TestAppContext) {
         let http = RouteHttpClient::new();
         http.route("/revisions/sha1/drafts", 401, "no");
