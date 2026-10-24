@@ -81,9 +81,10 @@ pub struct ChangeSummary {
     /// Accounts whose turn it is, sorted by id.
     pub attention_set: Vec<AccountId>,
     pub submittable: Option<bool>,
-    /// Whether the change merges cleanly into its branch (`MERGEABLE`).
-    /// `None` for merged changes, for changes not tested yet, and in
-    /// caches from before this field.
+    /// Whether the change merges cleanly into its branch (Gerrit computes it
+    /// for a single change unless `SKIP_MERGEABLE` is given). `None` for
+    /// merged changes, for changes not tested yet, and in caches from before
+    /// this field.
     #[serde(default)]
     pub mergeable: Option<bool>,
 }

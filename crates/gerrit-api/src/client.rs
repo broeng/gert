@@ -219,7 +219,6 @@ impl GerritClient {
             ChangeOption::DetailedLabels,
             ChangeOption::DetailedAccounts,
             ChangeOption::Submittable,
-            ChangeOption::Mergeable,
             ChangeOption::Messages,
             ChangeOption::SubmitRequirements,
             ChangeOption::CurrentActions,
@@ -1237,7 +1236,7 @@ mod tests {
         assert_eq!(
             fake.requests()[0].uri().to_string(),
             "https://h/changes/5?o=CURRENT_REVISION&o=ALL_REVISIONS&o=ALL_COMMITS\
-             &o=DETAILED_LABELS&o=DETAILED_ACCOUNTS&o=SUBMITTABLE&o=MERGEABLE\
+             &o=DETAILED_LABELS&o=DETAILED_ACCOUNTS&o=SUBMITTABLE\
              &o=MESSAGES&o=SUBMIT_REQUIREMENTS&o=CURRENT_ACTIONS&o=CHANGE_ACTIONS"
         );
     }
