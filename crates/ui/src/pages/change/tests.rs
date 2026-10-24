@@ -1459,3 +1459,36 @@ fn nothing_is_queued_with_syntax_highlighting_off_until_it_is_on(cx: &mut TestAp
     set_syntax(cx, &f, true);
     assert_eq!(queued(cx, &f), ["src/a.rs"]);
 }
+
+#[test]
+fn blocking_votes_name_the_label_and_vote() {
+    use model::LabelSummary;
+    let mut s = crate::testing::summary(1);
+    s.labels.insert(
+        "Code-Review".into(),
+        LabelSummary {
+            rejected: true,
+            ..Default::default()
+        },
+    );
+    s.labels.insert(
+        "Verified".into(),
+        LabelSummary {
+            rejected: true,
+            min: Some(-1),
+            ..Default::default()
+        },
+    );
+    s.labels.insert(
+        "Style".into(),
+        LabelSummary {
+            disliked: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        super::view::blocking_votes(Some(&s)),
+        ["Rejected", "Style -1", "Verified -1"]
+    );
+    assert!(super::view::blocking_votes(None).is_empty());
+}

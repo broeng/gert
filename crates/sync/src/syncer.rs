@@ -78,6 +78,25 @@ impl Syncer {
         Ok(self.store().load_change_detail(self.server, number)?)
     }
 
+    /// Fetches the changes `numbers` with their detailed labels, for the
+    /// vote markers of the relation chain. Nothing is cached.
+    pub async fn fetch_summaries(
+        &self,
+        numbers: &[ChangeNumber],
+    ) -> Result<Vec<model::ChangeSummary>, Error> {
+        if numbers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let q = numbers
+            .iter()
+            .map(|n| format!("change:{n}"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let mut query = ChangeQuery::new(q).limit(u32::try_from(numbers.len()).unwrap_or(u32::MAX));
+        query.options.push(gerrit_api::ChangeOption::DetailedLabels);
+        Ok(self.client.query_changes(&query).await?.changes)
+    }
+
     /// Fetches the first page of `query` and updates the cache.
     ///
     /// If the page matches the start of the cached result (same changes,

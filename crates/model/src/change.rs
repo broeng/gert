@@ -54,6 +54,10 @@ pub struct LabelSummary {
     pub recommended: bool,
     pub disliked: bool,
     pub value: Option<i32>,
+    /// The lowest vote the label permits (what `rejected` holds), known when
+    /// the server sent the permitted values (`DETAILED_LABELS`).
+    #[serde(default)]
+    pub min: Option<i32>,
 }
 
 /// What a search-result row needs to render.

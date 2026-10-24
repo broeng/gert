@@ -111,6 +111,11 @@ fn label(l: &LabelInfo) -> LabelSummary {
         recommended: l.recommended.is_some(),
         disliked: l.disliked.is_some(),
         value: l.value,
+        min: l.values.as_ref().and_then(|v| {
+            v.keys()
+                .filter_map(|k| k.trim().trim_start_matches('+').parse::<i32>().ok())
+                .min()
+        }),
     };
     let has_slots = s.approved || s.rejected || s.recommended || s.disliked;
     if let (false, Some(all), Some(values)) = (has_slots, &l.all, &l.values) {
@@ -717,7 +722,13 @@ mod tests {
         assert!(label(&detailed(&[-2])).rejected);
         assert!(label(&detailed(&[1])).recommended);
         assert!(label(&detailed(&[-1])).disliked);
-        assert_eq!(label(&detailed(&[0])), LabelSummary::default());
+        assert_eq!(
+            label(&detailed(&[0])),
+            LabelSummary {
+                min: Some(-2),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
