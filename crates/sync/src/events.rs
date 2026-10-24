@@ -1,6 +1,6 @@
 //! Notification events from two states of one change.
 //!
-//! Pure functions, no I/O: the caller (see [`crate::Watcher`]) has the old
+//! Pure functions, no I/O: the caller (see [`Syncer::watch_pass`](crate::Syncer::watch_pass)) has the old
 //! cached detail and the freshly fetched one. A change that was never
 //! cached has no old state and must not be diffed (that is the baseline,
 //! it notifies nothing).
