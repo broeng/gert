@@ -147,11 +147,12 @@ impl Store {
             .collect()
     }
 
-    /// How many unread items each server has; servers with none are left
-    /// out.
+    /// How many items each server has that are unread and not yet seen
+    /// (the bell's badge); servers with none are left out. Opening the
+    /// inbox marks the items seen, see [`Store::mark_inbox_seen`].
     pub fn inbox_unread_counts(&self) -> Result<HashMap<ServerId, usize>, Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT server_id, COUNT(*) FROM inbox WHERE read_ms IS NULL GROUP BY server_id",
+            "SELECT server_id, COUNT(*) FROM inbox\n             WHERE read_ms IS NULL AND seen_ms IS NULL GROUP BY server_id",
         )?;
         let counts = stmt
             .query_map([], |r| Ok((ServerId(r.get(0)?), r.get::<_, i64>(1)?)))?
@@ -160,6 +161,21 @@ impl Store {
             .into_iter()
             .map(|(id, n)| (id, usize::try_from(n).unwrap_or(0)))
             .collect())
+    }
+
+    /// Marks every item of `server` (of all servers if `None`) seen as of
+    /// `now`, which takes it off the bell's count but leaves it unread.
+    /// Returns how many changed.
+    pub fn mark_inbox_seen(
+        &mut self,
+        server: Option<ServerId>,
+        now: Timestamp,
+    ) -> Result<usize, Error> {
+        Ok(self.conn.execute(
+            "UPDATE inbox SET seen_ms = ?1
+             WHERE seen_ms IS NULL AND (?2 IS NULL OR server_id = ?2)",
+            params![millis(now), server.map(|s| s.0)],
+        )?)
     }
 
     /// Marks the items read as of `now`; an item read already keeps its

@@ -241,3 +241,56 @@ fn a_failed_inbox_write_leaves_the_events_pending() {
     assert!(s.pending_events(id).unwrap().is_empty());
     assert_eq!(s.inbox_items(None, 10).unwrap().len(), 1);
 }
+
+#[test]
+fn the_count_skips_seen_items_but_they_stay_unread() {
+    let (mut s, a) = store();
+    let b = s.server_id("https://other.example/").unwrap();
+    s.add_inbox(a, &[item(a, 1, T1), item(a, 2, T2)], ts(NOW))
+        .unwrap();
+    s.add_inbox(b, &[item(b, 1, T1)], ts(NOW)).unwrap();
+    assert_eq!(s.mark_inbox_seen(Some(a), ts(NOW)).unwrap(), 2);
+    let counts = s.inbox_unread_counts().unwrap();
+    assert!(!counts.contains_key(&a));
+    assert_eq!(counts[&b], 1);
+    assert!(
+        s.inbox_items(Some(&[a]), 10)
+            .unwrap()
+            .iter()
+            .all(|i| i.read_at.is_none())
+    );
+    // Seen once: nothing more to change.
+    assert_eq!(s.mark_inbox_seen(None, ts(NOW)).unwrap(), 1);
+    assert_eq!(s.mark_inbox_seen(None, ts(NOW)).unwrap(), 0);
+    assert!(s.inbox_unread_counts().unwrap().is_empty());
+    // A new arrival is unseen again; marking an item unread does not
+    // bring it back to the count.
+    s.add_inbox(a, &[item(a, 3, T2)], ts(NOW)).unwrap();
+    assert_eq!(s.inbox_unread_counts().unwrap()[&a], 1);
+    let items = s.inbox_items(Some(&[a]), 10).unwrap();
+    s.mark_inbox_read(&[items[2].id], ts(NOW)).unwrap();
+    s.mark_inbox_unread(&[items[2].id]).unwrap();
+    assert_eq!(s.inbox_unread_counts().unwrap()[&a], 1);
+}
+
+#[test]
+fn v10_adds_seen_and_existing_rows_start_unseen() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    migrate(&mut conn, &MIGRATIONS[..9]).unwrap();
+    assert_eq!(user_version(&conn).unwrap(), 9);
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO inbox (server_id, event_key, event, rule_title, created_ms)
+         VALUES (1, 'k', '{}', 'r', 0)",
+        [],
+    )
+    .unwrap();
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    assert_eq!(user_version(&conn).unwrap() as usize, MIGRATIONS.len());
+    let s = Store { conn };
+    assert_eq!(s.inbox_unread_counts().unwrap()[&ServerId(1)], 1);
+}
