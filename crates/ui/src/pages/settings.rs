@@ -58,6 +58,8 @@ pub enum SettingsEvent {
     /// Open the Manage filters dialog: on the rule `select`, or on a new
     /// rule when `add` is set.
     ManageFilters { select: Option<String>, add: bool },
+    /// The tab on show changed (the shell opens the page on it next time).
+    TabShown(SettingsTab),
     /// Open the login page to add a server.
     AddServer,
     /// The server list was written (reordered, renamed, recolored, or a
@@ -565,6 +567,7 @@ impl SettingsPage {
         self.cursor = *self.tab_rows(tab).start();
         let offset = self.scrolled.get(&tab).copied().unwrap_or_default();
         self.scroll.set_offset(offset);
+        cx.emit(SettingsEvent::TabShown(tab));
         cx.notify();
     }
 

@@ -152,6 +152,8 @@ pub struct Shell {
     click_task: Option<Task<()>>,
     clicks: Option<futures::channel::mpsc::UnboundedSender<Notification>>,
     notify_settings: NotificationSettings,
+    /// The settings tab last shown; the page opens on it again.
+    settings_tab: SettingsTab,
     /// When this run began: events from before it are catch-up.
     started: jiff::Timestamp,
     _subs: Vec<Subscription>,
@@ -253,6 +255,7 @@ impl Shell {
             click_task: None,
             clicks: None,
             notify_settings: NotificationSettings::default(),
+            settings_tab: SettingsTab::default(),
             started: jiff::Timestamp::now(),
             _subs: subs,
         };
@@ -1339,20 +1342,11 @@ impl Shell {
         let filters = self.filters.clone();
         let server = self.session().map(|s| s.backend().clone());
         let (servers, active) = (self.servers.rows(), self.servers.active_key().cloned());
+        let tab = self.settings_tab;
         let page = cx.new(|cx| {
             SettingsPage::new(
-                env,
-                server,
-                servers,
-                active,
-                queries,
-                bookmarks,
-                start,
-                layout,
-                filters,
-                SettingsTab::default(),
-                window,
-                cx,
+                env, server, servers, active, queries, bookmarks, start, layout, filters, tab,
+                window, cx,
             )
         });
         self.page_subs.push(cx.subscribe_in(
@@ -1372,6 +1366,7 @@ impl Shell {
                     }
                 }
                 SettingsEvent::StartupSaved(page) => this.start_page = page.clone(),
+                SettingsEvent::TabShown(tab) => this.settings_tab = *tab,
                 SettingsEvent::AddServer => {
                     this.open_add_server(String::new(), None, None, window, cx)
                 }
