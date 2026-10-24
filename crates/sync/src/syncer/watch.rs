@@ -17,7 +17,7 @@
 
 use jiff::Timestamp;
 use model::{Account, Event};
-use store::EVENT_RETENTION;
+use store::{EVENT_RETENTION, NewInboxItem};
 
 use super::Syncer;
 use crate::Error;
@@ -132,6 +132,23 @@ impl Syncer {
     pub fn ack_events(&self, events: &[Event]) -> Result<(), Error> {
         let keys: Vec<String> = events.iter().map(Event::key).collect();
         Ok(self.store().ack_events(self.server, &keys)?)
+    }
+
+    /// Keeps `items` in the notification inbox and acknowledges `seen` in
+    /// one transaction ([`Store::deliver_events`](store::Store::deliver_events)):
+    /// if the inbox cannot be written, nothing is acknowledged and the
+    /// events are found again by the next pass. Returns how many items
+    /// were new.
+    pub fn deliver_events(
+        &self,
+        items: &[NewInboxItem],
+        seen: &[Event],
+        now: Timestamp,
+    ) -> Result<usize, Error> {
+        let keys: Vec<String> = seen.iter().map(Event::key).collect();
+        Ok(self
+            .store()
+            .deliver_events(self.server, items, &keys, now)?)
     }
 }
 

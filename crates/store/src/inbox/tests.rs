@@ -199,3 +199,45 @@ fn v9_adds_the_inbox_and_keeps_existing_data() {
     let a = item(ServerId(1), 1, T1);
     assert_eq!(s.add_inbox(ServerId(1), &[a], ts(NOW)).unwrap(), 1);
 }
+
+#[test]
+fn delivering_keeps_the_items_and_acknowledges_the_events_together() {
+    let (mut s, id) = store();
+    let (a, b) = (item(id, 1, T1), item(id, 2, T2));
+    s.queue_events(id, &[a.event.clone(), b.event.clone()], ts(NOW))
+        .unwrap();
+    let keys = [a.event.key(), b.event.key()];
+    // `b` matched no rule: acknowledged but not kept.
+    assert_eq!(
+        s.deliver_events(id, std::slice::from_ref(&a), &keys, ts(NOW))
+            .unwrap(),
+        1
+    );
+    assert!(s.pending_events(id).unwrap().is_empty());
+    assert_eq!(changes(&s.inbox_items(None, 10).unwrap()), [1]);
+}
+
+#[test]
+fn a_failed_inbox_write_leaves_the_events_pending() {
+    let (mut s, id) = store();
+    let a = item(id, 1, T1);
+    s.queue_events(id, std::slice::from_ref(&a.event), ts(NOW))
+        .unwrap();
+    s.conn
+        .execute_batch(
+            "CREATE TRIGGER no_inbox BEFORE INSERT ON inbox
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    let keys = [a.event.key()];
+    assert!(
+        s.deliver_events(id, std::slice::from_ref(&a), &keys, ts(NOW))
+            .is_err()
+    );
+    assert_eq!(s.pending_events(id).unwrap().len(), 1);
+    // The next attempt, once the write works, keeps and acknowledges it.
+    s.conn.execute_batch("DROP TRIGGER no_inbox").unwrap();
+    s.deliver_events(id, &[a], &keys, ts(NOW)).unwrap();
+    assert!(s.pending_events(id).unwrap().is_empty());
+    assert_eq!(s.inbox_items(None, 10).unwrap().len(), 1);
+}

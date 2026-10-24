@@ -66,27 +66,32 @@ impl Store {
         now: Timestamp,
     ) -> Result<usize, Error> {
         let tx = self.conn.transaction()?;
-        let mut added = 0;
+        let added = add(&tx, server, items, now)?;
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// Adds `items` to the inbox of `server` and acknowledges the pending
+    /// events with the keys `seen`, in one transaction: if the inbox write
+    /// fails nothing is acknowledged, so the events come back with the
+    /// next pass, and a crash can neither lose an event nor leave it
+    /// pending after it was kept. Returns how many items were new.
+    pub fn deliver_events(
+        &mut self,
+        server: ServerId,
+        items: &[NewInboxItem],
+        seen: &[String],
+        now: Timestamp,
+    ) -> Result<usize, Error> {
+        let tx = self.conn.transaction()?;
+        let added = add(&tx, server, items, now)?;
         {
-            let mut insert = tx.prepare(
-                "INSERT OR IGNORE INTO inbox
-                    (server_id, event_key, event, rule_title, mention, shown_on_os, created_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )?;
-            for item in items {
-                let json = serde_json::to_string(&item.event)?;
-                added += insert.execute(params![
-                    server.0,
-                    item.event.key(),
-                    json,
-                    item.rule_title,
-                    item.mention,
-                    item.shown_on_os,
-                    millis(item.event.at),
-                ])?;
+            let mut delete =
+                tx.prepare("DELETE FROM pending_events WHERE server_id = ?1 AND key = ?2")?;
+            for key in seen {
+                delete.execute(params![server.0, key])?;
             }
         }
-        prune(&tx, Some(server), INBOX_KEEP, now)?;
         tx.commit()?;
         Ok(added)
     }
@@ -228,6 +233,36 @@ impl Store {
         tx.commit()?;
         Ok(gone)
     }
+}
+
+fn add(
+    tx: &Transaction<'_>,
+    server: ServerId,
+    items: &[NewInboxItem],
+    now: Timestamp,
+) -> Result<usize, Error> {
+    let mut added = 0;
+    {
+        let mut insert = tx.prepare(
+            "INSERT OR IGNORE INTO inbox
+                (server_id, event_key, event, rule_title, mention, shown_on_os, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for item in items {
+            let json = serde_json::to_string(&item.event)?;
+            added += insert.execute(params![
+                server.0,
+                item.event.key(),
+                json,
+                item.rule_title,
+                item.mention,
+                item.shown_on_os,
+                millis(item.event.at),
+            ])?;
+        }
+    }
+    prune(tx, Some(server), INBOX_KEEP, now)?;
+    Ok(added)
 }
 
 /// Drops items older than the retention and all but the newest `keep` per
