@@ -25,23 +25,27 @@ const LABEL_ORDER: [&str; 2] = ["Code-Review", "Verified"];
 
 /// Diameter of the round state mark.
 const MARK_SIZE: f32 = 18.;
+/// Space between the parts of a line (`gap_x_2`).
+const NAME_GAP: f32 = 8.;
+/// Width per character of a semibold name, and the bounds of the column.
+const NAME_CHAR: f32 = 8.;
+const NAME_MIN: f32 = 90.;
+const NAME_MAX: f32 = 220.;
 
 impl ChangePage {
     pub(super) fn requirements(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(d) = &self.detail else {
             return div().into_any_element();
         };
-        let muted = cx.theme().muted_foreground;
-        let rows: Vec<AnyElement> = d
-            .submit_requirements
-            .iter()
+        let name_width = self.name_width();
+        let rows: Vec<AnyElement> = ordered(&d.submit_requirements)
+            .into_iter()
             .enumerate()
             .map(|(ix, r)| {
                 let chips: Vec<AnyElement> = requirement_labels(r, &d.votes)
                     .iter()
                     .flat_map(|label| self.vote_chips(ix, label, &d.votes[label], cx))
                     .collect();
-                let missing = missing_note(r);
                 h_flex()
                     .gap_x_2()
                     .gap_y_0p5()
@@ -49,11 +53,15 @@ impl ChangePage {
                     .items_center()
                     .text_sm()
                     .child(requirement_mark(r, cx))
-                    .child(div().font_semibold().child(r.name.clone()))
+                    .child(
+                        div()
+                            .w(name_width)
+                            .flex_none()
+                            .truncate()
+                            .font_semibold()
+                            .child(r.name.clone()),
+                    )
                     .children(chips)
-                    .when_some(missing, |row, note| {
-                        row.child(div().text_xs().text_color(muted).child(note))
-                    })
                     .into_any_element()
             })
             .collect();
@@ -86,6 +94,8 @@ impl ChangePage {
             )
         });
         let muted = cx.theme().muted_foreground;
+        // Lined up with the names of the requirements above.
+        let name_width = self.name_width() + px(MARK_SIZE + NAME_GAP);
         let rows: Vec<AnyElement> = names
             .into_iter()
             .enumerate()
@@ -99,8 +109,9 @@ impl ChangePage {
                     .text_sm()
                     .child(
                         div()
-                            .w(px(110.))
+                            .w(name_width)
                             .flex_none()
+                            .truncate()
                             .text_color(muted)
                             .child(name.clone()),
                     )
@@ -118,6 +129,23 @@ impl ChangePage {
                 .children(rows)
                 .into_any_element(),
         )
+    }
+
+    /// Width of the name column, so the vote boxes of all lines start at the
+    /// same place: the longest requirement or label name, within bounds.
+    fn name_width(&self) -> Pixels {
+        let Some(d) = &self.detail else {
+            return px(NAME_MIN);
+        };
+        let longest = d
+            .submit_requirements
+            .iter()
+            .map(|r| r.name.as_str())
+            .chain(d.votes.keys().map(String::as_str))
+            .map(|n| n.chars().count())
+            .max()
+            .unwrap_or(0);
+        px((longest as f32 * NAME_CHAR).clamp(NAME_MIN, NAME_MAX))
     }
 
     /// One colored box per non-zero vote on `label`. `group` keeps the
@@ -319,17 +347,11 @@ fn requirement_mark(r: &SubmitRequirement, cx: &App) -> Div {
         )
 }
 
-/// What a blocking requirement is missing, as small print. Nothing for
-/// those that hold.
-fn missing_note(r: &SubmitRequirement) -> Option<String> {
-    match (&r.status, &r.submittability) {
-        (SubmitRequirementStatus::Unsatisfied, Some(e)) if !e.failing_atoms.is_empty() => {
-            Some(format!("needs {}", e.failing_atoms.join(", ")))
-        }
-        (SubmitRequirementStatus::Error, _) => Some("error".to_owned()),
-        (SubmitRequirementStatus::Timeout, _) => Some("timed out".to_owned()),
-        _ => None,
-    }
+/// Code-Review first, the rest as the server lists them.
+fn ordered(requirements: &[SubmitRequirement]) -> Vec<&SubmitRequirement> {
+    let mut v: Vec<_> = requirements.iter().collect();
+    v.sort_by_key(|r| r.name != "Code-Review");
+    v
 }
 
 /// The labels (that exist on the change) whose votes belong to `r`: the
@@ -371,7 +393,7 @@ mod tests {
 
     use model::{ExpressionResult, SubmitRequirement, SubmitRequirementStatus};
 
-    use super::{missing_note, requirement_labels};
+    use super::{ordered, requirement_labels};
 
     fn requirement(name: &str, expression: &str) -> SubmitRequirement {
         SubmitRequirement {
@@ -416,15 +438,13 @@ mod tests {
     }
 
     #[test]
-    fn only_blocking_requirements_have_small_print() {
-        let mut r = requirement("Code-Review", "label:Code-Review=MAX");
-        assert_eq!(missing_note(&r), None);
-        r.submittability.as_mut().unwrap().failing_atoms = vec!["label:Code-Review=MAX".into()];
-        assert_eq!(
-            missing_note(&r).as_deref(),
-            Some("needs label:Code-Review=MAX")
-        );
-        r.status = SubmitRequirementStatus::Satisfied;
-        assert_eq!(missing_note(&r), None);
+    fn code_review_comes_first_and_the_rest_keep_their_order() {
+        let rs = [
+            requirement("Verified", ""),
+            requirement("Style", ""),
+            requirement("Code-Review", ""),
+        ];
+        let names: Vec<_> = ordered(&rs).iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Code-Review", "Verified", "Style"]);
     }
 }
