@@ -40,6 +40,7 @@ pub fn summary(n: u64) -> ChangeSummary {
         hashtags: Vec::new(),
         attention_set: Vec::new(),
         submittable: None,
+        mergeable: None,
     }
 }
 

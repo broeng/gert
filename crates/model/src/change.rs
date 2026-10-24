@@ -81,6 +81,11 @@ pub struct ChangeSummary {
     /// Accounts whose turn it is, sorted by id.
     pub attention_set: Vec<AccountId>,
     pub submittable: Option<bool>,
+    /// Whether the change merges cleanly into its branch (`MERGEABLE`).
+    /// `None` for merged changes, for changes not tested yet, and in
+    /// caches from before this field.
+    #[serde(default)]
+    pub mergeable: Option<bool>,
 }
 
 /// One reviewer's vote on a label (`ApprovalInfo`, `DETAILED_LABELS`).
@@ -218,6 +223,7 @@ mod tests {
                 hashtags: vec![],
                 attention_set: vec![],
                 submittable: None,
+                mergeable: None,
             },
             current_revision: None,
             current_patch_set: None,
