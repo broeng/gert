@@ -2481,6 +2481,24 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    fn the_page_opens_on_the_tab_it_was_left_on(cx: &mut TestAppContext) {
+        let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
+        open_settings(cx, &f);
+        press(cx, &f, "4");
+        assert_eq!(tab_state(cx, &f), (SettingsTab::Appearance, 5));
+        press(cx, &f, "j");
+        press(cx, &f, "u");
+        // The tab is remembered, the cursor starts on the tab's first row.
+        open_settings(cx, &f);
+        assert_eq!(tab_state(cx, &f), (SettingsTab::Appearance, 5));
+        // Every visit updates it.
+        press(cx, &f, "5");
+        press(cx, &f, "u");
+        open_settings(cx, &f);
+        assert_eq!(tab_state(cx, &f).0, SettingsTab::Filters);
+    }
+
+    #[gpui_kit::test]
     fn the_filter_rows_follow_the_cursor_after_the_other_rows(cx: &mut TestAppContext) {
         let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
         open_settings(cx, &f);
