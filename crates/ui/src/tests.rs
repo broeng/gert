@@ -1809,6 +1809,30 @@ mod drafts {
             assert_eq!(run.notifier.titles(), ["Code-Review -1 from Bob"]);
             assert_eq!(pending(&run), 0);
         }
+
+        #[gpui_kit::test]
+        fn clicking_a_notification_opens_its_change_on_its_server(cx: &mut TestAppContext) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let run = start(cx, &http, NotificationSettings::default(), Some("a"));
+            serve(&http, U2, Some(-1));
+            advance(cx, 301);
+            assert_eq!(run.notifier.shown().len(), 1);
+
+            // Looking at the other server's dashboard when it is clicked.
+            cx.update_window(run.window, |_, window, cx| {
+                run.shell
+                    .update(cx, |s, cx| s.switch_to(&key("a"), window, cx))
+            })
+            .expect("window");
+            assert_eq!(place(cx, &run.shell), at("a", Route::Dashboard));
+            run.notifier.click(0);
+            cx.run_until_parked();
+            assert_eq!(
+                place(cx, &run.shell),
+                at("b", Route::Change(ChangeNumber(7)))
+            );
+        }
     }
 }
 
