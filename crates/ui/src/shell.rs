@@ -335,6 +335,36 @@ impl Shell {
         self.sync_notification_watches(window, cx);
     }
 
+    /// Shows a sample notification, whatever the rules say, so that the user
+    /// can see whether the desktop shows one. Clicking it opens the active
+    /// server. False when notifications are not set up in this run.
+    pub(crate) fn test_notification(&mut self) -> bool {
+        let Some(notifier) = &self.notifier else {
+            return false;
+        };
+        let notification = Notification {
+            title: "Test notification".to_owned(),
+            body: format!("This is what {} notifications look like.", self.app_name),
+            server: self
+                .servers
+                .active_key()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            change: None,
+        };
+        let clicks = self.clicks.clone();
+        let target = notification.clone();
+        notifier.show(
+            &notification,
+            Box::new(move || {
+                if let Some(clicks) = clicks {
+                    clicks.unbounded_send(target).ok();
+                }
+            }),
+        );
+        true
+    }
+
     /// The session of the active server.
     fn session(&self) -> Option<&Session> {
         self.servers.active()?.session.as_ref()
@@ -1387,6 +1417,16 @@ impl Shell {
                 }
                 SettingsEvent::NotificationsSaved(settings) => {
                     this.set_notification_settings(settings.clone(), window, cx)
+                }
+                // The rule editor is opened by the next change.
+                SettingsEvent::EditNotificationRule { index } => {
+                    log::debug!("no rule editor yet for rule {index}")
+                }
+                SettingsEvent::TestNotification => {
+                    let sent = this.test_notification();
+                    if let Page::Settings(page) = &this.page {
+                        page.update(cx, |p, cx| p.test_sent(sent, cx));
+                    }
                 }
                 SettingsEvent::ManageFilters { select, add } => {
                     let context = FiltersContext {

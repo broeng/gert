@@ -25,7 +25,7 @@ use crate::{
     theme::parse_hex_color,
 };
 
-use super::{Mode, SettingsEvent, SettingsPage, moved};
+use super::{Mode, SettingsEvent, SettingsPage, SettingsTab, moved};
 
 /// What the last "test connection" of a server found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -465,6 +465,9 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.tab == SettingsTab::Notifications {
+            return self.ask_test_notification(cx);
+        }
         let Some(row) = self
             .server_under_cursor()
             .and_then(|i| self.servers.get(i))
