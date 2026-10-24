@@ -20,5 +20,5 @@ pub use events::diff_change;
 pub use poll::{PollPolicy, PollState};
 pub use syncer::{
     CommentsView, DraftCounts, DraftSave, NewChange, PublishOutcome, QueryUpdate, RefreshSource,
-    RetryReport, ReviewerAdded, Syncer,
+    RetryReport, ReviewerAdded, Syncer, WatchOptions,
 };
