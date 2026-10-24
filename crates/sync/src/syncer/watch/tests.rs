@@ -409,3 +409,34 @@ fn events_come_out_oldest_first() {
     let order: Vec<_> = events.iter().map(|e| e.change.0).collect();
     assert_eq!(order, [1, 2]);
 }
+
+#[test]
+fn delivering_keeps_every_event_once_and_acknowledges_them() {
+    let f = baselined();
+    f.http
+        .route_json("GET /changes/?q=", &list(&[(1, U2)])[5..]);
+    route_change(&f.http, 1, U2, code_review(-1));
+    let events = pass_keeping(&f);
+    assert_eq!(events.len(), 1);
+    let items: Vec<NewInboxItem> = events
+        .iter()
+        .map(|event| NewInboxItem {
+            event: event.clone(),
+            rule_title: "Votes".into(),
+            mention: false,
+            shown_on_os: false,
+        })
+        .collect();
+    // The day after the event: the inbox forgets what is much older.
+    let now = events[0]
+        .at
+        .checked_add(std::time::Duration::from_secs(86_400))
+        .unwrap();
+    assert_eq!(f.syncer.deliver_events(&items, &events, now).unwrap(), 1);
+    assert!(f.syncer.pending_events().unwrap().is_empty());
+    // A replay (the same events again) adds nothing.
+    assert_eq!(f.syncer.deliver_events(&items, &events, now).unwrap(), 0);
+    let kept = f.syncer.store().inbox_items(None, 10).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].rule_title, "Votes");
+}
