@@ -31,7 +31,7 @@ use crate::{
         diff::{DiffPage, DiffPageEvent},
         list::{ChangeListPage, ListEvent, ListKind},
         login::{LoginPage, LoginPrefill},
-        settings::{SettingsEvent, SettingsPage},
+        settings::{SettingsEvent, SettingsPage, SettingsTab},
     },
     reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
@@ -1341,7 +1341,17 @@ impl Shell {
         let (servers, active) = (self.servers.rows(), self.servers.active_key().cloned());
         let page = cx.new(|cx| {
             SettingsPage::new(
-                env, server, servers, active, queries, bookmarks, start, layout, filters, window,
+                env,
+                server,
+                servers,
+                active,
+                queries,
+                bookmarks,
+                start,
+                layout,
+                filters,
+                SettingsTab::default(),
+                window,
                 cx,
             )
         });
