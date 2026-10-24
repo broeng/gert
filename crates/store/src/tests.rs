@@ -40,6 +40,7 @@ fn change(n: u64, updated: &str) -> ChangeSummary {
         hashtags: vec![],
         attention_set: vec![],
         submittable: None,
+        mergeable: None,
     }
 }
 

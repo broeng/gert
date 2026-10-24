@@ -518,6 +518,7 @@ pub(crate) struct ChangeInfo {
     /// Keyed by account id.
     pub attention_set: Option<BTreeMap<String, AttentionSetInfo>>,
     pub submittable: Option<bool>,
+    pub mergeable: Option<bool>,
     /// Label name to the vote values the user may set, as strings like
     /// `"-1"`, `" 0"` and `"+2"` (`DETAILED_LABELS`, authenticated only).
     pub permitted_labels: Option<BTreeMap<String, Vec<String>>>,

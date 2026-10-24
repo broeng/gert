@@ -294,6 +294,7 @@ pub(crate) fn change_summary(c: &ChangeInfo) -> Result<ChangeSummary, Conversion
         hashtags: c.hashtags.clone().unwrap_or_default(),
         attention_set,
         submittable: c.submittable,
+        mergeable: c.mergeable,
     })
 }
 

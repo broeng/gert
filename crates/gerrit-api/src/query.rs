@@ -13,6 +13,7 @@ pub enum ChangeOption {
     Messages,
     SubmitRequirements,
     Submittable,
+    Mergeable,
     /// `actions` of the current revision.
     CurrentActions,
     /// `actions` of the change.
@@ -32,6 +33,7 @@ impl ChangeOption {
             Self::Messages => "MESSAGES",
             Self::SubmitRequirements => "SUBMIT_REQUIREMENTS",
             Self::Submittable => "SUBMITTABLE",
+            Self::Mergeable => "MERGEABLE",
             Self::CurrentActions => "CURRENT_ACTIONS",
             Self::ChangeActions => "CHANGE_ACTIONS",
         }
