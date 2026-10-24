@@ -107,3 +107,34 @@ pub fn whole_file() -> Vec<u8> {
     });
     format!(")]}}'\n{body}").into_bytes()
 }
+
+/// A [`Notifier`](crate::Notifier) that remembers what it was asked to show,
+/// with the click callbacks.
+#[derive(Default)]
+pub struct RecordingNotifier {
+    shown: std::sync::Mutex<Vec<(sync::notify::Notification, Option<crate::Clicked>)>>,
+}
+
+impl crate::Notifier for RecordingNotifier {
+    fn show(&self, notification: &sync::notify::Notification, clicked: crate::Clicked) {
+        self.shown
+            .lock()
+            .expect("lock")
+            .push((notification.clone(), Some(clicked)));
+    }
+}
+
+impl RecordingNotifier {
+    pub fn shown(&self) -> Vec<sync::notify::Notification> {
+        self.shown
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
+
+    pub fn titles(&self) -> Vec<String> {
+        self.shown().into_iter().map(|n| n.title).collect()
+    }
+}

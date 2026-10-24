@@ -16,7 +16,7 @@
 //! everything and reports nothing.
 
 use jiff::Timestamp;
-use model::Event;
+use model::{Account, Event};
 use store::EVENT_RETENTION;
 
 use super::Syncer;
@@ -111,6 +111,27 @@ impl Syncer {
             log::warn!("pruning the event ledger failed: {e}");
         }
         Ok(store.pending_events(self.server)?)
+    }
+}
+
+impl Syncer {
+    /// The signed-in account of the server (`GET /accounts/self/detail`).
+    pub async fn account_self(&self) -> Result<Account, Error> {
+        Ok(self.client.account_self().await?)
+    }
+
+    /// The events of the server waiting for acknowledgement, oldest first,
+    /// without running a pass. This is what a refresh of one change (the
+    /// change page, an action) queued since the last pass.
+    pub fn pending_events(&self) -> Result<Vec<Event>, Error> {
+        Ok(self.store().pending_events(self.server)?)
+    }
+
+    /// Acknowledges `events`: they are not returned again. Call it once
+    /// they are delivered, shown or deliberately dropped.
+    pub fn ack_events(&self, events: &[Event]) -> Result<(), Error> {
+        let keys: Vec<String> = events.iter().map(Event::key).collect();
+        Ok(self.store().ack_events(self.server, &keys)?)
     }
 }
 
