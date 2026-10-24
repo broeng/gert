@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use gerrit_api::{Auth, GerritClient, HttpClient};
 use store::{ServerId, Store};
-use sync::Syncer;
+use sync::{Syncer, notify::NotificationSettings};
 
 use crate::{
     filters::FileFilter,
@@ -164,6 +164,16 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Writes `[appearance] theme`. Returns the theme now in effect.
     fn save_theme(&self, theme: ThemeName) -> Result<ThemeName, BackendError>;
+
+    /// Writes the `[notifications]` section and its rules. Returns what is
+    /// now in effect. Defaults to accepting the settings without saving,
+    /// for backends with no config file.
+    fn save_notifications(
+        &self,
+        settings: &NotificationSettings,
+    ) -> Result<NotificationSettings, BackendError> {
+        Ok(settings.clone())
+    }
 
     /// Writes `[appearance] mode` and `diff_mode`. Returns the modes now in
     /// effect. Defaults to accepting them without saving, for backends with
