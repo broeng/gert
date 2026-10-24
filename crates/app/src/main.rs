@@ -6,10 +6,12 @@ use gert::{
     backend::{AppBackend, queries_to_ui, startup_to_ui},
     config::{Config, DiffConfig, Paths},
     http::GpuiHttpClient,
+    notifier::DesktopNotifier,
     secrets::Keyring,
 };
 use gpui_kit::*;
 use store::Store;
+use sync::notify::NotificationSettings;
 use ui::{
     ACTIVE_SERVER_STATE, ColorModes, Env, LocalDiff, ServerKey, ServerSetup, Shell, Startup,
     ThemeName,
@@ -24,7 +26,16 @@ fn main() {
 }
 
 /// Everything that can fail before the window opens.
-fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
+/// What `startup` hands to `run`.
+struct Prepared {
+    startup: Startup,
+    advance_after_vote: bool,
+    theme: ThemeName,
+    color_modes: ColorModes,
+    notifications: NotificationSettings,
+}
+
+fn startup() -> anyhow::Result<Prepared> {
     let paths = Paths::discover()?;
     let config = Config::load(&paths.config_file)
         .context("reading the configuration")?
@@ -55,6 +66,7 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
     let advance_after_vote = config.advance_after_vote();
     let theme = config.theme();
     let color_modes = config.color_modes();
+    let notifications = config.notification_settings();
     let store = Arc::new(Mutex::new(store));
     let startup = Startup {
         env: Env {
@@ -79,14 +91,26 @@ fn startup() -> anyhow::Result<(Startup, bool, ThemeName, ColorModes)> {
             font_family: config.diff.and_then(|d| d.font_family),
         },
     };
-    Ok((startup, advance_after_vote, theme, color_modes))
+    Ok(Prepared {
+        startup,
+        advance_after_vote,
+        theme,
+        color_modes,
+        notifications,
+    })
 }
 
 fn run() -> anyhow::Result<()> {
     // `gert <link>` opens the change a web UI link points at, like a
     // browser would.
     let link = std::env::args().nth(1);
-    let (startup, advance_after_vote, theme, color_modes) = startup()?;
+    let Prepared {
+        startup,
+        advance_after_vote,
+        theme,
+        color_modes,
+        notifications,
+    } = startup()?;
     ui::application().run(move |cx| {
         gpui_kit::init(cx);
         ui::init(cx);
@@ -98,6 +122,12 @@ fn run() -> anyhow::Result<()> {
                 let mut shell = Shell::new(startup, window, cx)
                     .with_app_name(APP_NAME)
                     .with_advance_after_vote(advance_after_vote, cx);
+                shell.set_notifications(
+                    Arc::new(DesktopNotifier::new()),
+                    notifications,
+                    window,
+                    cx,
+                );
                 if let Some(link) = &link {
                     shell.open_link(link, window, cx);
                 }

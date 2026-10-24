@@ -11,6 +11,8 @@
 //! cache database (`app_state`, key [`ACTIVE_SERVER_STATE`]) and passed back
 //! in at the next start as `Startup::active`.
 
+use std::collections::HashSet;
+
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::{
     App, Div, Entity, Hsla, ParentElement as _, SharedString, Styled as _, Subscription, Task, div,
@@ -22,6 +24,7 @@ use crate::{
     session::{ServerConfig, ServerKey, ServerSetup, Session},
     syntax_cache::SyntaxCache,
     theme,
+    watching::Me,
 };
 
 /// The `app_state` key under which the slug of the last active server is
@@ -145,6 +148,15 @@ pub(crate) struct ServerEntry {
     /// The background poll of `attention_count`; present exactly while the
     /// server is polled (inactive, signed in). Dropping it stops the poll.
     pub attention_task: Option<Task<()>>,
+    /// The signed-in user, from the notification watch's first pass.
+    pub me: Option<Me>,
+    /// Keys of the events already shown in this run. The watch and the
+    /// drain after a change refresh can both see an event before its
+    /// acknowledgement lands; this keeps it from being shown twice.
+    pub notified: HashSet<String>,
+    /// The notification watch; present exactly while it runs (signed in,
+    /// notifications on). Dropping it stops it.
+    pub watch_task: Option<Task<()>>,
 }
 
 impl ServerEntry {
@@ -161,6 +173,9 @@ impl ServerEntry {
             bookmarks_task: None,
             attention_count: None,
             attention_task: None,
+            me: None,
+            notified: HashSet::new(),
+            watch_task: None,
         }
     }
 }

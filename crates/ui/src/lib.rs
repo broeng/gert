@@ -32,6 +32,7 @@ mod syntax_cache;
 mod theme;
 mod time_fmt;
 mod tracker;
+mod watching;
 mod window;
 
 #[cfg(test)]

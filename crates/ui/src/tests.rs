@@ -1561,6 +1561,255 @@ mod drafts {
             assert!(page.read(cx).server_badge_for_test().is_none());
         });
     }
+
+    // ---- desktop notifications ----
+
+    mod notifying {
+        use std::sync::Arc;
+
+        use sync::notify::NotificationSettings;
+
+        use super::*;
+        use crate::testing::RecordingNotifier;
+
+        const U1: &str = "2024-02-01 10:00:00.000000000";
+        const U2: &str = "2024-02-02 10:00:00.000000000";
+
+        /// Change 7 of the server at `/gb`, owned by account 1, with a
+        /// Code-Review `vote` by Bob if there is one.
+        fn change(updated: &str, vote: Option<i32>) -> String {
+            let labels = vote.map_or_else(String::new, |v| {
+                format!(
+                    r#", "labels": {{"Code-Review": {{"all": [{{"_account_id": 2,
+                    "name": "Bob", "value": {v}, "date": "2024-02-02 09:00:00.000000000"}}]}}}}"#
+                )
+            });
+            format!(
+                r#"{{"_number": 7, "branch": "main", "change_id": "I{:040}",
+                "created": "2024-02-01 09:00:00.000000000", "project": "p",
+                "owner": {{"_account_id": 1}}, "status": "NEW", "subject": "Fix it",
+                "updated": "{updated}"{labels}}}"#,
+                7
+            )
+        }
+
+        /// The server `b` answers with change 7 as of `updated`.
+        fn serve(http: &RouteHttpClient, updated: &str, vote: Option<i32>) {
+            http.route_json(
+                "/gb/a/accounts/self/detail",
+                r#"{"_account_id": 1, "username": "u"}"#,
+            );
+            http.route_json("/gb/a/changes/7?", &change(updated, vote));
+            // The list query of the watch; the attention count has its own.
+            http.route_json(
+                "/gb/a/changes/?q=is",
+                &format!("[{}]", change(updated, vote)),
+            );
+            http.route_json("/gb/a/changes/?q=attention", "[]");
+        }
+
+        /// Watches of the changes list queries seen so far on server `b`.
+        fn watch_requests(http: &RouteHttpClient) -> usize {
+            http.requested()
+                .iter()
+                .filter(|r| r.starts_with("/gb/a/changes/?q=is"))
+                .count()
+        }
+
+        struct Run {
+            window: gpui_kit::AnyWindowHandle,
+            shell: Entity<Shell>,
+            notifier: Arc<RecordingNotifier>,
+            store: Arc<std::sync::Mutex<Store>>,
+            b: store::ServerId,
+        }
+
+        /// Both servers are configured, `b` (shown) signed in, `anonymous`
+        /// not. Notifications are on with `settings`.
+        fn start(
+            cx: &mut TestAppContext,
+            http: &RouteHttpClient,
+            settings: NotificationSettings,
+            anonymous: Option<&str>,
+        ) -> Run {
+            let (store, ids) = two_server_store(false, false);
+            let (window, shell, shared) =
+                start_two_with(cx, store, ids, Some("b"), anonymous, http);
+            let notifier = Arc::new(RecordingNotifier::default());
+            cx.update_window(window, |_, window, cx| {
+                shell.update(cx, |s, cx| {
+                    s.set_window_active_for_test(false);
+                    s.set_notifications(notifier.clone(), settings, window, cx)
+                })
+            })
+            .expect("window");
+            cx.run_until_parked();
+            Run {
+                window,
+                shell,
+                notifier,
+                store: shared,
+                b: ids[1],
+            }
+        }
+
+        fn pending(run: &Run) -> usize {
+            run.store
+                .lock()
+                .expect("lock")
+                .pending_events(run.b)
+                .expect("pending")
+                .len()
+        }
+
+        #[gpui_kit::test]
+        fn an_event_is_shown_once_and_acknowledged(cx: &mut TestAppContext) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let run = start(cx, &http, NotificationSettings::default(), Some("a"));
+            // The first pass only caches.
+            assert_eq!(watch_requests(&http), 1, "{:?}", http.requested());
+            assert!(run.notifier.shown().is_empty());
+
+            serve(&http, U2, Some(-1));
+            advance(cx, 301);
+            assert_eq!(run.notifier.titles(), ["Code-Review -1 from Bob"]);
+            assert_eq!(
+                run.notifier.shown()[0].change,
+                Some(ChangeNumber(7)),
+                "the click opens the change"
+            );
+            assert_eq!(pending(&run), 0);
+
+            // Nothing new: not shown again.
+            advance(cx, 301);
+            assert_eq!(run.notifier.shown().len(), 1);
+            assert!(watch_requests(&http) >= 3);
+        }
+
+        #[gpui_kit::test]
+        fn a_focused_window_gets_no_popup_but_the_event_is_acknowledged(cx: &mut TestAppContext) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let run = start(cx, &http, NotificationSettings::default(), Some("a"));
+            cx.update(|cx| {
+                run.shell
+                    .update(cx, |s, _| s.set_window_active_for_test(true))
+            });
+            serve(&http, U2, Some(-1));
+            advance(cx, 301);
+            assert!(watch_requests(&http) >= 2);
+            assert!(run.notifier.shown().is_empty());
+            assert_eq!(pending(&run), 0);
+        }
+
+        #[gpui_kit::test]
+        fn a_focused_window_shows_them_when_the_setting_says_so(cx: &mut TestAppContext) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let settings = NotificationSettings {
+                only_when_unfocused: false,
+                ..Default::default()
+            };
+            let run = start(cx, &http, settings, Some("a"));
+            cx.update(|cx| {
+                run.shell
+                    .update(cx, |s, _| s.set_window_active_for_test(true))
+            });
+            serve(&http, U2, Some(-1));
+            advance(cx, 301);
+            assert_eq!(run.notifier.shown().len(), 1);
+        }
+
+        #[gpui_kit::test]
+        fn anonymous_servers_are_not_watched(cx: &mut TestAppContext) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let run = start(cx, &http, NotificationSettings::default(), Some("a"));
+            advance(cx, 3600);
+            assert!(
+                http.requested().iter().all(|r| !r.starts_with("/ga/")),
+                "{:?}",
+                http.requested()
+            );
+            cx.update(|cx| {
+                let s = run.shell.read(cx);
+                assert!(!s.watching_for_test("a"));
+                assert!(s.watching_for_test("b"));
+            });
+        }
+
+        #[gpui_kit::test]
+        fn the_master_switch_stops_and_starts_the_watch(cx: &mut TestAppContext) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let off = NotificationSettings {
+                enabled: false,
+                ..Default::default()
+            };
+            let run = start(cx, &http, off, Some("a"));
+            advance(cx, 3600);
+            assert_eq!(watch_requests(&http), 0);
+            cx.update(|cx| assert!(!run.shell.read(cx).watching_for_test("b")));
+
+            cx.update_window(run.window, |_, window, cx| {
+                run.shell.update(cx, |s, cx| {
+                    s.set_notification_settings(NotificationSettings::default(), window, cx)
+                })
+            })
+            .expect("window");
+            cx.run_until_parked();
+            assert_eq!(watch_requests(&http), 1);
+            cx.update(|cx| assert!(run.shell.read(cx).watching_for_test("b")));
+
+            cx.update_window(run.window, |_, window, cx| {
+                run.shell.update(cx, |s, cx| {
+                    s.set_notification_settings(
+                        NotificationSettings {
+                            enabled: false,
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .expect("window");
+            let before = watch_requests(&http);
+            advance(cx, 3600);
+            assert_eq!(watch_requests(&http), before);
+        }
+
+        #[gpui_kit::test]
+        fn a_refresh_of_the_change_is_shown_without_waiting_for_a_pass(cx: &mut TestAppContext) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let run = start(cx, &http, NotificationSettings::default(), Some("a"));
+            // Something other than the watch refreshes the change: its events
+            // are queued, and the page's refresh event picks them up.
+            serve(&http, U2, Some(-1));
+            let syncer = cx.update(|cx| {
+                run.shell
+                    .read(cx)
+                    .session_for_test("b")
+                    .expect("session")
+                    .syncer()
+                    .clone()
+            });
+            futures::executor::block_on(syncer.refresh_change(ChangeNumber(7))).expect("refresh");
+            assert!(run.notifier.shown().is_empty());
+            assert_eq!(pending(&run), 1);
+            cx.update_window(run.window, |_, window, cx| {
+                run.shell.update(cx, |s, cx| {
+                    s.navigate_for_test(Route::Change(ChangeNumber(7)), window, cx)
+                })
+            })
+            .expect("window");
+            cx.run_until_parked();
+            assert_eq!(run.notifier.titles(), ["Code-Review -1 from Bob"]);
+            assert_eq!(pending(&run), 0);
+        }
+    }
 }
 
 // --- the settings page ---------------------------------------------------

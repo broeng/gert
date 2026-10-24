@@ -1,6 +1,8 @@
 //! The root view: top bar, the current page, history, keyboard help and
 //! window-focus tracking.
 
+use std::sync::Arc;
+
 use gerrit_api::Auth;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
@@ -11,6 +13,7 @@ use gpui_kit::component::{IconName, TitleBar, window_border};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use model::{ChangeDetail, ChangeNumber};
+use sync::notify::{NotificationSettings, Screen};
 
 use crate::{
     action_menu::{ActionDialog, ActionEvent, Done},
@@ -20,6 +23,7 @@ use crate::{
     goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, LinkServer, resolve_link},
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
+    notifier::Notifier,
     outbox::{DraftOutbox, OutboxEvent},
     pages::{
         change::{ChangeEvent, ChangePage},
@@ -38,6 +42,7 @@ use crate::{
     settings::{DiffSettings, FileFilters, PageLayout},
     switcher::{ServerSwitcher, SwitcherEvent, SwitcherRow},
     syntax_cache::SyntaxCache,
+    watching::{self, Inputs, Ran},
 };
 
 enum Page {
@@ -139,7 +144,21 @@ pub struct Shell {
     /// with the change and diff pages.
     filters: Entity<FileFilters>,
     prefs_task: Option<Task<()>>,
+    /// Where desktop notifications go; `None` (the default) means none are
+    /// watched for. Set with [`Shell::set_notifications`].
+    notifier: Option<Arc<dyn Notifier>>,
+    notify_settings: NotificationSettings,
+    /// When this run began: events from before it are catch-up.
+    started: jiff::Timestamp,
     _subs: Vec<Subscription>,
+}
+
+/// What the notification watch does after a pass.
+enum WatchStep {
+    Done,
+    Failed,
+    /// The credentials are refused; the watch ends.
+    Stop,
 }
 
 impl Shell {
@@ -226,6 +245,9 @@ impl Shell {
             layout: cx.new(|_| PageLayout::default()),
             filters: cx.new(|_| FileFilters::new(filters)),
             prefs_task: None,
+            notifier: None,
+            notify_settings: NotificationSettings::default(),
+            started: jiff::Timestamp::now(),
             _subs: subs,
         };
         this.start(window, cx);
@@ -249,6 +271,31 @@ impl Shell {
         self.layout
             .update(cx, |layout, cx| layout.set_advance_after_vote(on, cx));
         self
+    }
+
+    /// Turns on desktop notifications: every signed-in server is watched
+    /// for the events `settings` asks for, and `notifier` shows them.
+    pub fn set_notifications(
+        &mut self,
+        notifier: Arc<dyn Notifier>,
+        settings: NotificationSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.notifier = Some(notifier);
+        self.set_notification_settings(settings, window, cx);
+    }
+
+    /// Takes new rules: the watches follow the master switch, and the
+    /// running ones read the rules again at their next pass.
+    pub(crate) fn set_notification_settings(
+        &mut self,
+        settings: NotificationSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.notify_settings = settings;
+        self.sync_notification_watches(window, cx);
     }
 
     /// The session of the active server.
@@ -454,6 +501,7 @@ impl Shell {
             entry.outbox_subs = subs;
             // The poll holds the old session's client.
             entry.attention_task = None;
+            entry.watch_task = None;
         }
         self.sync_attention_polls(window, cx);
     }
@@ -483,6 +531,227 @@ impl Shell {
             if let Some(entry) = self.servers.get_mut(&key) {
                 entry.attention_task = task;
             }
+        }
+        self.sync_notification_watches(window, cx);
+    }
+
+    /// Starts and stops the notification watches so that exactly the
+    /// servers that are signed in and can talk to the network are watched,
+    /// and only while notifications are on. Unlike the attention count this
+    /// includes the active server. Cheap and idempotent, like
+    /// `sync_attention_polls`, which calls it.
+    fn sync_notification_watches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let on = self.notifier.is_some() && self.notify_settings.enabled;
+        for key in self.servers.keys() {
+            let Some(entry) = self.servers.get(&key) else {
+                continue;
+            };
+            let syncer = entry
+                .session
+                .as_ref()
+                .filter(|s| s.can_sync() && s.username.is_some())
+                .filter(|_| on && entry.connection != Connection::Unauthorized)
+                .map(|s| s.syncer().clone());
+            let task = match syncer {
+                Some(_) if entry.watch_task.is_some() => continue,
+                Some(syncer) => Some(self.notification_watch(key.clone(), syncer, window, cx)),
+                None => None,
+            };
+            if let Some(entry) = self.servers.get_mut(&key) {
+                entry.watch_task = task;
+            }
+        }
+    }
+
+    /// What a pass of server `key` needs from the shell; `None` while
+    /// notifications are off or the server is gone.
+    fn watch_inputs(&self, key: &ServerKey) -> Option<Inputs> {
+        let entry = self.servers.get(key)?;
+        self.notify_settings.enabled.then(|| Inputs {
+            server: key.as_str().to_owned(),
+            settings: self.notify_settings.clone(),
+            saved: entry
+                .setup
+                .queries
+                .iter()
+                .map(|q| (q.name.clone(), q.query.clone()))
+                .collect(),
+            me: entry.me.clone(),
+        })
+    }
+
+    /// The task that watches server `key` for notification events until it
+    /// is dropped: one pass now, then every `PollPolicy` interval (the
+    /// focused one while the window has the focus, longer after failures).
+    /// The rules and saved queries are read again at every pass, so the
+    /// task only idles while notifications are off.
+    fn notification_watch(
+        &mut self,
+        key: ServerKey,
+        syncer: sync::Syncer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let policy = sync::PollPolicy::default();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut failures = 0u32;
+            loop {
+                let Ok(inputs) = this.update(cx, |this, _| this.watch_inputs(&key)) else {
+                    return;
+                };
+                let ran = match inputs {
+                    Some(inputs) => {
+                        let syncer = syncer.clone();
+                        Some(
+                            cx.background_spawn(async move {
+                                watching::run(&syncer, &inputs, true).await
+                            })
+                            .await,
+                        )
+                    }
+                    None => None,
+                };
+                let step = this.update_in(cx, |this, window, cx| {
+                    let step = match ran {
+                        Some(ran) => this.watched(&key, ran, window, cx),
+                        None => WatchStep::Done,
+                    };
+                    (step, this.window_active)
+                });
+                let Ok((step, focused)) = step else { return };
+                failures = match step {
+                    WatchStep::Done => 0,
+                    WatchStep::Failed => failures.saturating_add(1),
+                    WatchStep::Stop => return,
+                };
+                let state = sync::PollState {
+                    last_attempt: None,
+                    window_focused: focused,
+                    visible: true,
+                    consecutive_failures: failures,
+                };
+                cx.background_executor()
+                    .timer(policy.interval(&state))
+                    .await;
+            }
+        })
+    }
+
+    /// The result of a pass over server `key`.
+    fn watched(
+        &mut self,
+        key: &ServerKey,
+        ran: Result<Option<Ran>, sync::Error>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> WatchStep {
+        match ran {
+            Ok(Some(ran)) => {
+                self.found_events(key, ran, cx);
+                WatchStep::Done
+            }
+            Ok(None) => WatchStep::Done,
+            Err(e) if e.is_unauthorized() => {
+                self.unauthorized_for(key, window, cx);
+                WatchStep::Stop
+            }
+            Err(e) => {
+                log::debug!("watching {key} for notifications: {e}");
+                WatchStep::Failed
+            }
+        }
+    }
+
+    /// Shows what a refresh of one change of server `key` (the change page,
+    /// an action) queued, without waiting for the next pass.
+    fn drain_notifications(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        let Some(entry) = self.servers.get(key).filter(|e| e.watch_task.is_some()) else {
+            return;
+        };
+        let (Some(session), Some(inputs)) = (entry.session.as_ref(), self.watch_inputs(key)) else {
+            return;
+        };
+        let syncer = session.syncer().clone();
+        let key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let ran = cx
+                .background_spawn(async move { watching::run(&syncer, &inputs, false).await })
+                .await;
+            this.update(cx, |this, cx| match ran {
+                Ok(Some(ran)) => this.found_events(&key, ran, cx),
+                Ok(None) => {}
+                Err(e) => log::debug!("collecting notification events of {key}: {e}"),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Decides what to show for the events a pass of server `key` found,
+    /// shows it and acknowledges every event the pass saw.
+    fn found_events(&mut self, key: &ServerKey, ran: Ran, cx: &mut Context<Self>) {
+        let Ran { me, found } = ran;
+        let current = self.current_change();
+        let Some(entry) = self.servers.get_mut(key) else {
+            return;
+        };
+        entry.me = Some(me);
+        let Some(syncer) = entry.session.as_ref().map(|s| s.syncer().clone()) else {
+            return;
+        };
+        if found.seen.is_empty() {
+            return;
+        }
+        // Acknowledged below; one that is still in flight is not shown again.
+        if entry.notified.len() > 5_000 {
+            entry.notified.clear();
+        }
+        let matched: Vec<_> = found
+            .matched
+            .into_iter()
+            .filter(|(event, _)| entry.notified.insert(event.key()))
+            .collect();
+        let screen = Screen {
+            focused: self.window_active,
+            current: current.as_ref().map(|(k, n)| (k.as_str(), *n)),
+        };
+        // The zone is read once by jiff and cached.
+        let now = jiff::Zoned::now().time();
+        let plan = sync::notify::plan(
+            &self.notify_settings,
+            key.as_str(),
+            matched,
+            &screen,
+            now,
+            self.started,
+        );
+        if let Some(notifier) = &self.notifier {
+            for notification in &plan.notifications {
+                notifier.show(notification, Box::new(|| {}));
+            }
+        }
+        // The inbox will keep `plan.delivered`, suppressed ones included.
+        log::debug!(
+            "{key}: {} notification events, {} shown",
+            plan.delivered.len(),
+            plan.notifications.len()
+        );
+        let seen = found.seen;
+        cx.background_spawn(async move {
+            if let Err(e) = syncer.ack_events(&seen) {
+                log::warn!("acknowledging notification events failed: {e}");
+            }
+        })
+        .detach();
+    }
+
+    /// The server and change of the change or diff page on screen.
+    fn current_change(&self) -> Option<(ServerKey, ChangeNumber)> {
+        let key = self.nav.current_server()?.clone();
+        match self.nav.current() {
+            Route::Change(n) => Some((key, *n)),
+            Route::Diff(d) => Some((key, d.change)),
+            _ => None,
         }
     }
 
@@ -1102,7 +1371,10 @@ impl Shell {
             window,
             move |this, _, ev: &ChangeEvent, window, cx| match ev {
                 ChangeEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
-                ChangeEvent::Refreshed => this.server_reachable(&owner, cx),
+                ChangeEvent::Refreshed => {
+                    this.server_reachable(&owner, cx);
+                    this.drain_notifications(&owner, cx);
+                }
                 ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 ChangeEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 ChangeEvent::ManageFilters { project } => {
@@ -1621,6 +1893,9 @@ impl Shell {
     /// result.
     fn action_done(&mut self, done: &Done, window: &mut Window, cx: &mut Context<Self>) {
         self.close_menu(window, cx);
+        if let Some(key) = self.servers.active_key().cloned() {
+            self.drain_notifications(&key, cx);
+        }
         if let Some(new) = done.opened {
             // A revert or cherry-pick made another change: go there (Back
             // returns to this one). Its detail is in the cache already.
@@ -1932,6 +2207,24 @@ impl Shell {
     pub(crate) fn set_connection_for_test(&mut self, key: &str, connection: Connection) {
         self.servers
             .set_connection(&ServerKey::new(key), connection);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_window_active_for_test(&mut self, active: bool) {
+        self.window_active = active;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_for_test(&self, key: &str) -> Option<&Session> {
+        self.servers.get(&ServerKey::new(key))?.session.as_ref()
+    }
+
+    /// Whether the notification watch of server `key` runs.
+    #[cfg(test)]
+    pub(crate) fn watching_for_test(&self, key: &str) -> bool {
+        self.servers
+            .get(&ServerKey::new(key))
+            .is_some_and(|e| e.watch_task.is_some())
     }
 
     #[cfg(test)]
