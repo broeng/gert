@@ -408,6 +408,25 @@ impl SettingsPage {
         self.save_notifications(settings, window, cx);
     }
 
+    /// The notification settings on screen.
+    pub(crate) fn notification_settings(&self) -> &NotificationSettings {
+        &self.notify
+    }
+
+    /// The rule editor saved: `saved` is what is in effect now, and the
+    /// cursor goes to rule `index`.
+    pub(crate) fn notifications_saved(
+        &mut self,
+        saved: NotificationSettings,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.notify = saved;
+        let last = self.notify.rules.len().saturating_sub(1);
+        self.cursor = self.in_tab(self.rules_row() + index.min(last));
+        cx.notify();
+    }
+
     // ---- saving ----
 
     /// Writes `settings` in the background. On success they become the

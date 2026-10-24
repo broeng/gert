@@ -25,6 +25,7 @@ use crate::{
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
     notifier::Notifier,
+    notify_rule_dialog::{NotifyRuleContext, NotifyRuleDialog, NotifyRuleEvent},
     outbox::{DraftOutbox, OutboxEvent},
     pages::{
         change::{ChangeEvent, ChangePage},
@@ -99,6 +100,7 @@ pub fn init(cx: &mut App) {
     crate::reply::actions::bind_keys(cx);
     crate::action_menu::actions::bind_keys(cx);
     crate::filters_dialog::actions::bind_keys(cx);
+    crate::notify_rule_dialog::actions::bind_keys(cx);
     crate::goto::bind_keys(cx);
     crate::switcher::bind_keys(cx);
 }
@@ -130,6 +132,10 @@ pub struct Shell {
     /// The Manage filters dialog while it is open (modal, like the others).
     filters_dialog: Option<Entity<FiltersDialog>>,
     filters_dialog_subs: Vec<Subscription>,
+    /// The notification rule editor while it is open (modal, like the
+    /// others).
+    rule_dialog: Option<Entity<NotifyRuleDialog>>,
+    rule_dialog_subs: Vec<Subscription>,
     /// The Go to dialog while it is open (modal, like the others).
     goto: Option<Entity<GotoDialog>>,
     goto_subs: Vec<Subscription>,
@@ -204,6 +210,7 @@ impl Shell {
             let modal = this.reply.as_ref().map(|d| d.focus_handle(cx));
             let modal = modal.or_else(|| this.menu.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.filters_dialog.as_ref().map(|d| d.focus_handle(cx)));
+            let modal = modal.or_else(|| this.rule_dialog.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.goto.as_ref().map(|d| d.focus_handle(cx)));
             if let Some(handle) = modal {
                 window.focus(&handle, cx);
@@ -241,6 +248,8 @@ impl Shell {
             menu_subs: Vec::new(),
             filters_dialog: None,
             filters_dialog_subs: Vec::new(),
+            rule_dialog: None,
+            rule_dialog_subs: Vec::new(),
             goto: None,
             goto_subs: Vec::new(),
             switcher: None,
@@ -1192,6 +1201,7 @@ impl Shell {
         self.drop_reply(cx);
         self.drop_menu();
         self.drop_filters_dialog();
+        self.drop_rule_dialog();
         self.drop_goto();
         self.drop_switcher();
         let mut route = self.nav.current().clone();
@@ -1418,9 +1428,8 @@ impl Shell {
                 SettingsEvent::NotificationsSaved(settings) => {
                     this.set_notification_settings(settings.clone(), window, cx)
                 }
-                // The rule editor is opened by the next change.
                 SettingsEvent::EditNotificationRule { index } => {
-                    log::debug!("no rule editor yet for rule {index}")
+                    this.open_rule_dialog(*index, window, cx)
                 }
                 SettingsEvent::TestNotification => {
                     let sent = this.test_notification();
@@ -1758,6 +1767,7 @@ impl Shell {
         self.drop_reply(cx);
         self.drop_menu();
         self.drop_filters_dialog();
+        self.drop_rule_dialog();
         if let Some(first) = self.servers.keys().first().cloned() {
             let start = self.start_route();
             self.nav.visit(&first, start);
@@ -1840,6 +1850,7 @@ impl Shell {
         if self.reply.is_some()
             || self.menu.is_some()
             || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
             || self.goto.is_some()
         {
             return;
@@ -1856,6 +1867,7 @@ impl Shell {
             self.drop_reply(cx);
             self.drop_menu();
             self.drop_filters_dialog();
+            self.drop_rule_dialog();
         }
         let session = self.servers.get(key).and_then(|e| e.session.clone());
         self.servers.set_connection(key, Connection::Unauthorized);
@@ -1888,7 +1900,11 @@ impl Shell {
         else {
             return;
         };
-        if self.reply.is_some() || self.menu.is_some() || self.filters_dialog.is_some() {
+        if self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
+        {
             return;
         }
         let owner = session.key.clone();
@@ -1946,7 +1962,11 @@ impl Shell {
         let Some(session) = self.session().cloned() else {
             return;
         };
-        if self.menu.is_some() || self.reply.is_some() || self.filters_dialog.is_some() {
+        if self.menu.is_some()
+            || self.reply.is_some()
+            || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
+        {
             return;
         }
         let owner = session.key.clone();
@@ -2033,7 +2053,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.reply.is_some() || self.menu.is_some() || self.filters_dialog.is_some() {
+        if self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
+        {
             return;
         }
         let env = self.env.clone();
@@ -2068,6 +2092,68 @@ impl Shell {
 
     fn close_filters_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.drop_filters_dialog();
+        let handle = self.page.focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    // ---- notification rule editor ----
+
+    /// Opens the notification rule editor on rule `index` of the settings
+    /// page's list (one past the end: a new rule).
+    fn open_rule_dialog(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
+        {
+            return;
+        }
+        let Page::Settings(page) = &self.page else {
+            return;
+        };
+        let context = NotifyRuleContext {
+            settings: page.read(cx).notification_settings().clone(),
+            index,
+            servers: self
+                .servers
+                .rows()
+                .into_iter()
+                .map(|r| (r.key, r.name))
+                .collect(),
+            server_ids: self.servers.server_ids(),
+            queries: self.servers.query_names(),
+        };
+        let env = self.env.clone();
+        let dialog = cx.new(|cx| NotifyRuleDialog::new(env, context, window, cx));
+        self.rule_dialog_subs.push(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, ev: &NotifyRuleEvent, window, cx| match ev {
+                NotifyRuleEvent::Close => this.close_rule_dialog(window, cx),
+                NotifyRuleEvent::Saved { settings, index } => {
+                    this.close_rule_dialog(window, cx);
+                    this.set_notification_settings(settings.clone(), window, cx);
+                    if let Page::Settings(page) = &this.page {
+                        page.update(cx, |p, cx| {
+                            p.notifications_saved(settings.clone(), *index, cx)
+                        });
+                    }
+                }
+            },
+        ));
+        self.rule_dialog = Some(dialog);
+        cx.notify();
+    }
+
+    /// Takes the editor away for everything that replaces the page under it.
+    fn drop_rule_dialog(&mut self) {
+        self.rule_dialog_subs.clear();
+        self.rule_dialog = None;
+    }
+
+    fn close_rule_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_rule_dialog();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
@@ -2141,6 +2227,7 @@ impl Shell {
         let modal_open = self.reply.is_some()
             || self.menu.is_some()
             || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
             || self.goto.is_some()
             || self.switcher.is_some();
         let servers = self.link_servers();
@@ -2201,6 +2288,7 @@ impl Shell {
             || self.reply.is_some()
             || self.menu.is_some()
             || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
             || self.goto.is_some()
         {
             return;
@@ -2353,6 +2441,11 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn filters_for_test(&self) -> &Entity<FileFilters> {
         &self.filters
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rule_dialog_for_test(&self) -> Option<Entity<NotifyRuleDialog>> {
+        self.rule_dialog.clone()
     }
 
     #[cfg(test)]
@@ -2784,6 +2877,7 @@ impl Render for Shell {
                     .children(self.reply.clone())
                     .children(self.menu.clone())
                     .children(self.filters_dialog.clone())
+                    .children(self.rule_dialog.clone())
                     .children(self.goto.clone())
                     .children(self.switcher.clone()),
             )
