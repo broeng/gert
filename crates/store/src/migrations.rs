@@ -215,6 +215,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX notified_events_seen ON notified_events (seen_ms);
     ALTER TABLE servers ADD COLUMN watched_since INTEGER;
     ",
+    // v7 -> v8: `pending_events` holds notification events that were
+    // detected (and recorded in the ledger) but not yet acknowledged as
+    // delivered, so a restart does not lose them. `event` is the JSON of a
+    // `model::Event`, `created_ms` Unix milliseconds.
+    "
+    CREATE TABLE pending_events (
+        server_id  INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        key        TEXT NOT NULL,
+        event      TEXT NOT NULL,
+        created_ms INTEGER NOT NULL,
+        PRIMARY KEY (server_id, key)
+    );
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

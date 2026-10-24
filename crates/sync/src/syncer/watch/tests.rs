@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 use gerrit_api::{Auth, GerritClient, fake::RouteHttpClient};
+use jiff::Timestamp;
 use model::{ChangeNumber, EventKind};
 use serde_json::{Value, json};
 use store::Store;
@@ -66,8 +67,21 @@ fn fixture() -> Fixture {
     }
 }
 
+/// A pass whose events are delivered (acknowledged) at once.
 fn pass(f: &Fixture) -> Vec<Event> {
+    let events = pass_keeping(f);
+    ack(f, &events);
+    events
+}
+
+/// A pass whose events are not acknowledged.
+fn pass_keeping(f: &Fixture) -> Vec<Event> {
     block_on(f.syncer.watch_pass(Q, WatchOptions::default())).unwrap()
+}
+
+fn ack(f: &Fixture, events: &[Event]) {
+    let keys: Vec<String> = events.iter().map(Event::key).collect();
+    f.syncer.store().ack_events(f.syncer.server, &keys).unwrap();
 }
 
 fn watched(f: &Fixture) -> bool {
@@ -84,6 +98,14 @@ fn fetches(f: &Fixture) -> usize {
         .iter()
         .filter(|r| r.starts_with("/changes/") && !r.starts_with("/changes/?"))
         .count()
+}
+
+/// The detail of change 1 as `baselined` caches it.
+fn baselined_detail() -> model::ChangeDetail {
+    let http = RouteHttpClient::new();
+    route_change(&http, 1, U1, json!({}));
+    let client = GerritClient::new(Arc::new(http), BASE, Auth::Anonymous).unwrap();
+    block_on(client.get_change(ChangeNumber(1))).unwrap()
 }
 
 /// A watched server with change 1 cached at `U1` and no events pending.
@@ -155,10 +177,75 @@ fn the_ledger_suppresses_events_when_the_cache_is_rolled_back() {
     assert_eq!(first.len(), 1);
     // As after a lost cache write: the old detail is back, the event is
     // detected again, but it was reported already.
+    let old = baselined_detail();
+    f.syncer
+        .store()
+        .save_change_detail(f.syncer.server, &old, Timestamp::now())
+        .unwrap();
+    route_change(&f.http, 1, U2, code_review(-1));
+    assert!(pass(&f).is_empty());
+}
+
+#[test]
+fn a_refresh_outside_the_watch_pass_loses_no_events() {
+    let f = baselined();
+    // The change page refreshes the change first.
+    route_change(&f.http, 1, U2, code_review(-1));
+    block_on(f.syncer.refresh_change(ChangeNumber(1))).unwrap();
+    // The list now agrees with the cache, so the pass fetches nothing, but
+    // it still hands out the event.
+    f.http
+        .route_json("GET /changes/?q=", &list(&[(1, U2)])[5..]);
+    let before = fetches(&f);
+    let events = pass(&f);
+    assert_eq!(fetches(&f), before);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].change, ChangeNumber(1));
+    assert!(pass(&f).is_empty());
+}
+
+#[test]
+fn events_stay_pending_until_acknowledged() {
+    let f = baselined();
+    f.http
+        .route_json("GET /changes/?q=", &list(&[(1, U2)])[5..]);
+    route_change(&f.http, 1, U2, code_review(-1));
+    let first = pass_keeping(&f);
+    assert_eq!(first.len(), 1);
+    // Not acknowledged: still there, and not duplicated by more passes or
+    // by another refresh of the same state.
+    block_on(f.syncer.refresh_change(ChangeNumber(1))).unwrap();
+    assert_eq!(pass_keeping(&f), first);
+    ack(&f, &first);
+    assert!(pass_keeping(&f).is_empty());
+}
+
+#[test]
+fn repeated_refreshes_do_not_duplicate_events() {
+    let f = baselined();
+    route_change(&f.http, 1, U2, code_review(-1));
+    for _ in 0..3 {
+        block_on(f.syncer.refresh_change(ChangeNumber(1))).unwrap();
+    }
+    f.http
+        .route_json("GET /changes/?q=", &list(&[(1, U2)])[5..]);
+    assert_eq!(pass(&f).len(), 1);
+}
+
+#[test]
+fn an_unwatched_server_queues_nothing() {
+    let f = fixture();
     route_change(&f.http, 1, U1, json!({}));
     block_on(f.syncer.refresh_change(ChangeNumber(1))).unwrap();
     route_change(&f.http, 1, U2, code_review(-1));
-    assert!(pass(&f).is_empty());
+    block_on(f.syncer.refresh_change(ChangeNumber(1))).unwrap();
+    assert!(
+        f.syncer
+            .store()
+            .pending_events(f.syncer.server)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -258,9 +345,11 @@ fn a_pass_fetches_at_most_the_bound_and_the_rest_follow() {
     let first = block_on(f.syncer.watch_pass(Q, options)).unwrap();
     assert_eq!(fetches(&f) - before, 3);
     assert_eq!(first.len(), 3);
+    ack(&f, &first);
     let second = block_on(f.syncer.watch_pass(Q, options)).unwrap();
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].change, ChangeNumber(4));
+    ack(&f, &second);
     assert!(pass(&f).is_empty());
 }
 

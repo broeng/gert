@@ -12,7 +12,7 @@ use store::{
     PrunePolicy, ServerId, Store,
 };
 
-use crate::Error;
+use crate::{Error, diff_change};
 
 /// What a refresh did to the cached result of a query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,9 +145,31 @@ impl Syncer {
     /// Fetches a change's detail and caches it (and its list summary).
     pub async fn refresh_change(&self, number: ChangeNumber) -> Result<ChangeDetail, Error> {
         let detail = self.client.get_change(number).await?;
-        let now = Timestamp::now();
-        self.store().save_change_detail(self.server, &detail, now)?;
+        self.save_fresh_detail(&detail)?;
         Ok(detail)
+    }
+
+    /// The one place a fetched change detail enters the cache. On a watched
+    /// server, whatever differs from the previously cached detail becomes
+    /// notification events, queued as pending, so that no path that
+    /// refreshes a change (the change page, actions, polling) can advance
+    /// the cache without the events. Without an older detail, or before the
+    /// server has its baseline, nothing is derived.
+    ///
+    /// The events are queued before the detail is saved: after a failure
+    /// in between the next refresh detects them again, and the ledger
+    /// keeps that from queueing them twice.
+    fn save_fresh_detail(&self, detail: &ChangeDetail) -> Result<(), Error> {
+        let now = Timestamp::now();
+        let mut store = self.store();
+        if store.watched_since(self.server)?.is_some()
+            && let Some(old) = store.load_change_detail(self.server, detail.summary.number)?
+        {
+            let events = diff_change(self.server, &old.detail, detail);
+            store.queue_events(self.server, &events, now)?;
+        }
+        store.save_change_detail(self.server, detail, now)?;
+        Ok(())
     }
 
     /// The cached file list of a comparison.

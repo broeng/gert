@@ -2,26 +2,25 @@
 //! about since the last pass, as notification events.
 //!
 //! One list query says which changes moved (`updated` differs from the
-//! cached detail). Those are fetched one by one with [`Syncer::refresh_change`],
-//! after loading the previous cached detail, and the two are compared with
-//! [`diff_change`]. Events then go through the ledger so each is reported
-//! once, across restarts.
+//! cached detail). Those are fetched one by one with [`Syncer::refresh_change`].
+//! Turning the difference into events is not done here but where every
+//! fresh detail is cached, so that a refresh from anywhere else (the change
+//! page, an action) cannot lose them. The events wait in the store's
+//! pending table until the caller acknowledges them with
+//! [`Store::ack_events`](store::Store::ack_events), so they also survive a
+//! restart.
 //!
 //! Baselines never notify: a change without a cached detail is only cached,
 //! and the first complete pass on a server (see
 //! [`Store::watched_since`](store::Store::watched_since)) caches
 //! everything and reports nothing.
-//!
-//! Caveat: the comparison is against whatever the cache holds. A refresh
-//! of the change page in between advances the cache without going through
-//! here.
 
 use jiff::Timestamp;
 use model::Event;
 use store::EVENT_RETENTION;
 
 use super::Syncer;
-use crate::{Error, diff_change};
+use crate::Error;
 
 /// Limits of one [`Syncer::watch_pass`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +44,11 @@ impl Default for WatchOptions {
 impl Syncer {
     /// Runs one watch pass over the changes matching `query`, e.g.
     /// `is:open (owner:self OR reviewer:self OR attention:self)`, and
-    /// returns the events nobody was told about yet, oldest first.
+    /// returns the pending events of the server, oldest first: those this
+    /// pass found and those queued by refreshes since the last
+    /// acknowledgement. They stay pending until acknowledged (by
+    /// [`Event::key`]) with [`Store::ack_events`](store::Store::ack_events),
+    /// so a caller that fails to deliver gets them again.
     ///
     /// Details are fetched one after the other. A change whose fetch fails
     /// is skipped with its cache untouched, so the next pass tries it again
@@ -66,7 +69,6 @@ impl Syncer {
         let page = self.client.query_changes(&list).await?;
         let baseline = self.store().watched_since(self.server)?.is_none();
 
-        let mut events = Vec::new();
         let mut fetched = 0;
         let mut complete = true;
         for summary in &page.changes {
@@ -83,11 +85,7 @@ impl Syncer {
             }
             fetched += 1;
             match self.refresh_change(summary.number).await {
-                Ok(new) => {
-                    if !baseline && let Some(old) = cached {
-                        events.extend(diff_change(self.server, &old.detail, &new));
-                    }
-                }
+                Ok(_) => {}
                 Err(e) => {
                     log::warn!("watching change {}: {e}", summary.number);
                     complete = false;
@@ -106,20 +104,13 @@ impl Syncer {
             return Ok(Vec::new());
         }
 
-        events.sort_by_key(|e| e.at);
-        let keys: Vec<String> = events.iter().map(Event::key).collect();
         let mut store = self.store();
-        let fresh = store.record_events(self.server, &keys, now)?;
         if let Ok(cutoff) = now.checked_sub(EVENT_RETENTION)
             && let Err(e) = store.prune_events(cutoff)
         {
             log::warn!("pruning the event ledger failed: {e}");
         }
-        Ok(events
-            .into_iter()
-            .zip(fresh)
-            .filter_map(|(e, new)| new.then_some(e))
-            .collect())
+        Ok(store.pending_events(self.server)?)
     }
 }
 
