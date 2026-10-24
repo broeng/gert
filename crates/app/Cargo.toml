@@ -23,6 +23,7 @@ http.workspace = true
 keyring.workspace = true
 log.workspace = true
 model.workspace = true
+notify-rust.workspace = true
 reqwest_client.workspace = true
 serde.workspace = true
 store.workspace = true

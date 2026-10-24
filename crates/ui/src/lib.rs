@@ -17,6 +17,7 @@ mod links;
 mod list_model;
 mod login;
 mod nav;
+mod notifier;
 mod outbox;
 mod pages;
 mod reply;
@@ -39,6 +40,7 @@ mod testing;
 mod tests;
 
 pub use login::{LoginError, LoginOutcome, LoginRequest};
+pub use notifier::{Clicked, Notifier};
 pub use servers::{ACTIVE_SERVER_STATE, Connection};
 pub use session::{
     Backend, BackendError, Env, LocalDiff, SavedQuery, ServerBackend, ServerConfig, ServerKey,

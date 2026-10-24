@@ -49,6 +49,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
 directories = "6"
 keyring = "4"
+# Desktop notifications. The zbus backend (feature `z`) talks to the
+# notification daemon in pure Rust, so there is no libdbus to link.
+notify-rust = { version = "4.18", default-features = false, features = ["z"] }
 toml = "1"
 toml_edit = "0.25"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
