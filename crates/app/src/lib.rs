@@ -4,6 +4,7 @@
 pub mod backend;
 pub mod config;
 pub mod http;
+pub mod notifier;
 pub mod secrets;
 
 /// Single source of the (working) application name. Used for config and

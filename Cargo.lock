@@ -2280,6 +2280,7 @@ dependencies = [
  "keyring",
  "log",
  "model",
+ "notify-rust",
  "serde",
  "serde_json",
  "store",
