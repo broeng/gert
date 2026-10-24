@@ -11,10 +11,12 @@
 //! not on the UI thread.
 
 mod error;
+mod events;
 mod poll;
 mod syncer;
 
 pub use error::{Error, PendingDraft};
+pub use events::diff_change;
 pub use poll::{PollPolicy, PollState};
 pub use syncer::{
     CommentsView, DraftCounts, DraftSave, NewChange, PublishOutcome, QueryUpdate, RefreshSource,
