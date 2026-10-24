@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use store::Store;
+use sync::notify::NotificationSettings;
 
 use ui::{
     Backend, BackendError, ColorModes, SavedQuery, ServerBackend, ServerConfig as UiServerConfig,
@@ -294,6 +295,19 @@ impl Backend for AppBackend {
         })
         .map_err(|e| BackendError(e.to_string()))?;
         Ok(config.theme())
+    }
+
+    fn save_notifications(
+        &self,
+        settings: &NotificationSettings,
+    ) -> Result<NotificationSettings, BackendError> {
+        let config = Config::update(&self.config_file, |c| {
+            let mut n = c.notifications.take().unwrap_or_default();
+            n.apply_settings(settings);
+            c.notifications = (n != Default::default()).then_some(n);
+        })
+        .map_err(|e| BackendError(e.to_string()))?;
+        Ok(config.notification_settings())
     }
 
     fn save_color_modes(&self, modes: ColorModes) -> Result<ColorModes, BackendError> {

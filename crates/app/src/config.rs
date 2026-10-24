@@ -45,6 +45,35 @@
 //! mode = "system"                      # or "light", "dark": the UI
 //! diff_mode = "system"                 # or "light", "dark": the diff view
 //!
+//! # Optional: desktop notifications. Without this section (and without
+//! # rules) they are on for: being added to the attention set, negative votes
+//! # (Code-Review -2 and -1, Verified -1) on your changes, and new comments on
+//! # your changes. Rules you write replace those; `enabled = false` silences
+//! # everything. Every key is optional.
+//! [notifications]
+//! enabled = true                       # the master switch
+//! only_when_unfocused = true           # stay quiet while the window has focus
+//! suppress_current_change = true       # ... and for the change on screen
+//! ignore_own_actions = true            # not for what you did yourself
+//! quiet_hours = "22:00-07:00"          # local time; absent: never quiet
+//! group_window_secs = 20               # events this close become one
+//!
+//! [[notifications.rules]]
+//! name = "Negative votes on my changes"  # optional label
+//! event = "vote"                       # vote | comment | attention_added | reviewer_added
+//!                                      # | patch_set | merged | abandoned | ready_to_submit
+//!                                      # | merge_conflict | mention
+//! scope = "owner"                      # owner | reviewer | cc | attention | starred | any
+//!                                      # or instead: query = "<name of a saved query>"
+//! servers = ["example"]                # server ids; absent: every server
+//! label = "Code-Review"                # vote: label name, "*" for any (or labels = [...])
+//! values = [-2, -1]                    # vote: the exact values; absent: any value
+//! only_unresolved = false              # comment: not evaluated yet
+//! replies_to_me = false                # comment: not evaluated yet
+//! exclude_bots = true                  # skip events caused by bots (not detected yet)
+//! from = ["jenkins"]                   # only these actors (username, name or email)
+//! enabled = true                       # this rule only
+//!
 //! # Optional: local overrides of the diff view. Every key is optional. They
 //! # win over the preferences stored on the server (Settings > Preferences >
 //! # Diff Preferences in the web UI) and are never written back to it.
@@ -81,6 +110,7 @@ use std::{
 use directories::ProjectDirs;
 use model::{DiffContext, DiffPreferences, DiffViewMode, Whitespace};
 use serde::{Deserialize, Serialize};
+use sync::notify::{NotificationSettings, QuietHours, Rule, RuleEvent, Scope, default_rules};
 use toml_edit::{DocumentMut, Item};
 use ui::filters::{FileFilter, FilterAction, format_hex_color, parse_hex_color, validate_glob};
 use ui::{ColorMode, ColorModes, ServerKey, ThemeName, server_name_from_url};
@@ -124,6 +154,8 @@ pub struct Config {
     pub review: Option<ReviewConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<AppearanceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<NotificationsConfig>,
 }
 
 /// What opens on start.
@@ -203,6 +235,297 @@ pub struct AppearanceConfig {
     /// The same for the diff view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_mode: Option<String>,
+}
+
+/// The `[notifications]` section. Values are plain options so a typo never
+/// fails the whole file; [`Config::notification_settings`] resolves them and
+/// drops what it cannot use, with a warning.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub only_when_unfocused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_current_change: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore_own_actions: Option<bool>,
+    /// `"HH:MM-HH:MM"`, see [`QuietHours::parse`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_hours: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_window_secs: Option<u64>,
+    /// `[[notifications.rules]]`. None at all: the default rules apply.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<NotificationRuleConfig>,
+}
+
+/// A `[[notifications.rules]]` table, see [`NotificationRuleConfig::to_rule`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationRuleConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// The name of a saved query; it replaces `scope`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Ids of the servers the rule applies to; empty: all of them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub only_unresolved: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replies_to_me: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_bots: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub from: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl NotificationRuleConfig {
+    /// The rule as the matcher uses it. A rule with an unknown event, or
+    /// with neither a known scope nor a query, can do nothing and is
+    /// dropped.
+    pub fn to_rule(&self) -> Option<Rule> {
+        let label = self.name.as_deref().unwrap_or(&self.event);
+        let Some(event) = RuleEvent::from_key(self.event.trim()) else {
+            log::warn!(
+                "config: ignoring notification rule {label:?}: unknown event {:?}",
+                self.event
+            );
+            return None;
+        };
+        let scope = match (&self.query, &self.scope) {
+            (Some(query), scope) => {
+                if scope.is_some() {
+                    log::warn!(
+                        "config: notification rule {label:?} has both scope and query; \
+                         using the query"
+                    );
+                }
+                Scope::Query(query.clone())
+            }
+            (None, Some(scope)) => match Scope::from_key(scope.trim()) {
+                Some(s) => s,
+                None => {
+                    log::warn!(
+                        "config: ignoring notification rule {label:?}: unknown scope {scope:?}"
+                    );
+                    return None;
+                }
+            },
+            (None, None) => {
+                log::warn!("config: ignoring notification rule {label:?}: no scope or query");
+                return None;
+            }
+        };
+        let mut labels = self.labels.clone();
+        labels.extend(self.label.clone());
+        Some(Rule {
+            name: self.name.clone(),
+            event,
+            scope,
+            servers: self.servers.clone(),
+            labels,
+            values: self.values.clone(),
+            only_unresolved: self.only_unresolved.unwrap_or(false),
+            replies_to_me: self.replies_to_me.unwrap_or(false),
+            exclude_bots: self.exclude_bots.unwrap_or(true),
+            from: self.from.clone(),
+            enabled: self.enabled.unwrap_or(true),
+        })
+    }
+
+    /// The table for a rule; default values are left as `None` or empty so
+    /// they are not written.
+    pub fn from_rule(r: &Rule) -> Self {
+        let (scope, query) = match &r.scope {
+            Scope::Query(name) => (None, Some(name.clone())),
+            other => (other.key().map(str::to_owned), None),
+        };
+        Self {
+            name: r.name.clone(),
+            event: r.event.key().to_owned(),
+            scope,
+            query,
+            servers: r.servers.clone(),
+            label: None,
+            labels: r.labels.clone(),
+            values: r.values.clone(),
+            only_unresolved: r.only_unresolved.then_some(true),
+            replies_to_me: r.replies_to_me.then_some(true),
+            exclude_bots: (!r.exclude_bots).then_some(false),
+            from: r.from.clone(),
+            enabled: (!r.enabled).then_some(false),
+        }
+        .normalized()
+    }
+
+    /// The same rule with explicit defaults removed and `label` folded
+    /// into `labels`, for matching tables of the file by content.
+    fn normalized(mut self) -> Self {
+        let flag = |v: &mut Option<bool>, default: bool| {
+            if *v == Some(default) {
+                *v = None;
+            }
+        };
+        flag(&mut self.enabled, true);
+        flag(&mut self.exclude_bots, true);
+        flag(&mut self.only_unresolved, false);
+        flag(&mut self.replies_to_me, false);
+        if let Some(label) = self.label.take() {
+            self.labels.push(label);
+        }
+        self
+    }
+
+    /// Reads a table of the document; `None` if a key has the wrong type.
+    fn from_table(t: &toml_edit::Table) -> Option<Self> {
+        let strings = |key: &str| -> Option<Vec<String>> {
+            match t.get(key) {
+                None => Some(Vec::new()),
+                Some(item) => item
+                    .as_array()?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+            }
+        };
+        let string = |key: &str| -> Option<Option<String>> {
+            match t.get(key) {
+                None => Some(None),
+                Some(v) => Some(Some(v.as_str()?.to_owned())),
+            }
+        };
+        let flag = |key: &str| -> Option<Option<bool>> {
+            match t.get(key) {
+                None => Some(None),
+                Some(v) => Some(Some(v.as_bool()?)),
+            }
+        };
+        let values = match t.get("values") {
+            None => Vec::new(),
+            Some(item) => item
+                .as_array()?
+                .iter()
+                .map(|v| v.as_integer().and_then(|i| i32::try_from(i).ok()))
+                .collect::<Option<Vec<_>>>()?,
+        };
+        Some(
+            Self {
+                name: string("name")?,
+                event: t.get("event")?.as_str()?.to_owned(),
+                scope: string("scope")?,
+                query: string("query")?,
+                servers: strings("servers")?,
+                label: string("label")?,
+                labels: strings("labels")?,
+                values,
+                only_unresolved: flag("only_unresolved")?,
+                replies_to_me: flag("replies_to_me")?,
+                exclude_bots: flag("exclude_bots")?,
+                from: strings("from")?,
+                enabled: flag("enabled")?,
+            }
+            .normalized(),
+        )
+    }
+
+    /// Writes this rule into `t`, keeping the comments and the key order of
+    /// what is there. Keys that hold a default are removed.
+    fn fill(&self, t: &mut toml_edit::Table) {
+        let strings = |v: &[String]| -> Option<toml_edit::Value> {
+            (!v.is_empty()).then(|| v.iter().map(String::as_str).collect())
+        };
+        set_or_remove(t, "name", self.name.as_deref().map(Into::into));
+        set_value(t, "event", self.event.as_str().into());
+        set_or_remove(t, "scope", self.scope.as_deref().map(Into::into));
+        set_or_remove(t, "query", self.query.as_deref().map(Into::into));
+        set_or_remove(t, "servers", strings(&self.servers));
+        // One label reads best as `label`, as in the documented form.
+        match self.labels.as_slice() {
+            [one] => {
+                set_value(t, "label", one.as_str().into());
+                t.remove("labels");
+            }
+            many => {
+                t.remove("label");
+                set_or_remove(t, "labels", strings(many));
+            }
+        }
+        let values =
+            (!self.values.is_empty()).then(|| self.values.iter().map(|v| i64::from(*v)).collect());
+        set_or_remove(t, "values", values);
+        set_or_remove(t, "only_unresolved", self.only_unresolved.map(Into::into));
+        set_or_remove(t, "replies_to_me", self.replies_to_me.map(Into::into));
+        set_or_remove(t, "exclude_bots", self.exclude_bots.map(Into::into));
+        set_or_remove(t, "from", strings(&self.from));
+        set_or_remove(t, "enabled", self.enabled.map(Into::into));
+    }
+}
+
+impl NotificationsConfig {
+    /// Makes this section say `settings`, for the settings page. The keys
+    /// stay out of the file while they hold their default, unless the file
+    /// already had them. Rules the loader cannot use stay after the ones
+    /// from `settings`, so a hand-written rule is never lost. The default
+    /// rules are not written while the file has no rules of its own.
+    pub fn apply_settings(&mut self, settings: &NotificationSettings) {
+        fn put<T: PartialEq>(slot: &mut Option<T>, value: T, default: T) {
+            if value != default || slot.is_some() {
+                *slot = Some(value);
+            }
+        }
+        let default = NotificationSettings::default();
+        put(&mut self.enabled, settings.enabled, default.enabled);
+        put(
+            &mut self.only_when_unfocused,
+            settings.only_when_unfocused,
+            default.only_when_unfocused,
+        );
+        put(
+            &mut self.suppress_current_change,
+            settings.suppress_current_change,
+            default.suppress_current_change,
+        );
+        put(
+            &mut self.ignore_own_actions,
+            settings.ignore_own_actions,
+            default.ignore_own_actions,
+        );
+        self.quiet_hours = settings.quiet_hours.map(|q| q.format());
+        put(
+            &mut self.group_window_secs,
+            settings.group_window.as_secs(),
+            default.group_window.as_secs(),
+        );
+        if !(self.rules.is_empty() && settings.rules == default_rules()) {
+            let ignored: Vec<_> = self
+                .rules
+                .iter()
+                .filter(|r| r.to_rule().is_none())
+                .cloned()
+                .collect();
+            self.rules = settings
+                .rules
+                .iter()
+                .map(NotificationRuleConfig::from_rule)
+                .chain(ignored)
+                .collect();
+        }
+    }
 }
 
 /// `context = 10` or `context = "all"`.
@@ -680,6 +1003,44 @@ impl Config {
         })
     }
 
+    /// The `[notifications]` section resolved. Without it, everything is at
+    /// its default: on, with the default rules. The default rules also
+    /// stand in when the section has no `[[notifications.rules]]`. A rule
+    /// the matcher cannot use, or quiet hours that do not parse, are
+    /// dropped with a warning.
+    pub fn notification_settings(&self) -> NotificationSettings {
+        let default = NotificationSettings::default();
+        let Some(n) = &self.notifications else {
+            return default;
+        };
+        let quiet_hours = n.quiet_hours.as_deref().and_then(|text| {
+            QuietHours::parse(text)
+                .inspect_err(|e| log::warn!("config: [notifications] quiet_hours: {e}"))
+                .ok()
+        });
+        let rules = if n.rules.is_empty() {
+            default.rules
+        } else {
+            n.rules
+                .iter()
+                .filter_map(NotificationRuleConfig::to_rule)
+                .collect()
+        };
+        NotificationSettings {
+            enabled: n.enabled.unwrap_or(default.enabled),
+            only_when_unfocused: n.only_when_unfocused.unwrap_or(default.only_when_unfocused),
+            suppress_current_change: n
+                .suppress_current_change
+                .unwrap_or(default.suppress_current_change),
+            ignore_own_actions: n.ignore_own_actions.unwrap_or(default.ignore_own_actions),
+            quiet_hours,
+            group_window: n
+                .group_window_secs
+                .map_or(default.group_window, std::time::Duration::from_secs),
+            rules,
+        }
+    }
+
     /// Default: following the system, also for a value this client does not
     /// know (with a warning).
     pub fn color_modes(&self) -> ColorModes {
@@ -837,6 +1198,10 @@ fn apply_changes(old: &Config, new: &Config, doc: &mut DocumentMut) -> Result<()
         let mut t = toml::Table::try_from(c)?;
         t.remove("servers");
         t.remove("filters");
+        // The rules are tables of their own, see `apply_notification_rules`.
+        if let Some(toml::Value::Table(n)) = t.get_mut("notifications") {
+            n.remove("rules");
+        }
         Ok(t)
     };
     apply_table(&tables(old)?, &tables(new)?, doc.as_table_mut());
@@ -845,6 +1210,10 @@ fn apply_changes(old: &Config, new: &Config, doc: &mut DocumentMut) -> Result<()
     }
     if old.filters != new.filters {
         apply_filters(&new.filters, doc.as_table_mut());
+    }
+    let rules = |c: &Config| c.notifications.as_ref().map(|n| n.rules.clone());
+    if rules(old) != rules(new) {
+        apply_notification_rules(&rules(new).unwrap_or_default(), doc.as_table_mut());
     }
     Ok(())
 }
@@ -1011,6 +1380,31 @@ fn apply_filters(new: &[FilterConfig], root: &mut toml_edit::Table) {
         |f| Some(f.clone().normalized()),
         FilterConfig::from_table,
         |f, t| f.fill(t),
+    );
+}
+
+/// Rewrites the `[[notifications.rules]]` tables, see [`apply_array`]. They
+/// are matched like the filters, by the rule they hold.
+fn apply_notification_rules(new: &[NotificationRuleConfig], root: &mut toml_edit::Table) {
+    if new.is_empty() && !matches!(root.get("notifications"), Some(Item::Table(_))) {
+        return;
+    }
+    if !matches!(root.get("notifications"), Some(Item::Table(_))) {
+        let mut t = toml_edit::Table::new();
+        // Only holds the rules: no `[notifications]` header of its own.
+        t.set_implicit(true);
+        root.insert("notifications", Item::Table(t));
+    }
+    let Some(Item::Table(table)) = root.get_mut("notifications") else {
+        return;
+    };
+    apply_array(
+        table,
+        "rules",
+        new,
+        |r| Some(r.clone().normalized()),
+        NotificationRuleConfig::from_table,
+        |r, t| r.fill(t),
     );
 }
 
@@ -2126,5 +2520,242 @@ query = "-age:1d"
             after.contains("servers = [\"work\"]") && after.contains("\"dim\""),
             "{after}"
         );
+    }
+
+    const NOTIFY: &str = r#"# Top comment.
+[theme-ish]
+x = 1
+
+# Notifications.
+[notifications]
+enabled = true # master
+quiet_hours = "22:00-07:00"
+group_window_secs = 30
+
+# Votes first.
+[[notifications.rules]]
+name = "Votes"      # my votes label
+event = "vote"
+scope = "owner"
+label = "Code-Review"
+values = [-2, -1]
+
+# Then comments.
+[[notifications.rules]]
+event = "comment"
+query = "Team"
+from = ["jenkins"]
+exclude_bots = false
+"#;
+
+    fn notify_file(name: &str, text: &str) -> PathBuf {
+        let dir = tmp(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn without_a_section_notifications_are_the_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.notification_settings(), NotificationSettings::default());
+        // A section without rules keeps the default rules.
+        let cfg: Config = toml::from_str("[notifications]\nonly_when_unfocused = false\n").unwrap();
+        let s = cfg.notification_settings();
+        assert!(!s.only_when_unfocused);
+        assert_eq!(s.rules, default_rules());
+    }
+
+    #[test]
+    fn the_documented_section_parses() {
+        let path = notify_file("notify-parse", NOTIFY);
+        let s = Config::load(&path)
+            .unwrap()
+            .unwrap()
+            .notification_settings();
+        assert!(s.enabled);
+        assert_eq!(s.group_window.as_secs(), 30);
+        assert_eq!(
+            s.quiet_hours,
+            Some(QuietHours::parse("22:00-07:00").unwrap())
+        );
+        assert_eq!(s.rules.len(), 2);
+        let vote = &s.rules[0];
+        assert_eq!(vote.event, RuleEvent::Vote);
+        assert_eq!(vote.scope, Scope::Owner);
+        assert_eq!(vote.labels, ["Code-Review"]);
+        assert_eq!(vote.values, [-2, -1]);
+        assert!(vote.exclude_bots && vote.enabled);
+        let comment = &s.rules[1];
+        assert_eq!(comment.scope, Scope::Query("Team".into()));
+        assert_eq!(comment.from, ["jenkins"]);
+        assert!(!comment.exclude_bots);
+    }
+
+    #[test]
+    fn unknown_notification_values_are_dropped_not_fatal() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [notifications]
+            quiet_hours = "late"
+            [[notifications.rules]]
+            event = "party"
+            scope = "owner"
+            [[notifications.rules]]
+            event = "vote"
+            scope = "nobody"
+            [[notifications.rules]]
+            event = "vote"
+            [[notifications.rules]]
+            name = "ok"
+            event = "merged"
+            scope = "any"
+            labels = ["A", "B"]
+            label = "C"
+            "#,
+        )
+        .unwrap();
+        let s = cfg.notification_settings();
+        assert_eq!(s.quiet_hours, None);
+        assert_eq!(s.rules.len(), 1);
+        assert_eq!(s.rules[0].labels, ["A", "B", "C"]);
+        // The unusable ones are not lost on a save from the settings page.
+        let mut n = cfg.notifications.clone().unwrap();
+        n.apply_settings(&s);
+        assert_eq!(n.rules.len(), 4);
+        assert_eq!(n.rules[0].event, "merged");
+    }
+
+    #[test]
+    fn editing_a_notification_rule_keeps_comments() {
+        let path = notify_file("notify-edit", NOTIFY);
+        Config::update(&path, |c| {
+            let n = c.notifications.as_mut().unwrap();
+            n.rules[0].values = vec![-2];
+            n.group_window_secs = Some(10);
+        })
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        for kept in [
+            "# Top comment.",
+            "# Notifications.",
+            "enabled = true # master",
+            "# Votes first.",
+            "# my votes label",
+            "# Then comments.",
+            "values = [-2]",
+            "group_window_secs = 10",
+            "query = \"Team\"",
+        ] {
+            assert!(after.contains(kept), "lost {kept:?} in\n{after}");
+        }
+        assert!(!after.contains("-1"), "{after}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.notification_settings().rules[0].values, [-2]);
+    }
+
+    #[test]
+    fn adding_and_removing_rules_keeps_the_others_comments() {
+        let path = notify_file("notify-add", NOTIFY);
+        Config::update(&path, |c| {
+            let n = c.notifications.as_mut().unwrap();
+            n.rules.push(NotificationRuleConfig {
+                event: "merged".into(),
+                scope: Some("reviewer".into()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.contains("# Votes first.") && after.contains("# Then comments."));
+        assert!(after.contains("event = \"merged\""), "{after}");
+        Config::update(&path, |c| {
+            c.notifications.as_mut().unwrap().rules.remove(0);
+        })
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("# Votes first.") && after.contains("# Then comments."));
+        assert!(after.contains("# Top comment.") && after.contains("# Notifications."));
+        assert_eq!(
+            Config::load(&path)
+                .unwrap()
+                .unwrap()
+                .notification_settings()
+                .rules
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn rules_can_be_added_to_a_file_without_a_section() {
+        let path = notify_file(
+            "notify-new",
+            "# mine\n[review]\nadvance_after_vote = true\n",
+        );
+        let rule = Rule::new(RuleEvent::Merged, Scope::Owner);
+        let settings = NotificationSettings {
+            rules: vec![rule.clone()],
+            ..NotificationSettings::default()
+        };
+        Config::update(&path, |c| {
+            let mut n = c.notifications.take().unwrap_or_default();
+            n.apply_settings(&settings);
+            c.notifications = Some(n);
+        })
+        .unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("# mine") && after.contains("[[notifications.rules]]"),
+            "{after}"
+        );
+        assert!(!after.contains("enabled"), "{after}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.notification_settings().rules, [rule]);
+    }
+
+    #[test]
+    fn saving_default_settings_writes_nothing_new() {
+        let mut n = NotificationsConfig::default();
+        n.apply_settings(&NotificationSettings::default());
+        assert_eq!(n, NotificationsConfig::default());
+        // But a changed switch and quiet hours are written, with the rules
+        // left to the defaults.
+        let settings = NotificationSettings {
+            enabled: false,
+            quiet_hours: Some(QuietHours::parse("23:30-06:00").unwrap()),
+            ..NotificationSettings::default()
+        };
+        n.apply_settings(&settings);
+        assert_eq!(n.enabled, Some(false));
+        assert_eq!(n.quiet_hours.as_deref(), Some("23:30-06:00"));
+        assert!(n.rules.is_empty());
+        let cfg = Config {
+            notifications: Some(n),
+            ..Config::default()
+        };
+        assert_eq!(cfg.notification_settings(), settings);
+    }
+
+    #[test]
+    fn rules_round_trip_through_the_config_form() {
+        let mut rule = Rule::new(RuleEvent::Vote, Scope::Query("Team".into()));
+        rule.name = Some("N".into());
+        rule.servers = vec!["a".into()];
+        rule.labels = vec!["Code-Review".into(), "Verified".into()];
+        rule.values = vec![-1, 0];
+        rule.only_unresolved = true;
+        rule.replies_to_me = true;
+        rule.exclude_bots = false;
+        rule.from = vec!["x".into()];
+        rule.enabled = false;
+        assert_eq!(
+            NotificationRuleConfig::from_rule(&rule).to_rule(),
+            Some(rule)
+        );
+        for r in default_rules() {
+            assert_eq!(NotificationRuleConfig::from_rule(&r).to_rule(), Some(r));
+        }
     }
 }
