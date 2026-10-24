@@ -17,6 +17,7 @@ mod review_cache;
 
 use std::{path::Path, time::Duration};
 
+pub use model::ServerId;
 use model::{ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -28,10 +29,6 @@ pub use review_cache::{
 
 /// How long a writer waits for a competing connection before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Identifies one Gerrit server inside the database.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ServerId(pub i64);
 
 /// A cached query result: the changes in server order, plus paging state.
 #[derive(Clone, Debug, PartialEq)]

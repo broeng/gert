@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 #[serde(transparent)]
 pub struct ChangeNumber(pub u64);
 
+/// Identifies one Gerrit server inside the cache database. It lives in
+/// `model` so that events can name their server; `store` hands them out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ServerId(pub i64);
+
 /// The numeric id of an account (`_account_id`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
