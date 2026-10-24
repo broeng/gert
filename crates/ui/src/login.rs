@@ -166,6 +166,7 @@ pub(crate) mod tests {
         pub saved_startup: Mutex<Vec<crate::session::StartupPage>>,
         pub saved_advance: Mutex<Vec<bool>>,
         pub saved_theme: Mutex<Vec<crate::theme::ThemeName>>,
+        pub saved_notifications: Mutex<Vec<sync::notify::NotificationSettings>>,
         /// The password `load_password` finds, for every account.
         pub password: Option<String>,
         pub saved_servers: Mutex<Vec<Vec<crate::session::ServerConfig>>>,
@@ -235,6 +236,22 @@ pub(crate) mod tests {
             }
             self.saved_advance.lock().unwrap().push(on);
             Ok(on)
+        }
+
+        /// Like the real one: no rules at all come back as the defaults.
+        fn save_notifications(
+            &self,
+            s: &sync::notify::NotificationSettings,
+        ) -> Result<sync::notify::NotificationSettings, BackendError> {
+            if self.fail {
+                return Err(BackendError("disk full".into()));
+            }
+            self.saved_notifications.lock().unwrap().push(s.clone());
+            let mut s = s.clone();
+            if s.rules.is_empty() {
+                s.rules = sync::notify::default_rules();
+            }
+            Ok(s)
         }
 
         fn save_theme(

@@ -2406,8 +2406,12 @@ mod settings_page {
         assert_eq!(tab(cx), SettingsTab::Appearance);
         press(cx, &f, "l");
         assert_eq!(tab(cx), SettingsTab::Filters);
+        press(cx, &f, "l");
+        assert_eq!(tab(cx), SettingsTab::Notifications);
         // The strip has ends.
         press(cx, &f, "l");
+        assert_eq!(tab(cx), SettingsTab::Notifications);
+        press(cx, &f, "h");
         assert_eq!(tab(cx), SettingsTab::Filters);
         press(cx, &f, "h");
         assert_eq!(tab(cx), SettingsTab::Appearance);
@@ -2415,6 +2419,7 @@ mod settings_page {
         assert_eq!(tab(cx), SettingsTab::Review);
         for (key, want) in [
             ("1", SettingsTab::Servers),
+            ("6", SettingsTab::Notifications),
             ("5", SettingsTab::Filters),
             ("2", SettingsTab::Queries),
             ("4", SettingsTab::Appearance),
@@ -2599,6 +2604,193 @@ mod settings_page {
         cx.update(|cx| filters.update(cx, |ff, cx| ff.set_rules(Vec::new(), cx)));
         cx.run_until_parked();
         assert_eq!(page_state(cx, &f), (8, Vec::new()));
+    }
+
+    mod notifications {
+        use sync::notify::NotificationSettings;
+
+        use super::*;
+
+        /// The first row of the tab: the fixture has no filters (one empty row)
+        /// and one server.
+        const FIRST: usize = 10;
+
+        fn show(cx: &mut TestAppContext, f: &Fixture) {
+            open_settings(cx, f);
+            press(cx, f, "6");
+        }
+
+        fn page_settings(cx: &mut TestAppContext, f: &Fixture) -> NotificationSettings {
+            cx.update(|cx| {
+                let page = f.shell.read(cx).settings_page_for_test().expect("page");
+                page.read(cx).notify_for_test().clone()
+            })
+        }
+
+        fn shell_settings(cx: &mut TestAppContext, f: &Fixture) -> NotificationSettings {
+            cx.update(|cx| f.shell.read(cx).notify_settings_for_test().clone())
+        }
+
+        fn writes(f: &Fixture) -> Vec<NotificationSettings> {
+            f.backend.saved_notifications.lock().unwrap().clone()
+        }
+
+        fn notify_input(cx: &mut TestAppContext, f: &Fixture) -> Entity<InputState> {
+            cx.update(|cx| {
+                let page = f.shell.read(cx).settings_page_for_test().expect("page");
+                page.read(cx).notify_input_for_test()
+            })
+        }
+
+        fn editing(cx: &mut TestAppContext, f: &Fixture) -> bool {
+            cx.update(|cx| {
+                let page = f.shell.read(cx).settings_page_for_test().expect("page");
+                page.read(cx).editing_for_test()
+            })
+        }
+
+        #[gpui_kit::test]
+        fn six_shows_the_tab_with_its_rows_after_the_servers(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            assert_eq!(tab_state(cx, &f), (SettingsTab::Notifications, FIRST));
+            let first = cx.update(|cx| {
+                let page = f.shell.read(cx).settings_page_for_test().expect("page");
+                page.read(cx).notify_row_for_test()
+            });
+            assert_eq!(first, FIRST);
+            // The cursor stays in the tab: the two timing rows end it.
+            for _ in 0..10 {
+                press(cx, &f, "j");
+            }
+            assert_eq!(tab_state(cx, &f).1, FIRST + 5);
+            press(cx, &f, "1");
+            assert_eq!(tab_state(cx, &f), (SettingsTab::Servers, 9));
+        }
+
+        #[gpui_kit::test]
+        fn space_flips_each_option_saves_it_and_the_shell_follows(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            assert!(page_settings(cx, &f).enabled);
+            press(cx, &f, "space");
+            assert!(!page_settings(cx, &f).enabled);
+            assert!(!shell_settings(cx, &f).enabled);
+            press(cx, &f, "j");
+            press(cx, &f, "space");
+            press(cx, &f, "j");
+            press(cx, &f, "space");
+            press(cx, &f, "j");
+            press(cx, &f, "space");
+            let s = page_settings(cx, &f);
+            assert!(!s.enabled && !s.only_when_unfocused);
+            assert!(!s.suppress_current_change && !s.ignore_own_actions);
+            assert_eq!(writes(&f).len(), 4);
+            // Enter flips as well, back on.
+            press(cx, &f, "enter");
+            assert!(page_settings(cx, &f).ignore_own_actions);
+            assert_eq!(shell_settings(cx, &f), page_settings(cx, &f));
+        }
+
+        #[gpui_kit::test]
+        fn a_failed_save_changes_nothing_and_says_so(cx: &mut TestAppContext) {
+            let f = fixture(cx, true);
+            show(cx, &f);
+            press(cx, &f, "space");
+            assert!(page_settings(cx, &f).enabled);
+            assert!(shell_settings(cx, &f).enabled);
+            cx.update(|cx| {
+                let page = f.shell.read(cx).settings_page_for_test().expect("page");
+                let (text, error) = page.read(cx).hint_for_test().expect("hint");
+                assert!(error && text.contains("disk full"), "{text}");
+            });
+        }
+
+        #[gpui_kit::test]
+        fn the_group_window_takes_whole_seconds(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            for _ in 0..4 {
+                press(cx, &f, "j");
+            }
+            press(cx, &f, "enter");
+            assert!(editing(cx, &f));
+            let input = notify_input(cx, &f);
+            // The input starts on the current value.
+            assert_eq!(cx.update(|cx| input.read(cx).value().to_string()), "20");
+            for bad in ["", "soon", "-3", "1.5", "99999"] {
+                type_into(cx, &f, &input, bad);
+                press(cx, &f, "enter");
+                assert!(editing(cx, &f), "{bad:?}");
+            }
+            assert!(writes(&f).is_empty());
+            type_into(cx, &f, &input, " 45 ");
+            press(cx, &f, "enter");
+            assert!(!editing(cx, &f));
+            assert_eq!(page_settings(cx, &f).group_window.as_secs(), 45);
+            assert_eq!(shell_settings(cx, &f).group_window.as_secs(), 45);
+            // Zero: every event on its own.
+            press(cx, &f, "e");
+            type_into(cx, &f, &input, "0");
+            press(cx, &f, "enter");
+            assert_eq!(page_settings(cx, &f).group_window.as_secs(), 0);
+            assert_eq!(writes(&f).len(), 2);
+        }
+
+        #[gpui_kit::test]
+        fn quiet_hours_are_validated_and_can_be_cleared(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            for _ in 0..5 {
+                press(cx, &f, "j");
+            }
+            press(cx, &f, "e");
+            let input = notify_input(cx, &f);
+            for bad in ["22-07", "25:00-07:00", "22:00", "22:00-7:00"] {
+                type_into(cx, &f, &input, bad);
+                press(cx, &f, "enter");
+                assert!(editing(cx, &f), "{bad:?}");
+            }
+            assert!(writes(&f).is_empty());
+            type_into(cx, &f, &input, "22:00-07:00");
+            press(cx, &f, "enter");
+            assert_eq!(
+                page_settings(cx, &f).quiet_hours.map(|q| q.format()),
+                Some("22:00-07:00".to_owned())
+            );
+            // The next edit starts on the saved text; empty clears it.
+            press(cx, &f, "space");
+            assert_eq!(
+                cx.update(|cx| input.read(cx).value().to_string()),
+                "22:00-07:00"
+            );
+            type_into(cx, &f, &input, "");
+            press(cx, &f, "enter");
+            assert_eq!(page_settings(cx, &f).quiet_hours, None);
+            // Escape drops an edit.
+            press(cx, &f, "e");
+            type_into(cx, &f, &input, "01:00-02:00");
+            press(cx, &f, "escape");
+            assert!(!editing(cx, &f));
+            assert_eq!(page_settings(cx, &f).quiet_hours, None);
+            assert_eq!(writes(&f).len(), 2);
+        }
+
+        #[gpui_kit::test]
+        fn tab_and_row_keys_are_typed_while_an_input_is_edited(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            for _ in 0..4 {
+                press(cx, &f, "j");
+            }
+            press(cx, &f, "e");
+            for key in ["h", "l", "6", "1", "j", "space"] {
+                press(cx, &f, key);
+            }
+            assert_eq!(tab_state(cx, &f), (SettingsTab::Notifications, FIRST + 4));
+            assert!(editing(cx, &f));
+            assert!(writes(&f).is_empty());
+        }
     }
 }
 

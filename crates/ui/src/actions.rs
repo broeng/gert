@@ -683,7 +683,7 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "Space",
             KeyBinding::new("space", ToggleSetting, Some(b)),
-            "Startup page: dashboard or search; advance after a vote: on or off",
+            "Startup page: dashboard or search; advance after a vote: on or off; Notifications: switch the option, or edit the number or hours",
         ),
         e(
             "a",
@@ -704,13 +704,13 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "l / h",
             KeyBinding::new("l", NextSettingsTab, Some(b)),
-            "Next / previous tab (Servers, Queries, Review, Appearance, Filters)",
+            "Next / previous tab (Servers, Queries, Review, Appearance, Filters, Notifications)",
         ),
         e("", KeyBinding::new("h", PrevSettingsTab, Some(b)), ""),
         e("", KeyBinding::new("right", NextSettingsTab, Some(b)), ""),
         e("", KeyBinding::new("left", PrevSettingsTab, Some(b)), ""),
         e(
-            "1 .. 5",
+            "1 .. 6",
             KeyBinding::new("1", ShowSettingsTab { position: 0 }, Some(b)),
             "Go to the tab at that position",
         ),
@@ -732,6 +732,11 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "",
             KeyBinding::new("5", ShowSettingsTab { position: 4 }, Some(b)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("6", ShowSettingsTab { position: 5 }, Some(b)),
             "",
         ),
         e(

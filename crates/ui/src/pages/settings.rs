@@ -5,7 +5,8 @@
 //! The cursor is a row index over all of the sections: the query rows, then
 //! the bookmark rows, the startup row, the advance row, the theme row and the
 //! two mode rows, then the filter rows (one empty-state row when there are
-//! none), then the server rows (likewise). Each tab owns a range of those
+//! none), then the server rows (likewise), then the notification rows
+//! (`notifications`). Each tab owns a range of those
 //! rows ([`SettingsPage::tab_rows`]) and the cursor stays inside it. The
 //! queries and bookmarks are those of the active server; the servers section
 //! is in `servers`.
@@ -29,7 +30,9 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use sync::notify::NotificationSettings;
 
+pub(crate) mod notifications;
 pub(crate) mod servers;
 
 use servers::ServerForm;
@@ -79,6 +82,9 @@ pub enum SettingsEvent {
         key: ServerKey,
         connection: Connection,
     },
+    /// The notification settings were written; this is what is now in
+    /// effect, for the watches.
+    NotificationsSaved(NotificationSettings),
 }
 
 /// The tabs of the page, in the order they are shown. To add one: a variant
@@ -94,16 +100,18 @@ pub enum SettingsTab {
     Review,
     Appearance,
     Filters,
+    Notifications,
 }
 
 impl SettingsTab {
-    pub const fn all() -> [SettingsTab; 5] {
+    pub const fn all() -> [SettingsTab; 6] {
         [
             SettingsTab::Servers,
             SettingsTab::Queries,
             SettingsTab::Review,
             SettingsTab::Appearance,
             SettingsTab::Filters,
+            SettingsTab::Notifications,
         ]
     }
 
@@ -114,6 +122,7 @@ impl SettingsTab {
             SettingsTab::Review => "Review",
             SettingsTab::Appearance => "Appearance",
             SettingsTab::Filters => "Filters",
+            SettingsTab::Notifications => "Notifications",
         }
     }
 
@@ -131,6 +140,10 @@ impl SettingsTab {
             SettingsTab::Review => "Space / Enter: toggle",
             SettingsTab::Appearance => "Space / Enter: switch",
             SettingsTab::Filters => "a: add    Enter / e / d: open the dialog",
+            SettingsTab::Notifications => {
+                "Space: toggle    Enter / e: edit    a: add a rule    d: delete    \
+                 Shift-J / Shift-K: move    t: send a test notification"
+            }
         };
         format!(
             "j / k: select    h / l, 1 .. {}: tab    {own}    u: back to the dashboard",
@@ -164,6 +177,10 @@ enum Mode {
     Confirming(Which, usize),
     /// Typing the query of the startup page.
     EditingStartup,
+    /// Typing the notification group window, in seconds.
+    EditingGroupWindow,
+    /// Typing the notification quiet hours.
+    EditingQuietHours,
     /// Editing server `index` in the form.
     EditingServer(usize),
     /// Asking whether to remove server `index`.
@@ -270,6 +287,11 @@ pub struct SettingsPage {
     name: Entity<InputState>,
     query: Entity<InputState>,
     startup_input: Entity<InputState>,
+    /// The input of the group window and the quiet hours rows.
+    notify_input: Entity<InputState>,
+    /// The notification settings in effect, as the backend last returned
+    /// them.
+    notify: NotificationSettings,
     start_page: StartupPage,
     layout: Entity<PageLayout>,
     filters: Entity<FileFilters>,
@@ -311,6 +333,7 @@ impl SettingsPage {
         start_page: StartupPage,
         layout: Entity<PageLayout>,
         filters: Entity<FileFilters>,
+        notify: NotificationSettings,
         tab: SettingsTab,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -319,8 +342,9 @@ impl SettingsPage {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Query, e.g. is:open"));
         let startup_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Query, e.g. is:open owner:self"));
+        let notify_input = cx.new(|cx| InputState::new(window, cx));
         let form = ServerForm::new(window, cx);
-        let mut subs: Vec<Subscription> = [&name, &query, &startup_input]
+        let mut subs: Vec<Subscription> = [&name, &query, &startup_input, &notify_input]
             .into_iter()
             .chain(form.inputs())
             .map(|input| {
@@ -351,6 +375,8 @@ impl SettingsPage {
             name,
             query,
             startup_input,
+            notify_input,
+            notify,
             start_page,
             layout,
             filters,
@@ -429,9 +455,18 @@ impl SettingsPage {
 
     #[cfg(test)]
     pub(crate) fn editing_for_test(&self) -> bool {
+        self.in_edit_mode()
+    }
+
+    /// Whether an input has the keyboard.
+    fn in_edit_mode(&self) -> bool {
         matches!(
             self.mode,
-            Mode::Editing { .. } | Mode::EditingStartup | Mode::EditingServer(_)
+            Mode::Editing { .. }
+                | Mode::EditingStartup
+                | Mode::EditingServer(_)
+                | Mode::EditingGroupWindow
+                | Mode::EditingQuietHours
         )
     }
 
@@ -525,18 +560,19 @@ impl SettingsPage {
 
     /// The last row the cursor can be on.
     fn last_row(&self) -> usize {
-        self.servers_row() + self.servers.len().saturating_sub(1)
+        self.last_notification_row()
     }
 
     /// The cursor rows of `tab`. Never empty: a list without items has one
     /// empty-state row.
     fn tab_rows(&self, tab: SettingsTab) -> std::ops::RangeInclusive<usize> {
         match tab {
-            SettingsTab::Servers => self.servers_row()..=self.last_row(),
+            SettingsTab::Servers => self.servers_row()..=self.notify_row() - 1,
             SettingsTab::Queries => 0..=self.startup_row(),
             SettingsTab::Review => self.advance_row()..=self.advance_row(),
             SettingsTab::Appearance => self.theme_row()..=self.diff_mode_row(),
             SettingsTab::Filters => self.filters_row()..=self.servers_row() - 1,
+            SettingsTab::Notifications => self.notify_row()..=self.last_notification_row(),
         }
     }
 
@@ -583,7 +619,11 @@ impl SettingsPage {
     }
 
     fn in_servers(&self) -> bool {
-        self.cursor >= self.servers_row()
+        (self.servers_row()..self.notify_row()).contains(&self.cursor)
+    }
+
+    fn in_notifications(&self) -> bool {
+        self.cursor >= self.notify_row()
     }
 
     /// The server the cursor is on, if it is on one.
@@ -642,7 +682,9 @@ impl SettingsPage {
         if !self.can_change() {
             return;
         }
-        if self.in_filters() {
+        if self.in_notifications() {
+            self.edit_notification_row(window, cx);
+        } else if self.in_filters() {
             self.manage_filters(self.filter_under_cursor(), self.filter_names.is_empty(), cx);
         } else if self.in_servers() {
             if let Some(i) = self.server_under_cursor() {
@@ -668,7 +710,9 @@ impl SettingsPage {
         if !self.can_change() || self.mode != Mode::Browsing {
             return;
         }
-        if self.cursor == self.startup_row() {
+        if self.in_notifications() {
+            self.toggle_notification_row(window, cx);
+        } else if self.cursor == self.startup_row() {
             match self.start_page {
                 StartupPage::Dashboard => self.start_startup_edit(window, cx),
                 StartupPage::Search(_) => self.save_startup(StartupPage::Dashboard, window, cx),
@@ -726,15 +770,17 @@ impl SettingsPage {
     /// cursor on its rule, or clamp it when that rule is gone.
     fn follow_filters(&mut self, filters: &Entity<FileFilters>, cx: &mut Context<Self>) {
         let names: Vec<String> = filters.read(cx).rules().iter().map(rule_name).collect();
-        // The server rows come after the filters and move with them.
-        let in_servers_at = self.in_servers().then(|| self.cursor - self.servers_row());
+        // The server and notification rows come after the filters and move
+        // with them.
+        let after_at =
+            (self.cursor >= self.servers_row()).then(|| self.cursor - self.servers_row());
         if let Some(old) = self.filter_under_cursor()
             && let Some(at) = names.iter().position(|n| *n == self.filter_names[old])
         {
             self.cursor = self.filters_row() + at;
         }
         self.filter_names = names;
-        if let Some(at) = in_servers_at {
+        if let Some(at) = after_at {
             self.cursor = self.servers_row() + at;
         }
         self.cursor = self.in_tab(self.cursor);
@@ -763,11 +809,7 @@ impl SettingsPage {
     }
 
     fn cancel_edit(&mut self, _: &CancelEdit, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(
-            self.mode,
-            Mode::Editing { .. } | Mode::EditingStartup | Mode::EditingServer(_)
-        ) && !self.busy
-        {
+        if self.in_edit_mode() && !self.busy {
             let new_row = match self.mode {
                 Mode::Editing { which, index } if index >= self.list(which).len() => Some(which),
                 _ => None,
@@ -807,6 +849,12 @@ impl SettingsPage {
         }
         if let Mode::EditingServer(i) = self.mode {
             return self.commit_server_edit(i, window, cx);
+        }
+        if matches!(
+            self.mode,
+            Mode::EditingGroupWindow | Mode::EditingQuietHours
+        ) {
+            return self.commit_notification_edit(window, cx);
         }
         if self.mode == Mode::EditingStartup {
             let text = self.startup_input.read(cx).value().trim().to_owned();
@@ -1090,9 +1138,11 @@ impl SettingsPage {
     fn key_context(&self) -> &'static str {
         match self.mode {
             Mode::Browsing => "SettingsPage Browsing",
-            Mode::Editing { .. } | Mode::EditingStartup | Mode::EditingServer(_) => {
-                "SettingsPage Editing"
-            }
+            Mode::Editing { .. }
+            | Mode::EditingStartup
+            | Mode::EditingServer(_)
+            | Mode::EditingGroupWindow
+            | Mode::EditingQuietHours => "SettingsPage Editing",
             Mode::Confirming(..) | Mode::ConfirmingServer(_) => "SettingsPage Confirming",
         }
     }
@@ -1832,6 +1882,7 @@ impl SettingsPage {
             SettingsTab::Review => vec![self.render_review(cx)],
             SettingsTab::Appearance => vec![self.render_appearance(cx)],
             SettingsTab::Filters => vec![self.render_filters(cx)],
+            SettingsTab::Notifications => self.render_notifications(cx),
         }
     }
 
