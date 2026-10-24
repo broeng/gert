@@ -10,6 +10,7 @@ mod change;
 mod comment;
 mod diff;
 mod draft;
+mod event;
 mod file;
 mod ids;
 mod keys;
@@ -34,8 +35,9 @@ pub use diff::{
     line_marks,
 };
 pub use draft::{Draft, DraftInput, DraftOp, DraftReceipt, DraftSync, LocalDraftId};
+pub use event::{COMMENT_SNIPPET_CHARS, Event, EventKind};
 pub use file::{COMMIT_MSG_PATH, FileEntry, FileStatus, MERGE_LIST_PATH, file_order};
-pub use ids::{AccountId, ChangeNumber, PatchSetNumber, RevisionId};
+pub use ids::{AccountId, ChangeNumber, PatchSetNumber, RevisionId, ServerId};
 pub use keys::{DiffKey, FilesKey};
 pub use message::ChangeMessage;
 pub use prefs::{
