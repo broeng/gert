@@ -13,6 +13,7 @@
 mod drafts;
 mod error;
 mod events;
+mod labels;
 mod migrations;
 mod review_cache;
 
