@@ -4,12 +4,18 @@
 //! types from `[notifications]` in the config file; the matcher decides
 //! per event which rules fire, and [`watch_query`] builds the one list
 //! query the watch pass needs to see the changes those rules care about.
-//! Delivery, grouping and the focus rules belong to the caller.
+//! [`plan`] turns the matched events of one pass into the notifications to
+//! show (suppression, grouping); showing them is for the caller.
 
 mod matcher;
+mod plan;
 mod rules;
+pub mod text;
 
 pub use matcher::{MatchContext, NoQueries, QueryMembership, matches, watch_query};
+pub use plan::{
+    CATCH_UP_LIMIT, Delivered, Notification, Plan, Screen, pick_rule, plan, suppressed,
+};
 pub use rules::{
     NotificationSettings, QuietHours, QuietHoursError, Rule, RuleEvent, Scope, default_rules,
 };
