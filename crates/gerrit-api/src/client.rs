@@ -663,6 +663,26 @@ impl GerritClient {
         .await
     }
 
+    /// `DELETE /changes/{n}/reviewers/{account}/votes/{label}`: removes
+    /// `reviewer`'s vote on `label`. `reviewer` is an account id, email or
+    /// username.
+    pub async fn delete_vote(
+        &self,
+        change: ChangeNumber,
+        reviewer: &str,
+        label: &str,
+    ) -> Result<(), Error> {
+        self.write_empty(
+            http::Method::DELETE,
+            &format!(
+                "/changes/{change}/reviewers/{}/votes/{}",
+                encode_component(reviewer.trim()),
+                encode_component(label.trim())
+            ),
+        )
+        .await
+    }
+
     /// `PUT /changes/{n}/topic`, or `DELETE` for a blank (or `None`) topic.
     pub async fn set_topic(&self, change: ChangeNumber, topic: Option<&str>) -> Result<(), Error> {
         let path = format!("/changes/{change}/topic");
@@ -2449,6 +2469,32 @@ mod tests {
             "https://h/a/changes/5/reviewers/a%2Bb%40x.org"
         );
         assert!(reqs[0].body().is_empty());
+    }
+
+    #[test]
+    fn delete_vote_deletes_with_encoded_account_and_label() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(204, "");
+        fake.push_response(403, "not allowed\n");
+        let c = client(&fake, "https://h", basic());
+        block_on(c.delete_vote(ChangeNumber(5), "3", "Code-Review")).unwrap();
+        assert!(matches!(
+            block_on(c.delete_vote(ChangeNumber(5), "3", "Code-Review")),
+            Err(Error::Forbidden { .. })
+        ));
+        let reqs = fake.requests();
+        assert_eq!(reqs[0].method(), http::Method::DELETE);
+        assert_eq!(
+            reqs[0].uri(),
+            "https://h/a/changes/5/reviewers/3/votes/Code-Review"
+        );
+        assert!(reqs[0].body().is_empty());
+        let anon_fake = FakeHttpClient::new();
+        let anon = client(&anon_fake, "https://h", Auth::Anonymous);
+        assert!(matches!(
+            block_on(anon.delete_vote(ChangeNumber(5), "3", "Verified")),
+            Err(Error::Unauthorized)
+        ));
     }
 
     #[test]

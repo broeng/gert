@@ -137,6 +137,10 @@ pub struct ChangeDetail {
     /// sessions and for labels the user may not vote on.
     #[serde(default)]
     pub permitted_labels: BTreeMap<String, Vec<i32>>,
+    /// The reviewers whose votes the signed-in user may remove
+    /// (`removable_reviewers`, `DETAILED_LABELS`).
+    #[serde(default)]
+    pub removable_reviewers: Vec<AccountId>,
     /// What each value of a label means, ascending by value
     /// (`labels[].values`), for the reply dialog.
     #[serde(default)]
@@ -241,6 +245,7 @@ mod tests {
             votes: BTreeMap::new(),
             attention: vec![],
             permitted_labels: BTreeMap::new(),
+            removable_reviewers: Vec::new(),
             label_values: BTreeMap::new(),
             change_actions: BTreeMap::new(),
             revision_actions: BTreeMap::new(),
@@ -259,6 +264,7 @@ mod tests {
             "votes",
             "attention",
             "permitted_labels",
+            "removable_reviewers",
             "label_values",
             "change_actions",
             "revision_actions",

@@ -36,11 +36,33 @@ use gpui_kit::*;
 /// The smallest window the layout works in.
 const MIN_SIZE: Size<Pixels> = size(px(640.), px(400.));
 
-/// The GPUI application with the default icon set loaded. The title bar's
-/// window buttons are icons, so every binary that shows the shell must
-/// start from this.
+gpui_kit::assets::icon_assets!(ExtraIcons, [Trash]);
+
+/// The default icon set plus the few icons of our own that it lacks.
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match ExtraIcons.load(path)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
+
+/// The GPUI application with the icon set loaded. The title bar's window
+/// buttons are icons, so every binary that shows the shell must start from
+/// this.
 pub fn application() -> Application {
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets)
+    gpui_kit::application().with_assets(AppAssets)
 }
 
 /// Options of the main window: maximized, `size` big when restored and

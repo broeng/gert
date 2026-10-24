@@ -64,6 +64,7 @@ fn detail() -> ChangeDetail {
         votes: BTreeMap::new(),
         attention: vec![],
         permitted_labels: BTreeMap::new(),
+        removable_reviewers: Default::default(),
         label_values: BTreeMap::new(),
         change_actions: BTreeMap::new(),
         revision_actions: BTreeMap::new(),

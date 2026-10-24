@@ -80,6 +80,17 @@ impl Syncer {
         Ok(self.refresh_after_action(change, "remove reviewer").await)
     }
 
+    /// Removes `reviewer`'s vote on `label` (account id, email or username).
+    pub async fn delete_vote(
+        &self,
+        change: ChangeNumber,
+        reviewer: &str,
+        label: &str,
+    ) -> Result<Option<ChangeDetail>, Error> {
+        self.client.delete_vote(change, reviewer, label).await?;
+        Ok(self.refresh_after_action(change, "delete vote").await)
+    }
+
     /// Sets the topic, or clears it for `None` or a blank one.
     pub async fn set_topic(
         &self,

@@ -419,6 +419,12 @@ pub(crate) fn change_detail(c: &ChangeInfo) -> Result<ChangeDetail, ConversionEr
         votes,
         attention,
         permitted_labels,
+        removable_reviewers: c
+            .removable_reviewers
+            .iter()
+            .flatten()
+            .filter_map(|a| a.account_id.map(AccountId))
+            .collect(),
         label_values,
         change_actions: actions(c.actions.as_ref()),
         revision_actions: actions(rev.and_then(|r| r.actions.as_ref())),
