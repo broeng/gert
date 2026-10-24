@@ -53,6 +53,22 @@ impl RuleEvent {
         })
     }
 
+    /// The event as a phrase for a list, without the scope.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Vote => "Vote",
+            Self::Comment => "Comment",
+            Self::AttentionAdded => "Added to the attention set",
+            Self::ReviewerAdded => "Added as reviewer or CC",
+            Self::PatchSet => "New patch set",
+            Self::Merged => "Merged",
+            Self::Abandoned => "Abandoned",
+            Self::ReadyToSubmit => "Ready to submit",
+            Self::MergeConflict => "Merge conflict",
+            Self::Mention => "Mentioned in a comment",
+        }
+    }
+
     /// Whether the rule needs changes that are no longer open: the event
     /// is the change closing.
     pub fn needs_closed_changes(self) -> bool {
@@ -88,6 +104,19 @@ impl Scope {
             Self::Starred => Some("starred"),
             Self::Any => Some("any"),
             Self::Query(_) => None,
+        }
+    }
+
+    /// The scope as the end of a sentence: "on my changes".
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Owner => "on my changes".to_owned(),
+            Self::Reviewer => "on changes I review".to_owned(),
+            Self::Cc => "on changes I am CC'd on".to_owned(),
+            Self::Attention => "on changes in my attention set".to_owned(),
+            Self::Starred => "on starred changes".to_owned(),
+            Self::Any => "on any change".to_owned(),
+            Self::Query(name) => format!("on changes of the query \u{201c}{name}\u{201d}"),
         }
     }
 
@@ -150,6 +179,58 @@ impl Rule {
             from: Vec::new(),
             enabled: true,
         }
+    }
+}
+
+impl Rule {
+    /// What the rule does in a few words, like "Vote Code-Review -2, -1 on
+    /// my changes". Does not use the name.
+    pub fn describe(&self) -> String {
+        let mut text = match self.event {
+            RuleEvent::Vote => {
+                let any_label = self.labels.is_empty() || self.labels.iter().any(|l| l == "*");
+                match (any_label, self.values.is_empty()) {
+                    (true, true) => "Any vote".to_owned(),
+                    (any, no_values) => {
+                        let labels = if any {
+                            "any label".to_owned()
+                        } else {
+                            self.labels.join(", ")
+                        };
+                        let values = if no_values {
+                            "any value".to_owned()
+                        } else {
+                            let signed = |v: &i32| {
+                                if *v == 0 {
+                                    "0".to_owned()
+                                } else {
+                                    format!("{v:+}")
+                                }
+                            };
+                            let values: Vec<_> = self.values.iter().map(signed).collect();
+                            values.join(", ")
+                        };
+                        format!("Vote {labels} {values}")
+                    }
+                }
+            }
+            other => other.title().to_owned(),
+        };
+        text.push(' ');
+        text.push_str(&self.scope.describe());
+        if !self.from.is_empty() {
+            text.push_str(" from ");
+            text.push_str(&self.from.join(", "));
+        }
+        text
+    }
+
+    /// The name if the rule has one, else [`Rule::describe`].
+    pub fn title(&self) -> String {
+        self.name
+            .as_deref()
+            .filter(|n| !n.trim().is_empty())
+            .map_or_else(|| self.describe(), str::to_owned)
     }
 }
 
@@ -269,5 +350,76 @@ impl NotificationSettings {
     /// Whether `now` (local time, passed in) falls in the quiet hours.
     pub fn in_quiet_hours(&self, now: Time) -> bool {
         self.quiet_hours.is_some_and(|q| q.contains(now))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vote(labels: &[&str], values: &[i32]) -> Rule {
+        let mut r = Rule::new(RuleEvent::Vote, Scope::Owner);
+        r.labels = labels.iter().map(|l| (*l).to_owned()).collect();
+        r.values = values.to_vec();
+        r
+    }
+
+    #[test]
+    fn a_vote_rule_names_its_labels_and_values() {
+        assert_eq!(
+            vote(&["Code-Review"], &[-2, -1]).describe(),
+            "Vote Code-Review -2, -1 on my changes"
+        );
+        assert_eq!(
+            vote(&["Code-Review", "Verified"], &[1, 2]).describe(),
+            "Vote Code-Review, Verified +1, +2 on my changes"
+        );
+        assert_eq!(
+            vote(&["Verified"], &[0]).describe(),
+            "Vote Verified 0 on my changes"
+        );
+    }
+
+    #[test]
+    fn any_label_and_any_value_are_said_so() {
+        assert_eq!(vote(&[], &[]).describe(), "Any vote on my changes");
+        assert_eq!(vote(&["*"], &[]).describe(), "Any vote on my changes");
+        assert_eq!(
+            vote(&["Verified"], &[]).describe(),
+            "Vote Verified any value on my changes"
+        );
+        assert_eq!(
+            vote(&[], &[-1]).describe(),
+            "Vote any label -1 on my changes"
+        );
+    }
+
+    #[test]
+    fn other_events_read_as_a_phrase_with_their_scope_and_actors() {
+        let r = Rule::new(RuleEvent::AttentionAdded, Scope::Attention);
+        assert_eq!(
+            r.describe(),
+            "Added to the attention set on changes in my attention set"
+        );
+        let mut r = Rule::new(RuleEvent::Comment, Scope::Query("Team".into()));
+        r.from = vec!["alice".into(), "bob".into()];
+        assert_eq!(
+            r.describe(),
+            "Comment on changes of the query \u{201c}Team\u{201d} from alice, bob"
+        );
+        assert_eq!(
+            Rule::new(RuleEvent::Merged, Scope::Starred).describe(),
+            "Merged on starred changes"
+        );
+    }
+
+    #[test]
+    fn the_title_is_the_name_unless_it_is_blank() {
+        let mut r = Rule::new(RuleEvent::Merged, Scope::Owner);
+        assert_eq!(r.title(), "Merged on my changes");
+        r.name = Some("  ".into());
+        assert_eq!(r.title(), "Merged on my changes");
+        r.name = Some("Shipped".into());
+        assert_eq!(r.title(), "Shipped");
     }
 }
