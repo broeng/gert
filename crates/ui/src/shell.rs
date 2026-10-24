@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt as _;
 use gerrit_api::Auth;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
@@ -13,7 +14,7 @@ use gpui_kit::component::{IconName, TitleBar, window_border};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use model::{ChangeDetail, ChangeNumber};
-use sync::notify::{NotificationSettings, Screen};
+use sync::notify::{Notification, NotificationSettings, Screen};
 
 use crate::{
     action_menu::{ActionDialog, ActionEvent, Done},
@@ -147,6 +148,9 @@ pub struct Shell {
     /// Where desktop notifications go; `None` (the default) means none are
     /// watched for. Set with [`Shell::set_notifications`].
     notifier: Option<Arc<dyn Notifier>>,
+    /// Hears the clicks on notifications, which arrive on other threads.
+    click_task: Option<Task<()>>,
+    clicks: Option<futures::channel::mpsc::UnboundedSender<Notification>>,
     notify_settings: NotificationSettings,
     /// When this run began: events from before it are catch-up.
     started: jiff::Timestamp,
@@ -246,6 +250,8 @@ impl Shell {
             filters: cx.new(|_| FileFilters::new(filters)),
             prefs_task: None,
             notifier: None,
+            click_task: None,
+            clicks: None,
             notify_settings: NotificationSettings::default(),
             started: jiff::Timestamp::now(),
             _subs: subs,
@@ -283,7 +289,35 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.notifier = Some(notifier);
+        let (clicks, mut clicked) = futures::channel::mpsc::unbounded();
+        self.clicks = Some(clicks);
+        self.click_task = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Some(notification) = clicked.next().await {
+                let opened = this.update_in(cx, |this, window, cx| {
+                    this.notification_clicked(&notification, window, cx)
+                });
+                if opened.is_err() {
+                    return;
+                }
+            }
+        }));
         self.set_notification_settings(settings, window, cx);
+    }
+
+    /// The user clicked a notification: bring the window forward and open
+    /// what it is about, the change if it names one, else the server.
+    fn notification_clicked(
+        &mut self,
+        notification: &Notification,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.activate_window();
+        let key = ServerKey::new(&notification.server);
+        match notification.change {
+            Some(change) => self.go_to(&key, Route::Change(change), None, window, cx),
+            None => self.switch_to(&key, window, cx),
+        }
     }
 
     /// Takes new rules: the watches follow the master switch, and the
@@ -727,7 +761,17 @@ impl Shell {
         );
         if let Some(notifier) = &self.notifier {
             for notification in &plan.notifications {
-                notifier.show(notification, Box::new(|| {}));
+                let clicks = self.clicks.clone();
+                let target = notification.clone();
+                notifier.show(
+                    notification,
+                    Box::new(move || {
+                        if let Some(clicks) = clicks {
+                            // The shell may be gone by now; nothing to do then.
+                            clicks.unbounded_send(target).ok();
+                        }
+                    }),
+                );
             }
         }
         // The inbox will keep `plan.delivered`, suppressed ones included.

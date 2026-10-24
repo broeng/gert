@@ -137,4 +137,10 @@ impl RecordingNotifier {
     pub fn titles(&self) -> Vec<String> {
         self.shown().into_iter().map(|n| n.title).collect()
     }
+
+    /// Clicks the `i`th notification shown (once).
+    pub fn click(&self, i: usize) {
+        let clicked = self.shown.lock().expect("lock")[i].1.take();
+        clicked.expect("not clicked yet")();
+    }
 }
