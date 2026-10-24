@@ -249,6 +249,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX inbox_by_time ON inbox (server_id, created_ms);
     CREATE INDEX inbox_unread ON inbox (server_id) WHERE read_ms IS NULL;
     ",
+    // v9 -> v10: `seen_ms` is when the inbox page was opened with the row
+    // in it (NULL until then). It is separate from `read_ms`: the bell
+    // counts the rows that are neither read nor seen. Existing rows start
+    // unseen, so the bell shows the unread ones once.
+    "
+    ALTER TABLE inbox ADD COLUMN seen_ms INTEGER;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {
