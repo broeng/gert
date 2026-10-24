@@ -220,6 +220,10 @@ pub fn help_groups() -> Vec<HelpGroup> {
             "Manage filters ( F M )",
             crate::filters_dialog::actions::entries(),
         ),
+        g(
+            "Notification rule (settings, Notifications tab)",
+            crate::notify_rule_dialog::actions::entries(),
+        ),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
         g("Go to a change ( G )", crate::goto::entries()),
         g("Server switcher ( Ctrl-K )", crate::switcher::entries()),
@@ -936,6 +940,7 @@ mod tests {
             .chain(crate::reply::actions::entries())
             .chain(crate::action_menu::actions::entries())
             .chain(crate::filters_dialog::actions::entries())
+            .chain(crate::notify_rule_dialog::actions::entries())
             .chain(crate::goto::entries())
             .chain(crate::switcher::entries())
             .collect()

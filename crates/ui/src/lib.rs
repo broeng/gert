@@ -18,6 +18,7 @@ mod list_model;
 mod login;
 mod nav;
 mod notifier;
+mod notify_rule_dialog;
 mod outbox;
 mod pages;
 mod reply;

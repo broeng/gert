@@ -315,6 +315,23 @@ impl Servers {
         &mut self.entries[i]
     }
 
+    /// The cache ids of the servers, in config order.
+    pub fn server_ids(&self) -> Vec<store::ServerId> {
+        self.entries.iter().map(|e| e.setup.server).collect()
+    }
+
+    /// The names of the saved queries of all servers, in config order,
+    /// each once.
+    pub fn query_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for query in self.entries.iter().flat_map(|e| &e.setup.queries) {
+            if !names.contains(&query.name) {
+                names.push(query.name.clone());
+            }
+        }
+        names
+    }
+
     /// The sum of the attention counts of the servers other than the active
     /// one: what the chip shows. Unknown counts add nothing.
     pub fn others_attention(&self) -> usize {
@@ -393,6 +410,21 @@ mod tests {
         assert_eq!(s.connection(&key("a")), Some(Connection::Unauthorized));
         assert_eq!(s.connection(&key("b")), Some(Connection::Online));
         assert_eq!(s.connection(&key("c")), None);
+    }
+
+    #[test]
+    fn query_names_of_all_servers_are_listed_once() {
+        let q = |n: &str| crate::session::SavedQuery {
+            name: n.into(),
+            query: "q".into(),
+        };
+        let mut a = server("a");
+        a.queries = vec![q("Open"), q("Team")];
+        let mut b = server("b");
+        b.queries = vec![q("Team"), q("Mine")];
+        let s = Servers::new(vec![a, b], None);
+        assert_eq!(s.query_names(), ["Open", "Team", "Mine"]);
+        assert_eq!(s.server_ids().len(), 2);
     }
 
     #[test]
