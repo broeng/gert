@@ -9,7 +9,7 @@ use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
 use model::{
     Account, COMMIT_MSG_PATH, ChangeDetail, ChangeMessage, ChangeStatus, ChangeSummary, FileEntry,
-    FileStatus, MERGE_LIST_PATH, RelatedChange, SubmitRequirement, SubmitRequirementStatus,
+    FileStatus, MERGE_LIST_PATH, RelatedChange,
 };
 
 use super::{
@@ -61,8 +61,6 @@ const RELATED_PANEL_WIDTH: f32 = 360.;
 const RELATED_PANEL_MIN_WINDOW: f32 = 1000.;
 const COMMIT_BASIS: f32 = 660.;
 
-const LABEL_ORDER: [&str; 2] = ["Code-Review", "Verified"];
-
 pub(super) fn pill(text: impl Into<SharedString>, fg: Hsla) -> Div {
     div()
         .flex_none()
@@ -99,15 +97,6 @@ fn people(accounts: &[Account]) -> String {
         .map(Account::display)
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Votes are shown signed: `+2`, `-1`; `0` is not a vote.
-fn vote_text(v: i32) -> String {
-    if v > 0 {
-        format!("+{v}")
-    } else {
-        v.to_string()
-    }
 }
 
 fn status_label(s: &ChangeStatus) -> (&'static str, bool) {
@@ -434,9 +423,8 @@ impl ChangePage {
             .child(field("Updated", relative(now, c.updated, &tz)))
             .child(field("Created", relative(now, c.created, &tz)));
         let has_requirements = !d.submit_requirements.is_empty();
-        let has_votes = !d.votes.is_empty();
         let requirements = has_requirements.then(|| self.requirements(cx));
-        let votes = has_votes.then(|| self.votes(cx));
+        let votes = self.votes(cx);
         // Not for anonymous sessions, which cannot reply.
         let reply = self.session.can_comment().then(|| {
             h_flex().child(
@@ -453,101 +441,6 @@ impl ChangePage {
             .child(fields)
             .children(requirements)
             .children(votes)
-            .into_any_element()
-    }
-
-    fn requirements(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(d) = &self.detail else {
-            return div().into_any_element();
-        };
-        let theme = cx.theme().clone();
-        let rows = d.submit_requirements.iter().map(|r| {
-            let (glyph, color) = requirement_mark(r, cx);
-            let note = requirement_note(r);
-            h_flex()
-                .gap_x_2()
-                .flex_wrap()
-                .items_baseline()
-                .text_sm()
-                .child(div().w(px(14.)).flex_none().text_color(color).child(glyph))
-                .child(div().child(r.name.clone()))
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(note),
-                )
-        });
-        v_flex()
-            .gap_0p5()
-            .child(section_title("Submit requirements", cx))
-            .children(rows.collect::<Vec<_>>())
-            .into_any_element()
-    }
-
-    fn votes(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(d) = &self.detail else {
-            return div().into_any_element();
-        };
-        let theme = cx.theme().clone();
-        let mut names: Vec<&String> = d.votes.keys().collect();
-        names.sort_by_key(|n| {
-            (
-                LABEL_ORDER
-                    .iter()
-                    .position(|l| l == n)
-                    .unwrap_or(LABEL_ORDER.len()),
-                (*n).clone(),
-            )
-        });
-        let rows = names.into_iter().map(|name| {
-            let votes = &d.votes[name];
-            let voters: Vec<AnyElement> = votes
-                .iter()
-                .filter(|v| v.value != 0)
-                .map(|v| {
-                    let color = if v.value > 0 {
-                        theme.success
-                    } else {
-                        theme.danger
-                    };
-                    h_flex()
-                        .gap_1()
-                        .child(div().text_color(color).child(vote_text(v.value)))
-                        .child(div().child(v.account.display()))
-                        .into_any_element()
-                })
-                .collect();
-            h_flex()
-                .gap_3()
-                .text_sm()
-                .items_baseline()
-                .child(
-                    div()
-                        .w(px(110.))
-                        .flex_none()
-                        .text_color(theme.muted_foreground)
-                        .child(name.clone()),
-                )
-                .child(if voters.is_empty() {
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child("no votes")
-                        .into_any_element()
-                } else {
-                    h_flex()
-                        .min_w_0()
-                        .gap_x_3()
-                        .flex_wrap()
-                        .children(voters)
-                        .into_any_element()
-                })
-        });
-        v_flex()
-            .gap_0p5()
-            .child(section_title("Votes", cx))
-            .children(rows.collect::<Vec<_>>())
             .into_any_element()
     }
 
@@ -1177,42 +1070,6 @@ pub(super) fn section_title(text: &str, cx: &App) -> Div {
         .font_semibold()
         .text_color(cx.theme().muted_foreground)
         .child(text.to_owned())
-}
-
-fn requirement_mark(r: &SubmitRequirement, cx: &App) -> (&'static str, Hsla) {
-    let t = cx.theme();
-    match &r.status {
-        SubmitRequirementStatus::Satisfied => ("\u{2713}", t.success),
-        SubmitRequirementStatus::Overridden | SubmitRequirementStatus::Forced => {
-            ("\u{2713}", t.warning)
-        }
-        SubmitRequirementStatus::NotApplicable => ("\u{2013}", t.muted_foreground),
-        SubmitRequirementStatus::Unsatisfied => ("\u{2717}", t.danger),
-        SubmitRequirementStatus::Error | SubmitRequirementStatus::Timeout => ("!", t.danger),
-        SubmitRequirementStatus::Unknown(_) => ("?", t.muted_foreground),
-    }
-}
-
-/// The small print after a requirement: its state, and for a blocking one
-/// what is missing.
-fn requirement_note(r: &SubmitRequirement) -> String {
-    let state = match &r.status {
-        SubmitRequirementStatus::Satisfied => "satisfied".to_owned(),
-        SubmitRequirementStatus::Unsatisfied => "unsatisfied".to_owned(),
-        SubmitRequirementStatus::Overridden => "overridden".to_owned(),
-        SubmitRequirementStatus::NotApplicable => "not applicable".to_owned(),
-        SubmitRequirementStatus::Error => "error".to_owned(),
-        SubmitRequirementStatus::Forced => "forced".to_owned(),
-        SubmitRequirementStatus::Timeout => "timed out".to_owned(),
-        SubmitRequirementStatus::Unknown(s) => s.to_lowercase(),
-    };
-    let missing = match (&r.status, &r.submittability) {
-        (SubmitRequirementStatus::Unsatisfied, Some(e)) if !e.failing_atoms.is_empty() => {
-            format!(" \u{2013} needs {}", e.failing_atoms.join(", "))
-        }
-        _ => String::new(),
-    };
-    format!("{state}{missing}")
 }
 
 /// Opacity of the status letter and the path of a dimmed file.

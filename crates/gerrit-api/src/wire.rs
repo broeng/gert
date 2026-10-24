@@ -522,6 +522,8 @@ pub(crate) struct ChangeInfo {
     /// Label name to the vote values the user may set, as strings like
     /// `"-1"`, `" 0"` and `"+2"` (`DETAILED_LABELS`, authenticated only).
     pub permitted_labels: Option<BTreeMap<String, Vec<String>>>,
+    /// Reviewers (and so their votes) the user may remove (`DETAILED_LABELS`).
+    pub removable_reviewers: Option<Vec<AccountInfo>>,
     /// Keyed by reviewer state (`REVIEWER`, `CC`, ...).
     pub reviewers: Option<BTreeMap<String, Vec<AccountInfo>>>,
     pub current_revision: Option<String>,

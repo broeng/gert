@@ -174,6 +174,7 @@ fn change_detail_round_trip_updates_summary() {
         votes: Default::default(),
         attention: vec![],
         permitted_labels: Default::default(),
+        removable_reviewers: Default::default(),
         label_values: Default::default(),
         change_actions: [(
             "abandon".to_owned(),
@@ -441,6 +442,7 @@ fn fill_server(s: &mut Store, id: ServerId, tag: &str) {
         votes: Default::default(),
         attention: vec![],
         permitted_labels: Default::default(),
+        removable_reviewers: Default::default(),
         label_values: Default::default(),
         change_actions: Default::default(),
         revision_actions: Default::default(),

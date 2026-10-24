@@ -221,3 +221,28 @@ fn anonymous_sessions_cannot_edit() {
     );
     assert!(http.sent().is_empty());
 }
+
+#[test]
+fn deleting_a_vote_refreshes_the_change() {
+    let http = RouteHttpClient::new();
+    http.route_json("GET /changes/7?", &change_json(json!({})));
+    http.route("DELETE /changes/7/reviewers/3/votes/Code-Review", 204, "");
+    let syncer = syncer_for(&http, signed_in());
+
+    let d = block_on(syncer.delete_vote(CHANGE, "3", "Code-Review")).unwrap();
+    assert!(d.is_some());
+    let all = sent(&http);
+    assert_eq!(
+        all.iter()
+            .filter(|s| !s.starts_with("GET"))
+            .collect::<Vec<_>>(),
+        ["DELETE /a/changes/7/reviewers/3/votes/Code-Review"]
+    );
+
+    http.route("DELETE /changes/7/reviewers/3/votes/Verified", 403, "no\n");
+    let err = block_on(syncer.delete_vote(CHANGE, "3", "Verified")).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Api(gerrit_api::Error::Forbidden { .. })
+    ));
+}

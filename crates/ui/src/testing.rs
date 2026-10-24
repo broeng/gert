@@ -71,6 +71,7 @@ pub fn detail(number: u64, n: u32, current: u32) -> ChangeDetail {
         votes: Default::default(),
         attention: Default::default(),
         permitted_labels: Default::default(),
+        removable_reviewers: Default::default(),
         label_values: Default::default(),
         change_actions: Default::default(),
         revision_actions: Default::default(),

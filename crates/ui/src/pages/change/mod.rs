@@ -19,6 +19,7 @@
 //! and its own keys apply until `Esc` leaves the page.
 
 mod quick_vote;
+mod requirements;
 mod state;
 #[cfg(test)]
 mod tests;
