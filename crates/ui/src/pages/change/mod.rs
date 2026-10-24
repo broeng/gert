@@ -35,8 +35,8 @@ use std::{
 use gpui_kit::*;
 use jiff::Timestamp;
 use model::{
-    ChangeDetail, ChangeNumber, DiffKey, DiffPair, FileCommentCounts, FileEntry, FilesKey,
-    RelatedChange, RevisionId, Thread, ThreadId,
+    ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, DiffKey, DiffPair, FileCommentCounts,
+    FileEntry, FilesKey, RelatedChange, RevisionId, Thread, ThreadId,
 };
 use store::CachedFileList;
 use sync::PollPolicy;
@@ -110,6 +110,8 @@ struct Files {
 struct Related {
     sha: RevisionId,
     changes: Vec<RelatedChange>,
+    /// Labels of the open changes in the chain, once fetched.
+    summaries: HashMap<ChangeNumber, ChangeSummary>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +184,7 @@ pub struct ChangePage {
     task: Option<Task<()>>,
     files_task: Option<Task<()>>,
     related_task: Option<Task<()>>,
+    summaries_task: Option<Task<()>>,
     /// A quick vote is on its way.
     voting: Option<Task<()>>,
     /// The change's comment threads, shown in the inline diffs.
@@ -273,6 +276,7 @@ impl ChangePage {
             task: None,
             files_task: None,
             related_task: None,
+            summaries_task: None,
             voting: None,
             comments: comments.clone(),
             outbox,
@@ -701,13 +705,55 @@ impl ChangePage {
         if current.as_ref() != Some(sha) {
             return;
         }
+        let summaries = match self.related.take() {
+            Some(r) if &r.sha == sha => r.summaries,
+            _ => HashMap::new(),
+        };
+        let open: Vec<_> = changes
+            .iter()
+            .filter(|c| matches!(c.status, Some(ChangeStatus::New)))
+            .map(|c| c.number)
+            .collect();
         self.related = Some(Related {
             sha: sha.clone(),
             changes,
+            summaries,
         });
         self.reveal_current_related();
         self.rebuild_blocks();
         cx.notify();
+        if self.session.can_sync() {
+            self.load_related_summaries(sha.clone(), open, cx);
+        }
+    }
+
+    /// Fetches the votes of the open changes in the chain for their markers.
+    fn load_related_summaries(
+        &mut self,
+        sha: RevisionId,
+        open: Vec<ChangeNumber>,
+        cx: &mut Context<Self>,
+    ) {
+        if open.is_empty() {
+            return;
+        }
+        let syncer = self.session.syncer().clone();
+        self.summaries_task = Some(cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_spawn(async move { syncer.fetch_summaries(&open).await })
+                .await;
+            this.update(cx, |this, cx| match fetched {
+                Ok(list) => {
+                    if let Some(r) = this.related.as_mut().filter(|r| r.sha == sha) {
+                        r.summaries = list.into_iter().map(|s| (s.number, s)).collect();
+                        this.rebuild_blocks();
+                        cx.notify();
+                    }
+                }
+                Err(e) => log::warn!("fetching votes of related changes: {e}"),
+            })
+            .ok();
+        }));
     }
 
     // ---- file filters ----

@@ -8,8 +8,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
 use model::{
-    Account, COMMIT_MSG_PATH, ChangeDetail, ChangeMessage, ChangeStatus, FileEntry, FileStatus,
-    MERGE_LIST_PATH, RelatedChange, SubmitRequirement, SubmitRequirementStatus,
+    Account, COMMIT_MSG_PATH, ChangeDetail, ChangeMessage, ChangeStatus, ChangeSummary, FileEntry,
+    FileStatus, MERGE_LIST_PATH, RelatedChange, SubmitRequirement, SubmitRequirementStatus,
 };
 
 use super::{
@@ -1044,7 +1044,7 @@ impl ChangePage {
                         .child(related_subject(c)),
                 )
                 .child(div().flex_1())
-                .children(related_pills(c, cx))
+                .children(related_pills(c, r.summaries.get(&c.number), cx))
         });
         let scroll = self.related_scroll.clone();
         let list = v_flex()
@@ -1348,12 +1348,37 @@ fn related_subject(c: &RelatedChange) -> String {
         .map_or_else(|| "(no subject)".to_owned(), |k| k.subject.clone())
 }
 
-fn related_pills(c: &RelatedChange, cx: &App) -> Vec<Div> {
+/// Negative votes that hold a change back: `Rejected` for Code-Review at its
+/// lowest, otherwise the label and vote (`Verified -1`).
+pub(super) fn blocking_votes(summary: Option<&ChangeSummary>) -> Vec<String> {
+    let Some(s) = summary else {
+        return Vec::new();
+    };
+    s.labels
+        .iter()
+        .filter_map(|(name, l)| match crate::labels::mark(l) {
+            crate::labels::Mark::Rejected if name == "Code-Review" => Some("Rejected".to_owned()),
+            crate::labels::Mark::Rejected => Some(format!("{name} {}", l.min.unwrap_or(-1))),
+            crate::labels::Mark::Disliked(v) => Some(format!("{name} {v}")),
+            _ => None,
+        })
+        .collect()
+}
+
+fn related_pills(c: &RelatedChange, summary: Option<&ChangeSummary>, cx: &App) -> Vec<Div> {
     let t = cx.theme();
     let mut v = Vec::new();
     match &c.status {
         Some(ChangeStatus::Merged) => v.push(pill("Merged", t.success)),
         Some(ChangeStatus::Abandoned) => v.push(pill("Abandoned", t.muted_foreground)),
+        Some(ChangeStatus::New) => {
+            for text in blocking_votes(summary) {
+                v.push(pill(text, t.danger));
+            }
+            if c.submittable == Some(true) {
+                v.push(pill("Submittable", t.primary));
+            }
+        }
         _ => {}
     }
     if c.work_in_progress {
