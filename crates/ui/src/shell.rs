@@ -1139,6 +1139,11 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn notify_settings_for_test(&self) -> &NotificationSettings {
+        &self.notify_settings
+    }
+
+    #[cfg(test)]
     pub(crate) fn layout_for_test(&self) -> &Entity<PageLayout> {
         &self.layout
     }
@@ -1343,10 +1348,11 @@ impl Shell {
         let server = self.session().map(|s| s.backend().clone());
         let (servers, active) = (self.servers.rows(), self.servers.active_key().cloned());
         let tab = self.settings_tab;
+        let notify = self.notify_settings.clone();
         let page = cx.new(|cx| {
             SettingsPage::new(
-                env, server, servers, active, queries, bookmarks, start, layout, filters, tab,
-                window, cx,
+                env, server, servers, active, queries, bookmarks, start, layout, filters, notify,
+                tab, window, cx,
             )
         });
         self.page_subs.push(cx.subscribe_in(
@@ -1378,6 +1384,9 @@ impl Shell {
                 SettingsEvent::ConnectionTested { key, connection } => {
                     this.servers.set_connection(key, *connection);
                     cx.notify();
+                }
+                SettingsEvent::NotificationsSaved(settings) => {
+                    this.set_notification_settings(settings.clone(), window, cx)
                 }
                 SettingsEvent::ManageFilters { select, add } => {
                     let context = FiltersContext {
