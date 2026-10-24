@@ -225,6 +225,9 @@ impl SettingsPage {
 
     #[cfg(test)]
     pub(crate) fn select_row_for_test(&mut self, row: usize, cx: &mut Context<Self>) {
+        // Shows the tab the row is in, as keys would.
+        let tab = self.tab_of(row);
+        self.show_tab(tab, cx);
         self.select(row, cx);
     }
 

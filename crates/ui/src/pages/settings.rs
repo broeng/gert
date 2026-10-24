@@ -1,11 +1,14 @@
 //! The settings page: the saved queries of the dashboard, the startup page,
 //! the review flow (advance after a vote), the theme, the light/dark mode of
 //! the UI and of the diff view, the file filters and the servers.
-//! The cursor walks the query rows, then the startup row, the advance row
-//! the theme row and the two mode rows, then the filter rows (one empty-state
-//! row when there are none), then the server rows (likewise). The queries and
-//! bookmarks are those of the active server; the servers section is in
-//! `servers`.
+//! The page is split into tabs ([`SettingsTab`]) and shows one at a time.
+//! The cursor is a row index over all of the sections: the query rows, then
+//! the bookmark rows, the startup row, the advance row, the theme row and the
+//! two mode rows, then the filter rows (one empty-state row when there are
+//! none), then the server rows (likewise). Each tab owns a range of those
+//! rows ([`SettingsPage::tab_rows`]) and the cursor stays inside it. The
+//! queries and bookmarks are those of the active server; the servers section
+//! is in `servers`.
 //!
 //! The filters are edited in the Manage filters dialog, which the shell
 //! opens when the page emits [`SettingsEvent::ManageFilters`]; the page only
@@ -22,6 +25,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -73,6 +77,48 @@ pub enum SettingsEvent {
         key: ServerKey,
         connection: Connection,
     },
+}
+
+/// The tabs of the page, in the order they are shown. To add one: a variant
+/// here (in `all` and `title`), its rows in [`SettingsPage::tab_rows`] and
+/// its sections in [`SettingsPage::render_tab`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SettingsTab {
+    Servers,
+    /// The saved queries, the bookmarks and the startup page; the tab the
+    /// page opens on the first time.
+    #[default]
+    Queries,
+    Review,
+    Appearance,
+    Filters,
+}
+
+impl SettingsTab {
+    pub const fn all() -> [SettingsTab; 5] {
+        [
+            SettingsTab::Servers,
+            SettingsTab::Queries,
+            SettingsTab::Review,
+            SettingsTab::Appearance,
+            SettingsTab::Filters,
+        ]
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            SettingsTab::Servers => "Servers",
+            SettingsTab::Queries => "Queries",
+            SettingsTab::Review => "Review",
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Filters => "Filters",
+        }
+    }
+
+    /// Where the tab is in the strip.
+    fn position(self) -> usize {
+        Self::all().iter().position(|t| *t == self).unwrap_or(0)
+    }
 }
 
 /// The two lists of name and query pairs the page edits.
@@ -188,6 +234,8 @@ pub struct SettingsPage {
     server: Option<Arc<dyn ServerBackend>>,
     queries: Vec<SavedQuery>,
     bookmarks: Vec<SavedQuery>,
+    /// The tab on show; the cursor is always on one of its rows.
+    tab: SettingsTab,
     cursor: usize,
     mode: Mode,
     /// The configured servers, in config order, and the one whose queries
@@ -212,6 +260,8 @@ pub struct SettingsPage {
     hint: Hint,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    /// Where each tab was scrolled to when it was left.
+    scrolled: std::collections::HashMap<SettingsTab, Point<Pixels>>,
     task: Option<Task<()>>,
     _subs: Vec<Subscription>,
 }
@@ -236,6 +286,7 @@ impl SettingsPage {
         start_page: StartupPage,
         layout: Entity<PageLayout>,
         filters: Entity<FileFilters>,
+        tab: SettingsTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -260,7 +311,7 @@ impl SettingsPage {
             this.follow_filters(&filters, cx)
         }));
         let filter_names = filters.read(cx).rules().iter().map(rule_name).collect();
-        Self {
+        let mut page = Self {
             env,
             server,
             servers,
@@ -269,6 +320,7 @@ impl SettingsPage {
             tests: Default::default(),
             queries,
             bookmarks,
+            tab,
             cursor: 0,
             mode: Mode::Browsing,
             name,
@@ -283,9 +335,12 @@ impl SettingsPage {
             hint: Hint::default(),
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
+            scrolled: Default::default(),
             task: None,
             _subs: subs,
-        }
+        };
+        page.cursor = *page.tab_rows(tab).start();
+        page
     }
 
     #[cfg(test)]
@@ -322,6 +377,17 @@ impl SettingsPage {
     #[cfg(test)]
     pub(crate) fn filter_names_for_test(&self) -> &[String] {
         &self.filter_names
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tab_for_test(&self) -> SettingsTab {
+        self.tab
+    }
+
+    /// Shows `tab` as a key or click would.
+    #[cfg(test)]
+    pub(crate) fn show_tab_for_test(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        self.show_tab(tab, cx);
     }
 
     #[cfg(test)]
@@ -430,6 +496,48 @@ impl SettingsPage {
         self.servers_row() + self.servers.len().saturating_sub(1)
     }
 
+    /// The cursor rows of `tab`. Never empty: a list without items has one
+    /// empty-state row.
+    fn tab_rows(&self, tab: SettingsTab) -> std::ops::RangeInclusive<usize> {
+        match tab {
+            SettingsTab::Servers => self.servers_row()..=self.last_row(),
+            SettingsTab::Queries => 0..=self.startup_row(),
+            SettingsTab::Review => self.advance_row()..=self.advance_row(),
+            SettingsTab::Appearance => self.theme_row()..=self.diff_mode_row(),
+            SettingsTab::Filters => self.filters_row()..=self.servers_row() - 1,
+        }
+    }
+
+    /// `row` moved into the rows of the tab on show.
+    fn in_tab(&self, row: usize) -> usize {
+        let rows = self.tab_rows(self.tab);
+        row.clamp(*rows.start(), *rows.end())
+    }
+
+    /// The tab that has cursor row `row`.
+    #[cfg(test)]
+    fn tab_of(&self, row: usize) -> SettingsTab {
+        SettingsTab::all()
+            .into_iter()
+            .find(|t| self.tab_rows(*t).contains(&row))
+            .unwrap_or_default()
+    }
+
+    /// Shows `tab`, with the cursor on its first row and the scroll position
+    /// it had when it was left. Keys and clicks that would leave a pending
+    /// edit, question or save behind are ignored.
+    fn show_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        if tab == self.tab || self.mode != Mode::Browsing || !self.can_change() {
+            return;
+        }
+        self.scrolled.insert(self.tab, self.scroll.offset());
+        self.tab = tab;
+        self.cursor = *self.tab_rows(tab).start();
+        let offset = self.scrolled.get(&tab).copied().unwrap_or_default();
+        self.scroll.set_offset(offset);
+        cx.notify();
+    }
+
     /// The rule the cursor is on, if it is on one.
     fn filter_under_cursor(&self) -> Option<usize> {
         self.cursor
@@ -467,7 +575,7 @@ impl SettingsPage {
 
     fn select(&mut self, to: usize, cx: &mut Context<Self>) {
         if self.mode == Mode::Browsing {
-            self.cursor = to.min(self.last_row());
+            self.cursor = self.in_tab(to);
             cx.notify();
         }
     }
@@ -539,7 +647,7 @@ impl SettingsPage {
             if self.mode == Mode::Browsing && self.can_change() {
                 cx.emit(SettingsEvent::AddServer);
             }
-        } else if self.can_change() {
+        } else if self.tab == SettingsTab::Queries && self.can_change() {
             let which = self.item_under_cursor().map_or(Which::Queries, |(w, _)| w);
             self.start_edit(which, self.list(which).len(), window, cx);
         }
@@ -573,7 +681,7 @@ impl SettingsPage {
         if let Some(at) = in_servers_at {
             self.cursor = self.servers_row() + at;
         }
-        self.cursor = self.cursor.min(self.last_row());
+        self.cursor = self.in_tab(self.cursor);
         cx.notify();
     }
 
@@ -1655,16 +1763,52 @@ impl SettingsPage {
     }
 }
 
+impl SettingsPage {
+    /// The sections of `tab`.
+    fn render_tab(&self, tab: SettingsTab, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        match tab {
+            SettingsTab::Servers => vec![self.render_servers(cx)],
+            SettingsTab::Queries => vec![
+                self.render_queries(cx),
+                self.render_bookmarks(cx),
+                self.render_startup(cx),
+            ],
+            SettingsTab::Review => vec![self.render_review(cx)],
+            SettingsTab::Appearance => vec![self.render_appearance(cx)],
+            SettingsTab::Filters => vec![self.render_filters(cx)],
+        }
+    }
+
+    /// The title and the strip of tabs, which stay put while a tab scrolls.
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .flex_none()
+            .px_4()
+            .pt_4()
+            .gap_3()
+            .child(div().text_xl().font_semibold().child("Settings"))
+            .child(
+                TabBar::new("settings-tabs")
+                    .underline()
+                    .selected_index(self.tab.position())
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        if let Some(tab) = SettingsTab::all().get(*ix) {
+                            this.show_tab(*tab, cx);
+                        }
+                    }))
+                    .children(
+                        SettingsTab::all()
+                            .into_iter()
+                            .map(|t| Tab::new().label(t.title())),
+                    ),
+            )
+    }
+}
+
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let queries = self.render_queries(cx);
-        let bookmarks = self.render_bookmarks(cx);
-        let startup = self.render_startup(cx);
-        let review = self.render_review(cx);
-        let appearance = self.render_appearance(cx);
-        let filters = self.render_filters(cx);
-        let servers = self.render_servers(cx);
+        let sections = self.render_tab(self.tab, cx);
         v_flex()
             .id("settings")
             .key_context(self.key_context())
@@ -1686,6 +1830,7 @@ impl Render for SettingsPage {
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::test_connection))
             .size_full()
+            .child(self.render_header(cx))
             .child(
                 div()
                     .relative()
@@ -1699,14 +1844,7 @@ impl Render for SettingsPage {
                             .track_scroll(&self.scroll)
                             .py_4()
                             .gap_4()
-                            .child(div().px_4().text_xl().font_semibold().child("Settings"))
-                            .child(queries)
-                            .child(bookmarks)
-                            .child(startup)
-                            .child(review)
-                            .child(appearance)
-                            .child(filters)
-                            .child(servers),
+                            .children(sections),
                     )
                     .vertical_scrollbar(&self.scroll),
             )

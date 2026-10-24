@@ -1852,6 +1852,7 @@ mod settings_page {
         filters::{FileFilter, FilterAction},
         login::tests::FakeBackend,
         nav::Route,
+        pages::settings::SettingsTab,
         session::{Env, Startup, StartupPage},
         shell::Shell,
     };
@@ -1936,6 +1937,12 @@ mod settings_page {
                 "ctrl-,"
             },
         );
+    }
+
+    /// Shows `tab` of the open settings page, the cursor on its first row.
+    fn show_tab(cx: &mut TestAppContext, f: &Fixture, tab: SettingsTab) {
+        let page = cx.update(|cx| f.shell.read(cx).settings_page_for_test().expect("page"));
+        page.update(cx, |p, cx| p.show_tab_for_test(tab, cx));
     }
 
     fn names(cx: &mut TestAppContext, f: &Fixture) -> Vec<String> {
@@ -2125,10 +2132,7 @@ mod settings_page {
         let f = fixture(cx, false);
         open_settings(cx, &f);
         assert!(advance_on(cx, &f));
-        // Two query rows, the empty bookmarks row, the startup row, then the advance row.
-        for _ in 0..4 {
-            press(cx, &f, "j");
-        }
+        show_tab(cx, &f, SettingsTab::Review);
         press(cx, &f, "space");
         assert!(!advance_on(cx, &f));
         assert_eq!(*f.backend.saved_advance.lock().unwrap(), [false]);
@@ -2141,9 +2145,7 @@ mod settings_page {
     fn a_failed_advance_save_keeps_the_old_value(cx: &mut TestAppContext) {
         let f = fixture(cx, true);
         open_settings(cx, &f);
-        for _ in 0..4 {
-            press(cx, &f, "j");
-        }
+        show_tab(cx, &f, SettingsTab::Review);
         press(cx, &f, "space");
         assert!(advance_on(cx, &f));
         cx.update(|cx| {
@@ -2165,10 +2167,7 @@ mod settings_page {
             })
         };
         assert_eq!(applied(cx).0, ThemeName::Cwc);
-        // Two query rows, the empty bookmarks row, the startup and advance rows, then the theme row.
-        for _ in 0..5 {
-            press(cx, &f, "j");
-        }
+        show_tab(cx, &f, SettingsTab::Appearance);
         press(cx, &f, "space");
         let (now, name) = applied(cx);
         assert_eq!(now, ThemeName::Solarized);
@@ -2192,12 +2191,9 @@ mod settings_page {
             cx.update(|cx| gpui_kit::component::ActiveTheme::theme(cx).is_dark())
         };
         assert_eq!(cx.update(|cx| color_modes(cx)), ColorModes::default());
-        // Two query rows, the empty bookmarks row, the startup, advance and theme
-        // rows, then the UI
-        // mode row: system, light, dark.
-        for _ in 0..6 {
-            press(cx, &f, "j");
-        }
+        // The theme row, then the UI mode row: system, light, dark.
+        show_tab(cx, &f, SettingsTab::Appearance);
+        press(cx, &f, "j");
         press(cx, &f, "space");
         press(cx, &f, "space");
         assert_eq!(cx.update(|cx| color_modes(cx).ui), ColorMode::Dark);
@@ -2220,9 +2216,7 @@ mod settings_page {
     fn a_failed_theme_save_keeps_the_theme(cx: &mut TestAppContext) {
         let f = fixture(cx, true);
         open_settings(cx, &f);
-        for _ in 0..5 {
-            press(cx, &f, "j");
-        }
+        show_tab(cx, &f, SettingsTab::Appearance);
         press(cx, &f, "space");
         cx.update(|cx| {
             assert_eq!(crate::theme::current(cx), crate::theme::ThemeName::Cwc);
@@ -2334,12 +2328,63 @@ mod settings_page {
         })
     }
 
-    /// Cursor on the first filter row: 2 queries, the empty bookmarks row,
-    /// startup, advance, theme, two modes.
+    /// Cursor on the first filter row (row 8: 2 queries, the empty
+    /// bookmarks row, startup, advance, theme, two modes before it).
     fn to_filters(cx: &mut TestAppContext, f: &Fixture) {
-        for _ in 0..8 {
-            press(cx, f, "j");
+        show_tab(cx, f, SettingsTab::Filters);
+    }
+
+    fn tab_state(cx: &mut TestAppContext, f: &Fixture) -> (SettingsTab, usize) {
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            let page = page.read(cx);
+            (page.tab_for_test(), page.cursor_for_test())
+        })
+    }
+
+    #[gpui_kit::test]
+    fn the_cursor_stays_inside_the_tab_and_jumps_to_its_first_row_on_a_switch(
+        cx: &mut TestAppContext,
+    ) {
+        let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
+        open_settings(cx, &f);
+        // Queries: 2 queries, the empty bookmarks row, the startup row.
+        assert_eq!(tab_state(cx, &f), (SettingsTab::Queries, 0));
+        for _ in 0..9 {
+            press(cx, &f, "j");
         }
+        assert_eq!(tab_state(cx, &f).1, 3);
+        press(cx, &f, "k");
+        for _ in 0..9 {
+            press(cx, &f, "k");
+        }
+        assert_eq!(tab_state(cx, &f).1, 0);
+
+        // Appearance: the theme row and the two mode rows.
+        show_tab(cx, &f, SettingsTab::Appearance);
+        assert_eq!(tab_state(cx, &f), (SettingsTab::Appearance, 5));
+        press(cx, &f, "k");
+        assert_eq!(tab_state(cx, &f).1, 5);
+        for _ in 0..5 {
+            press(cx, &f, "j");
+        }
+        assert_eq!(tab_state(cx, &f).1, 7);
+
+        // Review has the one row; a does not add a query there.
+        show_tab(cx, &f, SettingsTab::Review);
+        assert_eq!(tab_state(cx, &f), (SettingsTab::Review, 4));
+        press(cx, &f, "j");
+        press(cx, &f, "a");
+        assert_eq!(tab_state(cx, &f).1, 4);
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            assert!(!page.read(cx).editing_for_test());
+        });
+
+        show_tab(cx, &f, SettingsTab::Servers);
+        assert_eq!(tab_state(cx, &f), (SettingsTab::Servers, 10));
+        press(cx, &f, "j");
+        assert_eq!(tab_state(cx, &f).1, 10);
     }
 
     #[gpui_kit::test]
@@ -2350,12 +2395,11 @@ mod settings_page {
         to_filters(cx, &f);
         assert_eq!(page_state(cx, &f).0, 8);
         press(cx, &f, "j");
-        // The last rule; the server rows come after it, and the only
-        // server is the last row.
+        // The last rule; the cursor stops there, the server row after it is
+        // on another tab.
         assert_eq!(page_state(cx, &f).0, 9);
         press(cx, &f, "j");
-        press(cx, &f, "j");
-        assert_eq!(page_state(cx, &f).0, 10);
+        assert_eq!(page_state(cx, &f).0, 9);
         press(cx, &f, "k");
         press(cx, &f, "k");
         assert_eq!(page_state(cx, &f).0, 8);
@@ -2405,11 +2449,9 @@ mod settings_page {
         let f = fixture(cx, false);
         open_settings(cx, &f);
         to_filters(cx, &f);
-        // The empty-state row is the only one of the filters; the server
-        // row follows it.
+        // The empty-state row is the only one of the filters.
         press(cx, &f, "j");
-        assert_eq!(page_state(cx, &f), (9, Vec::new()));
-        press(cx, &f, "k");
+        assert_eq!(page_state(cx, &f), (8, Vec::new()));
         press(cx, &f, "enter");
         assert_eq!(dialog_state(cx, &f), Some((0, "adding")));
     }
