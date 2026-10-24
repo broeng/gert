@@ -1581,7 +1581,9 @@ mod drafts {
             let labels = vote.map_or_else(String::new, |v| {
                 format!(
                     r#", "labels": {{"Code-Review": {{"all": [{{"_account_id": 2,
-                    "name": "Bob", "value": {v}, "date": "2024-02-02 09:00:00.000000000"}}]}}}}"#
+                    "name": "Bob", "value": {v}, "date": "{}"}}]}}}}"#,
+                    // Recent: the inbox drops what is older than its retention.
+                    jiff::Timestamp::now().strftime("%Y-%m-%d %H:%M:%S.000000000")
                 )
             });
             format!(
@@ -1685,6 +1687,63 @@ mod drafts {
             advance(cx, 301);
             assert_eq!(run.notifier.shown().len(), 1);
             assert!(watch_requests(&http) >= 3);
+        }
+
+        fn inbox(run: &Run) -> Vec<store::InboxItem> {
+            run.store
+                .lock()
+                .expect("lock")
+                .inbox_items(None, 100)
+                .expect("inbox")
+        }
+
+        fn bell(cx: &mut TestAppContext, run: &Run) -> usize {
+            cx.update(|cx| run.shell.read(cx).inbox_unread_for_test())
+        }
+
+        #[gpui_kit::test]
+        fn a_shown_event_is_also_kept_in_the_inbox_and_counted_by_the_bell(
+            cx: &mut TestAppContext,
+        ) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let run = start(cx, &http, NotificationSettings::default(), Some("a"));
+            assert!(inbox(&run).is_empty());
+            assert_eq!(bell(cx, &run), 0);
+
+            serve(&http, U2, Some(-1));
+            advance(cx, 301);
+            assert_eq!(run.notifier.titles(), ["Code-Review -1 from Bob"]);
+            let items = inbox(&run);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].server, run.b);
+            assert!(items[0].shown_on_os && items[0].read_at.is_none());
+            assert_eq!(items[0].rule_title, "Negative Code-Review on my changes");
+            assert_eq!(pending(&run), 0);
+            assert_eq!(bell(cx, &run), 1);
+
+            // Nothing new: nothing more kept.
+            advance(cx, 301);
+            assert_eq!(inbox(&run).len(), 1);
+        }
+
+        #[gpui_kit::test]
+        fn a_suppressed_event_is_only_kept_in_the_inbox(cx: &mut TestAppContext) {
+            let http = RouteHttpClient::new();
+            serve(&http, U1, None);
+            let run = start(cx, &http, NotificationSettings::default(), Some("a"));
+            cx.update(|cx| {
+                run.shell
+                    .update(cx, |s, _| s.set_window_active_for_test(true))
+            });
+            serve(&http, U2, Some(-1));
+            advance(cx, 301);
+            assert!(run.notifier.shown().is_empty());
+            let items = inbox(&run);
+            assert_eq!(items.len(), 1);
+            assert!(!items[0].shown_on_os);
+            assert_eq!(pending(&run), 0);
+            assert_eq!(bell(cx, &run), 1);
         }
 
         #[gpui_kit::test]
@@ -1832,6 +1891,343 @@ mod drafts {
                 place(cx, &run.shell),
                 at("b", Route::Change(ChangeNumber(7)))
             );
+        }
+    }
+
+    // ---- the notification inbox ----
+
+    mod inbox {
+        use std::{sync::Arc, time::Duration};
+
+        use jiff::Timestamp;
+        use model::{ChangeNumber, Event, EventKind};
+        use store::{InboxItem, NewInboxItem};
+
+        use super::*;
+        use crate::pages::inbox::InboxPage;
+
+        struct Run {
+            window: gpui_kit::AnyWindowHandle,
+            shell: Entity<Shell>,
+            store: Arc<std::sync::Mutex<Store>>,
+            ids: [store::ServerId; 2],
+        }
+
+        /// Seconds before now.
+        fn ago(secs: u64) -> Timestamp {
+            Timestamp::now()
+                .checked_sub(Duration::from_secs(secs))
+                .expect("ts")
+        }
+
+        fn new_item(server: store::ServerId, change: u64, at: Timestamp) -> NewInboxItem {
+            NewInboxItem {
+                event: Event {
+                    server,
+                    change: ChangeNumber(change),
+                    project: "proj".into(),
+                    subject: format!("Subject {change}"),
+                    owner: None,
+                    actor: None,
+                    at,
+                    kind: EventKind::Merged,
+                    subject_account: None,
+                },
+                rule_title: "Merged".into(),
+                mention: false,
+                shown_on_os: change.is_multiple_of(2),
+            }
+        }
+
+        /// Server `b` is shown. The inbox has, newest first: change 10 of
+        /// `a` (just now), change 11 of `b` (a minute ago) and change 12
+        /// of `a` (five days ago); `read` of them are read, from the top.
+        fn start(cx: &mut TestAppContext, read: usize) -> Run {
+            let (mut store, ids) = two_server_store(false, false);
+            let now = Timestamp::now();
+            store
+                .add_inbox(
+                    ids[0],
+                    &[
+                        new_item(ids[0], 10, ago(1)),
+                        new_item(ids[0], 12, ago(5 * 86_400)),
+                    ],
+                    now,
+                )
+                .expect("a");
+            store
+                .add_inbox(ids[1], &[new_item(ids[1], 11, ago(60))], now)
+                .expect("b");
+            let first = store.inbox_items(None, 10).expect("items");
+            let done: Vec<_> = first.iter().take(read).map(|i| i.id).collect();
+            store.mark_inbox_read(&done, now).expect("read");
+            let http = RouteHttpClient::new();
+            let (window, shell, shared) = start_two_in(cx, store, ids, Some("b"), &http);
+            Run {
+                window,
+                shell,
+                store: shared,
+                ids,
+            }
+        }
+
+        fn press(cx: &mut TestAppContext, run: &Run, key: &'static str) {
+            press_key(cx, run.window, key);
+        }
+
+        fn open(cx: &mut TestAppContext, run: &Run) -> Entity<InboxPage> {
+            press(cx, run, "ctrl-shift-n");
+            cx.update(|cx| {
+                run.shell
+                    .read(cx)
+                    .inbox_page_for_test()
+                    .expect("inbox page")
+            })
+        }
+
+        fn bell(cx: &mut TestAppContext, run: &Run) -> usize {
+            cx.update(|cx| run.shell.read(cx).inbox_unread_for_test())
+        }
+
+        fn stored(run: &Run) -> Vec<InboxItem> {
+            run.store
+                .lock()
+                .expect("lock")
+                .inbox_items(None, 100)
+                .expect("items")
+        }
+
+        /// Change numbers and read marks of the rows of the page.
+        fn rows(cx: &mut TestAppContext, page: &Entity<InboxPage>) -> Vec<(u64, bool)> {
+            cx.update(|cx| {
+                page.read(cx)
+                    .items_for_test()
+                    .iter()
+                    .map(|i| (i.event.change.0, i.read_at.is_some()))
+                    .collect()
+            })
+        }
+
+        fn cursor(cx: &mut TestAppContext, page: &Entity<InboxPage>) -> usize {
+            cx.update(|cx| page.read(cx).cursor_for_test())
+        }
+
+        fn route(cx: &mut TestAppContext, run: &Run) -> Route {
+            cx.update(|cx| run.shell.read(cx).route().clone())
+        }
+
+        #[gpui_kit::test]
+        fn the_bell_counts_unread_notifications_of_all_servers_from_the_start(
+            cx: &mut TestAppContext,
+        ) {
+            let run = start(cx, 0);
+            assert_eq!(bell(cx, &run), 3);
+            let run = start(cx, 1);
+            assert_eq!(bell(cx, &run), 2);
+            let run = start(cx, 3);
+            assert_eq!(bell(cx, &run), 0);
+        }
+
+        #[gpui_kit::test]
+        fn the_key_opens_the_inbox_newest_first_in_day_groups_and_marks_nothing_read(
+            cx: &mut TestAppContext,
+        ) {
+            let run = start(cx, 0);
+            let page = open(cx, &run);
+            assert_eq!(route(cx, &run), Route::Inbox);
+            assert_eq!(rows(cx, &page), [(10, false), (11, false), (12, false)]);
+            cx.update(|cx| {
+                let groups = page.read(cx).groups_for_test();
+                assert_eq!(groups.len(), 2, "{groups:?}");
+                assert_eq!(groups[0], ("Today".to_owned(), 2));
+                assert_eq!(groups[1].1, 1);
+            });
+            assert_eq!(cursor(cx, &page), 0);
+            assert_eq!(bell(cx, &run), 3);
+            assert!(stored(&run).iter().all(|i| i.read_at.is_none()));
+        }
+
+        #[gpui_kit::test]
+        fn j_and_k_move_the_cursor_and_stop_at_the_ends(cx: &mut TestAppContext) {
+            let run = start(cx, 0);
+            let page = open(cx, &run);
+            press(cx, &run, "k");
+            assert_eq!(cursor(cx, &page), 0);
+            press(cx, &run, "j");
+            press(cx, &run, "down");
+            assert_eq!(cursor(cx, &page), 2);
+            press(cx, &run, "j");
+            assert_eq!(cursor(cx, &page), 2);
+            press(cx, &run, "up");
+            assert_eq!(cursor(cx, &page), 1);
+        }
+
+        #[gpui_kit::test]
+        fn enter_opens_the_change_on_its_server_and_marks_it_read(cx: &mut TestAppContext) {
+            let run = start(cx, 0);
+            let page = open(cx, &run);
+            // The page was opened on `b`; the first row belongs to `a`.
+            press(cx, &run, "enter");
+            assert_eq!(
+                place(cx, &run.shell),
+                at("a", Route::Change(ChangeNumber(10)))
+            );
+            assert_eq!(bell(cx, &run), 2);
+            let read: Vec<_> = stored(&run).iter().map(|i| i.read_at.is_some()).collect();
+            assert_eq!(read, [true, false, false]);
+            assert_eq!(rows(cx, &page)[0], (10, true));
+
+            // Back is the inbox again, which shows what is stored.
+            press(cx, &run, "alt-left");
+            assert_eq!(route(cx, &run), Route::Inbox);
+            let page = cx.update(|cx| run.shell.read(cx).inbox_page_for_test().expect("page"));
+            assert_eq!(rows(cx, &page), [(10, true), (11, false), (12, false)]);
+            // The second row is on `b`.
+            press(cx, &run, "j");
+            press(cx, &run, "enter");
+            assert_eq!(
+                place(cx, &run.shell),
+                at("b", Route::Change(ChangeNumber(11)))
+            );
+            assert_eq!(bell(cx, &run), 1);
+        }
+
+        #[gpui_kit::test]
+        fn r_toggles_read_and_the_bell_follows(cx: &mut TestAppContext) {
+            let run = start(cx, 0);
+            let page = open(cx, &run);
+            press(cx, &run, "r");
+            assert_eq!(rows(cx, &page)[0], (10, true));
+            assert_eq!(bell(cx, &run), 2);
+            assert!(stored(&run)[0].read_at.is_some());
+            press(cx, &run, "r");
+            assert_eq!(rows(cx, &page)[0], (10, false));
+            assert_eq!(bell(cx, &run), 3);
+            assert!(stored(&run)[0].read_at.is_none());
+            // The cursor stayed.
+            assert_eq!(cursor(cx, &page), 0);
+        }
+
+        #[gpui_kit::test]
+        fn shift_r_and_shift_a_mark_everything_read(cx: &mut TestAppContext) {
+            let run = start(cx, 1);
+            let page = open(cx, &run);
+            press(cx, &run, "shift-r");
+            assert!(rows(cx, &page).iter().all(|r| r.1));
+            assert_eq!(bell(cx, &run), 0);
+            assert!(stored(&run).iter().all(|i| i.read_at.is_some()));
+            press(cx, &run, "r");
+            assert_eq!(bell(cx, &run), 1);
+            press(cx, &run, "shift-a");
+            assert_eq!(bell(cx, &run), 0);
+        }
+
+        #[gpui_kit::test]
+        fn d_dismisses_the_row_and_shift_d_asks_before_clearing_the_read_ones(
+            cx: &mut TestAppContext,
+        ) {
+            let run = start(cx, 1);
+            let page = open(cx, &run);
+            press(cx, &run, "j");
+            press(cx, &run, "j");
+            press(cx, &run, "d");
+            assert_eq!(rows(cx, &page), [(10, true), (11, false)]);
+            // The cursor moved up onto what is last now.
+            assert_eq!(cursor(cx, &page), 1);
+            assert_eq!(stored(&run).len(), 2);
+            assert_eq!(bell(cx, &run), 1);
+
+            // Shift-D: the first press only asks.
+            press(cx, &run, "shift-d");
+            assert_eq!(rows(cx, &page).len(), 2);
+            cx.update(|cx| {
+                let (text, error) = page.read(cx).hint_for_test().expect("hint");
+                assert!(!error && text.contains("again"), "{text}");
+            });
+            // Another key cancels the question.
+            press(cx, &run, "k");
+            press(cx, &run, "shift-d");
+            assert_eq!(rows(cx, &page).len(), 2);
+            press(cx, &run, "shift-d");
+            assert_eq!(rows(cx, &page), [(11, false)]);
+            assert_eq!(stored(&run).len(), 1);
+            assert_eq!(bell(cx, &run), 1);
+            let _ = run.ids;
+        }
+
+        #[gpui_kit::test]
+        fn an_empty_inbox_says_so_and_the_keys_do_nothing(cx: &mut TestAppContext) {
+            let run = start(cx, 0);
+            run.store
+                .lock()
+                .expect("lock")
+                .delete_read_inbox(None)
+                .expect("clear");
+            run.store
+                .lock()
+                .expect("lock")
+                .mark_all_inbox_read(None, Timestamp::now())
+                .expect("read");
+            run.store
+                .lock()
+                .expect("lock")
+                .delete_read_inbox(None)
+                .expect("clear");
+            let page = open(cx, &run);
+            cx.update(|cx| assert!(page.read(cx).loaded_for_test()));
+            assert!(rows(cx, &page).is_empty());
+            for key in ["j", "enter", "r", "d", "shift-d", "shift-r"] {
+                press(cx, &run, key);
+            }
+            assert_eq!(route(cx, &run), Route::Inbox);
+            assert_eq!(bell(cx, &run), 0);
+        }
+
+        #[gpui_kit::test]
+        fn u_and_escape_leave_and_history_goes_back_and_forward(cx: &mut TestAppContext) {
+            let run = start(cx, 0);
+            open(cx, &run);
+            press(cx, &run, "u");
+            assert_eq!(route(cx, &run), Route::Dashboard);
+            press(cx, &run, "alt-right");
+            assert_eq!(route(cx, &run), Route::Inbox);
+            press(cx, &run, "escape");
+            assert_eq!(route(cx, &run), Route::Dashboard);
+            press(cx, &run, "alt-right");
+            assert_eq!(route(cx, &run), Route::Inbox);
+            press(cx, &run, "alt-left");
+            assert_eq!(route(cx, &run), Route::Dashboard);
+        }
+
+        #[gpui_kit::test]
+        fn the_keys_do_not_fire_behind_a_modal_dialog(cx: &mut TestAppContext) {
+            let run = start(cx, 0);
+            press(cx, &run, "g");
+            cx.update(|cx| assert!(run.shell.read(cx).goto_for_test().is_some()));
+            press(cx, &run, "ctrl-shift-n");
+            assert_eq!(route(cx, &run), Route::Dashboard);
+            cx.update(|cx| assert!(run.shell.read(cx).goto_for_test().is_some()));
+            press(cx, &run, "escape");
+
+            // On the inbox page the dialog takes the row keys too.
+            let page = open(cx, &run);
+            press(cx, &run, "g");
+            press(cx, &run, "r");
+            press(cx, &run, "d");
+            assert_eq!(rows(cx, &page).len(), 3);
+            assert_eq!(bell(cx, &run), 3);
+        }
+
+        #[gpui_kit::test]
+        fn the_bell_button_opens_the_inbox(cx: &mut TestAppContext) {
+            let run = start(cx, 0);
+            cx.update_window(run.window, |_, window, cx| {
+                run.shell
+                    .update(cx, |s, cx| s.open_inbox_for_test(window, cx))
+            })
+            .expect("window");
+            cx.run_until_parked();
+            assert_eq!(route(cx, &run), Route::Inbox);
         }
     }
 }

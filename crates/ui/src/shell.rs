@@ -1,7 +1,7 @@
 //! The root view: top bar, the current page, history, keyboard help and
 //! window-focus tracking.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use futures::StreamExt as _;
 use gerrit_api::Auth;
@@ -22,6 +22,7 @@ use crate::{
     attention::{self, Polled},
     filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
     goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, LinkServer, resolve_link},
+    inbox::{self, InboxOp},
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
     notifier::Notifier,
@@ -30,6 +31,7 @@ use crate::{
     pages::{
         change::{ChangeEvent, ChangePage},
         diff::{DiffPage, DiffPageEvent},
+        inbox::{InboxEvent, InboxPage, InboxServer},
         list::{ChangeListPage, ListEvent, ListKind},
         login::{LoginPage, LoginPrefill},
         settings::{SettingsEvent, SettingsPage, SettingsTab},
@@ -53,6 +55,7 @@ enum Page {
     Change(Entity<ChangePage>),
     Diff(Entity<DiffPage>),
     Settings(Entity<SettingsPage>),
+    Inbox(Entity<InboxPage>),
 }
 
 impl Page {
@@ -63,6 +66,7 @@ impl Page {
             Page::Change(p) => p.focus_handle(cx),
             Page::Diff(p) => p.focus_handle(cx),
             Page::Settings(p) => p.focus_handle(cx),
+            Page::Inbox(p) => p.focus_handle(cx),
         }
     }
 
@@ -73,6 +77,7 @@ impl Page {
             Page::Change(p) => p.clone().into_any_element(),
             Page::Diff(p) => p.clone().into_any_element(),
             Page::Settings(p) => p.clone().into_any_element(),
+            Page::Inbox(p) => p.clone().into_any_element(),
         }
     }
 
@@ -81,7 +86,7 @@ impl Page {
             Page::Login(_) => {}
             Page::List(p) => p.update(cx, |p, cx| p.set_window_active(active, cx)),
             Page::Change(p) => p.update(cx, |p, cx| p.set_window_active(active, cx)),
-            Page::Diff(_) | Page::Settings(_) => {}
+            Page::Diff(_) | Page::Settings(_) | Page::Inbox(_) => {}
         }
     }
 }
@@ -162,6 +167,12 @@ pub struct Shell {
     settings_tab: SettingsTab,
     /// When this run began: events from before it are catch-up.
     started: jiff::Timestamp,
+    /// The unread notifications of each server, as the bell counts them.
+    inbox_unread: HashMap<store::ServerId, usize>,
+    /// Changes to the inbox waiting for the worker, which applies them in
+    /// order on the background executor (`inbox_busy` while it runs).
+    inbox_queue: Vec<InboxOp>,
+    inbox_busy: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -266,6 +277,9 @@ impl Shell {
             notify_settings: NotificationSettings::default(),
             settings_tab: SettingsTab::default(),
             started: jiff::Timestamp::now(),
+            inbox_unread: HashMap::new(),
+            inbox_queue: Vec::new(),
+            inbox_busy: false,
             _subs: subs,
         };
         this.start(window, cx);
@@ -463,6 +477,7 @@ impl Shell {
         self.nav.reset_for(Some(active), self.start_route());
         self.show(window, cx);
         self.load_diff_preferences(cx);
+        self.inbox_op(InboxOp::Reload, cx);
     }
 
     /// The page a server opens on when it is shown for the first time (the
@@ -816,17 +831,38 @@ impl Shell {
                 );
             }
         }
-        // The inbox will keep `plan.delivered`, suppressed ones included.
+        // The inbox keeps every matched event, the suppressed ones too, and
+        // is written before the events are acknowledged, in one
+        // transaction: if it fails nothing is acknowledged, so the next
+        // pass finds the events again.
         log::debug!(
             "{key}: {} notification events, {} shown",
             plan.delivered.len(),
             plan.notifications.len()
         );
-        let seen = found.seen;
-        cx.background_spawn(async move {
-            if let Err(e) = syncer.ack_events(&seen) {
-                log::warn!("acknowledging notification events failed: {e}");
-            }
+        let items = inbox::items_for(&self.notify_settings, &plan.delivered);
+        let (seen, keys) = (found.seen, plan.delivered.iter().map(|d| d.event.key()));
+        let keys: Vec<String> = keys.collect();
+        let key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let now = jiff::Timestamp::now();
+            let written = cx
+                .background_spawn(async move { syncer.deliver_events(&items, &seen, now) })
+                .await;
+            this.update(cx, |this, cx| match written {
+                Ok(0) => {}
+                Ok(_) => this.inbox_op(InboxOp::Reload, cx),
+                Err(e) => {
+                    log::warn!("keeping notifications of {key} in the inbox failed: {e}");
+                    // Not in flight any more: the next pass reports them again.
+                    if let Some(entry) = this.servers.get_mut(&key) {
+                        for k in &keys {
+                            entry.notified.remove(k);
+                        }
+                    }
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -1178,6 +1214,25 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn inbox_page_for_test(&self) -> Option<Entity<InboxPage>> {
+        match &self.page {
+            Page::Inbox(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_inbox_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_inbox(&OpenInbox, window, cx);
+    }
+
+    /// What the bell counts.
+    #[cfg(test)]
+    pub(crate) fn inbox_unread_for_test(&self) -> usize {
+        inbox::total(&self.inbox_unread)
+    }
+
+    #[cfg(test)]
     pub(crate) fn notify_settings_for_test(&self) -> &NotificationSettings {
         &self.notify_settings
     }
@@ -1239,6 +1294,7 @@ impl Shell {
                 self.list_page(session, ListKind::Search, spec, restore, active, window, cx)
             }
             (Route::Settings, Some(_)) => self.settings_page(window, cx),
+            (Route::Inbox, Some(_)) => self.inbox_page(window, cx),
             (Route::Diff(route), Some(session)) => self.diff_page(session, route, window, cx),
             (Route::Change(n), Some(session)) => {
                 let view = self.nav.change_view().unwrap_or_default();
@@ -1377,6 +1433,92 @@ impl Shell {
             },
         ));
         Page::List(page)
+    }
+
+    fn inbox_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Page {
+        let servers = self
+            .servers
+            .keys()
+            .into_iter()
+            .filter_map(|key| {
+                let id = self.servers.get(&key)?.setup.server;
+                let badge = self.servers.badge(&key);
+                Some(InboxServer { id, key, badge })
+            })
+            .collect();
+        let page = cx.new(|cx| InboxPage::new(servers, cx));
+        self.page_subs.push(cx.subscribe_in(
+            &page,
+            window,
+            |this, _, ev: &InboxEvent, window, cx| match ev {
+                InboxEvent::Op(op) => this.inbox_op(op.clone(), cx),
+                InboxEvent::Open { server, change } => {
+                    this.go_to(server, Route::Change(*change), None, window, cx)
+                }
+            },
+        ));
+        // The rows come from the store.
+        self.inbox_op(InboxOp::Reload, cx);
+        Page::Inbox(page)
+    }
+
+    /// Queues a change to the inbox. The worker applies the queue in order
+    /// off the main thread, then reads the unread counts for the bell (and
+    /// the rows, for the page when it is open and was asked to reload or
+    /// something failed).
+    fn inbox_op(&mut self, op: InboxOp, cx: &mut Context<Self>) {
+        self.inbox_queue.push(op);
+        if self.inbox_busy {
+            return;
+        }
+        self.inbox_busy = true;
+        let store = self.env.store.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let next = this.update(cx, |this, _| {
+                    let ops = std::mem::take(&mut this.inbox_queue);
+                    if ops.is_empty() {
+                        this.inbox_busy = false;
+                    }
+                    (
+                        ops,
+                        this.servers.server_ids(),
+                        matches!(this.page, Page::Inbox(_)),
+                    )
+                });
+                let Ok((ops, servers, page_open)) = next else {
+                    return;
+                };
+                if ops.is_empty() {
+                    return;
+                }
+                let store = store.clone();
+                let loaded = cx
+                    .background_spawn(
+                        async move { run_inbox_ops(&store, &ops, &servers, page_open) },
+                    )
+                    .await;
+                let applied = this.update(cx, |this, cx| {
+                    if let Some(counts) = loaded.counts {
+                        this.inbox_unread = counts;
+                    }
+                    if let (Some(items), Page::Inbox(page)) = (loaded.items, &this.page) {
+                        page.update(cx, |p, cx| p.set_items(items, cx));
+                    }
+                    cx.notify();
+                });
+                if applied.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn open_inbox(&mut self, _: &OpenInbox, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session().is_some() {
+            self.navigate(Route::Inbox, window, cx);
+        }
     }
 
     fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Page {
@@ -1754,6 +1896,8 @@ impl Shell {
         let was_active = self.servers.active_key() == Some(key);
         self.servers.remove(key);
         self.nav.forget_server(key);
+        // The store dropped its notifications with the server.
+        self.inbox_op(InboxOp::Reload, cx);
         if self
             .prefill
             .as_ref()
@@ -2640,6 +2784,7 @@ impl Shell {
                     .child(no_drag(
                         h_flex()
                             .gap_1()
+                            .child(self.render_bell(cx))
                             .child(
                                 Button::new("settings")
                                     .icon(IconName::Settings)
@@ -2655,6 +2800,42 @@ impl Shell {
             }
         };
         TitleBar::new().child(content)
+    }
+
+    /// The bell: opens the inbox, with the number of unread notifications
+    /// of all servers on it (nothing when there are none).
+    fn render_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let unread = inbox::total(&self.inbox_unread);
+        div()
+            .relative()
+            .child(
+                Button::new("inbox")
+                    .icon(IconName::Bell)
+                    .small()
+                    .tooltip("Notifications (Ctrl-Shift-N)")
+                    .on_click(cx.listener(|this, _, w, cx| this.open_inbox(&OpenInbox, w, cx))),
+            )
+            .when(unread > 0, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(-2.))
+                        .right(px(-2.))
+                        .px_1()
+                        .min_w(px(14.))
+                        .rounded_full()
+                        .bg(theme.danger)
+                        .text_color(theme.danger_foreground)
+                        .text_size(px(10.))
+                        .text_center()
+                        .child(if unread > 99 {
+                            "99+".to_owned()
+                        } else {
+                            unread.to_string()
+                        }),
+                )
+            })
     }
 
     /// The active server's chip, with several servers: its dot, name and
@@ -2811,6 +2992,54 @@ impl Shell {
     }
 }
 
+/// What a batch of inbox changes left: the unread counts for the bell, and
+/// the rows if the page needs them.
+struct InboxLoaded {
+    counts: Option<HashMap<store::ServerId, usize>>,
+    items: Option<Vec<store::InboxItem>>,
+}
+
+/// Applies `ops` to the store, then reads the unread counts, and the rows of
+/// `servers` if the page is open and wants them (a reload was asked for, or
+/// a change failed, so that it shows what the store has).
+fn run_inbox_ops(
+    store: &std::sync::Mutex<store::Store>,
+    ops: &[InboxOp],
+    servers: &[store::ServerId],
+    page_open: bool,
+) -> InboxLoaded {
+    let Ok(mut store) = store.lock() else {
+        log::warn!("the cache is unavailable: no inbox update");
+        return InboxLoaded {
+            counts: None,
+            items: None,
+        };
+    };
+    let now = jiff::Timestamp::now();
+    let mut failed = false;
+    for op in ops {
+        if let Err(e) = op.apply(&mut store, now) {
+            log::warn!("changing the notification inbox failed: {e}");
+            failed = true;
+        }
+    }
+    let counts = store
+        .inbox_unread_counts()
+        .map_err(|e| log::warn!("counting unread notifications failed: {e}"))
+        .ok();
+    let reload = ops.contains(&InboxOp::Reload) || failed;
+    let items = (page_open && reload)
+        .then(|| {
+            let limit = store::INBOX_KEEP * servers.len().max(1);
+            store
+                .inbox_items(Some(servers), limit)
+                .map_err(|e| log::warn!("reading the notification inbox failed: {e}"))
+                .ok()
+        })
+        .flatten();
+    InboxLoaded { counts, items }
+}
+
 /// "2 drafts not uploaded", "1 failed" or both.
 fn draft_label(counts: sync::DraftCounts) -> Option<String> {
     let mut parts = Vec::new();
@@ -2858,6 +3087,7 @@ impl Render for Shell {
                     .on_action(cx.listener(Self::go_forward))
                     .on_action(cx.listener(Self::go_up))
                     .on_action(cx.listener(Self::open_settings))
+                    .on_action(cx.listener(Self::open_inbox))
                     .on_action(cx.listener(Self::switch_server))
                     .on_action(cx.listener(Self::toggle_server_switcher))
                     .on_action(cx.listener(Self::add_server))

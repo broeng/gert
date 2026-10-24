@@ -30,6 +30,8 @@ actions!(
         ToggleServerSwitcher,
         /// `ctrl-shift-a`: the login page, to add a server.
         AddServer,
+        /// `ctrl-shift-n`: the notification inbox.
+        OpenInbox,
         /// `b b` on a search: bookmark the query (asks for a label), or take
         /// its bookmark away again.
         ToggleBookmark,
@@ -61,6 +63,15 @@ actions!(
         /// `Tab` / `Shift-Tab` while editing: the other field.
         NextField,
         PrevField,
+        // Inbox page.
+        /// `r`: mark the notification read, or unread again.
+        ToggleInboxRead,
+        /// `shift-r` / `shift-a`: mark every notification read.
+        MarkAllInboxRead,
+        /// `d`: dismiss the notification (delete it from the inbox).
+        DismissInboxItem,
+        /// `shift-d`: dismiss every read notification (asks first).
+        ClearReadInbox,
         // Change page.
         /// Show or hide the inline diff of the file under the cursor.
         ToggleInline,
@@ -161,6 +172,8 @@ pub const SHELL: &str = "Shell";
 pub const CHANGE_LIST: &str = "ChangeList";
 /// Key context of the change page.
 pub const CHANGE_PAGE: &str = "ChangePage";
+/// Key context of the inbox page.
+pub const INBOX_PAGE: &str = "InboxPage";
 /// Key context of the diff page (around the diff view).
 pub const DIFF_PAGE: &str = "DiffPage";
 /// Key context of the diff preferences panel.
@@ -173,6 +186,7 @@ pub const SEARCH_BAR: &str = "SearchBar";
 const SHELL_KEYS: &str = "Shell && !Input && !ReplyDialog && !ActionDialog && !FiltersDialog && !GotoDialog && !ServerSwitcher";
 const LIST_KEYS: &str = "ChangeList && !Input";
 const CHANGE_KEYS: &str = "ChangePage && !Input";
+const INBOX_KEYS: &str = "InboxPage && !Input";
 const DIFF_PAGE_KEYS: &str = "DiffPage && !Input";
 const DIFF_PREFS_KEYS: &str = "DiffPrefs && !Input";
 /// The label box of a new bookmark; as deep as the input's own context, to
@@ -187,6 +201,10 @@ const SETTINGS_FIELD: &str = "Editing > Input";
 /// Opening the settings works from anywhere but the modal dialogs.
 const SETTINGS_OPEN: &str =
     "Shell && !ReplyDialog && !ActionDialog && !FiltersDialog && !GotoDialog";
+
+/// Opening the inbox works from anywhere but the modal dialogs, the rule
+/// editor and the server switcher included.
+const INBOX_OPEN: &str = "Shell && !ReplyDialog && !ActionDialog && !FiltersDialog && !NotifyRuleDialog && !GotoDialog && !ServerSwitcher";
 
 /// All shell-level and list entries (what the help overlay called
 /// "everything" before the pages grew their own).
@@ -209,6 +227,7 @@ pub fn help_groups() -> Vec<HelpGroup> {
         g("Change page", change_entries()),
         g("Diff page", diff_page_entries()),
         g("Settings page", settings_entries()),
+        g("Inbox page ( Ctrl-Shift-N )", inbox_entries()),
         g("In a diff", crate::diff::actions::entries()),
         g("Writing a comment", crate::diff::actions::editor_entries()),
         g("Reply dialog ( A )", crate::reply::actions::entries()),
@@ -791,6 +810,52 @@ pub fn settings_entries() -> Vec<Entry> {
     ]
 }
 
+/// Entries of the notification inbox page.
+pub fn inbox_entries() -> Vec<Entry> {
+    let k = INBOX_KEYS;
+    vec![
+        e(
+            "j / k",
+            KeyBinding::new("j", SelectNext, Some(k)),
+            "Next / previous notification",
+        ),
+        e("", KeyBinding::new("k", SelectPrev, Some(k)), ""),
+        e("", KeyBinding::new("down", SelectNext, Some(k)), ""),
+        e("", KeyBinding::new("up", SelectPrev, Some(k)), ""),
+        e(
+            "Enter / o",
+            KeyBinding::new("enter", OpenSelected, Some(k)),
+            "Open the change (on its server) and mark the notification read",
+        ),
+        e("", KeyBinding::new("o", OpenSelected, Some(k)), ""),
+        e(
+            "r",
+            KeyBinding::new("r", ToggleInboxRead, Some(k)),
+            "Mark the notification read / unread",
+        ),
+        e(
+            "Shift-R / Shift-A",
+            KeyBinding::new("shift-r", MarkAllInboxRead, Some(k)),
+            "Mark every notification read",
+        ),
+        e(
+            "",
+            KeyBinding::new("shift-a", MarkAllInboxRead, Some(k)),
+            "",
+        ),
+        e(
+            "d",
+            KeyBinding::new("d", DismissInboxItem, Some(k)),
+            "Dismiss the notification",
+        ),
+        e(
+            "Shift-D",
+            KeyBinding::new("shift-d", ClearReadInbox, Some(k)),
+            "Dismiss every read notification (press again to confirm)",
+        ),
+    ]
+}
+
 /// Entries that work on every page.
 pub fn global_entries() -> Vec<Entry> {
     vec![
@@ -859,6 +924,11 @@ pub fn global_entries() -> Vec<Entry> {
             "Add a server: opens the login page for a new one (also in the switcher)",
         ),
         e(
+            "Ctrl-Shift-N",
+            KeyBinding::new("ctrl-shift-n", OpenInbox, Some(INBOX_OPEN)),
+            "Open the notification inbox (the bell in the title bar)",
+        ),
+        e(
             "u",
             KeyBinding::new("u", GoUp, Some(SHELL_KEYS)),
             "Up: from a diff to its change, from a change to its list",
@@ -896,7 +966,7 @@ pub fn global_entries() -> Vec<Entry> {
         e(
             "Esc",
             KeyBinding::new("escape", Dismiss, Some(SHELL_KEYS)),
-            "Close help, or go up a level (diff to change, change to list)",
+            "Close help, or go up a level (diff to change, change to list, settings or inbox to the dashboard)",
         ),
         e(
             "",
@@ -915,6 +985,7 @@ pub fn bind_keys(cx: &mut App) {
             .chain(diff_page_entries())
             .chain(diff_prefs_entries())
             .chain(settings_entries())
+            .chain(inbox_entries())
             .map(|e| e.binding),
     );
 }
@@ -923,7 +994,7 @@ pub fn bind_keys(cx: &mut App) {
 mod tests {
     use super::{
         Entry, change_entries, diff_page_entries, diff_prefs_entries, entries, help_groups,
-        settings_entries,
+        inbox_entries, settings_entries,
     };
 
     /// Every binding the app registers (see `bind_keys` here and in
@@ -935,6 +1006,7 @@ mod tests {
             .chain(diff_page_entries())
             .chain(diff_prefs_entries())
             .chain(settings_entries())
+            .chain(inbox_entries())
             .chain(crate::diff::actions::entries())
             .chain(crate::diff::actions::editor_entries())
             .chain(crate::reply::actions::entries())
