@@ -688,17 +688,17 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "a",
             KeyBinding::new("a", AddQuery, Some(b)),
-            "Add a query; in File filters: a new rule in the dialog",
+            "Add a query; in File filters: a new rule in the dialog; in Notifications: a new notification rule",
         ),
         e(
             "d",
             KeyBinding::new("d", DeleteQuery, Some(b)),
-            "Delete the query (y / Enter: yes, n / Esc: no); on a file filter: open the dialog on it",
+            "Delete the query or notification rule (y / Enter: yes, n / Esc: no); on a file filter: open the dialog on it",
         ),
         e(
             "Shift-J / Shift-K",
             KeyBinding::new("shift-j", MoveQueryDown, Some(b)),
-            "Move the query down / up",
+            "Move the query or notification rule down / up",
         ),
         e("", KeyBinding::new("shift-k", MoveQueryUp, Some(b)), ""),
         e(
@@ -742,7 +742,7 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "t",
             KeyBinding::new("t", TestConnection, Some(b)),
-            "Servers: test the connection of the selected server (a adds one, Enter edits, d removes it with its cache and password)",
+            "Servers: test the connection of the selected server (a adds one, Enter edits, d removes it with its cache and password); Notifications: send a test notification",
         ),
         e(
             "",

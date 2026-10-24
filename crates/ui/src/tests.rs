@@ -2659,11 +2659,13 @@ mod settings_page {
                 page.read(cx).notify_row_for_test()
             });
             assert_eq!(first, FIRST);
-            // The cursor stays in the tab: the two timing rows end it.
-            for _ in 0..10 {
+            // The cursor stays in the tab: the test row ends it, after the
+            // options, the timing rows, the four default rules and the reset
+            // row.
+            for _ in 0..20 {
                 press(cx, &f, "j");
             }
-            assert_eq!(tab_state(cx, &f).1, FIRST + 5);
+            assert_eq!(tab_state(cx, &f).1, FIRST + 11);
             press(cx, &f, "1");
             assert_eq!(tab_state(cx, &f), (SettingsTab::Servers, 9));
         }
@@ -2774,6 +2776,204 @@ mod settings_page {
             assert!(!editing(cx, &f));
             assert_eq!(page_settings(cx, &f).quiet_hours, None);
             assert_eq!(writes(&f).len(), 2);
+        }
+
+        /// Where the rules start: the toggles and the timing rows are before.
+        const RULES: usize = FIRST + 6;
+
+        fn rule_titles(cx: &mut TestAppContext, f: &Fixture) -> Vec<String> {
+            page_settings(cx, f)
+                .rules
+                .iter()
+                .map(|r| r.title())
+                .collect()
+        }
+
+        fn at(cx: &mut TestAppContext, f: &Fixture, row: usize) {
+            cx.update(|cx| {
+                let page = f.shell.read(cx).settings_page_for_test().expect("page");
+                page.update(cx, |p, cx| p.select_row_for_test(row, cx));
+            });
+        }
+
+        fn hint(cx: &mut TestAppContext, f: &Fixture) -> Option<(String, bool)> {
+            cx.update(|cx| {
+                let page = f.shell.read(cx).settings_page_for_test().expect("page");
+                page.read(cx).hint_for_test()
+            })
+        }
+
+        fn defaults(cx: &mut TestAppContext, f: &Fixture) -> bool {
+            cx.update(|cx| {
+                let page = f.shell.read(cx).settings_page_for_test().expect("page");
+                page.read(cx).rules_are_defaults_for_test()
+            })
+        }
+
+        #[gpui_kit::test]
+        fn the_default_rules_are_listed_and_the_first_change_writes_them_all(
+            cx: &mut TestAppContext,
+        ) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            assert!(defaults(cx, &f));
+            assert_eq!(rule_titles(cx, &f).len(), 4);
+            assert_eq!(rule_titles(cx, &f)[1], "Negative Code-Review on my changes");
+            // A global option writes no rules of its own: the defaults stay
+            // the defaults.
+            assert!(writes(&f).is_empty());
+            // Switching a rule off writes the whole list, with that one off.
+            at(cx, &f, RULES);
+            assert_eq!(tab_state(cx, &f).1, RULES);
+            press(cx, &f, "space");
+            let written = writes(&f);
+            assert_eq!(written.len(), 1);
+            assert_eq!(written[0].rules.len(), 4);
+            assert!(!written[0].rules[0].enabled && written[0].rules[1].enabled);
+            assert!(!defaults(cx, &f));
+            assert!(!shell_settings(cx, &f).rules[0].enabled);
+            // And back on.
+            press(cx, &f, "space");
+            assert!(page_settings(cx, &f).rules[0].enabled);
+        }
+
+        #[gpui_kit::test]
+        fn rules_move_with_shift_j_and_k_and_the_cursor_follows(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            at(cx, &f, RULES);
+            let before = rule_titles(cx, &f);
+            press(cx, &f, "shift-j");
+            let after = rule_titles(cx, &f);
+            assert_eq!(after[1], before[0]);
+            assert_eq!(after[0], before[1]);
+            assert_eq!(tab_state(cx, &f).1, RULES + 1);
+            press(cx, &f, "shift-k");
+            assert_eq!(rule_titles(cx, &f), before);
+            assert_eq!(tab_state(cx, &f).1, RULES);
+            // The first rule cannot move up, the last cannot move down.
+            press(cx, &f, "shift-k");
+            assert_eq!(writes(&f).len(), 2);
+            at(cx, &f, RULES + 3);
+            press(cx, &f, "shift-j");
+            assert_eq!(writes(&f).len(), 2);
+        }
+
+        #[gpui_kit::test]
+        fn deleting_a_rule_asks_first_and_the_last_one_brings_the_defaults_back(
+            cx: &mut TestAppContext,
+        ) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            at(cx, &f, RULES + 1);
+            press(cx, &f, "d");
+            press(cx, &f, "n");
+            assert_eq!(rule_titles(cx, &f).len(), 4);
+            assert!(writes(&f).is_empty());
+            press(cx, &f, "d");
+            press(cx, &f, "y");
+            assert_eq!(rule_titles(cx, &f).len(), 3);
+            assert_eq!(writes(&f).len(), 1);
+            assert!(!defaults(cx, &f));
+            // The cursor stays on the place of the deleted rule.
+            assert_eq!(tab_state(cx, &f).1, RULES + 1);
+            // Down to no rules: the file then has none, and the defaults
+            // apply again, which the page says.
+            for _ in 0..3 {
+                at(cx, &f, RULES);
+                press(cx, &f, "d");
+                press(cx, &f, "enter");
+            }
+            assert!(writes(&f).last().expect("write").rules.is_empty());
+            assert!(defaults(cx, &f));
+            let (text, error) = hint(cx, &f).expect("hint");
+            assert!(!error && text.contains("default rules"), "{text}");
+        }
+
+        #[gpui_kit::test]
+        fn a_failed_delete_changes_nothing_and_says_so(cx: &mut TestAppContext) {
+            let f = fixture(cx, true);
+            show(cx, &f);
+            at(cx, &f, RULES);
+            press(cx, &f, "d");
+            press(cx, &f, "y");
+            assert_eq!(rule_titles(cx, &f).len(), 4);
+            let (text, error) = hint(cx, &f).expect("hint");
+            assert!(error && text.contains("disk full"), "{text}");
+            // The question is over: a key works again.
+            press(cx, &f, "j");
+            assert_eq!(tab_state(cx, &f).1, RULES + 1);
+        }
+
+        #[gpui_kit::test]
+        fn reset_to_defaults_asks_and_is_idle_on_the_defaults(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            let reset = RULES + 4;
+            at(cx, &f, reset);
+            press(cx, &f, "enter");
+            let (text, _) = hint(cx, &f).expect("hint");
+            assert!(text.contains("already"), "{text}");
+            assert!(writes(&f).is_empty());
+
+            at(cx, &f, RULES);
+            press(cx, &f, "space");
+            assert!(!defaults(cx, &f));
+            at(cx, &f, reset);
+            press(cx, &f, "enter");
+            press(cx, &f, "n");
+            assert!(!defaults(cx, &f));
+            press(cx, &f, "enter");
+            press(cx, &f, "y");
+            assert!(defaults(cx, &f));
+            assert!(page_settings(cx, &f).rules[0].enabled);
+        }
+
+        fn with_notifier(
+            cx: &mut TestAppContext,
+            f: &Fixture,
+        ) -> Arc<crate::testing::RecordingNotifier> {
+            let notifier = Arc::new(crate::testing::RecordingNotifier::default());
+            // Off, so that nothing is watched and only the test is shown.
+            let settings = NotificationSettings {
+                enabled: false,
+                ..Default::default()
+            };
+            let n = notifier.clone();
+            cx.update_window(f.window, |_, window, cx| {
+                f.shell
+                    .update(cx, |s, cx| s.set_notifications(n, settings, window, cx))
+            })
+            .expect("window");
+            cx.run_until_parked();
+            notifier
+        }
+
+        #[gpui_kit::test]
+        fn the_test_row_and_t_show_a_notification_through_the_notifier(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            let notifier = with_notifier(cx, &f);
+            show(cx, &f);
+            at(cx, &f, RULES + 5);
+            press(cx, &f, "enter");
+            assert_eq!(notifier.titles(), ["Test notification"]);
+            let (text, error) = hint(cx, &f).expect("hint");
+            assert!(!error && text.starts_with("Sent"), "{text}");
+            assert!(text.contains("daemon"), "{text}");
+            // `t` works from any row of the tab, and while the master
+            // switch is off.
+            at(cx, &f, FIRST);
+            press(cx, &f, "t");
+            assert_eq!(notifier.shown().len(), 2);
+        }
+
+        #[gpui_kit::test]
+        fn without_a_notifier_the_test_says_so(cx: &mut TestAppContext) {
+            let f = fixture(cx, false);
+            show(cx, &f);
+            press(cx, &f, "t");
+            let (text, error) = hint(cx, &f).expect("hint");
+            assert!(error && text.contains("not available"), "{text}");
         }
 
         #[gpui_kit::test]

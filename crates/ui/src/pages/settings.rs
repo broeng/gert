@@ -85,6 +85,11 @@ pub enum SettingsEvent {
     /// The notification settings were written; this is what is now in
     /// effect, for the watches.
     NotificationsSaved(NotificationSettings),
+    /// Open the rule editor on rule `index` of the notification rules; one
+    /// past the end is a new rule.
+    EditNotificationRule { index: usize },
+    /// Show a sample notification now (see `Shell::test_notification`).
+    TestNotification,
 }
 
 /// The tabs of the page, in the order they are shown. To add one: a variant
@@ -185,6 +190,10 @@ enum Mode {
     EditingServer(usize),
     /// Asking whether to remove server `index`.
     ConfirmingServer(usize),
+    /// Asking whether to delete notification rule `index`.
+    ConfirmingRule(usize),
+    /// Asking whether to replace the notification rules by the defaults.
+    ConfirmingReset,
 }
 
 // ---- pure list logic ----
@@ -741,7 +750,9 @@ impl SettingsPage {
     }
 
     fn add_query(&mut self, _: &AddQuery, window: &mut Window, cx: &mut Context<Self>) {
-        if self.in_filters() {
+        if self.in_notifications() {
+            self.add_notification_rule(cx);
+        } else if self.in_filters() {
             self.manage_filters(None, true, cx);
         } else if self.in_servers() {
             if self.mode == Mode::Browsing && self.can_change() {
@@ -890,7 +901,9 @@ impl SettingsPage {
     fn delete_query(&mut self, _: &DeleteQuery, _: &mut Window, cx: &mut Context<Self>) {
         // The dialog asks before it deletes a rule; the page has no path of
         // its own for that.
-        if let Some(i) = self.filter_under_cursor() {
+        if self.in_notifications() {
+            self.ask_delete_rule(cx);
+        } else if let Some(i) = self.filter_under_cursor() {
             self.manage_filters(Some(i), false, cx);
         } else if self.in_servers() {
             if self.can_change()
@@ -911,6 +924,9 @@ impl SettingsPage {
     }
 
     fn confirm_delete(&mut self, _: &ConfirmDelete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.can_change() && self.confirm_rule_question(window, cx) {
+            return;
+        }
         if let Mode::ConfirmingServer(i) = self.mode
             && self.can_change()
         {
@@ -925,7 +941,14 @@ impl SettingsPage {
     }
 
     fn cancel_delete(&mut self, _: &CancelDelete, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.mode, Mode::Confirming(..) | Mode::ConfirmingServer(_)) && !self.busy {
+        if matches!(
+            self.mode,
+            Mode::Confirming(..)
+                | Mode::ConfirmingServer(_)
+                | Mode::ConfirmingRule(_)
+                | Mode::ConfirmingReset
+        ) && !self.busy
+        {
             self.mode = Mode::Browsing;
             cx.notify();
         }
@@ -947,6 +970,9 @@ impl SettingsPage {
         }
         if self.in_servers() {
             return self.move_server(delta, window, cx);
+        }
+        if self.in_notifications() {
+            return self.move_rule(delta, window, cx);
         }
         if let Some((which, index)) = self.item_under_cursor()
             && let Some((list, to)) = moved(self.list(which), index, delta)
@@ -1143,7 +1169,10 @@ impl SettingsPage {
             | Mode::EditingServer(_)
             | Mode::EditingGroupWindow
             | Mode::EditingQuietHours => "SettingsPage Editing",
-            Mode::Confirming(..) | Mode::ConfirmingServer(_) => "SettingsPage Confirming",
+            Mode::Confirming(..)
+            | Mode::ConfirmingServer(_)
+            | Mode::ConfirmingRule(_)
+            | Mode::ConfirmingReset => "SettingsPage Confirming",
         }
     }
 
