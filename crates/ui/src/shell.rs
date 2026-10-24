@@ -1226,6 +1226,12 @@ impl Shell {
         self.open_inbox(&OpenInbox, window, cx);
     }
 
+    /// Asks the inbox worker to re-read the store, as a delivered event does.
+    #[cfg(test)]
+    pub(crate) fn inbox_reload_for_test(&mut self, cx: &mut Context<Self>) {
+        self.inbox_op(InboxOp::Reload, cx);
+    }
+
     /// What the bell counts.
     #[cfg(test)]
     pub(crate) fn inbox_unread_for_test(&self) -> usize {
@@ -1459,6 +1465,8 @@ impl Shell {
         ));
         // The rows come from the store.
         self.inbox_op(InboxOp::Reload, cx);
+        // Opening the page is seeing what is in it: the bell resets.
+        self.inbox_op(InboxOp::Seen, cx);
         Page::Inbox(page)
     }
 
@@ -3017,7 +3025,11 @@ fn run_inbox_ops(
     };
     let now = jiff::Timestamp::now();
     let mut failed = false;
-    for op in ops {
+    let reload_asked = ops.contains(&InboxOp::Reload);
+    // While the page is open, rows it is about to show count as seen, so a
+    // new arrival leaves no badge behind.
+    let seen = (page_open && reload_asked).then_some(&InboxOp::Seen);
+    for op in ops.iter().chain(seen) {
         if let Err(e) = op.apply(&mut store, now) {
             log::warn!("changing the notification inbox failed: {e}");
             failed = true;
@@ -3027,7 +3039,7 @@ fn run_inbox_ops(
         .inbox_unread_counts()
         .map_err(|e| log::warn!("counting unread notifications failed: {e}"))
         .ok();
-    let reload = ops.contains(&InboxOp::Reload) || failed;
+    let reload = reload_asked || failed;
     let items = (page_open && reload)
         .then(|| {
             let limit = store::INBOX_KEEP * servers.len().max(1);
