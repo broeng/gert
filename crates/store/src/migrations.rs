@@ -200,6 +200,21 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE servers_new RENAME TO servers;
     CREATE INDEX servers_by_url ON servers (base_url);
     ",
+    // v6 -> v7: notifications. `notified_events` is the ledger of event keys
+    // that were already reported, so a restart or a re-detected change never
+    // notifies twice (`events.rs`); `seen_ms` is Unix milliseconds, for
+    // pruning. `servers.watched_since` (Unix milliseconds) is NULL until the
+    // first watch pass has recorded a baseline for the server.
+    "
+    CREATE TABLE notified_events (
+        server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        key       TEXT NOT NULL,
+        seen_ms   INTEGER NOT NULL,
+        PRIMARY KEY (server_id, key)
+    );
+    CREATE INDEX notified_events_seen ON notified_events (seen_ms);
+    ALTER TABLE servers ADD COLUMN watched_since INTEGER;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {
