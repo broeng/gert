@@ -22,9 +22,36 @@ pub fn relative(now: Timestamp, then: Timestamp, tz: &TimeZone) -> String {
     }
 }
 
+/// The heading of the day `then` falls on, in `tz`: "Today", "Yesterday",
+/// a weekday and date within the last week (`Mon, Mar 4`), else the date
+/// (`Mar 4` this year, `2023-03-04` otherwise).
+pub fn day_label(now: Timestamp, then: Timestamp, tz: &TimeZone) -> String {
+    let (today, day) = (now.to_zoned(tz.clone()), then.to_zoned(tz.clone()));
+    let days = (today.date() - day.date()).get_days();
+    match days {
+        i32::MIN..=0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        2..=6 => day.strftime("%a, %b %-d").to_string(),
+        _ if day.year() == today.year() => day.strftime("%b %-d").to_string(),
+        _ => day.strftime("%Y-%m-%d").to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn day_headings() {
+        let now = ts("2024-06-15T12:00:00Z");
+        let label = |then: &str| day_label(now, ts(then), &TimeZone::UTC);
+        assert_eq!(label("2024-06-15T00:00:00Z"), "Today");
+        assert_eq!(label("2024-06-16T09:00:00Z"), "Today");
+        assert_eq!(label("2024-06-14T23:59:00Z"), "Yesterday");
+        assert_eq!(label("2024-06-12T08:00:00Z"), "Wed, Jun 12");
+        assert_eq!(label("2024-06-08T08:00:00Z"), "Jun 8");
+        assert_eq!(label("2023-06-08T08:00:00Z"), "2023-06-08");
+    }
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()

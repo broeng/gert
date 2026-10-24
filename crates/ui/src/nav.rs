@@ -12,6 +12,9 @@ pub enum Route {
     Dashboard,
     Search(String),
     Settings,
+    /// The notification inbox, which lists the notifications of every
+    /// server; like the settings it takes the server that was active.
+    Inbox,
     Change(ChangeNumber),
     /// One file's diff, like PolyGerrit's `/c/proj/+/123/2..5/path`.
     Diff(DiffRoute),
@@ -267,7 +270,7 @@ impl NavState {
     pub fn up_target(&self) -> Option<Route> {
         match self.current() {
             Route::Login | Route::Dashboard => None,
-            Route::Search(_) | Route::Settings => Some(Route::Dashboard),
+            Route::Search(_) | Route::Settings | Route::Inbox => Some(Route::Dashboard),
             Route::Diff(d) => Some(Route::Change(d.change)),
             Route::Change(_) => Some(
                 self.entries[..self.index]

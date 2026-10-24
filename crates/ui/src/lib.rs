@@ -12,6 +12,7 @@ pub mod filters;
 mod filters_dialog;
 mod goto;
 mod hint;
+mod inbox;
 mod labels;
 mod links;
 mod list_model;
