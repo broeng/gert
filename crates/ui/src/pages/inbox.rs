@@ -4,7 +4,8 @@
 //!
 //! The shell hands over the rows read from the store and applies what the
 //! page asks for ([`InboxOp`]); the page changes its own copy at once, so
-//! a key never waits for the database.
+//! a key never waits for the database. Opening the page marks every
+//! notification seen (the bell resets); none becomes read by that.
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex, v_flex};

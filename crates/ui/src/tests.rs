@@ -2043,8 +2043,57 @@ mod drafts {
                 assert_eq!(groups[1].1, 1);
             });
             assert_eq!(cursor(cx, &page), 0);
-            assert_eq!(bell(cx, &run), 3);
+            // Opening it resets the bell, but the rows stay unread.
+            assert_eq!(bell(cx, &run), 0);
             assert!(stored(&run).iter().all(|i| i.read_at.is_none()));
+        }
+
+        #[gpui_kit::test]
+        fn a_new_event_bumps_the_bell_again_unless_the_page_is_open(cx: &mut TestAppContext) {
+            let run = start(cx, 0);
+            assert_eq!(bell(cx, &run), 3);
+            let page = open(cx, &run);
+            assert_eq!(bell(cx, &run), 0);
+
+            // An event arrives while the page is open: shown, and no badge.
+            let item = |change: u64| store::NewInboxItem {
+                event: model::Event {
+                    server: run.ids[0],
+                    change: ChangeNumber(change),
+                    project: "p".into(),
+                    subject: "s".into(),
+                    owner: None,
+                    actor: None,
+                    at: Timestamp::now(),
+                    kind: model::EventKind::Merged,
+                    subject_account: None,
+                },
+                rule_title: "r".into(),
+                mention: false,
+                shown_on_os: false,
+            };
+            run.store
+                .lock()
+                .expect("lock")
+                .add_inbox(run.ids[0], &[item(40)], Timestamp::now())
+                .expect("add");
+            cx.update(|cx| run.shell.update(cx, |s, cx| s.inbox_reload_for_test(cx)));
+            cx.run_until_parked();
+            assert_eq!(rows(cx, &page).len(), 4);
+            assert_eq!(bell(cx, &run), 0);
+            assert!(rows(cx, &page).iter().all(|r| !r.1));
+
+            // After leaving, the next arrival counts.
+            press(cx, &run, "u");
+            assert_eq!(route(cx, &run), Route::Dashboard);
+            run.store
+                .lock()
+                .expect("lock")
+                .add_inbox(run.ids[0], &[item(41)], Timestamp::now())
+                .expect("add");
+            cx.update(|cx| run.shell.update(cx, |s, cx| s.inbox_reload_for_test(cx)));
+            cx.run_until_parked();
+            assert_eq!(bell(cx, &run), 1);
         }
 
         #[gpui_kit::test]
@@ -2072,7 +2121,8 @@ mod drafts {
                 place(cx, &run.shell),
                 at("a", Route::Change(ChangeNumber(10)))
             );
-            assert_eq!(bell(cx, &run), 2);
+            // Seen on opening the page, so reading a row changes nothing.
+            assert_eq!(bell(cx, &run), 0);
             let read: Vec<_> = stored(&run).iter().map(|i| i.read_at.is_some()).collect();
             assert_eq!(read, [true, false, false]);
             assert_eq!(rows(cx, &page)[0], (10, true));
@@ -2089,7 +2139,7 @@ mod drafts {
                 place(cx, &run.shell),
                 at("b", Route::Change(ChangeNumber(11)))
             );
-            assert_eq!(bell(cx, &run), 1);
+            assert_eq!(bell(cx, &run), 0);
         }
 
         #[gpui_kit::test]
@@ -2098,11 +2148,13 @@ mod drafts {
             let page = open(cx, &run);
             press(cx, &run, "r");
             assert_eq!(rows(cx, &page)[0], (10, true));
-            assert_eq!(bell(cx, &run), 2);
+            // The bell was reset on opening; marking read or unread does
+            // not bring a seen row back into the count.
+            assert_eq!(bell(cx, &run), 0);
             assert!(stored(&run)[0].read_at.is_some());
             press(cx, &run, "r");
             assert_eq!(rows(cx, &page)[0], (10, false));
-            assert_eq!(bell(cx, &run), 3);
+            assert_eq!(bell(cx, &run), 0);
             assert!(stored(&run)[0].read_at.is_none());
             // The cursor stayed.
             assert_eq!(cursor(cx, &page), 0);
@@ -2117,7 +2169,7 @@ mod drafts {
             assert_eq!(bell(cx, &run), 0);
             assert!(stored(&run).iter().all(|i| i.read_at.is_some()));
             press(cx, &run, "r");
-            assert_eq!(bell(cx, &run), 1);
+            assert_eq!(bell(cx, &run), 0);
             press(cx, &run, "shift-a");
             assert_eq!(bell(cx, &run), 0);
         }
@@ -2135,7 +2187,7 @@ mod drafts {
             // The cursor moved up onto what is last now.
             assert_eq!(cursor(cx, &page), 1);
             assert_eq!(stored(&run).len(), 2);
-            assert_eq!(bell(cx, &run), 1);
+            assert_eq!(bell(cx, &run), 0);
 
             // Shift-D: the first press only asks.
             press(cx, &run, "shift-d");
@@ -2151,8 +2203,7 @@ mod drafts {
             press(cx, &run, "shift-d");
             assert_eq!(rows(cx, &page), [(11, false)]);
             assert_eq!(stored(&run).len(), 1);
-            assert_eq!(bell(cx, &run), 1);
-            let _ = run.ids;
+            assert_eq!(bell(cx, &run), 0);
         }
 
         #[gpui_kit::test]
@@ -2215,7 +2266,8 @@ mod drafts {
             press(cx, &run, "r");
             press(cx, &run, "d");
             assert_eq!(rows(cx, &page).len(), 3);
-            assert_eq!(bell(cx, &run), 3);
+            assert_eq!(bell(cx, &run), 0);
+            assert!(stored(&run).iter().all(|i| i.read_at.is_none()));
         }
 
         #[gpui_kit::test]

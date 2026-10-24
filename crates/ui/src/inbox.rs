@@ -1,7 +1,10 @@
 //! The notification inbox: what is kept of the events that matched a rule,
 //! and the changes the page and the bell make to it. The rows live in the
 //! store; the shell applies [`InboxOp`]s on the background executor, in
-//! order, and reads the unread counts back for the bell.
+//! order, and reads the counts back for the bell. The bell counts the
+//! notifications that are unread and not yet seen: opening the page marks
+//! them all seen (the badge resets), but nothing read (the rows keep their
+//! unread dots).
 
 use std::collections::HashMap;
 
@@ -19,6 +22,10 @@ pub enum InboxOp {
     Dismiss(Vec<InboxId>),
     /// Dismiss every read notification of every server.
     ClearRead,
+    /// The page was opened (or showed new rows): every notification of
+    /// every server is seen, which resets the bell but leaves the rows
+    /// unread.
+    Seen,
     /// Change nothing; read the counts (and the page's rows) again.
     Reload,
 }
@@ -32,6 +39,7 @@ impl InboxOp {
             Self::ReadAll => store.mark_all_inbox_read(None, now).map(drop),
             Self::Dismiss(ids) => store.delete_inbox(ids),
             Self::ClearRead => store.delete_read_inbox(None).map(drop),
+            Self::Seen => store.mark_inbox_seen(None, now).map(drop),
             Self::Reload => Ok(()),
         }
     }
@@ -55,7 +63,8 @@ pub fn items_for(settings: &NotificationSettings, delivered: &[Delivered]) -> Ve
         .collect()
 }
 
-/// The unread notifications of all servers.
+/// The unread notifications of all servers that were not seen yet (the
+/// bell's badge).
 pub fn total(counts: &HashMap<ServerId, usize>) -> usize {
     counts.values().sum()
 }
