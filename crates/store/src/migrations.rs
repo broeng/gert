@@ -228,6 +228,27 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (server_id, key)
     );
     ",
+    // v8 -> v9: `inbox` is the in-app notification inbox (`inbox.rs`): one
+    // row per matched event, whether or not the desktop notification was
+    // shown. `event` is the JSON of a `model::Event`, `created_ms` the time
+    // of the event and `read_ms` NULL while unread (both Unix milliseconds).
+    // `rule_title` is the title of the rule that fired, at match time.
+    "
+    CREATE TABLE inbox (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id   INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        event_key   TEXT NOT NULL,
+        event       TEXT NOT NULL,
+        rule_title  TEXT NOT NULL,
+        mention     INTEGER NOT NULL DEFAULT 0,
+        shown_on_os INTEGER NOT NULL DEFAULT 0,
+        created_ms  INTEGER NOT NULL,
+        read_ms     INTEGER,
+        UNIQUE (server_id, event_key)
+    );
+    CREATE INDEX inbox_by_time ON inbox (server_id, created_ms);
+    CREATE INDEX inbox_unread ON inbox (server_id) WHERE read_ms IS NULL;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

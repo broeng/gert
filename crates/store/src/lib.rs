@@ -13,6 +13,7 @@
 mod drafts;
 mod error;
 mod events;
+mod inbox;
 mod labels;
 mod migrations;
 mod review_cache;
@@ -26,6 +27,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 pub use drafts::{CachedComments, DeleteOutcome, DraftCounts, DraftFailure, MergeReport};
 pub use error::Error;
 pub use events::EVENT_RETENTION;
+pub use inbox::{INBOX_KEEP, INBOX_RETENTION, InboxId, InboxItem, NewInboxItem};
 pub use review_cache::{
     CachedDiff, CachedDiffPreferences, CachedFileList, CachedRelated, PrunePolicy, PruneReport,
 };
