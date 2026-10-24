@@ -37,7 +37,8 @@ Claude writes most of the code and the user reviews it. So:
 
 - **No telemetry, ever.** The app makes no network calls except to the
   Gerrit servers the user configured. That also rules out crash uploaders,
-  update checks, and fetching fonts or avatars from third parties.
+  update checks, and fetching fonts or avatars from third parties. Desktop
+  notifications only talk to the local notification daemon.
 
 ## Platforms
 
@@ -83,6 +84,7 @@ Claude writes most of the code and the user reviews it. So:
 | HTTP | our own async client over an `HttpClient` trait; the production impl in `app` adapts `gpui-pre-reqwest-client` (Zed's reqwest client, which manages its own tokio runtime) |
 | Storage | SQLite via `rusqlite` (bundled), called from GPUI's background executor |
 | Secrets | `keyring` |
+| Desktop notifications | `notify-rust` in `app` only, pure-Rust zbus backend on Linux (no libdbus) |
 | Config | TOML at `<config_dir>/gert/config.toml`, read with `toml` and written with `toml_edit` so the user's comments and formatting survive; cache DB in `<cache_dir>/gert/` (via `directories`) |
 | Syntax highlighting | `syntect` with `two-face`'s syntax set, versions and features equal to gpui-component's workspace |
 | File filters | `globset`, gitignore-style |
@@ -142,11 +144,13 @@ crates/
                 No I/O.
   store/        rusqlite cache + schema migrations: servers, query results,
                 change details, file lists, diffs, related changes,
-                preferences, comments, and local drafts.
+                preferences, comments, local drafts, and the notification
+                ledger, pending events and inbox.
   sync/         polling and cache refresh (server -> store -> UI
                 notifications), and the write paths: drafts (saved to the
                 store first, then sent and retried), reviews, change actions,
-                reviewers, topic and hashtags.
+                reviewers, topic and hashtags; notification event detection,
+                rules and matching (`sync::notify`).
   ui/           GPUI views on gpui-component: the shell and page navigation,
                 login, dashboard/search list, change page, diff page and diff
                 view, reply dialog, action menu, file filters, settings,
@@ -194,6 +198,35 @@ UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
   There is no merged all-servers view. Removing a server purges its cache
   rows and keyring secret.
 
+### Notifications
+
+- Events are **derived from sync diffs**: whenever `Syncer::refresh_change`
+  saves a fresh change detail on a watched server, `sync::diff_change`
+  compares it with the cached one and queues `model::Event`s (votes,
+  comments, attention set, reviewers, patch sets, merged/abandoned, ready to
+  submit, merge conflict, mentions) in the store's `pending_events`; the
+  `notified_events` ledger dedupes them. The first complete watch pass on a
+  server (`servers.watched_since`) and changes never seen before are
+  baselines and never notify.
+- `sync::notify` holds the rule model, the matcher (scope, labels, exact
+  vote values, actors, own actions, per-server), `watch_query`, quiet hours
+  and the planner that groups events into OS notifications. `ui::watching`
+  runs one watch loop per signed-in (not anonymous) server, including the
+  active one; `Shell::found_events` delivers through the `ui::Notifier`
+  trait (`app::notifier::DesktopNotifier` over `notify-rust`), stores every
+  matched event in the inbox and acknowledges in one transaction.
+- Config is `[notifications]` plus `[[notifications.rules]]`, edited on the
+  settings page's Notifications tab. With no rules, the defaults apply
+  (attention set added, negative Code-Review/Verified votes and comments on
+  my changes). Notifications work only while the app runs; no tray or
+  background mode.
+- The inbox (bell in the title bar, `Ctrl-Shift-N`) is the one cross-server
+  page and keeps every matched event, also those the OS notification
+  skipped (quiet hours, focused window, no daemon).
+- Known gaps: `only_unresolved` and `replies_to_me` are stored but not
+  evaluated, `exclude_bots` has no effect (accounts carry no tags), and
+  click-to-open works on Linux only.
+
 ### Diffs
 
 - Diffs come from the **server diff API**
@@ -237,10 +270,11 @@ marks and the attention set; change actions (submit, rebase,
 abandon/restore, WIP/ready, private, reviewers/CC, topic, hashtags) via an
 action menu; file filters (hide, dim, highlight by glob); a settings page;
 opening a change from a web UI link (`g`, or `gert <link>`, matched
-against all configured servers); multiple servers with a switcher.
+against all configured servers); multiple servers with a switcher; desktop
+notifications with configurable rules and an in-app inbox; a tabbed settings
+page.
 
-Not built yet: Checks/CI results, desktop notifications, local git
-integration, query autocompletion, a configurable keymap and command palette,
+Not built yet: Checks/CI results, local git integration, query autocompletion, a configurable keymap and command palette,
 the general offline outbox, inline change edits, Gerrit's own
 dashboard sections, and packaging beyond cargo and Nix.
 
