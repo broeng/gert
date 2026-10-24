@@ -2387,6 +2387,99 @@ mod settings_page {
         assert_eq!(tab_state(cx, &f).1, 10);
     }
 
+    fn tabs_strip(cx: &mut TestAppContext, f: &Fixture) -> gpui_kit::ScrollHandle {
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            page.read(cx).tabs_scroll_for_test()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn l_h_the_arrows_and_the_digits_switch_tabs(cx: &mut TestAppContext) {
+        let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
+        open_settings(cx, &f);
+        let tab = |cx: &mut TestAppContext| tab_state(cx, &f).0;
+        assert_eq!(tab(cx), SettingsTab::Queries);
+        press(cx, &f, "l");
+        assert_eq!(tab(cx), SettingsTab::Review);
+        press(cx, &f, "right");
+        assert_eq!(tab(cx), SettingsTab::Appearance);
+        press(cx, &f, "l");
+        assert_eq!(tab(cx), SettingsTab::Filters);
+        // The strip has ends.
+        press(cx, &f, "l");
+        assert_eq!(tab(cx), SettingsTab::Filters);
+        press(cx, &f, "h");
+        assert_eq!(tab(cx), SettingsTab::Appearance);
+        press(cx, &f, "left");
+        assert_eq!(tab(cx), SettingsTab::Review);
+        for (key, want) in [
+            ("1", SettingsTab::Servers),
+            ("5", SettingsTab::Filters),
+            ("2", SettingsTab::Queries),
+            ("4", SettingsTab::Appearance),
+            ("3", SettingsTab::Review),
+        ] {
+            press(cx, &f, key);
+            assert_eq!(tab(cx), want, "key {key}");
+        }
+        press(cx, &f, "1");
+        press(cx, &f, "h");
+        assert_eq!(tab(cx), SettingsTab::Servers);
+        // Switching puts the cursor on the first row of the tab.
+        press(cx, &f, "5");
+        assert_eq!(tab_state(cx, &f).1, 8);
+    }
+
+    #[gpui_kit::test]
+    fn clicking_a_tab_shows_it(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        let strip = tabs_strip(cx, &f);
+        for (i, want) in [(3, SettingsTab::Appearance), (0, SettingsTab::Servers)] {
+            let at = strip.bounds_for_item(i).expect("tab").center();
+            gpui_kit::VisualTestContext::from_window(f.window, cx)
+                .simulate_click(at, Default::default());
+            cx.run_until_parked();
+            assert_eq!(tab_state(cx, &f).0, want);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_tab_keys_are_not_swallowed_from_inputs_and_wait_for_answers(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        // While a row is edited the keys are typed, not bound.
+        press(cx, &f, "e");
+        press(cx, &f, "l");
+        press(cx, &f, "2");
+        press(cx, &f, "left");
+        assert_eq!(tab_state(cx, &f), (SettingsTab::Queries, 0));
+        cx.update(|cx| {
+            let page = f.shell.read(cx).settings_page_for_test().expect("page");
+            assert!(page.read(cx).editing_for_test());
+        });
+        // A click on a tab does not leave the edit either.
+        let strip = tabs_strip(cx, &f);
+        let at = strip.bounds_for_item(2).expect("tab").center();
+        gpui_kit::VisualTestContext::from_window(f.window, cx)
+            .simulate_click(at, Default::default());
+        cx.run_until_parked();
+        assert_eq!(tab_state(cx, &f).0, SettingsTab::Queries);
+        press(cx, &f, "escape");
+
+        // A pending delete is answered first: the keys do nothing, and the
+        // question is still there afterwards.
+        press(cx, &f, "d");
+        press(cx, &f, "l");
+        press(cx, &f, "3");
+        assert_eq!(tab_state(cx, &f).0, SettingsTab::Queries);
+        press(cx, &f, "n");
+        assert_eq!(names(cx, &f).len(), 2);
+        press(cx, &f, "l");
+        assert_eq!(tab_state(cx, &f).0, SettingsTab::Review);
+    }
+
     #[gpui_kit::test]
     fn the_filter_rows_follow_the_cursor_after_the_other_rows(cx: &mut TestAppContext) {
         let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());

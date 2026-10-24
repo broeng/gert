@@ -54,6 +54,10 @@ actions!(
         CancelEdit,
         /// `t`: test the connection of the selected server.
         TestConnection,
+        /// `l` / `Right`: the next tab of the settings page.
+        NextSettingsTab,
+        /// `h` / `Left`: the previous tab of the settings page.
+        PrevSettingsTab,
         /// `Tab` / `Shift-Tab` while editing: the other field.
         NextField,
         PrevField,
@@ -132,6 +136,14 @@ pub struct OpenBookmark {
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = ui, no_json)]
 pub struct ToggleFilter {
+    pub position: usize,
+}
+
+/// `1` .. `9` on the settings page: show the tab at `position` (0 is the
+/// first of the strip).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = ui, no_json)]
+pub struct ShowSettingsTab {
     pub position: usize,
 }
 
@@ -689,6 +701,39 @@ pub fn settings_entries() -> Vec<Entry> {
             "Move the query down / up",
         ),
         e("", KeyBinding::new("shift-k", MoveQueryUp, Some(b)), ""),
+        e(
+            "l / h",
+            KeyBinding::new("l", NextSettingsTab, Some(b)),
+            "Next / previous tab (Servers, Queries, Review, Appearance, Filters)",
+        ),
+        e("", KeyBinding::new("h", PrevSettingsTab, Some(b)), ""),
+        e("", KeyBinding::new("right", NextSettingsTab, Some(b)), ""),
+        e("", KeyBinding::new("left", PrevSettingsTab, Some(b)), ""),
+        e(
+            "1 .. 5",
+            KeyBinding::new("1", ShowSettingsTab { position: 0 }, Some(b)),
+            "Go to the tab at that position",
+        ),
+        e(
+            "",
+            KeyBinding::new("2", ShowSettingsTab { position: 1 }, Some(b)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("3", ShowSettingsTab { position: 2 }, Some(b)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("4", ShowSettingsTab { position: 3 }, Some(b)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("5", ShowSettingsTab { position: 4 }, Some(b)),
+            "",
+        ),
         e(
             "t",
             KeyBinding::new("t", TestConnection, Some(b)),

@@ -115,6 +115,27 @@ impl SettingsTab {
         }
     }
 
+    /// The keys of the footer: the ones every tab has, then the tab's own.
+    fn footer(self) -> String {
+        let own = match self {
+            SettingsTab::Servers => {
+                "a: add    Enter / e: edit    d: remove    Shift-J / Shift-K: move    \
+                 t: test connection"
+            }
+            SettingsTab::Queries => {
+                "a: add    Enter / e: edit    d: delete    Shift-J / Shift-K: move    \
+                 Space: toggle the startup page"
+            }
+            SettingsTab::Review => "Space / Enter: toggle",
+            SettingsTab::Appearance => "Space / Enter: switch",
+            SettingsTab::Filters => "a: add    Enter / e / d: open the dialog",
+        };
+        format!(
+            "j / k: select    h / l, 1 .. {}: tab    {own}    u: back to the dashboard",
+            Self::all().len()
+        )
+    }
+
     /// Where the tab is in the strip.
     fn position(self) -> usize {
         Self::all().iter().position(|t| *t == self).unwrap_or(0)
@@ -260,6 +281,8 @@ pub struct SettingsPage {
     hint: Hint,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    /// The strip of tabs, which scrolls sideways when the window is narrow.
+    tabs_scroll: ScrollHandle,
     /// Where each tab was scrolled to when it was left.
     scrolled: std::collections::HashMap<SettingsTab, Point<Pixels>>,
     task: Option<Task<()>>,
@@ -335,6 +358,7 @@ impl SettingsPage {
             hint: Hint::default(),
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
+            tabs_scroll: ScrollHandle::new(),
             scrolled: Default::default(),
             task: None,
             _subs: subs,
@@ -377,6 +401,12 @@ impl SettingsPage {
     #[cfg(test)]
     pub(crate) fn filter_names_for_test(&self) -> &[String] {
         &self.filter_names
+    }
+
+    /// The strip of tabs, for the bounds of a tab.
+    #[cfg(test)]
+    pub(crate) fn tabs_scroll_for_test(&self) -> ScrollHandle {
+        self.tabs_scroll.clone()
     }
 
     #[cfg(test)]
@@ -571,6 +601,29 @@ impl SettingsPage {
 
     fn select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) {
         self.select(self.cursor.saturating_sub(1), cx);
+    }
+
+    fn next_tab(&mut self, _: &NextSettingsTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(1, cx);
+    }
+
+    fn prev_tab(&mut self, _: &PrevSettingsTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(-1, cx);
+    }
+
+    /// The tab `delta` places along the strip, stopping at its ends.
+    fn step_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let tabs = SettingsTab::all();
+        let to = self.tab.position().saturating_add_signed(delta);
+        if let Some(tab) = tabs.get(to) {
+            self.show_tab(*tab, cx);
+        }
+    }
+
+    fn go_to_tab(&mut self, action: &ShowSettingsTab, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = SettingsTab::all().get(action.position) {
+            self.show_tab(*tab, cx);
+        }
     }
 
     fn select(&mut self, to: usize, cx: &mut Context<Self>) {
@@ -1790,6 +1843,7 @@ impl SettingsPage {
             .child(
                 TabBar::new("settings-tabs")
                     .underline()
+                    .track_scroll(&self.tabs_scroll)
                     .selected_index(self.tab.position())
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
                         if let Some(tab) = SettingsTab::all().get(*ix) {
@@ -1829,6 +1883,9 @@ impl Render for SettingsPage {
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::test_connection))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::go_to_tab))
             .size_full()
             .child(self.render_header(cx))
             .child(
@@ -1857,11 +1914,7 @@ impl Render for SettingsPage {
                     .border_color(theme.border)
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(
-                        "j / k: select    Enter / e: edit    a: add    d: delete    \
-                         Shift-J / Shift-K: move    Space: toggle    u: back to the dashboard    \
-                         Filters: Enter / e / d: dialog    Servers: t: test connection",
-                    ),
+                    .child(self.tab.footer()),
             )
     }
 }
