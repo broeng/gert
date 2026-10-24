@@ -127,3 +127,85 @@ fn v7_adds_the_ledger_and_keeps_existing_data() {
         [true]
     );
 }
+
+fn event(change: u64, at: &str) -> Event {
+    Event {
+        server: ServerId(0),
+        change: model::ChangeNumber(change),
+        project: "p".into(),
+        subject: "s".into(),
+        owner: None,
+        actor: None,
+        at: ts(at),
+        kind: model::EventKind::Merged,
+        subject_account: None,
+    }
+}
+
+#[test]
+fn queued_events_are_pending_until_acknowledged() {
+    let (mut s, id) = store();
+    let (a, b) = (event(1, T2), event(2, T1));
+    assert_eq!(
+        s.queue_events(id, &[a.clone(), b.clone()], ts(T3)).unwrap(),
+        2
+    );
+    // Oldest event first.
+    assert_eq!(s.pending_events(id).unwrap(), [b.clone(), a.clone()]);
+    s.ack_events(id, &[b.key()]).unwrap();
+    assert_eq!(s.pending_events(id).unwrap(), std::slice::from_ref(&a));
+    // Acknowledged events are in the ledger, so they are not queued again.
+    assert_eq!(s.queue_events(id, &[a, b], ts(T3)).unwrap(), 0);
+    assert_eq!(s.pending_events(id).unwrap().len(), 1);
+}
+
+#[test]
+fn queueing_feeds_the_ledger_and_ignores_repeats() {
+    let (mut s, id) = store();
+    let e = event(1, T1);
+    assert_eq!(
+        s.queue_events(id, &[e.clone(), e.clone()], ts(T2)).unwrap(),
+        1
+    );
+    assert_eq!(s.record_events(id, &[e.key()], ts(T2)).unwrap(), [false]);
+}
+
+#[test]
+fn pending_events_are_per_server_and_pruned() {
+    let (mut s, a) = store();
+    let b = s.server_id("https://other.example/").unwrap();
+    s.queue_events(a, &[event(1, T1)], ts(T1)).unwrap();
+    assert!(s.pending_events(b).unwrap().is_empty());
+    s.prune_events(ts(T2)).unwrap();
+    assert!(s.pending_events(a).unwrap().is_empty());
+}
+
+#[test]
+fn v8_adds_pending_events_to_a_v7_database() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    migrate(&mut conn, &MIGRATIONS[..7]).unwrap();
+    assert_eq!(user_version(&conn).unwrap(), 7);
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO notified_events (server_id, key, seen_ms) VALUES (1, 'k', 0)",
+        [],
+    )
+    .unwrap();
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT COUNT(*) FROM pending_events"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM notified_events"), 1);
+    conn.execute(
+        "INSERT INTO pending_events (server_id, key, event, created_ms) VALUES (1, 'k', '{}', 0)",
+        [],
+    )
+    .unwrap();
+    // Removing the server removes its pending events.
+    conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM servers WHERE id = 1")
+        .unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM pending_events"), 0);
+}
