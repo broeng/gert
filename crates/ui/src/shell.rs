@@ -1635,7 +1635,7 @@ impl Shell {
                 ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
                 ChangeEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 ChangeEvent::SubmitChain(detail) => {
-                    this.open_menu_at((**detail).clone(), Some('s'), window, cx)
+                    this.open_menu_at((**detail).clone(), true, window, cx)
                 }
                 ChangeEvent::ManageFilters { project } => {
                     let paths = match &this.page {
@@ -2114,15 +2114,15 @@ impl Shell {
 
     /// Opens the action menu for `detail` on top of the current page.
     fn open_menu(&mut self, detail: ChangeDetail, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_menu_at(detail, None, window, cx);
+        self.open_menu_at(detail, false, window, cx);
     }
 
-    /// Opens the action menu and takes the entry with mnemonic `pick` at
-    /// once, if given (the change page's Submit chain button).
+    /// Opens the action menu and submits at once if `submit` (the change
+    /// page's Submit chain button).
     fn open_menu_at(
         &mut self,
         detail: ChangeDetail,
-        pick: Option<char>,
+        submit: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2141,8 +2141,8 @@ impl Shell {
         let dialog = cx.new(|cx| {
             let mut dialog = ActionDialog::new(session, detail, window, cx);
             dialog.set_server_badge(badge, cx);
-            if let Some(key) = pick {
-                dialog.pick_key(key, window, cx);
+            if submit {
+                dialog.submit_now(window, cx);
             }
             dialog
         });

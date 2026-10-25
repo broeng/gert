@@ -586,9 +586,22 @@ impl ActionDialog {
         self.pick_at(self.selected, window, cx);
     }
 
+    /// Submits without the confirmation, if the menu offers Submit. The
+    /// dialog stays up while it runs (and for a refusal), then closes.
+    pub(crate) fn submit_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.step == Step::Menu
+            && self
+                .entries
+                .iter()
+                .any(|e| e.kind == Kind::Submit && e.enabled)
+        {
+            self.run(Kind::Submit, Args::default(), window, cx);
+        }
+    }
+
     /// Picks the entry whose mnemonic is `key` (`w`: WIP or ready, `p`:
     /// private or not, whichever the change offers).
-    pub(crate) fn pick_key(&mut self, key: char, window: &mut Window, cx: &mut Context<Self>) {
+    fn pick_key(&mut self, key: char, window: &mut Window, cx: &mut Context<Self>) {
         if self.step != Step::Menu {
             return;
         }

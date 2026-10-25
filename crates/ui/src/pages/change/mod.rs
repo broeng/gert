@@ -90,7 +90,7 @@ pub enum ChangeEvent {
     Reply(Box<ChangeDetail>),
     /// `m`: open the change action menu for this change.
     Actions(Box<ChangeDetail>),
-    /// The Submit chain button: the action menu, at its Submit confirmation.
+    /// The Submit chain button: submits the change with its ancestors, without confirmation.
     SubmitChain(Box<ChangeDetail>),
     /// `f m` or the Manage filters button: the dialog for the file filter
     /// rules, with the change's project at hand.
