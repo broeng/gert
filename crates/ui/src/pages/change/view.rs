@@ -333,6 +333,15 @@ impl ChangePage {
                     .on_click(cx.listener(move |this, _, _, cx| this.quick_vote(i, cx)))
             })
             .collect();
+        let submit_chain =
+            (c.status == ChangeStatus::New && c.submittable == Some(true)).then(|| {
+                Button::new("submit-chain")
+                    .label("Submit chain")
+                    .small()
+                    .custom(crate::theme::vote_button(true, false, cx))
+                    .bg(cx.theme().primary)
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_chain(cx)))
+            });
         let bar = h_flex()
             .w_full()
             .gap_2()
@@ -367,6 +376,7 @@ impl ChangePage {
                     .child(c.subject.clone()),
             )
             .child(div().flex_1())
+            .children(submit_chain)
             .children(quick)
             .child(status);
         Some(bar.into_any_element())
@@ -1232,8 +1242,10 @@ fn related_pills(c: &RelatedChange, summary: Option<&ChangeSummary>, cx: &App) -
             for text in blocking_votes(summary) {
                 v.push(pill(text, t.danger));
             }
-            if c.submittable == Some(true) {
-                v.push(pill("Submittable", t.primary));
+            // The related-changes endpoint carries no `submittable`; the
+            // change's own summary does.
+            if c.submittable == Some(true) || summary.is_some_and(|s| s.submittable == Some(true)) {
+                v.push(pill("Submittable", t.primary).font_bold());
             }
         }
         _ => {}
