@@ -1245,7 +1245,13 @@ fn related_pills(c: &RelatedChange, summary: Option<&ChangeSummary>, cx: &App) -
             // The related-changes endpoint carries no `submittable`; the
             // change's own summary does.
             if c.submittable == Some(true) || summary.is_some_and(|s| s.submittable == Some(true)) {
-                v.push(pill("Submittable", t.primary).font_bold());
+                // Black on the solid primary box, to stand out from the tinted ones.
+                v.push(
+                    pill("Submittable", t.primary)
+                        .bg(t.primary)
+                        .text_color(black())
+                        .font_bold(),
+                );
             }
         }
         _ => {}
