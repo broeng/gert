@@ -90,6 +90,8 @@ pub enum ChangeEvent {
     Reply(Box<ChangeDetail>),
     /// `m`: open the change action menu for this change.
     Actions(Box<ChangeDetail>),
+    /// The Submit chain button: the action menu, at its Submit confirmation.
+    SubmitChain(Box<ChangeDetail>),
     /// `f m` or the Manage filters button: the dialog for the file filter
     /// rules, with the change's project at hand.
     ManageFilters {
@@ -1470,6 +1472,17 @@ impl ChangePage {
             None => self
                 .hint
                 .say("The change is not loaded yet", false, cx, |p| &mut p.hint),
+        }
+    }
+
+    /// The Submit chain button.
+    pub(super) fn submit_chain(&mut self, cx: &mut Context<Self>) {
+        if let Some(why) = action_menu::unavailable(&self.session) {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        if let Some(d) = &self.detail {
+            cx.emit(ChangeEvent::SubmitChain(Box::new(d.clone())));
         }
     }
 

@@ -588,7 +588,7 @@ impl ActionDialog {
 
     /// Picks the entry whose mnemonic is `key` (`w`: WIP or ready, `p`:
     /// private or not, whichever the change offers).
-    fn pick_key(&mut self, key: char, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pick_key(&mut self, key: char, window: &mut Window, cx: &mut Context<Self>) {
         if self.step != Step::Menu {
             return;
         }

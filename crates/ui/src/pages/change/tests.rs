@@ -181,6 +181,7 @@ fn page_in(
                 ChangeEvent::Refreshed => return,
                 ChangeEvent::Reply(_) => "reply".to_owned(),
                 ChangeEvent::Actions(_) => "actions".to_owned(),
+                ChangeEvent::SubmitChain(_) => "submit chain".to_owned(),
                 ChangeEvent::ManageFilters { project } => format!("manage filters {project}"),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
