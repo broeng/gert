@@ -54,11 +54,11 @@ pub(super) use crate::card::title_bar as card_title_bar;
 
 /// Width for 72 monospace columns, the card padding and border.
 /// Width of the relation chain side panel: room for `#12345`, a subject of
-/// ~30 characters and the status pills, while the left side keeps ~640px
+/// ~55 characters and the status pills, while the left side keeps ~640px
 /// at the narrowest window that still gets the panel.
-const RELATED_PANEL_WIDTH: f32 = 360.;
+const RELATED_PANEL_WIDTH: f32 = 540.;
 /// Below this window width the chain stays in its box, wanted panel or not.
-const RELATED_PANEL_MIN_WINDOW: f32 = 1000.;
+const RELATED_PANEL_MIN_WINDOW: f32 = 1180.;
 const COMMIT_BASIS: f32 = 660.;
 
 pub(super) fn pill(text: impl Into<SharedString>, fg: Hsla) -> Div {
@@ -960,12 +960,22 @@ impl ChangePage {
             .border_color(theme.border)
             .children(rows.collect::<Vec<_>>());
         let list = if panel {
-            list.flex_1().min_h_0()
+            // The panel is as tall as the window, so a long chain scrolls in
+            // it, with a scrollbar that shows only when it overflows.
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(list.size_full())
+                .vertical_scrollbar(&self.related_scroll)
+                .into_any_element()
         } else {
-            list.max_h(px(220.)).on_scroll_wheel(move |ev, window, cx| {
-                let delta = ev.delta.pixel_delta(window.line_height()).y;
-                keep_wheel_while_scrollable(&scroll, delta, cx);
-            })
+            list.max_h(px(220.))
+                .on_scroll_wheel(move |ev, window, cx| {
+                    let delta = ev.delta.pixel_delta(window.line_height()).y;
+                    keep_wheel_while_scrollable(&scroll, delta, cx);
+                })
+                .into_any_element()
         };
         let toggle = div()
             .id("related-toggle")

@@ -939,6 +939,12 @@ fn panel_shown(cx: &mut TestAppContext, f: &Fixture) -> bool {
     cx.update(|cx| f.page.read(cx).panel_shown_for_test())
 }
 
+fn resize(cx: &mut TestAppContext, f: &Fixture, w: f32) {
+    gpui_kit::VisualTestContext::from_window(f.window, cx)
+        .simulate_resize(gpui_kit::size(gpui_kit::px(w), gpui_kit::px(800.)));
+    cx.run_until_parked();
+}
+
 #[gpui_kit::test]
 fn shift_j_and_k_replace_the_page_with_the_next_and_previous_chain_entry(cx: &mut TestAppContext) {
     // Rows: 100, 101, 7, 103, 104 (newest descendant first).
@@ -979,6 +985,8 @@ fn clicking_a_chain_row_opens_it_as_a_new_history_entry(cx: &mut TestAppContext)
 #[gpui_kit::test]
 fn shift_l_and_the_link_toggle_the_relation_panel(cx: &mut TestAppContext) {
     let f = chain_page(cx, 5, 2);
+    // Wide enough for the panel.
+    resize(cx, &f, 1400.);
     assert!(!panel_shown(cx, &f));
     press(cx, &f, &["shift-l"]);
     assert!(panel_shown(cx, &f));
@@ -1005,17 +1013,13 @@ fn shift_l_and_the_link_toggle_the_relation_panel(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_panel_gives_way_to_the_box_in_a_narrow_window(cx: &mut TestAppContext) {
     let f = chain_page(cx, 5, 2);
+    resize(cx, &f, 1400.);
     press(cx, &f, &["shift-l"]);
     assert!(panel_shown(cx, &f));
-    let resize = |cx: &mut TestAppContext, w: f32| {
-        gpui_kit::VisualTestContext::from_window(f.window, cx)
-            .simulate_resize(gpui_kit::size(gpui_kit::px(w), gpui_kit::px(800.)));
-        cx.run_until_parked();
-    };
-    resize(cx, 900.);
+    resize(cx, &f, 1100.);
     assert!(!panel_shown(cx, &f));
     // The wish is kept: widening brings the panel back.
-    resize(cx, 1400.);
+    resize(cx, &f, 1400.);
     assert!(panel_shown(cx, &f));
 }
 
