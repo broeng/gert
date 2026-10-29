@@ -20,9 +20,9 @@ use crate::{
     actions::*,
     filters::{FileStyle, FilterAction},
     pages::list::Status,
-    row::chips,
+    row::{browser_url, chips},
     theme::chip_colors,
-    time_fmt::relative,
+    time_fmt::{clock, relative},
 };
 
 /// The cards of the page. Consecutive blocks of one section are drawn as
@@ -358,7 +358,16 @@ impl ChangePage {
             } else {
                 pill(status_text, status_color)
             })
-            .child(div().text_color(muted).child(format!("#{}", c.number)))
+            .child({
+                let url = browser_url(&self.session.base_url, &c.project, c.number);
+                div()
+                    .id("change-number-link")
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .hover(|d| d.underline())
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .child(format!("#{}", c.number))
+            })
             .children(self.server_badge.as_ref().map(|b| b.pill(cx)))
             .children(
                 chips(c)
@@ -1069,7 +1078,7 @@ impl ChangePage {
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_message(ix, cx)))
                     .when_some(m.revision, |d, n| d.child(format!("PS{n}")))
-                    .child(relative(Timestamp::now(), m.date, &TimeZone::system())),
+                    .child(clock(Timestamp::now(), m.date, &TimeZone::system())),
             )
             .into_any_element()
     }

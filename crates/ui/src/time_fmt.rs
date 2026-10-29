@@ -22,6 +22,20 @@ pub fn relative(now: Timestamp, then: Timestamp, tz: &TimeZone) -> String {
     }
 }
 
+/// The time of day of `then` in `tz` (`14:05`), with the date (`Mar 4`
+/// this year, `2023-03-04` otherwise) before it unless it is today.
+pub fn clock(now: Timestamp, then: Timestamp, tz: &TimeZone) -> String {
+    let (today, at) = (now.to_zoned(tz.clone()), then.to_zoned(tz.clone()));
+    let time = at.strftime("%H:%M");
+    if at.date() == today.date() {
+        time.to_string()
+    } else if at.year() == today.year() {
+        format!("{} {time}", at.strftime("%b %-d"))
+    } else {
+        format!("{} {time}", at.strftime("%Y-%m-%d"))
+    }
+}
+
 /// The heading of the day `then` falls on, in `tz`: "Today", "Yesterday",
 /// a weekday and date within the last week (`Mon, Mar 4`), else the date
 /// (`Mar 4` this year, `2023-03-04` otherwise).
@@ -51,6 +65,15 @@ mod tests {
         assert_eq!(label("2024-06-12T08:00:00Z"), "Wed, Jun 12");
         assert_eq!(label("2024-06-08T08:00:00Z"), "Jun 8");
         assert_eq!(label("2023-06-08T08:00:00Z"), "2023-06-08");
+    }
+
+    #[test]
+    fn clock_times() {
+        let now = ts("2024-06-15T12:00:00Z");
+        let c = |then: &str| clock(now, ts(then), &TimeZone::UTC);
+        assert_eq!(c("2024-06-15T09:05:00Z"), "09:05");
+        assert_eq!(c("2024-06-14T23:59:00Z"), "Jun 14 23:59");
+        assert_eq!(c("2023-06-14T08:00:00Z"), "2023-06-14 08:00");
     }
 
     fn ts(s: &str) -> Timestamp {
