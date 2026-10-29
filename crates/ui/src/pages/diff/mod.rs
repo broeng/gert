@@ -127,6 +127,9 @@ pub struct DiffPage {
     outbox: Entity<DraftOutbox>,
     /// The thread the route asked the cursor to be on, until it is found.
     want_thread: Option<model::ThreadId>,
+    /// A `]` (true) or `[` pressed before the file list was loaded, done
+    /// once it is.
+    pending_step: Option<bool>,
     _subs: Vec<Subscription>,
 }
 
@@ -181,6 +184,7 @@ impl DiffPage {
             comments: comments.clone(),
             outbox,
             want_thread,
+            pending_step: None,
             _subs: Vec::new(),
         };
         this._subs
@@ -261,6 +265,7 @@ impl DiffPage {
             self.reviewed = reviewed;
             self.restyle(cx);
         }
+        let step = self.pending_step.take();
         if let Some(e) = l.error {
             self.loading = false;
             self.error = Some(e);
@@ -276,6 +281,9 @@ impl DiffPage {
                 self.loading = false;
                 self.error = Some("the diff could not be requested".into());
             }
+        }
+        if let Some(forward) = step {
+            self.step_file(forward, cx);
         }
         cx.notify();
     }
@@ -762,9 +770,13 @@ impl DiffPage {
 
     /// The next / previous file that is neither hidden nor dimmed. `]` on
     /// the last one goes back up to the change (`[` on the first does
-    /// nothing).
+    /// nothing). Each file is a new page, so a quick second `]` often
+    /// comes while the file list is still loading; it waits for it.
     fn step_file(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(from) = self.position() else {
+            if self.loading && self.files_key.is_none() {
+                self.pending_step = Some(forward);
+            }
             return;
         };
         let skipped = |i: usize| self.styles.get(i).is_some_and(skips);
