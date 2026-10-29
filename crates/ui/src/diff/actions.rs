@@ -19,6 +19,9 @@ actions!(
         HalfPageUp,
         CursorTop,
         CursorBottom,
+        /// `h` / `l`: scroll long lines sideways (when they are not wrapped).
+        ScrollLeft,
+        ScrollRight,
         ToggleMode,
         /// Enter / x on a fold row: show all of its lines.
         ExpandFold,
@@ -97,6 +100,15 @@ pub fn entries() -> Vec<Entry> {
         e("Home / End", "home", CursorTop, "First / last line"),
         e("", "end", CursorBottom, ""),
         e("", "shift-g", CursorBottom, ""),
+        e(
+            "H / L",
+            "h",
+            ScrollLeft,
+            "Scroll long lines left / right (when they are not wrapped)",
+        ),
+        e("", "l", ScrollRight, ""),
+        e("", "left", ScrollLeft, ""),
+        e("", "right", ScrollRight, ""),
         // PolyGerrit toggles side-by-side/unified with `m` in current
         // versions (older ones used shift-m); bind both.
         e("m", "m", ToggleMode, "Toggle side-by-side / unified"),

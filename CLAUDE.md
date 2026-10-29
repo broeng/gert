@@ -234,6 +234,9 @@ UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
   intraline edits), so comment anchors match what other reviewers see.
 - Side-by-side and unified views, with local context folding (the server
   sends whole files).
+- Long lines wrap when Gerrit's `line_wrapping` diff preference is on;
+  otherwise the code text scrolls sideways, all panes together, with the
+  gutters fixed.
 - **Syntax highlighting** with syntect: each side is highlighted as a whole on
   the background executor, the diff is drawn plain until the result arrives,
   and the colors come from the app theme at paint time. It follows Gerrit's
