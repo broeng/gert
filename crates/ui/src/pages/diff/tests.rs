@@ -172,6 +172,27 @@ fn diff_page_full(
     seed: Vec<(DiffKey, Highlight)>,
     local: LocalDiff,
 ) -> Page {
+    let p = diff_page_loading(cx, store, route, http, auth, rules, seed, local);
+    cx.run_until_parked();
+    // A frame, so the page can hand its focus to the diff view.
+    cx.update_window(p.window, |_, window, cx| window.render_frame(cx))
+        .expect("frame");
+    cx.run_until_parked();
+    p
+}
+
+/// The page right after it was opened, before anything has loaded.
+#[allow(clippy::too_many_arguments)]
+fn diff_page_loading(
+    cx: &mut TestAppContext,
+    store: Store,
+    route: DiffRoute,
+    http: RouteHttpClient,
+    auth: gerrit_api::Auth,
+    rules: Vec<FileFilter>,
+    seed: Vec<(DiffKey, Highlight)>,
+    local: LocalDiff,
+) -> Page {
     let env = env_with(store, &http);
     let mut server = setup();
     if let gerrit_api::Auth::Basic { username, .. } = &auth {
@@ -214,11 +235,6 @@ fn diff_page_full(
         window.focus(&focus, cx);
         page
     });
-    cx.run_until_parked();
-    // A frame, so the page can hand its focus to the diff view.
-    cx.update_window(window, |_, window, cx| window.render_frame(cx))
-        .expect("frame");
-    cx.run_until_parked();
     Page {
         window,
         page,
@@ -1032,6 +1048,27 @@ fn filtered_page(cx: &mut TestAppContext, path: &str, rules: Vec<FileFilter>) ->
 
 fn opened(p: &Page) -> Vec<String> {
     p.events.lock().expect("log").clone()
+}
+
+#[gpui_kit::test]
+fn a_bracket_pressed_while_the_page_loads_is_done_once_the_files_are_there(
+    cx: &mut TestAppContext,
+) {
+    // Stepping through files opens a new page each time; a quick second
+    // `]` lands before that page knows its files and must not be lost.
+    let p = diff_page_loading(
+        cx,
+        seeded(),
+        route("src/a.rs"),
+        http(),
+        gerrit_api::Auth::Anonymous,
+        Vec::new(),
+        Vec::new(),
+        LocalDiff::default(),
+    );
+    cx.update(|cx| assert!(p.page.read(cx).files.is_empty()));
+    press(cx, p.window, &["]"]);
+    assert_eq!(opened(&p), ["open src/b.rs"]);
 }
 
 #[gpui_kit::test]
