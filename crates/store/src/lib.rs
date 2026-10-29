@@ -18,7 +18,7 @@ mod labels;
 mod migrations;
 mod review_cache;
 
-use std::{path::Path, time::Duration};
+use std::{borrow::Cow, path::Path, time::Duration};
 
 pub use model::ServerId;
 use model::{ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
@@ -452,7 +452,17 @@ fn parse_ts(s: &str) -> Result<Timestamp, Error> {
     s.parse().map_err(|_| Error::BadTimestamp(s.to_owned()))
 }
 
+/// Saves a change's summary. A summary without `mergeable` keeps the cached
+/// one's while the change has not been updated since: servers may leave it
+/// out of query results, and only the change detail asks for it, so a
+/// query refresh must not forget what opening the change learned.
 fn upsert_change(tx: &Transaction<'_>, server: ServerId, c: &ChangeSummary) -> Result<(), Error> {
+    let mut c = Cow::Borrowed(c);
+    if c.mergeable.is_none()
+        && let Some(m) = cached_mergeable(tx, server, &c)?
+    {
+        c.to_mut().mergeable = Some(m);
+    }
     tx.prepare_cached(
         "INSERT INTO changes (server_id, number, updated, json) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (server_id, number)
@@ -462,9 +472,32 @@ fn upsert_change(tx: &Transaction<'_>, server: ServerId, c: &ChangeSummary) -> R
         server.0,
         number(c.number),
         c.updated.to_string(),
-        serde_json::to_string(c)?
+        serde_json::to_string(&c)?
     ])?;
     Ok(())
+}
+
+/// The cached `mergeable` of `c`, if the cached summary has the same
+/// `updated`.
+fn cached_mergeable(
+    tx: &Transaction<'_>,
+    server: ServerId,
+    c: &ChangeSummary,
+) -> Result<Option<bool>, Error> {
+    let json: Option<String> = tx
+        .prepare_cached(
+            "SELECT json FROM changes WHERE server_id = ?1 AND number = ?2 AND updated = ?3",
+        )?
+        .query_row(
+            params![server.0, number(c.number), c.updated.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(json) = json else {
+        return Ok(None);
+    };
+    let cached: ChangeSummary = serde_json::from_str(&json)?;
+    Ok(cached.mergeable)
 }
 
 fn insert_items(
