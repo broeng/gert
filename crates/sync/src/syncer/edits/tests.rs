@@ -29,6 +29,7 @@ fn change_json(extra: Value) -> String {
         "_number": 7, "branch": "main", "change_id": "I7", "project": "p",
         "created": "2013-02-01 09:59:32.126000000", "owner": {"_account_id": 1},
         "status": "NEW", "subject": "s", "updated": "2024-02-01 10:00:00.000000000",
+        "mergeable": true,
     });
     v.as_object_mut()
         .unwrap()

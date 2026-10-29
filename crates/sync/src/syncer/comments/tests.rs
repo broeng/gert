@@ -458,6 +458,7 @@ fn refresh_uses_the_cached_patch_sets_to_place_server_drafts() {
             "_number": 7, "branch": "main", "change_id": "I7", "project": "p",
             "created": "2013-02-01 09:59:32.126000000", "owner": {"_account_id": 1},
             "status": "NEW", "subject": "s", "updated": "2024-02-01 10:00:00.000000000",
+            "mergeable": true,
             "current_revision": "shaB",
             "revisions": {"shaA": {"_number": 1}, "shaB": {"_number": 2}}
         })
@@ -530,6 +531,7 @@ fn change_with_ps2() -> String {
         "_number": 7, "branch": "main", "change_id": "I7", "project": "p",
         "created": "2013-02-01 09:59:32.126000000", "owner": {"_account_id": 1},
         "status": "NEW", "subject": "s", "updated": "2024-02-01 10:00:00.000000000",
+            "mergeable": true,
         "current_revision": "sha2",
         "revisions": {"sha2": {"_number": 2}}
     })

@@ -30,7 +30,7 @@ fn change(n: u64, updated: &str, extra: Value) -> Value {
         "_number": n, "branch": "main", "change_id": format!("I{n:040}"),
         "project": "p", "created": "2024-02-01 09:00:00.000000000",
         "owner": {"_account_id": 1}, "status": "NEW",
-        "subject": format!("change {n}"), "updated": updated,
+        "subject": format!("change {n}"), "updated": updated, "mergeable": true,
     });
     v.as_object_mut()
         .unwrap()
