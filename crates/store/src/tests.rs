@@ -199,6 +199,27 @@ fn change_detail_round_trip_updates_summary() {
 }
 
 /// Applies only the first `version` steps, like an older release would have.
+#[test]
+fn a_summary_without_mergeable_keeps_the_known_one_until_updated() {
+    let (mut s, id) = store();
+    let mergeable = |s: &Store| s.load_query(id, "q").unwrap().unwrap().changes[0].mergeable;
+    let mut known = change(5, T1);
+    known.mergeable = Some(false);
+    s.save_query_page(id, "q", &[known], false, ts(T1)).unwrap();
+    s.save_query_page(id, "q", &[change(5, T1)], false, ts(T1))
+        .unwrap();
+    assert_eq!(mergeable(&s), Some(false));
+    let mut answered = change(5, T1);
+    answered.mergeable = Some(true);
+    s.save_query_page(id, "q", &[answered], false, ts(T1))
+        .unwrap();
+    assert_eq!(mergeable(&s), Some(true));
+    // A newer change may merge differently.
+    s.save_query_page(id, "q", &[change(5, T2)], false, ts(T2))
+        .unwrap();
+    assert_eq!(mergeable(&s), None);
+}
+
 fn db_at_version(version: usize) -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
     migrate(&mut conn, &MIGRATIONS[..version]).unwrap();
