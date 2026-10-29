@@ -261,6 +261,7 @@ pub fn chip_colors(chip: Chip, cx: &App) -> (Hsla, Hsla) {
         Chip::Abandoned => cx.theme().muted_foreground,
         Chip::Wip => cx.theme().warning,
         Chip::Private => cx.theme().info,
+        Chip::MergeConflict => cx.theme().danger,
     };
     (fg, fg.opacity(0.15))
 }

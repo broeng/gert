@@ -10,6 +10,7 @@ pub enum Chip {
     Abandoned,
     Wip,
     Private,
+    MergeConflict,
 }
 
 impl Chip {
@@ -19,6 +20,7 @@ impl Chip {
             Chip::Abandoned => "Abandoned",
             Chip::Wip => "WIP",
             Chip::Private => "Private",
+            Chip::MergeConflict => "Merge conflict",
         }
     }
 }
@@ -30,6 +32,9 @@ pub fn chips(c: &ChangeSummary) -> Vec<Chip> {
         ChangeStatus::Abandoned => v.push(Chip::Abandoned),
         ChangeStatus::New | ChangeStatus::Unknown(_) => {}
     }
+    if has_merge_conflict(c) {
+        v.push(Chip::MergeConflict);
+    }
     if c.work_in_progress {
         v.push(Chip::Wip);
     }
@@ -37,6 +42,12 @@ pub fn chips(c: &ChangeSummary) -> Vec<Chip> {
         v.push(Chip::Private);
     }
     v
+}
+
+/// Whether Gerrit found that the open change does not merge cleanly into
+/// its branch. Unknown counts as no.
+pub fn has_merge_conflict(c: &ChangeSummary) -> bool {
+    c.status == ChangeStatus::New && c.mergeable == Some(false)
 }
 
 /// `(+insertions, -deletions)` as shown in the size column.
@@ -96,6 +107,19 @@ mod tests {
         assert_eq!(chips(&c), [Chip::Abandoned, Chip::Wip, Chip::Private]);
         c.status = ChangeStatus::Unknown("DRAFT".into());
         assert_eq!(chips(&c), [Chip::Wip, Chip::Private]);
+    }
+
+    #[test]
+    fn merge_conflict_only_for_open_unmergeable_changes() {
+        let mut c = summary(1);
+        assert!(!has_merge_conflict(&c), "not tested yet");
+        c.mergeable = Some(true);
+        assert!(!has_merge_conflict(&c));
+        c.mergeable = Some(false);
+        assert!(has_merge_conflict(&c));
+        assert_eq!(chips(&c), [Chip::MergeConflict]);
+        c.status = ChangeStatus::Abandoned;
+        assert!(!has_merge_conflict(&c));
     }
 
     #[test]

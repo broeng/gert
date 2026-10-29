@@ -1497,17 +1497,3 @@ fn blocking_votes_name_the_label_and_vote() {
     );
     assert!(super::view::blocking_votes(None).is_empty());
 }
-
-#[test]
-fn merge_conflict_only_for_open_unmergeable_changes() {
-    use super::view::has_merge_conflict;
-    let mut s = crate::testing::summary(1);
-    assert!(!has_merge_conflict(Some(&s)), "not tested yet");
-    s.mergeable = Some(true);
-    assert!(!has_merge_conflict(Some(&s)));
-    s.mergeable = Some(false);
-    assert!(has_merge_conflict(Some(&s)));
-    s.status = model::ChangeStatus::Abandoned;
-    assert!(!has_merge_conflict(Some(&s)));
-    assert!(!has_merge_conflict(None));
-}
