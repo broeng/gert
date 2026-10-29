@@ -302,6 +302,21 @@ impl GerritClient {
         Ok(convert::related(&info)?)
     }
 
+    /// `GET /changes/{n}/revisions/current/mergeable`: whether the current
+    /// patch set merges cleanly into its branch. Servers may leave
+    /// `mergeable` out of change info (`change.mergeabilityComputationBehavior`),
+    /// but they always answer this; the web UI asks it too.
+    pub async fn get_mergeable(&self, change: ChangeNumber) -> Result<Option<bool>, Error> {
+        let v = self
+            .get_json(
+                &format!("/changes/{change}/revisions/current/mergeable"),
+                &[],
+            )
+            .await?;
+        let info: wire::MergeableInfo = serde_json::from_value(v)?;
+        Ok(info.mergeable)
+    }
+
     /// `GET /changes/{n}/comments`: the published comments of all patch
     /// sets, by path (special files first), in server order within a path.
     pub async fn get_comments(&self, change: ChangeNumber) -> Result<Vec<Comment>, Error> {
@@ -1598,6 +1613,29 @@ mod tests {
             block_on(c.get_related(ChangeNumber(5), &sha()))
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn mergeable() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"{"submit_type": "MERGE_IF_NECESSARY", "strategy": "recursive",
+                    "mergeable": false, "commit_merged": false, "content_merged": false}"#,
+            ),
+        );
+        fake.push_response(200, xssi("{}"));
+        let c = client(&fake, "https://h", Auth::Anonymous);
+        assert_eq!(
+            block_on(c.get_mergeable(ChangeNumber(5))).unwrap(),
+            Some(false)
+        );
+        assert_eq!(block_on(c.get_mergeable(ChangeNumber(5))).unwrap(), None);
+        assert_eq!(
+            fake.requests()[0].uri().to_string(),
+            "https://h/changes/5/revisions/current/mergeable"
         );
     }
 

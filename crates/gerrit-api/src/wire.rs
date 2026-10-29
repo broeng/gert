@@ -267,6 +267,13 @@ pub(crate) struct RelatedChangesInfo {
     pub changes: Option<Vec<RelatedChangeAndCommitInfo>>,
 }
 
+/// The part of `MergeableInfo` we read.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct MergeableInfo {
+    pub mergeable: Option<bool>,
+}
+
 /// The subset of `DiffPreferencesInfo` a diff view uses.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
@@ -592,6 +599,7 @@ mod tests {
         conforms::<DiffInfo>(&spec, "DiffInfo");
         conforms::<RelatedChangeAndCommitInfo>(&spec, "RelatedChangeAndCommitInfo");
         conforms::<RelatedChangesInfo>(&spec, "RelatedChangesInfo");
+        conforms::<MergeableInfo>(&spec, "MergeableInfo");
         conforms::<DiffPreferencesInfo>(&spec, "DiffPreferencesInfo");
         conforms::<GeneralPreferencesInfo>(&spec, "GeneralPreferencesInfo");
         conforms::<Range>(&spec, "Range");
