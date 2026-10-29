@@ -191,11 +191,73 @@ fn refresh_change_round_trip() {
     assert!(f.syncer.cached_change(ChangeNumber(7)).unwrap().is_none());
     f.http
         .push_response(200, format!(")]}}'\n{}", change_json(7, U1)));
+    f.http.push_response(200, ")]}'\n{\"mergeable\": false}");
     let detail = block_on(f.syncer.refresh_change(ChangeNumber(7))).unwrap();
     assert_eq!(detail.summary.number, ChangeNumber(7));
+    // The server left `mergeable` out, so it was asked separately.
+    assert_eq!(detail.summary.mergeable, Some(false));
     let cached = f.syncer.cached_change(ChangeNumber(7)).unwrap().unwrap();
     assert_eq!(cached.detail, detail);
-    assert!(f.http.requests()[0].uri().path().ends_with("/changes/7"));
+    let paths: Vec<_> = f
+        .http
+        .requests()
+        .iter()
+        .map(|r| r.uri().path().to_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        ["/changes/7", "/changes/7/revisions/current/mergeable"]
+    );
+}
+
+#[test]
+fn mergeable_is_asked_only_for_open_changes_without_it() {
+    let f = fixture();
+    let mut given = change_json(7, U1);
+    given["mergeable"] = json!(true);
+    let mut merged = change_json(8, U1);
+    merged["status"] = json!("MERGED");
+    for c in [&given, &merged] {
+        f.http.push_response(200, format!(")]}}'\n{c}"));
+    }
+    let d = block_on(f.syncer.refresh_change(ChangeNumber(7))).unwrap();
+    assert_eq!(d.summary.mergeable, Some(true));
+    let d = block_on(f.syncer.refresh_change(ChangeNumber(8))).unwrap();
+    assert_eq!(d.summary.mergeable, None);
+    assert_eq!(f.http.requests().len(), 2);
+}
+
+#[test]
+fn a_failed_mergeable_check_leaves_it_unknown() {
+    let f = fixture();
+    f.http
+        .push_response(200, format!(")]}}'\n{}", change_json(7, U1)));
+    f.http.push_response(500, "boom");
+    let d = block_on(f.syncer.refresh_change(ChangeNumber(7))).unwrap();
+    assert_eq!(d.summary.mergeable, None);
+    assert!(f.syncer.cached_change(ChangeNumber(7)).unwrap().is_some());
+}
+
+#[test]
+fn summaries_of_open_changes_get_their_mergeability() {
+    let f = fixture();
+    let mut given = change_json(2, U1);
+    given["mergeable"] = json!(true);
+    let mut abandoned = change_json(3, U1);
+    abandoned["status"] = json!("ABANDONED");
+    let list = Value::Array(vec![change_json(1, U1), given, abandoned]);
+    f.http.push_response(200, format!(")]}}'\n{list}"));
+    f.http.push_response(200, ")]}'\n{\"mergeable\": false}");
+    let numbers = [1, 2, 3].map(ChangeNumber);
+    let got = block_on(f.syncer.fetch_summaries(&numbers)).unwrap();
+    let mergeable: Vec<_> = got.iter().map(|c| c.mergeable).collect();
+    assert_eq!(mergeable, [Some(false), Some(true), None]);
+    let reqs = f.http.requests();
+    assert_eq!(reqs.len(), 2);
+    assert_eq!(
+        reqs[1].uri().path(),
+        "/changes/1/revisions/current/mergeable"
+    );
 }
 
 #[test]

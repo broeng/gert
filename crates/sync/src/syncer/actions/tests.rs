@@ -31,7 +31,7 @@ fn change_json(status: &str, actions: Value) -> String {
         "_number": 7, "branch": "main", "change_id": "I7", "project": "p",
         "created": "2013-02-01 09:59:32.126000000", "owner": {"_account_id": 1},
         "status": status, "subject": "s", "updated": "2024-02-01 10:00:00.000000000",
-        "actions": actions,
+        "mergeable": true, "actions": actions,
     })
     .to_string()
 }

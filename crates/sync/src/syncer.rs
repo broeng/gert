@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use futures::future::{BoxFuture, FutureExt};
+use futures::future::{BoxFuture, FutureExt, join_all};
 use gerrit_api::{ChangeQuery, DiffParams, GerritClient};
 use jiff::Timestamp;
 use model::{
-    ChangeDetail, ChangeNumber, ChangeSummary, Diff, DiffKey, DiffPreferences, FileEntry, FilesKey,
-    RelatedChange, RevisionId,
+    ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, Diff, DiffKey, DiffPreferences,
+    FileEntry, FilesKey, RelatedChange, RevisionId,
 };
 use store::{
     CachedChange, CachedDiff, CachedDiffPreferences, CachedFileList, CachedQuery, CachedRelated,
@@ -78,8 +78,9 @@ impl Syncer {
         Ok(self.store().load_change_detail(self.server, number)?)
     }
 
-    /// Fetches the changes `numbers` with their detailed labels, for the
-    /// vote markers of the relation chain. Nothing is cached.
+    /// Fetches the changes `numbers` with their detailed labels and
+    /// mergeability, for the markers of the relation chain. Nothing is
+    /// cached.
     pub async fn fetch_summaries(
         &self,
         numbers: &[ChangeNumber],
@@ -94,7 +95,23 @@ impl Syncer {
             .join(" OR ");
         let mut query = ChangeQuery::new(q).limit(u32::try_from(numbers.len()).unwrap_or(u32::MAX));
         query.options.push(gerrit_api::ChangeOption::DetailedLabels);
-        Ok(self.client.query_changes(&query).await?.changes)
+        let mut changes = self.client.query_changes(&query).await?.changes;
+        join_all(changes.iter_mut().map(|c| self.fill_mergeable(c))).await;
+        Ok(changes)
+    }
+
+    /// Sets `mergeable` of an open change from the mergeable endpoint when
+    /// the server left it out of the change info, as servers may
+    /// (`change.mergeabilityComputationBehavior`). A failure leaves it
+    /// unknown instead of failing the fetch it is part of.
+    async fn fill_mergeable(&self, c: &mut ChangeSummary) {
+        if c.status != ChangeStatus::New || c.mergeable.is_some() {
+            return;
+        }
+        match self.client.get_mergeable(c.number).await {
+            Ok(m) => c.mergeable = m,
+            Err(e) => log::warn!("checking whether change {} merges: {e}", c.number),
+        }
     }
 
     /// Fetches the first page of `query` and updates the cache.
@@ -161,9 +178,11 @@ impl Syncer {
         })
     }
 
-    /// Fetches a change's detail and caches it (and its list summary).
+    /// Fetches a change's detail, with its mergeability, and caches it
+    /// (and its list summary).
     pub async fn refresh_change(&self, number: ChangeNumber) -> Result<ChangeDetail, Error> {
-        let detail = self.client.get_change(number).await?;
+        let mut detail = self.client.get_change(number).await?;
+        self.fill_mergeable(&mut detail.summary).await;
         self.save_fresh_detail(&detail)?;
         Ok(detail)
     }
