@@ -72,6 +72,22 @@ pub(super) fn pill(text: impl Into<SharedString>, fg: Hsla) -> Div {
         .child(text.into())
 }
 
+/// Whether Gerrit found that the open change does not merge cleanly into
+/// its branch.
+pub(super) fn has_merge_conflict(summary: Option<&ChangeSummary>) -> bool {
+    summary.is_some_and(|s| s.status == ChangeStatus::New && s.mergeable == Some(false))
+}
+
+/// "Merge conflict" in solid red with its own text colour, so it stands out
+/// from the tinted pills as it does in the web UI.
+fn conflict_pill(cx: &App) -> Div {
+    let t = cx.theme();
+    pill("Merge conflict", t.danger)
+        .bg(t.danger)
+        .text_color(t.danger_foreground)
+        .font_bold()
+}
+
 /// One div per line, URLs in them clickable. `id` must be unique on the page.
 fn lines_of(id: impl Into<ElementId>, text: &str, empty_pad: bool, link: Hsla) -> Vec<AnyElement> {
     let id = id.into();
@@ -358,6 +374,7 @@ impl ChangePage {
             } else {
                 pill(status_text, status_color)
             })
+            .when(has_merge_conflict(Some(c)), |d| d.child(conflict_pill(cx)))
             .child({
                 let url = browser_url(&self.session.base_url, &c.project, c.number);
                 div()
@@ -915,6 +932,7 @@ impl ChangePage {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let r = self.related.as_ref().filter(|r| r.changes.len() > 1)?;
+        let own = self.detail.as_ref().map(|d| &d.summary);
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let rows = r.changes.iter().enumerate().map(|(i, c)| {
@@ -956,7 +974,15 @@ impl ChangePage {
                         .child(related_subject(c)),
                 )
                 .child(div().flex_1())
-                .children(related_pills(c, r.summaries.get(&c.number), cx))
+                .children(related_pills(
+                    c,
+                    // Until the chain's summaries arrive, this change's own
+                    // row uses the detail the page already has.
+                    r.summaries
+                        .get(&c.number)
+                        .or(own.filter(|s| s.number == c.number)),
+                    cx,
+                ))
         });
         let scroll = self.related_scroll.clone();
         let list = v_flex()
@@ -1258,6 +1284,9 @@ fn related_pills(c: &RelatedChange, summary: Option<&ChangeSummary>, cx: &App) -
         Some(ChangeStatus::Merged) => v.push(pill("Merged", t.success)),
         Some(ChangeStatus::Abandoned) => v.push(pill("Abandoned", t.muted_foreground)),
         Some(ChangeStatus::New) => {
+            if has_merge_conflict(summary) {
+                v.push(conflict_pill(cx));
+            }
             for text in blocking_votes(summary) {
                 v.push(pill(text, t.danger));
             }
