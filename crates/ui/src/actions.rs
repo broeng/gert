@@ -123,6 +123,7 @@ actions!(
         PrefsShowTabs,
         PrefsIntraline,
         PrefsSyntax,
+        PrefsWrap,
     ]
 );
 
@@ -552,6 +553,11 @@ pub fn diff_prefs_entries() -> Vec<Entry> {
             "y",
             KeyBinding::new("y", PrefsSyntax, Some(k)),
             "Syntax highlighting",
+        ),
+        e(
+            "l",
+            KeyBinding::new("l", PrefsWrap, Some(k)),
+            "Wrap long lines",
         ),
         e(
             "Esc or ,",

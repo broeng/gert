@@ -126,8 +126,9 @@ pub struct Cell {
     /// Parts of the line a comment thread is anchored at (a range
     /// location), byte ranges into `text`, sorted and not overlapping.
     pub comments: Vec<Range<usize>>,
-    /// URLs in `text` (byte ranges, sorted); Ctrl-click opens them. Lines
-    /// are never wrapped or split, so a URL always sits in one cell.
+    /// URLs in `text` (byte ranges, sorted); Ctrl-click opens them. A line
+    /// is never split into several cells (wrapping is only drawn), so a URL
+    /// always sits in one cell.
     pub urls: Vec<Range<usize>>,
     /// The line as it is in the file, when `text` differs from it (tabs
     /// expanded, a long line cut): syntax spans are byte ranges of it.
@@ -354,6 +355,8 @@ pub struct Layout {
     /// Highest line number on the old / new side, for the gutter width.
     max_old: u32,
     max_new: u32,
+    /// The longest text in the left / right pane, in characters.
+    widest: (usize, usize),
 }
 
 impl Layout {
@@ -406,6 +409,7 @@ impl Layout {
                 }
             }
         }
+        let widest = widest(&b.rows);
         Self {
             mode: opts.mode,
             rows: b.rows,
@@ -413,6 +417,7 @@ impl Layout {
             thread_rows: b.thread_rows,
             max_old: old - 1,
             max_new: new - 1,
+            widest,
         }
     }
 
@@ -458,6 +463,13 @@ impl Layout {
     /// The widest line number on each side, for sizing the gutters.
     pub fn max_numbers(&self) -> (u32, u32) {
         (self.max_old, self.max_new)
+    }
+
+    /// The longest line shown in the left and the right text pane, in
+    /// characters (tabs expanded), for how far the text scrolls sideways.
+    /// Unified rows have one pane, so both are the same.
+    pub fn widest(&self) -> (usize, usize) {
+        self.widest
     }
 
     /// Indexes of the thread rows, ascending.
@@ -522,6 +534,18 @@ fn len32<T>(v: &[T]) -> u32 {
 /// A line on both sides: the old and the new text (they differ only for
 /// lines of a whitespace-only change).
 type PairedLine<'a> = (&'a str, &'a str);
+
+fn widest(rows: &[Row]) -> (usize, usize) {
+    let width = |c: Option<&Cell>| c.map_or(0, |c| c.text.chars().count());
+    rows.iter().fold((0, 0), |(l, r), row| match row {
+        Row::Side { left, right } => (l.max(width(left.as_ref())), r.max(width(right.as_ref()))),
+        Row::Unified { cell, .. } => {
+            let w = l.max(width(Some(cell)));
+            (w, w)
+        }
+        _ => (l, r),
+    })
+}
 
 /// Consecutive unchanged lines.
 struct Run<'a> {
@@ -1254,6 +1278,24 @@ mod tests {
             c.as_ref().map(|c| (c.number, &*c.text))
         }
         (f(left), f(right))
+    }
+
+    #[test]
+    fn the_widest_line_is_counted_per_pane_with_tabs_expanded() {
+        let d = diff(vec![
+            common(&["ab"]),
+            changed(&["\tx", "a longer old line"], &["new"]),
+            common(&["é"]),
+        ]);
+        // "\tx" is 5 columns with a tab width of 4; "é" is one character.
+        let l = build(&d, &opts(DiffViewMode::SideBySide));
+        assert_eq!(l.widest(), (17, 3));
+        let l = build(&d, &opts(DiffViewMode::Unified));
+        assert_eq!(l.widest(), (17, 17));
+        assert_eq!(
+            build(&diff(Vec::new()), &opts(DiffViewMode::Unified)).widest(),
+            (0, 0)
+        );
     }
 
     #[test]

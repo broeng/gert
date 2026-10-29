@@ -842,6 +842,10 @@ impl DiffPage {
         );
     }
 
+    fn prefs_wrap(&mut self, _: &PrefsWrap, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_session(|p, r| p.line_wrapping = Some(!r.line_wrapping), cx);
+    }
+
     fn prefs_syntax(&mut self, _: &PrefsSyntax, _: &mut Window, cx: &mut Context<Self>) {
         self.set_session(
             |p, r| p.syntax_highlighting = Some(!r.syntax_highlighting),
@@ -1070,6 +1074,7 @@ impl DiffPage {
                 .on_action(cx.listener(Self::prefs_show_tabs))
                 .on_action(cx.listener(Self::prefs_intraline))
                 .on_action(cx.listener(Self::prefs_syntax))
+                .on_action(cx.listener(Self::prefs_wrap))
                 .gap_0p5()
                 .p_3()
                 .rounded_lg()
@@ -1132,6 +1137,13 @@ impl DiffPage {
                     "Syntax highlighting",
                     on_off(p.syntax_highlighting),
                     |t, w, cx| t.prefs_syntax(&PrefsSyntax, w, cx),
+                ))
+                .child(row(
+                    "pref-wrap",
+                    "l",
+                    "Line wrapping",
+                    on_off(p.line_wrapping),
+                    |t, w, cx| t.prefs_wrap(&PrefsWrap, w, cx),
                 ))
                 .child(
                     div()

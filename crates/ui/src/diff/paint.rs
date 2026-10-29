@@ -112,10 +112,20 @@ impl Palette {
     }
 }
 
+/// Space between the gutter and the code text.
+pub const TEXT_INSET: Pixels = px(6.);
+
 /// Everything the row builders need, computed once per rendered slice.
 pub struct Style {
     pub palette: Palette,
     pub row_height: Pixels,
+    /// Advance of one character of the code font.
+    pub char_w: Pixels,
+    /// Long lines wrap onto more rows of text (the `line_wrapping`
+    /// preference); otherwise they are cut at the pane's edge and the text
+    /// scrolls sideways by `scroll_x`.
+    pub wrap: bool,
+    pub scroll_x: Pixels,
     pub old_gutter: Pixels,
     pub new_gutter: Pixels,
     pub hide_numbers: bool,
@@ -189,6 +199,9 @@ impl Style {
         Self {
             palette,
             row_height: row_height(size),
+            char_w,
+            wrap: false,
+            scroll_x: px(0.),
             old_gutter: gutter(max_old),
             new_gutter: gutter(max_new),
             hide_numbers,

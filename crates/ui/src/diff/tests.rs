@@ -1078,6 +1078,85 @@ fn toggling_a_thread_changes_the_height_of_its_row(cx: &mut TestAppContext) {
     assert_eq!(height(cx), open);
 }
 
+/// One short line, then a line far wider than the 1000px window.
+fn long_line_diff() -> Diff {
+    Diff {
+        meta_a: None,
+        meta_b: None,
+        change_type: Some(DiffChangeType::Modified),
+        intraline_status: None,
+        diff_header: Vec::new(),
+        chunks: vec![DiffChunk::Changed(ChangedChunk {
+            a: lines(&["short"]),
+            b: lines(&["short", &"word ".repeat(100)]),
+            ..Default::default()
+        })],
+        binary: false,
+    }
+}
+
+fn frame(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    cx.update_window(window, |_, window, cx| window.render_frame(cx))
+        .expect("frame");
+    cx.run_until_parked();
+}
+
+fn side_scroll(cx: &mut TestAppContext, view: &Entity<DiffView>) -> gpui_kit::Pixels {
+    cx.update(|cx| view.read(cx).side_scroll_for_test())
+}
+
+#[gpui_kit::test]
+fn h_and_l_scroll_long_lines_sideways_within_their_length(cx: &mut TestAppContext) {
+    let (window, view, _) = open(cx, long_line_diff(), DiffViewMode::Unified);
+    frame(cx, window);
+    press(cx, window, "l");
+    let step = side_scroll(cx, &view);
+    assert!(step > px(0.), "{step:?}");
+    press(cx, window, "right");
+    assert_eq!(side_scroll(cx, &view), step * 2.);
+    press(cx, window, "h");
+    press(cx, window, "left");
+    press(cx, window, "h");
+    assert_eq!(side_scroll(cx, &view), px(0.));
+    // It stops where the end of the longest line shows.
+    for _ in 0..200 {
+        press(cx, window, "l");
+    }
+    frame(cx, window);
+    let max = side_scroll(cx, &view);
+    assert!(max > step * 2. && max < px(3000.), "{max:?}");
+    // Nothing to scroll when every line fits.
+    let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
+    frame(cx, window);
+    press(cx, window, "l");
+    assert_eq!(side_scroll(cx, &view), px(0.));
+}
+
+#[gpui_kit::test]
+fn wrapped_lines_make_their_row_taller_and_do_not_scroll(cx: &mut TestAppContext) {
+    let mut p = prefs(DiffViewMode::SideBySide);
+    let (window, view, _) = open_with(cx, long_line_diff(), p.clone());
+    frame(cx, window);
+    let height = |cx: &mut TestAppContext, row: usize| {
+        cx.update(|cx| view.read(cx).row_height_for_test(row))
+            .expect("measured")
+    };
+    let (short, long) = (height(cx, 0), height(cx, 1));
+    assert_eq!(short, long);
+    p.line_wrapping = true;
+    cx.update(|cx| view.update(cx, |v, cx| v.set_preferences(p.clone(), cx)));
+    frame(cx, window);
+    assert_eq!(height(cx, 0), short);
+    assert!(height(cx, 1) > short * 2., "{:?}", height(cx, 1));
+    press(cx, window, "l");
+    assert_eq!(side_scroll(cx, &view), px(0.));
+    assert_eq!(hint(cx, &view).as_deref(), Some("Lines are wrapped"));
+    p.line_wrapping = false;
+    cx.update(|cx| view.update(cx, |v, cx| v.set_preferences(p, cx)));
+    frame(cx, window);
+    assert_eq!(height(cx, 1), short);
+}
+
 #[gpui_kit::test]
 fn clicking_a_thread_header_toggles_it_and_retry_asks_the_owner(cx: &mut TestAppContext) {
     let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);

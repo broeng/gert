@@ -9,7 +9,7 @@ mod thread_card;
 
 use std::{cell, collections::HashMap, rc::Rc, sync::Arc};
 
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarHandle};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -24,7 +24,7 @@ use super::{
         Anchor, Cell, Expansion, FoldRow, HiddenRow, Layout, LayoutOptions, LineKind, REVEAL_STEP,
         Row, ThreadSlot,
     },
-    paint::{Palette, Style, SyntaxPaint, line_highlights},
+    paint::{Palette, Style, SyntaxPaint, TEXT_INSET, line_highlights},
     syntax::{DiffSyntax, highlight_diff},
 };
 
@@ -113,6 +113,8 @@ pub struct DiffView {
     /// Height of the list's viewport at the last render. (The list's own
     /// state is borrowed while it renders rows, so rows cannot ask it.)
     viewport: Pixels,
+    /// How far the code text is scrolled sideways (lines not wrapped).
+    side_scroll: SideScroll,
     /// The cursor row asks the list to scroll it into view in the next
     /// frame (cleared when that row has been painted).
     reveal: Rc<cell::Cell<Option<Reveal>>>,
@@ -168,6 +170,72 @@ fn default_open(t: &Thread) -> bool {
     t.is_unresolved() || t.has_draft()
 }
 
+/// Columns `h` / `l` scroll the text sideways.
+const SIDE_STEP: f32 = 8.;
+
+/// The sideways scroll of the code text when lines are not wrapped. One
+/// offset for every text pane, so both sides of a row move together, and
+/// the gutters, folds and comment threads stay where they are. Shared with
+/// the horizontal scrollbar, which drags it.
+#[derive(Clone, Default)]
+struct SideScroll(Rc<cell::Cell<SideScrollState>>);
+
+#[derive(Clone, Copy, Default)]
+struct SideScrollState {
+    /// How far the text is scrolled, `0..=max`.
+    x: Pixels,
+    max: Pixels,
+    /// The list's bounds, which the scrollbar runs along.
+    viewport: Bounds<Pixels>,
+}
+
+impl SideScroll {
+    fn x(&self) -> Pixels {
+        self.0.get().x
+    }
+
+    /// Scrolls to `x`, within the limits; whether the text moved.
+    fn scroll_to(&self, x: Pixels) -> bool {
+        let mut s = self.0.get();
+        let x = x.clamp(px(0.), s.max);
+        let moved = x != s.x;
+        s.x = x;
+        self.0.set(s);
+        moved
+    }
+
+    fn scroll_by(&self, dx: Pixels) -> bool {
+        self.scroll_to(self.x() + dx)
+    }
+
+    fn set_limits(&self, viewport: Bounds<Pixels>, max: Pixels) {
+        let mut s = self.0.get();
+        s.viewport = viewport;
+        s.max = max;
+        s.x = s.x.min(max);
+        self.0.set(s);
+    }
+}
+
+impl ScrollbarHandle for SideScroll {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        self.0.get().viewport
+    }
+
+    fn offset(&self) -> Point<Pixels> {
+        point(-self.x(), px(0.))
+    }
+
+    fn set_offset(&self, offset: Point<Pixels>) {
+        self.scroll_to(-offset.x);
+    }
+
+    fn content_size(&self) -> Size<Pixels> {
+        let s = self.0.get();
+        size(s.viewport.size.width + s.max, s.viewport.size.height)
+    }
+}
+
 /// How far above and below the viewport the list measures rows.
 const OVERDRAW: Pixels = px(300.);
 
@@ -208,6 +276,7 @@ impl DiffView {
             row_height,
             window_width: px(0.),
             viewport: px(0.),
+            side_scroll: SideScroll::default(),
             reveal: Rc::new(cell::Cell::new(None)),
             style: None,
             status: None,
@@ -600,6 +669,9 @@ impl DiffView {
         let old = LayoutOptions::from_prefs(&self.prefs);
         let mode_changed = prefs.view_mode != self.prefs.view_mode;
         let syntax_toggled = prefs.syntax_highlighting != self.prefs.syntax_highlighting;
+        // Wrapping changes the height of the code rows, which the list has
+        // measured; it has to start over like for a new layout.
+        let wrap_toggled = prefs.line_wrapping != self.prefs.line_wrapping;
         self.prefs = prefs;
         if syntax_toggled {
             if !self.prefs.syntax_highlighting {
@@ -613,7 +685,7 @@ impl DiffView {
                 self.start_syntax(cx);
             }
         }
-        if old == LayoutOptions::from_prefs(&self.prefs) {
+        if old == LayoutOptions::from_prefs(&self.prefs) && !wrap_toggled {
             cx.notify();
             return;
         }
@@ -662,6 +734,11 @@ impl DiffView {
     #[cfg(test)]
     pub(crate) fn focus_for_test(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn side_scroll_for_test(&self) -> Pixels {
+        self.side_scroll.x()
     }
 
     /// Height of a row as the list measured it (it must have been drawn).
@@ -924,6 +1001,48 @@ impl DiffView {
 
     // --- actions ---------------------------------------------------------
 
+    fn scroll_left(&mut self, _: &ScrollLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_sideways(-SIDE_STEP, cx);
+    }
+
+    fn scroll_right(&mut self, _: &ScrollRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_sideways(SIDE_STEP, cx);
+    }
+
+    fn scroll_sideways(&mut self, columns: f32, cx: &mut Context<Self>) {
+        if self.prefs.line_wrapping {
+            self.say("Lines are wrapped", cx);
+            return;
+        }
+        let Some(char_w) = self.style.as_ref().map(|s| s.char_w) else {
+            return;
+        };
+        if self.side_scroll.scroll_by(char_w * columns) {
+            cx.notify();
+        }
+    }
+
+    /// How far the code text can scroll sideways: until the end of the
+    /// longest line, and two columns more, shows in its pane.
+    fn side_scroll_max(&self, style: &Style, width: Pixels) -> Pixels {
+        let gutter = |g: Pixels| if style.hide_numbers { px(0.) } else { g };
+        let over = |chars: usize, pane: Pixels| {
+            (style.char_w * (chars + 2) as f32 + TEXT_INSET - pane).max(px(0.))
+        };
+        let (left, right) = self.layout.widest();
+        match self.layout.mode() {
+            DiffViewMode::SideBySide => {
+                let half = width / 2.;
+                over(left, half - gutter(style.old_gutter))
+                    .max(over(right, half - gutter(style.new_gutter)))
+            }
+            DiffViewMode::Unified => over(
+                left.max(right),
+                width - gutter(style.old_gutter) - gutter(style.new_gutter),
+            ),
+        }
+    }
+
     fn line_down(&mut self, _: &LineDown, _: &mut Window, cx: &mut Context<Self>) {
         self.step(1, cx);
     }
@@ -1094,9 +1213,9 @@ impl DiffView {
         let (Some(row), Some(style)) = (layout.rows().get(ix), self.style.clone()) else {
             return div().into_any_element();
         };
+        let wrap = style.wrap;
         let body = match row {
-            Row::Side { left, right } => h_flex()
-                .size_full()
+            Row::Side { left, right } => code_row(wrap)
                 .child(cell_element(
                     left.as_ref(),
                     DiffSide::Left,
@@ -1109,8 +1228,7 @@ impl DiffView {
                         .border_color(style.palette.divider),
                 )
                 .into_any_element(),
-            Row::Unified { old, new, cell } => h_flex()
-                .size_full()
+            Row::Unified { old, new, cell } => code_row(wrap)
                 .child(number_element(*old, style.old_gutter, cell.kind, &style))
                 .child(number_element(*new, style.new_gutter, cell.kind, &style))
                 .child(text_pane(
@@ -1137,6 +1255,8 @@ impl DiffView {
             Row::Thread(tr) => thread_card::thread_row(self, ix, tr, &style, cx),
         };
         let is_thread = matches!(row, Row::Thread(_));
+        // A wrapped line is as tall as its text.
+        let grows = wrap && matches!(row, Row::Side { .. } | Row::Unified { .. });
         let selected = ix == self.cursor && row.selectable();
         let reveal = self.reveal.get().filter(|_| selected);
         let viewport = self.viewport;
@@ -1144,7 +1264,8 @@ impl DiffView {
             .id(("diff-row", ix))
             .relative()
             .w_full()
-            .when(!is_thread, |d| d.h(style.row_height))
+            .when(grows, |d| d.min_h(style.row_height))
+            .when(!is_thread && !grows, |d| d.h(style.row_height))
             .child(body)
             .when(selected, |d| {
                 d.child(
@@ -1196,13 +1317,26 @@ fn autoscroll_probe(
     .inset_0()
 }
 
+/// The row of a code line: its cells side by side. A wrapped line makes
+/// the row taller, and every cell stretches to it, so that the backgrounds
+/// meet.
+fn code_row(wrap: bool) -> Div {
+    let row = h_flex().w_full();
+    if wrap {
+        row.items_stretch()
+    } else {
+        row.h_full()
+    }
+}
+
 fn number_element(n: Option<u32>, width: Pixels, kind: LineKind, style: &Style) -> Div {
     div()
         .flex()
         .flex_none()
-        .items_center()
+        // Next to a wrapped line the number stays on its first row.
+        .when(style.wrap, |d| d.items_start())
+        .when(!style.wrap, |d| d.items_center().h_full())
         .justify_end()
-        .h_full()
         .w(width)
         .pr(px(8.))
         .text_color(style.palette.gutter_fg)
@@ -1217,10 +1351,10 @@ fn text_pane(cell: &Cell, side: DiffSide, style: &Style) -> Div {
         .relative()
         .flex_1()
         .min_w_0()
-        .h_full()
+        .when(!style.wrap, |d| d.h_full().whitespace_nowrap())
+        .when(style.wrap, |d| d.whitespace_normal())
         .overflow_hidden()
-        .whitespace_nowrap()
-        .pl(px(6.))
+        .pl(TEXT_INSET)
         .bg(p.line_bg(cell.kind, cell.due_to_rebase))
         .when(cell.due_to_rebase, |d| d.text_color(p.muted_fg))
         .children(style.ruler.map(|x| {
@@ -1228,7 +1362,7 @@ fn text_pane(cell: &Cell, side: DiffSide, style: &Style) -> Div {
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .left(x + px(6.))
+                .left(x + TEXT_INSET - style.scroll_x)
                 .w(px(1.))
                 .bg(p.ruler)
         }))
@@ -1240,15 +1374,16 @@ fn text_pane(cell: &Cell, side: DiffSide, style: &Style) -> Div {
                 .unwrap_or_default();
             let text = StyledText::new(SharedString::from(cell.text.clone()))
                 .with_highlights(line_highlights(cell, p, &syntax));
+            let shifted = |text| div().relative().left(-style.scroll_x).child(text);
             if cell.urls.is_empty() {
-                return d.child(text);
+                return d.child(shifted(text));
             }
             // Ctrl-click (Cmd on macOS) on a URL opens it. The click still
             // reaches the row, so it moves the cursor there as well.
             let layout = text.layout().clone();
             let urls = cell.urls.clone();
             let line = cell.text.clone();
-            d.child(text)
+            d.child(shifted(text))
                 .on_mouse_up(MouseButton::Left, move |e, _, cx| {
                     if !e.modifiers.secondary() {
                         return;
@@ -1265,18 +1400,20 @@ fn text_pane(cell: &Cell, side: DiffSide, style: &Style) -> Div {
 /// One half of a side-by-side row; a blank filler without a cell.
 fn cell_element(cell: Option<&Cell>, side: DiffSide, gutter: Pixels, style: &Style) -> Div {
     let p = &style.palette;
+    let half = || {
+        let d = h_flex().flex_1().min_w_0();
+        if style.wrap {
+            d.items_stretch()
+        } else {
+            d.h_full()
+        }
+    };
     match cell {
-        Some(cell) => h_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
+        Some(cell) => half()
             .overflow_hidden()
             .child(number_element(Some(cell.number), gutter, cell.kind, style))
             .child(text_pane(cell, side, style)),
-        None => h_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
+        None => half()
             .bg(p.filler_bg)
             .child(number_element(None, gutter, LineKind::Common, style)),
     }
@@ -1398,6 +1535,17 @@ impl Render for DiffView {
             &t,
             window,
         );
+        style.wrap = self.prefs.line_wrapping;
+        let bounds = self.list.viewport_bounds();
+        if bounds.size.width > px(0.) {
+            let max = if style.wrap {
+                px(0.)
+            } else {
+                self.side_scroll_max(&style, bounds.size.width)
+            };
+            self.side_scroll.set_limits(bounds, max);
+        }
+        style.scroll_x = self.side_scroll.x();
         if let Some(syntax) = self.active_syntax() {
             style.syntax = Some(SyntaxPaint {
                 syntax: syntax.clone(),
@@ -1432,6 +1580,8 @@ impl Render for DiffView {
             .on_action(cx.listener(Self::half_page_up))
             .on_action(cx.listener(Self::cursor_top))
             .on_action(cx.listener(Self::cursor_bottom))
+            .on_action(cx.listener(Self::scroll_left))
+            .on_action(cx.listener(Self::scroll_right))
             .on_action(cx.listener(Self::toggle_mode_action))
             .on_action(cx.listener(Self::expand_fold_action))
             .on_action(cx.listener(Self::expand_above))
@@ -1467,7 +1617,17 @@ impl Render for DiffView {
                     .w_full()
                     .when(self.sizing == DiffSizing::Fill, |d| d.flex_1().min_h_0())
                     .child(list)
-                    .vertical_scrollbar(&self.list),
+                    .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                        // The list scrolls up and down; sideways is ours.
+                        let dx = e.delta.pixel_delta(this.row_height).x;
+                        if dx != px(0.) && this.side_scroll.scroll_by(-dx) {
+                            cx.notify();
+                        }
+                    }))
+                    .vertical_scrollbar(&self.list)
+                    .when(!self.prefs.line_wrapping, |d| {
+                        d.horizontal_scrollbar(&self.side_scroll)
+                    }),
             )
     }
 }
