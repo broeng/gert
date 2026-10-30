@@ -25,6 +25,7 @@ mod pages;
 mod reply;
 mod reviewed;
 mod row;
+mod search_link;
 mod servers;
 mod session;
 mod settings;
