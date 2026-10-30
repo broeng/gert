@@ -52,15 +52,34 @@ impl PatchSel {
             return;
         };
         let numbers: Vec<_> = d.revisions.iter().map(|r| r.number).collect();
-        let Some(next) = cycle(&numbers, Some(current), forward) else {
+        if let Some(next) = cycle(&numbers, Some(current), forward) {
+            self.set_target(d, next);
+        }
+    }
+
+    /// Shows patch set `n`. Picking the current one follows the current
+    /// patch set again; a base that is no longer older goes back to "Base".
+    pub fn set_target(&mut self, d: &ChangeDetail, n: PatchSetNumber) {
+        if d.revision(n).is_none() {
             return;
-        };
-        self.target = if Some(next) == d.current_patch_set {
+        }
+        self.target = if Some(n) == d.current_patch_set {
             None
         } else {
-            Some(next)
+            Some(n)
         };
         self.base = self.base_number(d);
+    }
+
+    /// Compares with patch set `n`, or with "Base" for `None`. A patch set
+    /// that is not older than the target is ignored.
+    pub fn set_base(&mut self, d: &ChangeDetail, n: Option<PatchSetNumber>) {
+        let Some(target) = self.target_number(d) else {
+            return;
+        };
+        if n.is_none_or(|b| b < target && d.revision(b).is_some()) {
+            self.base = n;
+        }
     }
 
     /// Moves the base through "Base" and the patch sets older than the
@@ -304,6 +323,27 @@ mod tests {
         };
         first.cycle_base(&d, true);
         assert_eq!(first.base, None);
+    }
+
+    #[test]
+    fn picking_patch_sets() {
+        let d = detail(4, 4);
+        let mut sel = PatchSel::default();
+        sel.set_base(&d, ps(3));
+        assert_eq!(sel.base, ps(3));
+        sel.set_base(&d, ps(4)); // not older than the target: ignored
+        assert_eq!(sel.base, ps(3));
+        sel.set_target(&d, PatchSetNumber(9)); // no such patch set
+        assert_eq!(sel.target, None);
+        sel.set_target(&d, PatchSetNumber(2)); // base 3 is no longer older
+        assert_eq!(sel.target, ps(2));
+        assert_eq!(sel.base, None);
+        sel.set_base(&d, ps(1));
+        sel.set_target(&d, PatchSetNumber(4)); // the current one: follow it
+        assert_eq!(sel.target, None);
+        assert_eq!(sel.base, ps(1));
+        sel.set_base(&d, None);
+        assert_eq!(sel.base, None);
     }
 
     #[test]
