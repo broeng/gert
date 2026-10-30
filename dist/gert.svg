@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Gert = "brave spear": a shield split into a diff -->
+  <defs>
+    <path id="shield" d="M44 42 Q128 16 212 42 L212 128 Q212 202 128 242 Q44 202 44 128 Z"/>
+    <clipPath id="left">
+      <rect width="123" height="256"/>
+    </clipPath>
+    <clipPath id="right">
+      <rect x="133" width="123" height="256"/>
+    </clipPath>
+  </defs>
+  <use href="#shield" fill="#d9534f" clip-path="url(#left)"/>
+  <use href="#shield" fill="#3fa34d" clip-path="url(#right)"/>
+  <g stroke="#fff" stroke-width="18" stroke-linecap="round">
+    <line x1="66" y1="118" x2="104" y2="118"/>
+    <line x1="152" y1="118" x2="190" y2="118"/>
+    <line x1="171" y1="99" x2="171" y2="137"/>
+  </g>
+</svg>
