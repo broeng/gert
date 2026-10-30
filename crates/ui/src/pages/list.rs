@@ -23,6 +23,7 @@ use crate::{
     list_model::{DASHBOARD_ROWS, ListModel, PAGE_SIZE, Pager},
     pages::settings::validate,
     row::{browser_url, chips, size_text},
+    search_link::{account_query, project_query, search_link},
     session::{SavedQuery, Session, is_unauthorized},
     theme::{chip_colors, mark_color},
     time_fmt::relative,
@@ -645,12 +646,24 @@ impl ChangeListPage {
                     }))
                     .child(div().min_w_0().truncate().child(c.subject.clone())),
             )
-            .child(shrinking(W_OWNER).child(c.owner.display()))
-            .child(
-                shrinking(W_PROJECT)
-                    .text_color(muted)
-                    .child(c.project.clone()),
-            )
+            .child(shrinking(W_OWNER).child(search_link(
+                ("owner-link", section * 10_000 + row),
+                c.owner.display(),
+                cx,
+                {
+                    let query = account_query("owner", &c.owner);
+                    cx.listener(move |_, _, _, cx| cx.emit(ListEvent::Search(query.clone())))
+                },
+            )))
+            .child(shrinking(W_PROJECT).text_color(muted).child(search_link(
+                ("project-link", section * 10_000 + row),
+                c.project.clone(),
+                cx,
+                {
+                    let query = project_query(&c.project);
+                    cx.listener(move |_, _, _, cx| cx.emit(ListEvent::Search(query.clone())))
+                },
+            )))
             .child(
                 shrinking(W_BRANCH)
                     .text_color(muted)

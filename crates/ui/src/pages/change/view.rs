@@ -21,6 +21,7 @@ use crate::{
     filters::{FileStyle, FilterAction},
     pages::list::Status,
     row::{browser_url, chips, has_merge_conflict},
+    search_link::{account_query, person_query, project_query, search_link},
     theme::chip_colors,
     time_fmt::{clock, relative},
 };
@@ -99,14 +100,6 @@ fn lines_of(id: impl Into<ElementId>, text: &str, empty_pad: bool, link: Hsla) -
                 .into_any_element()
         })
         .collect()
-}
-
-fn people(accounts: &[Account]) -> String {
-    accounts
-        .iter()
-        .map(Account::display)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn status_label(s: &ChangeStatus) -> (&'static str, bool) {
@@ -411,6 +404,29 @@ impl ChangePage {
 
     /// First column of the top: the Reply button, who and where, then the
     /// submit requirements and the votes.
+    /// The accounts as links to the changes they relate to through `op`,
+    /// separated by commas.
+    fn account_links(&self, op: &'static str, list: &[Account], cx: &Context<Self>) -> AnyElement {
+        h_flex()
+            .flex_wrap()
+            .children(list.iter().enumerate().flat_map(|(ix, who)| {
+                let query = account_query(op, who);
+                let link = search_link(
+                    (op, ix),
+                    who.display(),
+                    cx,
+                    cx.listener(move |_, _, _, cx| cx.emit(ChangeEvent::Search(query.clone()))),
+                );
+                [
+                    (ix > 0).then(|| div().child(", ").into_any_element()),
+                    Some(link.into_any_element()),
+                ]
+                .into_iter()
+                .flatten()
+            }))
+            .into_any_element()
+    }
+
     fn change_info(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(d) = &self.detail else {
             return div().into_any_element();
@@ -419,7 +435,7 @@ impl ChangePage {
         let c = &d.summary;
         let now = Timestamp::now();
         let tz = TimeZone::system();
-        let field = |name: &'static str, value: String| {
+        let field = |name: &'static str, value: AnyElement| {
             h_flex()
                 .gap_3()
                 .text_sm()
@@ -427,38 +443,92 @@ impl ChangePage {
                 .child(div().w(px(110.)).flex_none().text_color(muted).child(name))
                 .child(div().min_w_0().child(value))
         };
-        let list = |name: &'static str, list: &[Account]| {
-            field(
-                name,
-                if list.is_empty() {
-                    "none".to_owned()
-                } else {
-                    people(list)
-                },
+        let text = |value: String| value.into_any_element();
+        let accounts =
+            |name: &'static str, op: &'static str, list: &[Account], cx: &Context<Self>| {
+                field(
+                    name,
+                    if list.is_empty() {
+                        text("none".to_owned())
+                    } else {
+                        self.account_links(op, list, cx)
+                    },
+                )
+            };
+        let commit = self
+            .sel
+            .target_number(d)
+            .and_then(|n| d.revision(n))
+            .and_then(|r| r.commit.as_ref());
+        let author = commit.and_then(|c| c.author.as_ref());
+        let committer = commit
+            .and_then(|c| c.committer.as_ref())
+            .filter(|p| Some(*p) != author);
+        let git_person = |name: &'static str, op: &'static str, who: &model::GitPerson| {
+            let label = who
+                .name
+                .clone()
+                .or_else(|| who.email.clone())
+                .unwrap_or_default();
+            let link = match person_query(op, who) {
+                Some(query) => search_link(
+                    (op, usize::from(op == "committer")),
+                    label,
+                    cx,
+                    cx.listener(move |_, _, _, cx| cx.emit(ChangeEvent::Search(query.clone()))),
+                )
+                .into_any_element(),
+                None => text(label),
+            };
+            field(name, link)
+        };
+        let project_link = {
+            let query = project_query(&c.project);
+            search_link(
+                "project-link",
+                c.project.clone(),
+                cx,
+                cx.listener(move |_, _, _, cx| cx.emit(ChangeEvent::Search(query.clone()))),
             )
         };
         let fields = v_flex()
             .gap_0p5()
-            .child(field("Owner", c.owner.display()))
-            .child(list("Reviewers", &d.reviewers))
-            .child(list("CC", &d.cc))
+            .child(accounts(
+                "Owner",
+                "owner",
+                std::slice::from_ref(&c.owner),
+                cx,
+            ))
+            .child(accounts("Reviewers", "reviewer", &d.reviewers, cx))
+            .child(accounts("CC", "cc", &d.cc, cx))
             .child(field(
                 "Repo | Branch",
-                format!("{} | {}", c.project, c.branch),
+                h_flex()
+                    .child(project_link)
+                    .child(format!(" | {}", c.branch))
+                    .into_any_element(),
             ))
-            .when_some(c.topic.clone(), |d, t| d.child(field("Topic", t)))
+            .when_some(author, |d, who| {
+                d.child(git_person("Author", "author", who))
+            })
+            .when_some(committer, |d, who| {
+                d.child(git_person("Committer", "committer", who))
+            })
+            .when_some(c.topic.clone(), |d, t| d.child(field("Topic", text(t))))
             .when(!c.hashtags.is_empty(), |d| {
                 d.child(field(
                     "Hashtags",
-                    c.hashtags
-                        .iter()
-                        .map(|h| format!("#{h}"))
-                        .collect::<Vec<_>>()
-                        .join(" "),
+                    text(
+                        c.hashtags
+                            .iter()
+                            .map(|h| format!("#{h}"))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
                 ))
             })
-            .child(field("Updated", relative(now, c.updated, &tz)))
-            .child(field("Created", relative(now, c.created, &tz)));
+            .child(field("Updated", text(relative(now, c.updated, &tz))))
+            .child(field("Created", text(relative(now, c.created, &tz))));
         let has_requirements = !d.submit_requirements.is_empty();
         let requirements = has_requirements.then(|| self.requirements(cx));
         let votes = self.votes(cx);
@@ -1089,7 +1159,21 @@ impl ChangePage {
                             .font_semibold()
                             .truncate()
                             .text_color(theme.foreground)
-                            .child(who),
+                            .child(match m.author.as_ref() {
+                                Some(account) => {
+                                    let query = account_query("messageby", account);
+                                    search_link(
+                                        ("change-message-author-link", ix),
+                                        who,
+                                        cx,
+                                        cx.listener(move |_, _, _, cx| {
+                                            cx.emit(ChangeEvent::Search(query.clone()))
+                                        }),
+                                    )
+                                    .into_any_element()
+                                }
+                                None => who.into_any_element(),
+                            }),
                     )
                     .when(auto, |d| d.child(pill("auto", muted))),
             )

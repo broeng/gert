@@ -1651,6 +1651,7 @@ impl Shell {
                     };
                     this.open_filters_dialog(context, window, cx)
                 }
+                ChangeEvent::Search(q) => this.search(q.clone(), window, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 // Like stepping through files: Back leaves the walk.
                 ChangeEvent::ReplaceChange(n) => {

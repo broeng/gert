@@ -183,6 +183,7 @@ fn page_in(
                 ChangeEvent::Actions(_) => "actions".to_owned(),
                 ChangeEvent::SubmitChain(_) => "submit chain".to_owned(),
                 ChangeEvent::ManageFilters { project } => format!("manage filters {project}"),
+                ChangeEvent::Search(q) => format!("search {q}"),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
                 ChangeEvent::Advance(n, note) => format!("advance {n}: {note}"),

@@ -97,6 +97,8 @@ pub enum ChangeEvent {
     ManageFilters {
         project: String,
     },
+    /// A project or person was clicked: show the search for this query.
+    Search(String),
 }
 
 /// The file list of the current patch set pair.
