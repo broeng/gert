@@ -2,6 +2,7 @@
 
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -9,12 +10,12 @@ use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
 use model::{
     Account, COMMIT_MSG_PATH, ChangeDetail, ChangeMessage, ChangeStatus, ChangeSummary, FileEntry,
-    FileStatus, MERGE_LIST_PATH, RelatedChange,
+    FileStatus, MERGE_LIST_PATH, PatchSetNumber, RelatedChange,
 };
 
 use super::{
     ChangeEvent, ChangePage, Phase,
-    state::{Block, size_text},
+    state::{Block, PatchSel, size_text},
 };
 use crate::{
     actions::*,
@@ -669,6 +670,45 @@ impl ChangePage {
             .map(|f| f.lines_deleted)
             .sum();
         let count = files.iter().filter(|f| !f.is_special()).count();
+        // Newest first, as in the web UI; "Base" goes below the patch sets.
+        let choice = |n: PatchSetNumber, picked: Option<PatchSetNumber>, enabled: bool| {
+            let mut label = format!("Patchset {n}");
+            if Some(n) == current {
+                label.push_str(" (current)");
+            }
+            if let Some(desc) = d
+                .revision(n)
+                .and_then(|r| r.description.as_deref())
+                .filter(|s| !s.is_empty())
+            {
+                label.push_str(&format!("  \u{201C}{desc}\u{201D}"));
+            }
+            PatchSetChoice {
+                value: Some(n),
+                label: label.into(),
+                checked: picked == Some(n),
+                enabled,
+            }
+        };
+        let target_choices: Vec<_> = d
+            .revisions
+            .iter()
+            .rev()
+            .map(|r| choice(r.number, target, true))
+            .collect();
+        let base_choices: Vec<_> = d
+            .revisions
+            .iter()
+            .rev()
+            .map(|r| choice(r.number, base, target.is_some_and(|t| r.number < t)))
+            .chain([PatchSetChoice {
+                value: None,
+                label: "Base".into(),
+                checked: base.is_none(),
+                enabled: true,
+            }])
+            .collect();
+        let page = cx.entity().downgrade();
         v_flex()
             .child(
                 card_title_bar(cx)
@@ -682,25 +722,25 @@ impl ChangePage {
                             .flex_wrap()
                             .child(section_title("Files", cx))
                             .child(div().text_sm().text_color(muted).child("Compare"))
-                            .child(
-                                Button::new("base-ps")
-                                    .label(format!("{base_text}  (b)"))
-                                    .small()
-                                    .outline()
-                                    .on_click(cx.listener(|this, _, w, cx| {
-                                        this.next_base(&NextBase, w, cx)
-                                    })),
-                            )
+                            .child(patch_set_dropdown(
+                                "base-ps",
+                                format!("{base_text}  (b)"),
+                                base_choices,
+                                page.clone(),
+                                |s, d, n| s.set_base(d, n),
+                            ))
                             .child(div().text_sm().text_color(muted).child("with"))
-                            .child(
-                                Button::new("target-ps")
-                                    .label(format!("{target_text}  (t)"))
-                                    .small()
-                                    .outline()
-                                    .on_click(cx.listener(|this, _, w, cx| {
-                                        this.next_target(&NextTarget, w, cx)
-                                    })),
-                            )
+                            .child(patch_set_dropdown(
+                                "target-ps",
+                                format!("{target_text}  (t)"),
+                                target_choices,
+                                page,
+                                |s, d, n| {
+                                    if let Some(n) = n {
+                                        s.set_target(d, n);
+                                    }
+                                },
+                            ))
                             .child(div().flex_1())
                             .when(self.files.loaded, |d| {
                                 d.child(
@@ -1202,6 +1242,47 @@ fn one_line(message: &str) -> String {
 
 fn message_lines(ix: usize, m: &ChangeMessage, link: Hsla) -> Vec<AnyElement> {
     lines_of(("change-message", ix), &m.message, true, link)
+}
+
+/// One entry of a patch set dropdown; `value` `None` is "Base".
+struct PatchSetChoice {
+    value: Option<PatchSetNumber>,
+    label: SharedString,
+    checked: bool,
+    enabled: bool,
+}
+
+/// A button that opens a menu of patch sets and applies `pick` to the
+/// chosen one.
+fn patch_set_dropdown(
+    id: &'static str,
+    label: String,
+    choices: Vec<PatchSetChoice>,
+    page: WeakEntity<ChangePage>,
+    pick: fn(&mut PatchSel, &ChangeDetail, Option<PatchSetNumber>),
+) -> impl IntoElement {
+    Button::new(id)
+        .label(label)
+        .small()
+        .outline()
+        .dropdown_caret(true)
+        .dropdown_menu(move |menu, _, _| {
+            choices.iter().fold(menu.scrollable(true), |menu, c| {
+                let page = page.clone();
+                let value = c.value;
+                menu.item(
+                    PopupMenuItem::new(c.label.clone())
+                        .checked(c.checked)
+                        .disabled(!c.enabled)
+                        .on_click(move |_, _, cx| {
+                            page.update(cx, |this, cx| {
+                                this.change_patch_sets(|s, d| pick(s, d, value), cx)
+                            })
+                            .ok();
+                        }),
+                )
+            })
+        })
 }
 
 pub(super) fn section_title(text: &str, cx: &App) -> Div {
