@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Gert
+GenericName=Gerrit Code Review client
+Comment=A fast, keyboard-driven desktop client for Gerrit Code Review
+Exec=gert %u
+Icon=gert
+Terminal=false
+Categories=Development;
+MimeType=x-scheme-handler/gert;
+StartupWMClass=gert

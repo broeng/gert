@@ -59,6 +59,13 @@
           pname = "gert";
           cargoExtraArgs = "--package gert";
           doCheck = false;
+          # The desktop entry registers the gert:// URL scheme, so browsers
+          # can open links in the app. cleanCargoSource drops dist/, hence
+          # the direct paths.
+          postInstall = ''
+            install -Dm644 ${./dist/gert.desktop} $out/share/applications/gert.desktop
+            install -Dm644 ${./dist/gert.svg} $out/share/icons/hicolor/scalable/apps/gert.svg
+          '';
           postFixup = ''
             wrapProgram $out/bin/gert \
               --suffix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}

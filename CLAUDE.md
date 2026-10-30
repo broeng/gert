@@ -272,8 +272,9 @@ threads; drafts, replies and votes (reply dialog and quick votes), reviewed
 marks and the attention set; change actions (submit, rebase,
 abandon/restore, WIP/ready, private, reviewers/CC, topic, hashtags) via an
 action menu; file filters (hide, dim, highlight by glob); a settings page;
-opening a change from a web UI link (`g`, or `gert <link>`, matched
-against all configured servers); multiple servers with a switcher; desktop
+opening a change from a web UI link (`g`, `gert <link>`, or a
+`gert://<host><path>` link from a browser, matched against all configured
+servers); multiple servers with a switcher; desktop
 notifications with configurable rules and an in-app inbox; a tabbed settings
 page.
 
@@ -288,7 +289,8 @@ dashboard sections, and packaging beyond cargo and Nix.
 - `flake.nix` at the repo root provides:
   - `packages.default` / `apps.default`, so `nix build` and `nix run` work. It is
     built with **crane** (dependencies are cached separately, and git
-    dependencies are vendored from `Cargo.lock`).
+    dependencies are vendored from `Cargo.lock`). It installs the desktop
+    entry and icon from `dist/`; the entry registers the `gert://` URL scheme.
   - `apps.dev-gerrit` / `apps.dev-gerrit-seed`: the local dev Gerrit
     (`dev/README.md`).
   - `devShells.default`: the toolchain, rust-analyzer, and every native
