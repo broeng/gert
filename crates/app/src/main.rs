@@ -102,8 +102,9 @@ fn startup() -> anyhow::Result<Prepared> {
 
 fn run() -> anyhow::Result<()> {
     // `gert <link>` opens the change a web UI link points at, like a
-    // browser would.
-    let link = std::env::args().nth(1);
+    // browser would. The link may also come from a browser in the app's own
+    // URL scheme.
+    let link = std::env::args().nth(1).map(|arg| gert::web_link(&arg));
     let Prepared {
         startup,
         advance_after_vote,
