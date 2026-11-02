@@ -62,6 +62,35 @@ impl LocalCommit {
     }
 }
 
+/// One look at a checkout for the commits of local changes, everything
+/// from the same read of its refs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalScan {
+    /// A hash of the refs the scan saw. A later fingerprint that is equal
+    /// means a new scan would find the same. Stable within one process run
+    /// only, so never store it.
+    pub fingerprint: u64,
+    /// Newest first, never a parent before its children.
+    pub commits: Vec<LocalCommit>,
+    /// There were more local commits than the limit, and the oldest were
+    /// left out. A change missing from such a scan may still be on a
+    /// branch, so it must not be taken as vanished.
+    pub truncated: bool,
+    /// The checkout has no remote-tracking branches at all, so every commit
+    /// would count as local, and nothing was scanned (`commits` is empty).
+    /// Not a reason to take anything as vanished either.
+    pub no_remotes: bool,
+    pub targets: BranchTargets,
+}
+
+impl LocalScan {
+    /// Whether `commits` is every local commit, so a change missing from it
+    /// is really gone from the named branches.
+    pub fn is_complete(&self) -> bool {
+        !self.truncated && !self.no_remotes
+    }
+}
+
 /// The branch on a remote that a local branch tracks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Upstream {

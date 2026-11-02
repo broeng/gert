@@ -4,7 +4,7 @@
 //! the server when the checkout has the commits.
 //!
 //! It also finds the user's unpushed commits on local branches
-//! ([`Repo::local_commits`]) for local changes.
+//! ([`Repo::scan`]) for local changes.
 //!
 //! The repository is only ever read: no fetch, no checkout, no gc (see
 //! [`git`] for the flags every invocation carries). Everything here is

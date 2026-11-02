@@ -1,10 +1,14 @@
 //! Commits on local branches: discovery of unpushed commits for local
 //! changes, where they are headed, and full commit data for a change page.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
+use std::sync::Mutex;
 
-use model::{BranchTargets, CommitInfo, LocalCommit, RevisionId, Signature, Timestamp, Upstream};
+use model::{
+    BranchTargets, CommitInfo, LocalCommit, LocalScan, RevisionId, Signature, Timestamp, Upstream,
+};
 
 use crate::git::{self, Object};
 use crate::{Error, Local, NotLocal, Repo, is_object_id};
@@ -29,142 +33,105 @@ struct RefRecord {
     upstream_ref: String,
 }
 
+/// Checkouts already logged as having no remote-tracking branches, so that
+/// is said once per checkout and process, not on every scan.
+static NO_REMOTES_LOGGED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
 impl Repo {
-    /// The commits reachable from a named local branch (`refs/heads/*`) and
-    /// from no remote-tracking branch (`refs/remotes/*`), the `limit` newest
-    /// by committer date, newest first but never a parent before its
-    /// children (`--date-order`; `--topo-order` would finish one line of
-    /// history before the next, so the limit could drop a newer branch).
+    /// Looks for the commits of local changes, from a single read of the
+    /// refs so that the commits, their branches, the targets and the
+    /// fingerprint all describe the same moment.
+    ///
+    /// The commits are those reachable from a named local branch
+    /// (`refs/heads/*`) and from no remote-tracking branch
+    /// (`refs/remotes/*`): the `limit` newest by committer date, newest
+    /// first but never a parent before its children (`--date-order`;
+    /// `--topo-order` would finish one line of history before the next, so
+    /// the limit could drop a newer branch). [`LocalScan::truncated`] says
+    /// whether there were more.
     ///
     /// A detached HEAD does not count. Merge commits are included (see
-    /// [`LocalCommit::is_merge`]); nothing is filtered by author.
-    pub fn local_commits(&self, limit: usize) -> Result<Vec<LocalCommit>, Error> {
-        if limit == 0 {
-            return Ok(Vec::new());
+    /// [`LocalCommit::is_merge`]); nothing is filtered by author. A
+    /// repository without any remote-tracking branch is not scanned at all
+    /// ([`LocalScan::no_remotes`]): its whole history would count as local.
+    pub fn scan(&self, limit: usize) -> Result<LocalScan, Error> {
+        let raw = self.refs_raw()?;
+        let records = parse_refs(&raw)?;
+        let mut scan = LocalScan {
+            fingerprint: fingerprint(&raw),
+            targets: branch_targets(&records),
+            ..LocalScan::default()
+        };
+        // Only full object ids go to git, so nothing can pass as an option.
+        let tips = |prefix: &str| -> Vec<&RefRecord> {
+            records
+                .iter()
+                .filter(|r| r.name.starts_with(prefix) && is_object_id(&r.oid))
+                .collect()
+        };
+        let heads = tips(HEADS);
+        let remotes: BTreeSet<&str> = tips(REMOTES).iter().map(|r| r.oid.as_str()).collect();
+        if remotes.is_empty() {
+            scan.no_remotes = true;
+            if !heads.is_empty()
+                && let Ok(mut logged) = NO_REMOTES_LOGGED.lock()
+                && logged.insert(self.path().to_owned())
+            {
+                log::info!(
+                    "{} has no remote-tracking branches; not looking for local changes",
+                    self.path().display()
+                );
+            }
+            return Ok(scan);
         }
-        let max = format!("--max-count={limit}");
+        if heads.is_empty() {
+            return Ok(scan);
+        }
+
+        let mut input = String::new();
+        for head in &heads {
+            input.push_str(&head.oid);
+            input.push('\n');
+        }
+        for oid in &remotes {
+            input.push('^');
+            input.push_str(oid);
+            input.push('\n');
+        }
+        // One more than asked for, to know whether the limit cut anything.
+        let max = format!("--max-count={}", limit.saturating_add(1));
         let out = self.git.run(
-            &[
-                "rev-list",
-                "--date-order",
-                &max,
-                "--branches",
-                "--not",
-                "--remotes",
-            ],
-            None,
+            &["rev-list", "--date-order", &max, "--stdin"],
+            Some(input.as_bytes()),
         )?;
-        let shas: Vec<String> = String::from_utf8_lossy(&out)
+        let mut shas: Vec<String> = String::from_utf8_lossy(&out)
             .lines()
             .filter(|l| is_object_id(l))
             .map(str::to_owned)
             .collect();
+        if shas.len() > limit {
+            shas.truncate(limit);
+            scan.truncated = true;
+        }
+
         let objects = self.git.read_objects(&shas)?;
-        let mut commits: Vec<LocalCommit> = Vec::with_capacity(shas.len());
         for (sha, object) in shas.iter().zip(objects) {
             match object {
-                Object::Found { kind, data, .. } if kind == "commit" => commits.push(LocalCommit {
-                    commit: parse_commit(sha, &data),
-                    branches: Vec::new(),
-                }),
-                _ => {
-                    return Err(Error::Parse {
-                        command: "cat-file --batch",
-                        detail: format!("rev-list listed {sha}, which is not a commit"),
+                Object::Found { kind, data, .. } if kind == "commit" => {
+                    scan.commits.push(LocalCommit {
+                        commit: parse_commit(sha, &data),
+                        branches: Vec::new(),
                     });
                 }
+                // Gone since rev-list listed it (a gc in between, say).
+                _ => log::debug!(
+                    "{}: skipping {sha}, which is no longer a commit",
+                    self.path().display()
+                ),
             }
         }
-        self.fill_branches(&mut commits)?;
-        Ok(commits)
-    }
-
-    /// Sets [`LocalCommit::branches`] by walking parents from each branch
-    /// tip inside the listed commits, without asking git again.
-    ///
-    /// That is exact: a branch whose tip is not listed is either on a
-    /// remote (and so is everything it reaches) or was cut off by the
-    /// limit, and the order puts all its ancestors after it, so
-    /// they were cut off too. For the same reason a walk never has to
-    /// step through an unlisted commit to reach a listed one.
-    fn fill_branches(&self, commits: &mut [LocalCommit]) -> Result<(), Error> {
-        let index: HashMap<String, usize> = commits
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.commit.sha.0.clone(), i))
-            .collect();
-        for record in self.refs()? {
-            let Some(branch) = record.name.strip_prefix(HEADS) else {
-                continue;
-            };
-            let Some(&tip) = index.get(&record.oid) else {
-                continue;
-            };
-            let mut seen = HashSet::from([tip]);
-            let mut stack = vec![tip];
-            while let Some(i) = stack.pop() {
-                commits[i].branches.push(branch.to_owned());
-                for parent in &commits[i].commit.parents {
-                    if let Some(&p) = index.get(parent.as_str())
-                        && seen.insert(p)
-                    {
-                        stack.push(p);
-                    }
-                }
-            }
-        }
-        for c in commits {
-            c.branches.sort();
-        }
-        Ok(())
-    }
-
-    /// Each local branch's upstream branch on its remote
-    /// (`branch.<b>.remote` and `branch.<b>.merge`), leaving out upstreams
-    /// that are local branches, and each remote's default branch from
-    /// `refs/remotes/<remote>/HEAD` where that exists.
-    pub fn branch_targets(&self) -> Result<BranchTargets, Error> {
-        let mut targets = BranchTargets::default();
-        for record in self.refs()? {
-            if let Some(branch) = record.name.strip_prefix(HEADS) {
-                let remote = record.upstream_remote;
-                if remote.is_empty() || remote == "." {
-                    continue;
-                }
-                let upstream = match record.upstream_ref.strip_prefix(HEADS) {
-                    Some(b) => b,
-                    // Some other ref namespace: not a branch to target.
-                    None if record.upstream_ref.starts_with("refs/") => continue,
-                    // A short name, which git also accepts in the config.
-                    None => record.upstream_ref.as_str(),
-                };
-                if upstream.is_empty() {
-                    continue;
-                }
-                targets.upstreams.insert(
-                    branch.to_owned(),
-                    Upstream {
-                        remote,
-                        branch: upstream.to_owned(),
-                    },
-                );
-            } else if let Some(remote) = record
-                .name
-                .strip_prefix(REMOTES)
-                .and_then(|r| r.strip_suffix("/HEAD"))
-                && let Some(default) = record
-                    .symref
-                    .strip_prefix(REMOTES)
-                    .and_then(|s| s.strip_prefix(remote))
-                    .and_then(|s| s.strip_prefix('/'))
-                && !default.is_empty()
-            {
-                targets
-                    .defaults
-                    .insert(remote.to_owned(), default.to_owned());
-            }
-        }
-        Ok(targets)
+        fill_branches(&mut scan.commits, &heads);
+        Ok(scan)
     }
 
     /// The commit object `sha`: message, author, committer and parents as
@@ -201,46 +168,137 @@ impl Repo {
     }
 
     /// A hash of every local and remote-tracking branch (name, commit,
-    /// symbolic target and upstream), so a scan can be skipped when none of
-    /// them changed. Stable within one process run only.
+    /// symbolic target and upstream), the same as [`LocalScan::fingerprint`]
+    /// of a scan that saw the same refs. One cheap `for-each-ref`, so a
+    /// scanner can skip [`scan`](Self::scan) when nothing changed. Stable
+    /// within one process run only.
     pub fn refs_fingerprint(&self) -> Result<u64, Error> {
-        let out = self.refs_raw()?;
-        let mut hasher = DefaultHasher::new();
-        out.hash(&mut hasher);
-        Ok(hasher.finish())
+        Ok(fingerprint(&self.refs_raw()?))
     }
 
     fn refs_raw(&self) -> Result<Vec<u8>, Error> {
         self.git
             .run(&["for-each-ref", REF_FORMAT, HEADS, REMOTES], None)
     }
+}
 
-    fn refs(&self) -> Result<Vec<RefRecord>, Error> {
-        let out = self.refs_raw()?;
-        let mut records = Vec::new();
-        for line in out.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
-            let fields: Vec<String> = line
-                .split(|&b| b == 0)
-                .map(|f| String::from_utf8_lossy(f).into_owned())
-                .collect();
-            let Ok([name, oid, symref, upstream_remote, upstream_ref]) =
-                <[String; 5]>::try_from(fields)
-            else {
-                return Err(Error::Parse {
-                    command: "for-each-ref",
-                    detail: format!("unrecognised line {:?}", String::from_utf8_lossy(line)),
-                });
-            };
-            records.push(RefRecord {
-                name,
-                oid,
-                symref,
-                upstream_remote,
-                upstream_ref,
+fn fingerprint(refs_raw: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    refs_raw.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn parse_refs(raw: &[u8]) -> Result<Vec<RefRecord>, Error> {
+    let mut records = Vec::new();
+    for line in raw.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        let fields: Vec<String> = line
+            .split(|&b| b == 0)
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect();
+        let Ok([name, oid, symref, upstream_remote, upstream_ref]) =
+            <[String; 5]>::try_from(fields)
+        else {
+            return Err(Error::Parse {
+                command: "for-each-ref",
+                detail: format!("unrecognised line {:?}", String::from_utf8_lossy(line)),
             });
-        }
-        Ok(records)
+        };
+        records.push(RefRecord {
+            name,
+            oid,
+            symref,
+            upstream_remote,
+            upstream_ref,
+        });
     }
+    Ok(records)
+}
+
+/// Sets [`LocalCommit::branches`] by walking parents from each branch tip
+/// inside the listed commits, without asking git again.
+///
+/// That is exact: a branch whose tip is not listed is either on a remote
+/// (and so is everything it reaches) or was cut off by the limit, and the
+/// order puts all its ancestors after it, so they were cut off too. For the
+/// same reason a walk never has to step through an unlisted commit to reach
+/// a listed one. (A commit skipped because it vanished mid-scan does cut
+/// the walks through it short.)
+fn fill_branches(commits: &mut [LocalCommit], heads: &[&RefRecord]) {
+    let index: HashMap<String, usize> = commits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.commit.sha.0.clone(), i))
+        .collect();
+    for head in heads {
+        let Some(branch) = head.name.strip_prefix(HEADS) else {
+            continue;
+        };
+        let Some(&tip) = index.get(&head.oid) else {
+            continue;
+        };
+        let mut seen = HashSet::from([tip]);
+        let mut stack = vec![tip];
+        while let Some(i) = stack.pop() {
+            commits[i].branches.push(branch.to_owned());
+            for parent in &commits[i].commit.parents {
+                if let Some(&p) = index.get(parent.as_str())
+                    && seen.insert(p)
+                {
+                    stack.push(p);
+                }
+            }
+        }
+    }
+    for c in commits {
+        c.branches.sort();
+    }
+}
+
+/// Each local branch's upstream branch on its remote (`branch.<b>.remote`
+/// and `branch.<b>.merge`), leaving out upstreams that are local branches,
+/// and each remote's default branch from `refs/remotes/<remote>/HEAD` where
+/// that exists.
+fn branch_targets(records: &[RefRecord]) -> BranchTargets {
+    let mut targets = BranchTargets::default();
+    for record in records {
+        if let Some(branch) = record.name.strip_prefix(HEADS) {
+            // git leaves both atoms empty unless `branch.<b>.merge` is a
+            // full ref name and the remote is a configured one.
+            let remote = &record.upstream_remote;
+            if remote.is_empty() || remote == "." {
+                continue;
+            }
+            // Another ref namespace is not a branch to target.
+            let Some(upstream) = record.upstream_ref.strip_prefix(HEADS) else {
+                continue;
+            };
+            if upstream.is_empty() {
+                continue;
+            }
+            targets.upstreams.insert(
+                branch.to_owned(),
+                Upstream {
+                    remote: remote.clone(),
+                    branch: upstream.to_owned(),
+                },
+            );
+        } else if let Some(remote) = record
+            .name
+            .strip_prefix(REMOTES)
+            .and_then(|r| r.strip_suffix("/HEAD"))
+            && let Some(default) = record
+                .symref
+                .strip_prefix(REMOTES)
+                .and_then(|s| s.strip_prefix(remote))
+                .and_then(|s| s.strip_prefix('/'))
+            && !default.is_empty()
+        {
+            targets
+                .defaults
+                .insert(remote.to_owned(), default.to_owned());
+        }
+    }
+    targets
 }
 
 /// Parses a raw commit object. The message is read as UTF-8, lossily (the

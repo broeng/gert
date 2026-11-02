@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use model::{BranchTargets, LocalCommit, RevisionId, Timestamp, Upstream};
+use model::{BranchTargets, LocalCommit, LocalScan, RevisionId, Timestamp, Upstream};
 
 use super::change_id_trailer;
 use crate::testutil::{TEST_EMAIL, TestRepo};
@@ -48,6 +48,13 @@ fn raw_commit(r: &TestRepo, parents: &[&str], time: i64, message: &str) -> Strin
     r.git(&["hash-object", "-t", "commit", "-w", file])
 }
 
+/// The commits of a scan that must not have been cut by the limit.
+fn complete(repo: &Repo, limit: usize) -> Vec<LocalCommit> {
+    let scan = repo.scan(limit).expect("scan");
+    assert!(scan.is_complete(), "truncated: {}", scan.truncated);
+    scan.commits
+}
+
 fn shas(commits: &[LocalCommit]) -> Vec<&str> {
     commits.iter().map(|c| c.commit.sha.as_str()).collect()
 }
@@ -71,7 +78,13 @@ fn unpushed_commits_on_named_branches_are_listed_with_their_branches() {
     let c3 = r.commit("Detached");
     let repo = open(&r);
 
-    let local = repo.local_commits(200).expect("local commits");
+    let scan = repo.scan(200).expect("scan");
+    assert!(!scan.truncated && !scan.no_remotes);
+    assert_eq!(
+        scan.fingerprint,
+        repo.refs_fingerprint().expect("fingerprint")
+    );
+    let local = scan.commits;
     assert_eq!(shas(&local), [c2.as_str(), c1.as_str()]);
     assert!(!shas(&local).contains(&base.as_str()));
     assert!(!shas(&local).contains(&c3.as_str()));
@@ -83,16 +96,17 @@ fn unpushed_commits_on_named_branches_are_listed_with_their_branches() {
     assert_eq!(local[0].commit.change_id, None);
     assert!(local.iter().all(|c| !c.is_merge()));
 
-    // The limit keeps the newest.
-    assert_eq!(
-        shas(&repo.local_commits(1).expect("limit 1")),
-        [c2.as_str()]
-    );
-    assert!(repo.local_commits(0).expect("limit 0").is_empty());
+    // The limit keeps the newest and says it cut something.
+    let scan = repo.scan(1).expect("limit 1");
+    assert_eq!(shas(&scan.commits), [c2.as_str()]);
+    assert!(scan.truncated);
+    let scan = repo.scan(0).expect("limit 0");
+    assert!(scan.commits.is_empty() && scan.truncated);
+    assert_eq!(complete(&repo, 2).len(), 2);
 
     // Once on origin, a commit is no longer local.
     r.git(&["push", "-q", "origin", "main"]);
-    let local = repo.local_commits(200).expect("after push");
+    let local = complete(&repo, 200);
     assert_eq!(shas(&local), [c2.as_str()]);
     assert_eq!(branches_of(&local, &c2), ["topic"]);
 }
@@ -107,7 +121,7 @@ fn children_come_before_their_parents_whatever_the_dates() {
     let b1 = raw_commit(&r, &[&a0], 1_900_000_000, "b1\n");
     r.git(&["update-ref", "refs/heads/a", &a1]);
     r.git(&["update-ref", "refs/heads/b", &b1]);
-    let local = open(&r).local_commits(200).expect("local commits");
+    let local = complete(&open(&r), 200);
 
     assert_eq!(local.len(), 3);
     assert_eq!(local[2].commit.sha.as_str(), a0);
@@ -154,7 +168,9 @@ fn the_limit_keeps_the_newest_commits_of_every_branch() {
     }
     r.git(&["update-ref", "refs/heads/old", &old_tip]);
     r.git(&["update-ref", "refs/heads/new", &new[3]]);
-    let local = open(&r).local_commits(5).expect("local commits");
+    let scan = open(&r).scan(5).expect("scan");
+    assert!(scan.truncated);
+    let local = scan.commits;
 
     assert_eq!(
         shas(&local),
@@ -177,7 +193,7 @@ fn merge_commits_are_listed_and_flagged() {
     let m1 = r.commit("Main");
     r.git(&["merge", "-q", "--no-ff", "-m", "Merge topic", "topic"]);
     let merge = r.git(&["rev-parse", "HEAD"]);
-    let local = open(&r).local_commits(200).expect("local commits");
+    let local = complete(&open(&r), 200);
 
     assert_eq!(local.len(), 3);
     assert_eq!(local[0].commit.sha.as_str(), merge);
@@ -242,7 +258,7 @@ fn commit_messages_are_read_verbatim() {
     let message = format!("Subject\r\n\r\nBody\r\n\r\nChange-Id: {ID_A}");
     let sha = raw_commit(&r, &[&base], 1_700_000_000, &message);
     r.git(&["update-ref", "refs/heads/main", &sha]);
-    let local = open(&r).local_commits(200).expect("local commits");
+    let local = complete(&open(&r), 200);
 
     assert_eq!(local.len(), 1);
     let c = &local[0].commit;
@@ -356,7 +372,7 @@ fn branch_targets_read_upstreams_and_remote_defaults() {
         remote: "origin".into(),
         branch: b.into(),
     };
-    let targets = repo.branch_targets().expect("targets");
+    let targets = repo.scan(200).expect("scan").targets;
     assert_eq!(
         targets,
         BranchTargets {
@@ -374,7 +390,7 @@ fn branch_targets_read_upstreams_and_remote_defaults() {
     assert_eq!(targets.target_for(&["main", "feature"]), Some("stable"));
 
     r.git(&["remote", "set-head", "origin", "main"]);
-    let targets = repo.branch_targets().expect("targets with HEAD");
+    let targets = repo.scan(200).expect("scan with HEAD").targets;
     assert_eq!(
         targets.defaults,
         BTreeMap::from([("origin".to_owned(), "main".to_owned())])
@@ -388,10 +404,25 @@ fn branch_targets_read_upstreams_and_remote_defaults() {
 fn an_empty_repository_has_nothing() {
     let r = TestRepo::new();
     let repo = open(&r);
-    assert!(repo.local_commits(200).expect("commits").is_empty());
+    let scan = repo.scan(200).expect("scan");
     assert_eq!(
-        repo.branch_targets().expect("targets"),
-        BranchTargets::default()
+        scan,
+        LocalScan {
+            fingerprint: repo.refs_fingerprint().expect("fingerprint"),
+            no_remotes: true,
+            ..LocalScan::default()
+        }
     );
-    repo.refs_fingerprint().expect("fingerprint");
+    assert!(!scan.is_complete());
+}
+
+#[test]
+fn a_repository_without_remote_tracking_branches_is_not_scanned() {
+    let r = TestRepo::new();
+    r.commit("One");
+    r.git(&["branch", "other"]);
+    let scan = open(&r).scan(200).expect("scan");
+    assert!(scan.no_remotes);
+    assert!(scan.commits.is_empty());
+    assert!(!scan.is_complete());
 }
