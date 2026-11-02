@@ -12,6 +12,7 @@
 
 mod error;
 mod events;
+pub mod local;
 pub mod notify;
 mod poll;
 mod syncer;

@@ -415,6 +415,7 @@ fn first_page_unchanged(cached: &CachedQuery, fresh: &[ChangeSummary], more: boo
 mod actions;
 mod comments;
 mod edits;
+mod local;
 mod watch;
 
 pub use actions::NewChange;
