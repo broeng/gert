@@ -292,3 +292,20 @@ fn anonymous_sessions_cannot_run_actions() {
     );
     assert!(http.sent().is_empty());
 }
+
+#[test]
+fn a_local_commit_is_neither_a_rebase_base_nor_cherry_picked() {
+    let http = routes("NEW", json!({}));
+    let syncer = syncer_for(&http, signed_in());
+    crate::syncer::tests::add_local_version(&syncer, Some(7), "localsha");
+    let refused =
+        |r: Result<(), Error>| matches!(r, Err(Error::Local(s)) if s.as_str() == "localsha");
+    assert!(refused(
+        block_on(syncer.rebase(CHANGE, Some("localsha"), model::RebaseOptions::default()))
+            .map(drop)
+    ));
+    assert!(refused(
+        block_on(syncer.cherry_pick(CHANGE, &"localsha".into(), "stable", None)).map(drop)
+    ));
+    assert!(http.requested().is_empty());
+}

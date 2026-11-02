@@ -995,3 +995,46 @@ fn retrying_failed_drafts_leaves_the_definite_rejections_alone() {
     ));
     assert_eq!(f.http.requests().len(), 3, "the refused one was not sent");
 }
+
+// ---- drafts of local changes ----
+
+use crate::syncer::tests::add_local_version;
+
+#[test]
+fn an_ordinary_draft_on_a_local_commit_fails_without_a_request() {
+    let f = fx();
+    add_local_version(&f.syncer, Some(7), "localsha");
+    let d = block_on(f.syncer.save_draft(DraftSave::Create {
+        change: CHANGE,
+        patch_set: PatchSetRef {
+            number: PatchSetNumber(3),
+            sha: "localsha".into(),
+        },
+        input: input("odd"),
+    }))
+    .unwrap()
+    .unwrap();
+    assert!(d.is_ordinary());
+    assert!(matches!(
+        &d.sync,
+        DraftSync::Failed { retryable: true, error, .. } if error.contains("only in the local checkout")
+    ));
+    assert!(f.http.requests().is_empty());
+}
+
+#[test]
+fn replies_and_reviewed_marks_on_a_local_commit_are_refused() {
+    let f = fx();
+    add_local_version(&f.syncer, Some(7), "sha2");
+    cache_files(&f, &["a.rs"]);
+    let err = block_on(
+        f.syncer
+            .publish_review(CHANGE, &sha2(), &review_with_vote()),
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Local(s) if s == sha2()));
+    let err = block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true)).unwrap_err();
+    assert!(matches!(err, Error::Local(_)));
+    assert_eq!(reviewed(&f), ["a.rs"]);
+    assert!(f.http.requests().is_empty());
+}

@@ -665,3 +665,151 @@ fn two_servers_in_one_store_keep_the_same_numbers_and_queries_apart() {
     assert_eq!(numbers(&sync_b.cached_query("q").unwrap().unwrap()), [1]);
     assert_eq!(numbers(&sync_a.cached_query("q").unwrap().unwrap()), [1]);
 }
+
+// ---- commits that exist only locally ----
+
+/// Adds a local change to project `p` with one version, `sha`: a local
+/// patch set of Gerrit change `gerrit`, or a purely local change.
+pub(crate) fn add_local_version(
+    syncer: &Syncer,
+    gerrit: Option<u64>,
+    sha: &str,
+) -> (model::LocalChange, model::LocalPatchSet) {
+    let mut store = syncer.store();
+    let upsert = store::LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: format!("I-{sha}"),
+        gerrit_number: gerrit.map(ChangeNumber),
+        subject: "local".into(),
+        author_name: "Ann".into(),
+        author_email: "ann@example.com".into(),
+        updated: Timestamp::UNIX_EPOCH,
+        state: None,
+        patch_sets: vec![store::NewLocalPatchSet {
+            sha: sha.into(),
+            parent_sha: None,
+            seen_at: Timestamp::UNIX_EPOCH,
+        }],
+    };
+    store
+        .reconcile_local(
+            syncer.server,
+            "p",
+            &[store::LocalOp::Upsert(upsert)],
+            Timestamp::UNIX_EPOCH,
+        )
+        .unwrap();
+    let change = store
+        .local_changes_by_change_id(syncer.server, &format!("I-{sha}"))
+        .unwrap()
+        .remove(0);
+    let version = store
+        .local_patch_sets(syncer.server, change.id)
+        .unwrap()
+        .remove(0);
+    (change, version)
+}
+
+fn is_local_error(r: Result<impl std::fmt::Debug, Error>, sha: &str) -> bool {
+    matches!(r, Err(Error::Local(s)) if s.as_str() == sha)
+}
+
+#[test]
+fn revision_reads_naming_a_local_commit_send_nothing() {
+    let f = fixture_with(signed_in());
+    add_local_version(&f.syncer, Some(7), "bbb");
+    let local_base = FilesKey {
+        base: Some(ps(1, "bbb")),
+        target: ps(2, "ccc"),
+        ..files_key()
+    };
+    assert!(is_local_error(
+        block_on(f.syncer.refresh_files(&files_key())),
+        "bbb"
+    ));
+    assert!(is_local_error(
+        block_on(f.syncer.refresh_files(&local_base)),
+        "bbb"
+    ));
+    assert!(is_local_error(
+        block_on(f.syncer.refresh_diff(&diff_key("a.rs"))),
+        "bbb"
+    ));
+    let mut base_diff = diff_key("a.rs");
+    base_diff.base = local_base.base.clone();
+    base_diff.target = local_base.target.clone();
+    assert!(is_local_error(
+        block_on(f.syncer.refresh_diff(&base_diff)),
+        "bbb"
+    ));
+    let prev = diff_key("/COMMIT_MSG");
+    assert!(is_local_error(
+        block_on(f.syncer.prefetch_next_diff(&prev, &file_list())),
+        "bbb"
+    ));
+    assert!(is_local_error(
+        block_on(f.syncer.refresh_related(ChangeNumber(7), &"bbb".into())),
+        "bbb"
+    ));
+    assert!(f.http.requests().is_empty());
+    let err = block_on(f.syncer.refresh_related(ChangeNumber(7), &"bbb".into())).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "commit bbb exists only in the local checkout, not on the server"
+    );
+    // A purely local change's commit is refused the same way.
+    add_local_version(&f.syncer, None, "ddd");
+    assert!(is_local_error(
+        block_on(f.syncer.refresh_related(ChangeNumber(7), &"ddd".into())),
+        "ddd"
+    ));
+    assert!(f.http.requests().is_empty());
+}
+
+#[test]
+fn a_local_version_known_to_be_on_gerrit_may_be_requested() {
+    let f = fixture();
+    let (_, version) = add_local_version(&f.syncer, Some(7), "bbb");
+    f.syncer
+        .store()
+        .reconcile_local(
+            f.syncer.server,
+            "p",
+            &[store::LocalOp::MapPatchSet {
+                patch_set: version.id,
+                gerrit_patch_set: PatchSetNumber(2),
+            }],
+            Timestamp::UNIX_EPOCH,
+        )
+        .unwrap();
+    f.http.push_response(200, xssi(&json!({"changes": []})));
+    block_on(f.syncer.refresh_related(ChangeNumber(7), &"bbb".into())).unwrap();
+    assert_eq!(
+        f.http.requests()[0].uri().path(),
+        "/changes/7/revisions/bbb/related"
+    );
+}
+
+#[test]
+fn fetching_summaries_drops_local_change_numbers() {
+    let f = fixture();
+    let (local, _) = add_local_version(&f.syncer, None, "ddd");
+    assert!(local.number.is_local());
+    // Only local numbers: nothing to ask.
+    assert!(
+        block_on(f.syncer.fetch_summaries(&[local.number]))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(f.http.requests().is_empty());
+
+    f.http
+        .push_response(200, format!(")]}}'\n[{}]", change_json(3, U1)));
+    let got = block_on(f.syncer.fetch_summaries(&[local.number, ChangeNumber(3)])).unwrap();
+    assert_eq!(got.len(), 1);
+    let reqs = f.http.requests();
+    let query = reqs[0].uri().query().unwrap();
+    assert!(query.contains("q=change%3A3"), "{query}");
+    assert!(!query.contains("OR"), "{query}");
+}

@@ -1,4 +1,4 @@
-use model::{LocalDraftId, PatchSetNumber};
+use model::{LocalDraftId, PatchSetNumber, RevisionId};
 
 /// A failed sync operation. A failed refresh leaves the cache as it was.
 #[derive(Debug, thiserror::Error)]
@@ -11,6 +11,10 @@ pub enum Error {
     /// not on the server. Nothing was posted.
     #[error("{} draft comment(s) are not uploaded: {}", .0.len(), describe(.0))]
     DraftsNotUploaded(Vec<PendingDraft>),
+    /// The request names a commit that exists only in the local checkout
+    /// (a local patch set not known to be on Gerrit). Nothing was sent.
+    #[error("commit {} exists only in the local checkout, not on the server", .0.short(12))]
+    Local(RevisionId),
 }
 
 impl Error {

@@ -22,6 +22,11 @@
 //! (offline, failed, or a delete not yet confirmed) nothing is posted and
 //! [`crate::Error::DraftsNotUploaded`] lists them.
 //!
+//! # Local commits
+//!
+//! Requests that name a commit that exists only locally fail with
+//! [`crate::Error::Local`] before anything is sent.
+//!
 //! # Reviewed marks
 //!
 //! [`Syncer::set_reviewed`] updates the cached file lists first (the file
@@ -345,6 +350,9 @@ impl Syncer {
     }
 
     /// One upload attempt; the caller holds `drafts_lock`.
+    ///
+    /// A draft on a commit that exists only locally is marked failed
+    /// (retryable, since the commit may reach Gerrit), without a request.
     async fn upload_locked(&self, id: LocalDraftId) -> Result<Option<Draft>, Error> {
         // An update whose draft is gone from the server is created anew,
         // once.
@@ -352,6 +360,21 @@ impl Syncer {
             let Some(d) = self.store().load_draft(self.server, id)? else {
                 return Ok(None);
             };
+            let sends = d.sync.is_uploadable()
+                && !(d.sync == DraftSync::PendingDelete && d.server_id.is_none());
+            if sends && self.store().is_local_sha(self.server, &d.revision)? {
+                let failure = DraftFailure::Rejected {
+                    error: Error::Local(d.revision.clone()).to_string(),
+                    retryable: true,
+                };
+                return Ok(self.store().record_draft_failure(
+                    self.server,
+                    id,
+                    d.version,
+                    &failure,
+                    Timestamp::now(),
+                )?);
+            }
             let sent = match (&d.sync, d.server_id.as_deref()) {
                 (DraftSync::PendingCreate, _) | (DraftSync::PendingUpdate, None) => self
                     .client
@@ -440,6 +463,7 @@ impl Syncer {
         revision: &RevisionId,
         review: &ReviewInput,
     ) -> Result<PublishOutcome, Error> {
+        self.ensure_on_server(revision)?;
         let result = {
             let _guard = self.drafts_lock.lock().await;
             if review.drafts != DraftHandling::Keep {
@@ -522,6 +546,7 @@ impl Syncer {
         path: &str,
         reviewed: bool,
     ) -> Result<(), Error> {
+        self.ensure_on_server(revision)?;
         let changed =
             self.store()
                 .set_reviewed_path(self.server, change, revision, path, reviewed)?;

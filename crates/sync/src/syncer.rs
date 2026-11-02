@@ -68,6 +68,19 @@ impl Syncer {
         self.store.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Fails with [`Error::Local`] if `sha` is a commit that exists only in
+    /// the local checkout: a local patch set that is not known to be a
+    /// Gerrit patch set. Every request that names a revision by its SHA
+    /// checks it first. `gerrit-api` refuses the synthetic numbers of local
+    /// changes and patch sets itself; this catches a local commit named
+    /// under a real change number (a local patch set of a Gerrit change).
+    fn ensure_on_server(&self, sha: &RevisionId) -> Result<(), Error> {
+        if self.store().is_local_sha(self.server, sha)? {
+            return Err(Error::Local(sha.clone()));
+        }
+        Ok(())
+    }
+
     /// The cached result of `query`, for instant start.
     pub fn cached_query(&self, query: &str) -> Result<Option<CachedQuery>, Error> {
         Ok(self.store().load_query(self.server, query)?)
@@ -80,11 +93,14 @@ impl Syncer {
 
     /// Fetches the changes `numbers` with their detailed labels and
     /// mergeability, for the markers of the relation chain. Nothing is
-    /// cached.
+    /// cached. Numbers of local changes are left out (they are not on the
+    /// server), so the others still load.
     pub async fn fetch_summaries(
         &self,
         numbers: &[ChangeNumber],
     ) -> Result<Vec<model::ChangeSummary>, Error> {
+        let numbers: Vec<ChangeNumber> =
+            numbers.iter().copied().filter(|n| !n.is_local()).collect();
         if numbers.is_empty() {
             return Ok(Vec::new());
         }
@@ -220,6 +236,10 @@ impl Syncer {
     /// extra: if only that request fails, the list is still stored and the
     /// previously cached marks stay.
     pub async fn refresh_files(&self, key: &FilesKey) -> Result<CachedFileList, Error> {
+        self.ensure_on_server(&key.target.sha)?;
+        if let Some(base) = &key.base {
+            self.ensure_on_server(&base.sha)?;
+        }
         let files = self
             .client
             .get_files(
@@ -268,6 +288,10 @@ impl Syncer {
     /// rows are pruned (see [`PrunePolicy`]); a failure to prune is logged,
     /// not returned, because the diff itself was stored.
     pub async fn refresh_diff(&self, key: &DiffKey) -> Result<Diff, Error> {
+        self.ensure_on_server(&key.target.sha)?;
+        if let Some(base) = &key.base {
+            self.ensure_on_server(&base.sha)?;
+        }
         let diff = self
             .client
             .get_diff(
@@ -326,6 +350,7 @@ impl Syncer {
         change: ChangeNumber,
         revision: &RevisionId,
     ) -> Result<Vec<RelatedChange>, Error> {
+        self.ensure_on_server(revision)?;
         let related = self.client.get_related(change, revision).await?;
         let now = Timestamp::now();
         self.store()

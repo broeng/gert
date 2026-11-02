@@ -40,13 +40,17 @@ impl Syncer {
     }
 
     /// Rebases the change onto `base` (a commit SHA or change number), or
-    /// onto the tip of its branch.
+    /// onto the tip of its branch. A base that is a local commit is refused
+    /// with [`Error::Local`].
     pub async fn rebase(
         &self,
         change: ChangeNumber,
         base: Option<&str>,
         options: model::RebaseOptions,
     ) -> Result<Option<ChangeDetail>, Error> {
+        if let Some(base) = base {
+            self.ensure_on_server(&RevisionId::from(base.trim()))?;
+        }
         self.client.rebase(change, base, options).await?;
         Ok(self.refresh_after_action(change, "rebase").await)
     }
@@ -71,6 +75,7 @@ impl Syncer {
         destination: &str,
         message: Option<&str>,
     ) -> Result<NewChange, Error> {
+        self.ensure_on_server(target)?;
         let created = self
             .client
             .cherry_pick(change, target, destination, message)
