@@ -114,6 +114,9 @@ struct Files {
     reviewed: HashSet<String>,
     /// A list (possibly empty) has arrived for `key`.
     loaded: bool,
+    /// The checkout the list was made in, while it is the local list (no
+    /// reviewed marks, never stored) that Gerrit's has not replaced yet.
+    local: Option<std::path::PathBuf>,
     error: Option<String>,
 }
 
@@ -193,6 +196,8 @@ pub struct ChangePage {
     /// The local source for the file list in use (see `update_local`).
     local: LocalState,
     local_task: Option<Task<()>>,
+    /// Making the file list in the checkout after a cache miss.
+    local_files_task: Option<Task<()>>,
     /// The renames of the file list, for the local source.
     renames: Arc<Renames>,
     /// The filter style of each entry of `files.list`.
@@ -285,6 +290,7 @@ impl ChangePage {
             checkouts: None,
             local: LocalState::Unknown,
             local_task: None,
+            local_files_task: None,
             renames: Arc::default(),
             styles: Vec::new(),
             visible: Vec::new(),
@@ -448,6 +454,22 @@ impl ChangePage {
             .iter()
             .map(|&i| self.files.list[i].path.as_str())
             .collect()
+    }
+
+    /// The checkout the file list was made in, while it is the local one.
+    #[cfg(test)]
+    pub(crate) fn files_local_for_test(&self) -> Option<&std::path::Path> {
+        self.files.local.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn files_error_for_test(&self) -> Option<&str> {
+        self.files.error.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn files_reviewed_count_for_test(&self) -> usize {
+        self.files.reviewed.len()
     }
 
     #[cfg(test)]
@@ -641,6 +663,7 @@ impl ChangePage {
             self.inline.clear();
             self.local = LocalState::Unknown;
             self.local_task = None;
+            self.local_files_task = None;
             self.styles.clear();
             self.visible.clear();
             self.cursor = 0;
@@ -676,7 +699,9 @@ impl ChangePage {
             };
             this.update(cx, |this, cx| match cached {
                 Ok(Some(list)) => this.apply_files(&key, list, cx),
-                Ok(None) => {}
+                // Nothing stored: the checkout, if it has the commits,
+                // gives a list until Gerrit's arrives.
+                Ok(None) => this.start_local_files(&key, cx),
                 Err(e) => log::warn!("reading cached files: {e}"),
             })
             .ok();
@@ -705,16 +730,65 @@ impl ChangePage {
     }
 
     fn apply_files(&mut self, key: &FilesKey, list: CachedFileList, cx: &mut Context<Self>) {
+        let reviewed = list.reviewed.unwrap_or_default().into_iter().collect();
+        self.apply_list(key, list.files, reviewed, None, cx);
+    }
+
+    /// Makes the file list in the checkout when there is no stored one and
+    /// none is on screen. Never stored; Gerrit's list replaces it. The
+    /// shared local resolve is the one the diffs use.
+    fn start_local_files(&mut self, key: &FilesKey, cx: &mut Context<Self>) {
+        if self.files.key.as_ref() != Some(key) || self.files.loaded {
+            return;
+        }
+        self.update_local(cx);
+        let lazy = self.local.lazy(key, &Arc::default());
+        let key = key.clone();
+        self.local_files_task = Some(cx.spawn(async move |this, cx| {
+            let made = cx
+                .background_spawn(async move {
+                    let source = lazy.get().await?;
+                    Some((source.path().to_owned(), source.file_list()?))
+                })
+                .await;
+            if let Some((path, files)) = made {
+                this.update(cx, |this, cx| {
+                    // Gerrit's list (or a stored one) may have come first,
+                    // or another pair been picked.
+                    if this.files.key.as_ref() == Some(&key) && !this.files.loaded {
+                        this.apply_list(&key, files, HashSet::new(), Some(path), cx);
+                    }
+                })
+                .ok();
+            }
+        }));
+    }
+
+    /// Shows `files`. `local` is the checkout they were made in, `None` for
+    /// the stored list or Gerrit's.
+    fn apply_list(
+        &mut self,
+        key: &FilesKey,
+        files: Vec<FileEntry>,
+        reviewed: HashSet<String>,
+        local: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if self.files.key.as_ref() != Some(key) {
             return; // the user picked another pair meanwhile
+        }
+        if local.is_none() {
+            // The local list is not needed any more, and must not land late.
+            self.local_files_task = None;
         }
         let keep = self
             .want_file
             .take()
             .or_else(|| self.cursor_path().map(str::to_owned));
-        self.files.list = list.files;
-        self.files.reviewed = list.reviewed.unwrap_or_default().into_iter().collect();
+        self.files.list = files;
+        self.files.reviewed = reviewed;
         self.files.loaded = true;
+        self.files.local = local;
         self.files.error = None;
         self.renames = renames_of(&self.files.list);
         self.update_local(cx);

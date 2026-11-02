@@ -122,6 +122,24 @@ impl LocalSource {
                 .is_some_and(|r| r.contains_key(&key.path))
     }
 
+    /// The comparison's file list, with git's renames (60% similarity, like
+    /// Gerrit) and no reviewed marks, or `None` when it has to come from
+    /// Gerrit (git cannot answer like Gerrit would, or failed; the last is
+    /// logged as a warning). Blocking.
+    pub fn file_list(&self) -> Option<Vec<FileEntry>> {
+        match self.core.repo.file_list(&self.core.comparison) {
+            Ok(Local::Available(files)) => Some(files),
+            Ok(Local::NotLocal(why)) => {
+                log::debug!("the file list is not made locally: {why}");
+                None
+            }
+            Err(e) => {
+                log::warn!("listing files in {}: {e}", self.path().display());
+                None
+            }
+        }
+    }
+
     /// The diff of `key`, or `None` when it has to come from Gerrit (not
     /// served, git cannot answer like Gerrit would, or failed; the last is
     /// logged as a warning). Blocking.

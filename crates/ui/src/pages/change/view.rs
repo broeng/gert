@@ -763,6 +763,13 @@ impl ChangePage {
                                         .gap_2()
                                         .text_sm()
                                         .text_color(muted)
+                                        .items_center()
+                                        .children(
+                                            self.files
+                                                .local
+                                                .as_ref()
+                                                .map(|p| local_marker("files-local", p, cx)),
+                                        )
                                         .child(format!("{count} files"))
                                         .child(
                                             div()

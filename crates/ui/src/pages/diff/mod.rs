@@ -86,6 +86,9 @@ struct Loaded {
     /// The comparison, also when its file list could not be had.
     files_key: Option<FilesKey>,
     files: Option<(Vec<FileEntry>, HashSet<String>)>,
+    /// The store had no list for `files_key`; the page gets it (from the
+    /// checkout and Gerrit) after this.
+    files_missed: bool,
     error: Option<String>,
 }
 
@@ -96,6 +99,15 @@ pub struct DiffPage {
     detail: Option<ChangeDetail>,
     files_key: Option<FilesKey>,
     files: Vec<FileEntry>,
+    /// A list (possibly empty) is in `files`.
+    files_loaded: bool,
+    /// The checkout `files` was made in, while it is the local list that
+    /// Gerrit's has not replaced yet (no reviewed marks, never stored).
+    files_local: Option<std::path::PathBuf>,
+    /// How many of the requests for a missing list (Gerrit, the checkout)
+    /// have not answered yet.
+    files_pending: u8,
+    files_tasks: Vec<Task<()>>,
     /// The server's local checkouts, when it has any.
     checkouts: Option<Entity<Checkouts>>,
     /// The local source for `files_key`, once resolved.
@@ -175,6 +187,10 @@ impl DiffPage {
             detail: None,
             files_key: None,
             files: Vec::new(),
+            files_loaded: false,
+            files_local: None,
+            files_pending: 0,
+            files_tasks: Vec::new(),
             checkouts: None,
             local: LocalState::Unknown,
             local_task: None,
@@ -273,11 +289,112 @@ impl DiffPage {
         }));
     }
 
+    /// The store had no file list. Asks Gerrit (if it can be asked) and the
+    /// checkout (if it has the commits) at the same time: the first answer
+    /// is shown, and Gerrit's replaces the checkout's. Nothing stored comes
+    /// from the checkout. The diff is fetched once there is a list, or
+    /// when no request is left to bring one.
+    fn miss_files(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.files_key.clone() else {
+            return;
+        };
+        self.files_tasks.clear();
+        self.files_pending = 0;
+        self.ensure_local(&key, cx);
+        if !matches!(self.local, LocalState::Ready(_, None)) {
+            let lazy = self.local.lazy(&key, &Arc::default());
+            self.files_pending += 1;
+            let task_key = key.clone();
+            self.files_tasks.push(cx.spawn(async move |this, cx| {
+                let made = cx
+                    .background_spawn(async move {
+                        let source = lazy.get().await?;
+                        Some((source.path().to_owned(), source.file_list()?))
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.files_pending = this.files_pending.saturating_sub(1);
+                    // Gerrit's list may have come first.
+                    if let Some((path, files)) = made
+                        && !this.files_loaded
+                    {
+                        this.apply_list(&task_key, files, HashSet::new(), Some(path), cx);
+                    }
+                    this.files_settled(cx);
+                })
+                .ok();
+            }));
+        }
+        if self.session.can_sync() {
+            self.files_pending += 1;
+            let syncer = self.session.syncer().clone();
+            let task_key = key.clone();
+            self.files_tasks.push(cx.spawn(async move |this, cx| {
+                let fetched = cx
+                    .background_spawn(async move { syncer.refresh_files(&key).await })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.files_pending = this.files_pending.saturating_sub(1);
+                    match fetched {
+                        Ok(c) => {
+                            let reviewed = c.reviewed.unwrap_or_default().into_iter().collect();
+                            this.apply_list(&task_key, c.files, reviewed, None, cx);
+                        }
+                        Err(e) => log::warn!("fetching files of change {}: {e}", this.route.change),
+                    }
+                    this.files_settled(cx);
+                })
+                .ok();
+            }));
+        }
+        self.files_settled(cx);
+    }
+
+    /// Fetches the diff and does the step asked for meanwhile, once a list
+    /// has arrived or nothing is left that could bring one.
+    fn files_settled(&mut self, cx: &mut Context<Self>) {
+        if !self.files_loaded && self.files_pending > 0 {
+            return;
+        }
+        self.fetch(cx);
+        if let Some(forward) = self.pending_step.take() {
+            self.step_file(forward, cx);
+        }
+    }
+
+    /// Shows `files`. `local` is the checkout they were made in, `None` for
+    /// Gerrit's list, which also stops the checkout's from landing late.
+    fn apply_list(
+        &mut self,
+        key: &FilesKey,
+        files: Vec<FileEntry>,
+        reviewed: HashSet<String>,
+        local: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.files_key.as_ref() != Some(key) {
+            return;
+        }
+        self.files = files;
+        self.files_loaded = true;
+        self.files_local = local;
+        self.renames = renames_of(&self.files);
+        self.reviewed = reviewed;
+        self.restyle(cx);
+        // What depends on the list: the old path of a rename, the files
+        // ahead (and the prefetch decision), the position.
+        self.apply_threads(cx);
+        self.ahead_state = None;
+        self.ahead(cx);
+        cx.notify();
+    }
+
     fn loaded(&mut self, l: Loaded, cx: &mut Context<Self>) {
         self.detail = l.detail;
         self.files_key = l.files_key;
         if let Some((files, reviewed)) = l.files {
             self.files = files;
+            self.files_loaded = true;
             self.renames = renames_of(&self.files);
             self.reviewed = reviewed;
             self.restyle(cx);
@@ -287,6 +404,12 @@ impl DiffPage {
             self.loading = false;
             self.error = Some(e);
             cx.notify();
+            return;
+        }
+        if self.files_key.is_some() && l.files_missed {
+            // The diff is fetched, and the step done, once a list is there.
+            self.pending_step = step;
+            self.miss_files(cx);
             return;
         }
         if self.files_key.is_some() {
@@ -588,6 +711,17 @@ impl DiffPage {
         self.checkouts = checkouts;
     }
 
+    /// The checkout the file list was made in, while it is the local one.
+    #[cfg(test)]
+    pub(crate) fn files_local_for_test(&self) -> Option<&std::path::Path> {
+        self.files_local.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_paths_for_test(&self) -> Vec<&str> {
+        self.files.iter().map(|f| f.path.as_str()).collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn source_for_test(&self) -> Option<DiffSource> {
         self.source
@@ -869,7 +1003,9 @@ impl DiffPage {
     /// comes while the file list is still loading; it waits for it.
     fn step_file(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(from) = self.position() else {
-            if self.loading && self.files_key.is_none() {
+            if (self.loading && self.files_key.is_none())
+                || (self.files_pending > 0 && !self.files_loaded)
+            {
                 self.pending_step = Some(forward);
             }
             return;
@@ -1022,6 +1158,9 @@ impl DiffPage {
         let local_path = (self.source == Some(DiffSource::Local))
             .then(|| self.local_source().map(|s| s.path().to_owned()))
             .flatten();
+        // The list the position and `]` go by comes from the checkout too;
+        // the marker of a local diff already says it.
+        let list_path = self.files_local.clone().filter(|_| local_path.is_none());
         v_flex()
             .px_3()
             .py_2()
@@ -1101,6 +1240,7 @@ impl DiffPage {
                     })
                     .child(div().text_color(muted).child(pair))
                     .children(position.map(|p| div().text_color(muted).child(p)))
+                    .children(list_path.map(|p| local_marker("files-local", &p, cx)))
                     .children(self.hint.current().map(|(text, error)| {
                         div()
                             .text_xs()
@@ -1272,6 +1412,7 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
         detail,
         files_key: None,
         files: None,
+        files_missed: false,
         error: Some(error),
     };
     let mut detail = match syncer.cached_change(route.change) {
@@ -1317,19 +1458,19 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
         base,
         target,
     };
+    // A miss is the page's to fill: from the checkout, and from Gerrit.
     let files = match syncer.cached_files(&files_key) {
         Ok(Some(c)) => Some((c.files, c.reviewed)),
-        _ if can_sync => syncer
-            .refresh_files(&files_key)
-            .await
-            .map(|c| (c.files, c.reviewed))
-            .map_err(|e| log::warn!("fetching files of change {}: {e}", route.change))
-            .ok(),
-        _ => None,
+        Ok(None) => None,
+        Err(e) => {
+            log::warn!("reading cached files: {e}");
+            None
+        }
     };
     Loaded {
         detail: Some(d),
         files_key: Some(files_key),
+        files_missed: files.is_none(),
         files: files.map(|(f, r)| (f, r.unwrap_or_default().into_iter().collect())),
         error: None,
     }

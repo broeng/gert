@@ -1512,6 +1512,115 @@ mod local {
         assert_eq!(requests(&p.http, "/diff"), 0, "{:?}", p.http.requested());
     }
 
+    fn unlisted_store_for(sha: &str) -> Store {
+        let mut store = Store::open_in_memory().expect("store");
+        let server = store.server_id(URL).expect("server");
+        store
+            .save_change_detail(server, &lt::detail_at(sha), now())
+            .expect("detail");
+        store
+    }
+
+    fn list_of(cx: &TestAppContext, p: &Page) -> Vec<String> {
+        p.page.read_with(cx, |p, _| {
+            p.file_paths_for_test()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn an_uncached_list_comes_from_the_checkout_when_gerrit_has_none(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        // No /files and no /diff route: Gerrit fails both.
+        let p = open_local(
+            cx,
+            &f,
+            unlisted_store_for(&f.target),
+            RouteHttpClient::new(),
+            gerrit_api::Auth::Anonymous,
+            "src/a.rs",
+        );
+        assert_eq!(list_of(cx, &p), ["/COMMIT_MSG", "src/a.rs"]);
+        p.page.read_with(cx, |p, _| {
+            assert_eq!(p.files_local_for_test(), Some(f.repo.path()));
+            assert!(!p.is_reviewed_for_test());
+        });
+        // The list gave the diff its renames, so that is local too.
+        assert_eq!(shown(cx, &p), Some(DiffSource::Local));
+        assert!(
+            !p.store
+                .lock()
+                .expect("store")
+                .load_file_list(store::ServerId(1), &lt::files_key(&f.target))
+                .expect("load")
+                .is_some()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn gerrits_list_replaces_the_local_one(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        let http = RouteHttpClient::new();
+        http.route(
+            "/files",
+            200,
+            ")]}'\n{\"/COMMIT_MSG\":{\"size\":1},\"gerrit/only.rs\":{\"size\":1}}",
+        );
+        let p = open_local(
+            cx,
+            &f,
+            unlisted_store_for(&f.target),
+            http,
+            gerrit_api::Auth::Anonymous,
+            "src/a.rs",
+        );
+        for _ in 0..20 {
+            cx.executor().allow_parking();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        // Whichever came first, Gerrit's list is what stays.
+        assert_eq!(list_of(cx, &p), ["/COMMIT_MSG", "gerrit/only.rs"]);
+        p.page
+            .read_with(cx, |p, _| assert_eq!(p.files_local_for_test(), None));
+    }
+
+    #[gpui_kit::test]
+    fn a_stored_list_is_used_without_asking_git_or_gerrit(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        let p = open_local(
+            cx,
+            &f,
+            store_for(&f.target),
+            RouteHttpClient::new(),
+            gerrit_api::Auth::Anonymous,
+            "src/a.rs",
+        );
+        assert_eq!(list_of(cx, &p), ["/COMMIT_MSG", "src/a.rs", "src/b.rs"]);
+        p.page
+            .read_with(cx, |p, _| assert_eq!(p.files_local_for_test(), None));
+        assert_eq!(requests(&p.http, "/files"), 0, "{:?}", p.http.requested());
+    }
+
+    #[gpui_kit::test]
+    fn a_missing_commit_gives_no_local_list(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        let missing = "0123456789012345678901234567890123456789";
+        let p = open_local(
+            cx,
+            &f,
+            unlisted_store_for(missing),
+            RouteHttpClient::new(),
+            gerrit_api::Auth::Anonymous,
+            "src/a.rs",
+        );
+        assert!(list_of(cx, &p).is_empty());
+        p.page
+            .read_with(cx, |p, _| assert_eq!(p.files_local_for_test(), None));
+    }
+
     #[gpui_kit::test]
     fn a_commit_the_checkout_lacks_goes_to_the_server(cx: &mut TestAppContext) {
         let f = lt::fixture();

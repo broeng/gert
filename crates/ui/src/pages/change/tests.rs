@@ -1676,3 +1676,183 @@ fn an_inline_diff_opened_while_the_checkout_resolves_still_ends_up_local(cx: &mu
         f.http.requested()
     );
 }
+
+// ---- the file list from the local checkout ----
+
+/// A cache that has the change but no file list.
+fn unlisted_store(sha: &str) -> Store {
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server");
+    store
+        .save_change_detail(server, &lt::detail_at(sha), ts())
+        .expect("detail");
+    store
+}
+
+fn gerrit_files() -> String {
+    r#"{"/COMMIT_MSG":{"lines_inserted":9,"size_delta":1,"size":1},
+        "gerrit/only.rs":{"lines_inserted":1,"size_delta":1,"size":1}}"#
+        .to_owned()
+}
+
+/// Lets the checkout open and git run on real threads.
+fn settle_git(cx: &mut TestAppContext) {
+    for _ in 0..50 {
+        cx.executor().allow_parking();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+}
+
+fn unlisted_page(
+    cx: &mut TestAppContext,
+    store: Store,
+    repo: &lt::Fixture,
+    auth: Option<Auth>,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fixture {
+    let projects = vec![ProjectSettings::new(
+        "platform/foo",
+        repo.repo.path().to_string_lossy(),
+    )];
+    let f = page_in_with(
+        cx,
+        store,
+        auth,
+        setup(),
+        ChangeView::default(),
+        routes,
+        projects,
+    );
+    settle_git(cx);
+    f
+}
+
+fn list_of(cx: &TestAppContext, f: &Fixture) -> Vec<String> {
+    cx.read(|cx| {
+        f.page
+            .read(cx)
+            .file_paths()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn an_uncached_list_comes_from_the_checkout_when_gerrit_fails(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    // No /files route: Gerrit's answer is a 404.
+    let f = unlisted_page(
+        cx,
+        unlisted_store(&repo.target),
+        &repo,
+        Some(Auth::Anonymous),
+        |_| {},
+    );
+    assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "src/a.rs"]);
+    // A refresh that reaches the files request and fails (no /files route).
+    let detail = lt::detail_at(&repo.target);
+    f.page.update(cx, |p, cx| p.detail_refreshed(&detail, cx));
+    settle_git(cx);
+    assert!(
+        f.http.requested().iter().any(|r| r.contains("/files")),
+        "{:?}",
+        f.http.requested()
+    );
+    assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "src/a.rs"]);
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert_eq!(p.files_local_for_test(), Some(repo.repo.path()));
+        // The failed refresh does not replace the list with an error.
+        assert_eq!(p.files_error_for_test(), None);
+        assert_eq!(p.files_reviewed_count_for_test(), 0);
+    });
+    // Never stored.
+    assert!(
+        f.store
+            .lock()
+            .expect("store")
+            .load_file_list(ServerId(1), &lt::files_key(&repo.target))
+            .expect("load")
+            .is_none()
+    );
+}
+
+#[gpui_kit::test]
+fn gerrits_list_replaces_the_local_one_and_the_marker_goes(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    let f = unlisted_page(
+        cx,
+        unlisted_store(&repo.target),
+        &repo,
+        Some(Auth::Anonymous),
+        |_| {},
+    );
+    cx.update(|cx| assert!(f.page.read(cx).files_local_for_test().is_some()));
+    // Gerrit answers on the next refresh.
+    f.http
+        .route("/files", 200, format!(")]}}'\n{}", gerrit_files()));
+    let detail = lt::detail_at(&repo.target);
+    f.page.update(cx, |p, cx| p.detail_refreshed(&detail, cx));
+    settle_git(cx);
+    assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "gerrit/only.rs"]);
+    cx.update(|cx| assert_eq!(f.page.read(cx).files_local_for_test(), None));
+}
+
+#[gpui_kit::test]
+fn offline_the_local_list_stays(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    // Not signed in and anonymous access refused: the session cannot sync.
+    let f = unlisted_page(cx, unlisted_store(&repo.target), &repo, None, |_| {});
+    assert!(
+        !f.http.requested().iter().any(|r| r.contains("/files")),
+        "{:?}",
+        f.http.requested()
+    );
+    assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "src/a.rs"]);
+    cx.update(|cx| assert!(f.page.read(cx).files_local_for_test().is_some()));
+}
+
+#[gpui_kit::test]
+fn a_stored_list_wins_without_git(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    // The stored list has src/b.rs too; git would not list it.
+    let f = unlisted_page(cx, local_store(&repo.target), &repo, None, |_| {});
+    assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "src/a.rs", "src/b.rs"]);
+    cx.update(|cx| assert_eq!(f.page.read(cx).files_local_for_test(), None));
+}
+
+#[gpui_kit::test]
+fn a_missing_commit_gives_no_local_list(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    let missing = "0123456789012345678901234567890123456789";
+    let f = unlisted_page(cx, unlisted_store(missing), &repo, None, |_| {});
+    assert!(list_of(cx, &f).is_empty());
+    cx.update(|cx| assert_eq!(f.page.read(cx).files_local_for_test(), None));
+}
+
+#[gpui_kit::test]
+fn a_late_local_list_does_not_replace_gerrits(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    let f = unlisted_page(
+        cx,
+        unlisted_store(&repo.target),
+        &repo,
+        Some(Auth::Anonymous),
+        |http| {
+            http.route("/files", 200, format!(")]}}'\n{}", gerrit_files()));
+        },
+    );
+    let detail = lt::detail_at(&repo.target);
+    f.page.update(cx, |p, cx| p.detail_refreshed(&detail, cx));
+    settle_git(cx);
+    assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "gerrit/only.rs"]);
+    // Asking for the local list now, as a slow start would have, changes
+    // nothing: a list is on screen.
+    let key = lt::files_key(&repo.target);
+    f.page.update(cx, |p, cx| p.start_local_files(&key, cx));
+    settle_git(cx);
+    assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "gerrit/only.rs"]);
+    cx.update(|cx| assert_eq!(f.page.read(cx).files_local_for_test(), None));
+}
