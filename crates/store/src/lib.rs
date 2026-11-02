@@ -10,8 +10,10 @@
 //! caches (file lists, diffs, related changes, diff preferences) live in
 //! `review_cache.rs`, including the pruning policy. Local changes (unpushed
 //! commits shown as changes) live in `local.rs`, the reviews waiting for
-//! them to reach Gerrit in `pending_reviews.rs`.
+//! them to reach Gerrit in `pending_reviews.rs`, and moving both onto the
+//! Gerrit change in `consolidation.rs`.
 
+mod consolidation;
 mod drafts;
 mod error;
 mod events;
@@ -28,14 +30,15 @@ pub use model::ServerId;
 use model::{ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+pub use consolidation::{
+    ConsolidationRewrite, DraftAnchor, FinishReport, HeldItems, PatchSetMove, ReviewStateChange,
+    RewriteReport,
+};
 pub use drafts::{CachedComments, DeleteOutcome, DraftCounts, DraftFailure, MergeReport};
 pub use error::Error;
 pub use events::EVENT_RETENTION;
 pub use inbox::{INBOX_KEEP, INBOX_RETENTION, InboxId, InboxItem, NewInboxItem};
-pub use local::{
-    ConsolidationRewrite, DraftAnchor, LocalChangeEntry, LocalChangeUpsert, LocalOp,
-    NewLocalPatchSet, PatchSetMove, ReconcileReport, ReviewStateChange, RewriteReport,
-};
+pub use local::{LocalChangeEntry, LocalChangeUpsert, LocalOp, NewLocalPatchSet, ReconcileReport};
 pub use pending_reviews::{NewPendingReview, PendingReviewEdit};
 pub use review_cache::{
     CachedDiff, CachedDiffPreferences, CachedFileList, CachedRelated, PrunePolicy, PruneReport,

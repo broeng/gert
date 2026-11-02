@@ -332,6 +332,72 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE UNIQUE INDEX drafts_by_pending_review ON drafts (pending_review_id)
         WHERE pending_review_id IS NOT NULL;
     ",
+    // v11 -> v12: what consolidation needs to keep moved data apart.
+    //
+    // `drafts.reserved_by` marks a draft that consolidation moved onto the
+    // Gerrit change; it is posted inline with its local change's review and
+    // never uploaded as a draft. `drafts.held_reason` marks a draft of a
+    // local patch set that could not be moved and waits for the user.
+    //
+    // `pending_reviews` is rebuilt (SQLite cannot add NOT NULL to a column):
+    // `local_change_id` becomes required, taken from the review's local
+    // patch set where it was NULL (16777216 is `PatchSetNumber::LOCAL_BASE`;
+    // reviews that cannot be attributed are dropped, and their message
+    // drafts unsealed); `revision_sha` is the
+    // commit of `patch_set`, which consolidation moves, apart from
+    // `given_on_sha`; `voted_at_ms` is when the labels were last set. The
+    // AUTOINCREMENT counter carries over, so ids are still never reused.
+    // `migrate` runs with foreign keys off; the drafts' references to
+    // `pending_reviews` resolve to the new table once it is renamed.
+    "
+    ALTER TABLE drafts ADD COLUMN reserved_by INTEGER
+        REFERENCES local_changes(id) ON DELETE CASCADE;
+    ALTER TABLE drafts ADD COLUMN held_reason TEXT;
+    CREATE INDEX drafts_reserved ON drafts (reserved_by) WHERE reserved_by IS NOT NULL;
+
+    CREATE TABLE pending_reviews_new (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id       INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        local_change_id INTEGER NOT NULL REFERENCES local_changes(id) ON DELETE CASCADE,
+        change_number   INTEGER NOT NULL,
+        patch_set       INTEGER NOT NULL,
+        revision_sha    TEXT NOT NULL,
+        given_on_sha    TEXT NOT NULL,
+        labels          TEXT NOT NULL,
+        strategy        TEXT NOT NULL,
+        state           TEXT NOT NULL,
+        error           TEXT,
+        held_reason     TEXT,
+        created_ms      INTEGER NOT NULL,
+        voted_at_ms     INTEGER NOT NULL,
+        nonce           TEXT
+    );
+    INSERT INTO pending_reviews_new (id, server_id, local_change_id, change_number,
+            patch_set, revision_sha, given_on_sha, labels, strategy, state, error,
+            held_reason, created_ms, voted_at_ms, nonce)
+        SELECT id, server_id, owner, change_number, patch_set, given_on_sha, given_on_sha,
+               labels, strategy, state, error, held_reason, created_ms, created_ms, nonce
+        FROM (SELECT r.*, COALESCE(r.local_change_id,
+                     (SELECT p.local_change_id FROM local_patch_sets p
+                      WHERE p.server_id = r.server_id AND p.id = r.patch_set - 16777216))
+                     AS owner
+              FROM pending_reviews r)
+        WHERE owner IS NOT NULL;
+    UPDATE drafts SET pending_review_id = NULL
+        WHERE pending_review_id IS NOT NULL
+          AND pending_review_id NOT IN (SELECT id FROM pending_reviews_new);
+    INSERT INTO sqlite_sequence (name, seq)
+        SELECT 'pending_reviews_new', 0
+        WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'pending_reviews_new');
+    UPDATE sqlite_sequence
+        SET seq = (SELECT MAX(seq) FROM sqlite_sequence
+                   WHERE name IN ('pending_reviews', 'pending_reviews_new'))
+        WHERE name = 'pending_reviews_new';
+    DROP TABLE pending_reviews;
+    ALTER TABLE pending_reviews_new RENAME TO pending_reviews;
+    CREATE INDEX pending_reviews_by_change ON pending_reviews (server_id, change_number);
+    CREATE INDEX pending_reviews_by_local ON pending_reviews (local_change_id);
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

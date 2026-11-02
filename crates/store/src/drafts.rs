@@ -45,8 +45,8 @@
 //! | `PendingCreate` | (has no server id) untouched | untouched |
 
 use model::{
-    ChangeNumber, Comment, Draft, DraftInput, DraftOp, DraftSync, LocalDraftId, Location,
-    PatchSetNumber, PatchSetRef, PendingReviewId, RevisionId, Side, Timestamp,
+    ChangeNumber, Comment, Draft, DraftInput, DraftOp, DraftSync, LocalChangeId, LocalDraftId,
+    Location, PatchSetNumber, PatchSetRef, PendingReviewId, RevisionId, Side, Timestamp,
 };
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -71,6 +71,9 @@ pub enum DeleteOutcome {
     Removed,
     /// The row stays as `PendingDelete` until the server confirms.
     Pending,
+    /// The draft is a pending review's message; it goes with the review
+    /// (see `Store::cancel_pending_review`), nothing was deleted.
+    Sealed,
 }
 
 /// How many drafts of a server are not on it, for an indicator.
@@ -119,7 +122,7 @@ impl MergeReport {
 const COLUMNS: &str = "id, change_number, patch_set, revision_sha, server_draft_id, path, side, \
      parent, line, start_line, start_character, end_line, end_character, in_reply_to, message, \
      unresolved, updated_ms, state, failed_op, error, retryable, attempts, last_error, version, \
-     pending_review_id";
+     pending_review_id, reserved_by, held_reason";
 
 #[derive(Debug)]
 struct BadColumn(String);
@@ -212,18 +215,37 @@ fn draft_from_row(r: &Row<'_>) -> rusqlite::Result<Draft> {
         last_error: r.get(22)?,
         version: u32::try_from(r.get::<_, i64>(23)?).unwrap_or(u32::MAX),
         pending_review: r.get::<_, Option<i64>>(24)?.map(PendingReviewId),
+        reserved_by: r.get::<_, Option<i64>>(25)?.map(LocalChangeId),
+        held_reason: r.get(26)?,
     })
 }
 
-/// An SQL condition on `drafts` that holds for drafts on a server change
-/// and patch set, and fails for drafts on local numbers (see
-/// [`ChangeNumber::LOCAL_BASE`] and [`PatchSetNumber::LOCAL_BASE`]).
-pub(crate) fn not_local() -> String {
+/// The SQL form of [`Draft::is_ordinary`] over `drafts`: a draft of a
+/// server change and patch set (not on local numbers, see
+/// [`ChangeNumber::LOCAL_BASE`] and [`PatchSetNumber::LOCAL_BASE`]) that is
+/// neither a pending review's sealed message, nor reserved for a
+/// consolidation post, nor held. Only such drafts are uploaded, retried,
+/// counted, merged with the server's list or forgotten after a publish.
+pub(crate) fn ordinary() -> String {
     format!(
-        "change_number < {} AND patch_set < {}",
+        "change_number < {} AND patch_set < {} AND pending_review_id IS NULL
+         AND reserved_by IS NULL AND held_reason IS NULL",
         ChangeNumber::LOCAL_BASE,
         PatchSetNumber::LOCAL_BASE
     )
+}
+
+/// The drafts matching `cond` (with `?1` the server), in creation order.
+pub(crate) fn query(
+    conn: &rusqlite::Connection,
+    cond: &str,
+    args: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<Draft>, Error> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM drafts WHERE {cond} ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(args, draft_from_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 /// `(start_line, start_character, end_line, end_character)` of a range.
@@ -334,7 +356,10 @@ impl Store {
     /// Changes the text and resolution of a draft; its place in the file
     /// does not change. Makes the draft pending again (`Synced` becomes
     /// `PendingUpdate`, `Failed` goes back to the operation that failed).
-    /// `None` if there is no such draft or it is being deleted.
+    /// A draft reserved for a consolidation post stays reserved; the version
+    /// bump tells the post that it changed. `None` if there is no such
+    /// draft, it is being deleted, or it is a pending review's sealed
+    /// message (edit it through the review).
     pub fn edit_draft(
         &mut self,
         server: ServerId,
@@ -346,6 +371,9 @@ impl Store {
         let Some(d) = self.load_draft(server, id)? else {
             return Ok(None);
         };
+        if d.is_sealed() {
+            return Ok(None);
+        }
         let state = match &d.sync {
             DraftSync::PendingDelete => return Ok(None),
             DraftSync::PendingCreate
@@ -373,7 +401,8 @@ impl Store {
 
     /// Deletes a draft locally. One the server never saw is removed at
     /// once; one it has stays as `PendingDelete` (hidden from threads)
-    /// until the deletion was confirmed.
+    /// until the deletion was confirmed. A pending review's sealed message
+    /// is refused ([`DeleteOutcome::Sealed`]).
     pub fn delete_draft(
         &mut self,
         server: ServerId,
@@ -382,6 +411,9 @@ impl Store {
         let Some(d) = self.load_draft(server, id)? else {
             return Ok(DeleteOutcome::NotFound);
         };
+        if d.is_sealed() {
+            return Ok(DeleteOutcome::Sealed);
+        }
         if d.server_id.is_none() {
             self.remove_draft(server, id)?;
             return Ok(DeleteOutcome::Removed);
@@ -444,45 +476,45 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The drafts the server refused, oldest first. Drafts on local numbers
-    /// are left out, like in [`Self::pending_drafts`].
+    /// The drafts the server refused, oldest first. Only ordinary drafts
+    /// ([`Draft::is_ordinary`]), like in [`Self::pending_drafts`].
     pub fn failed_drafts(&self, server: ServerId) -> Result<Vec<Draft>, Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM drafts WHERE server_id = ?1 AND state = 'failed'
-               AND {NOT_LOCAL}
+               AND {ORDINARY}
              ORDER BY id",
-            NOT_LOCAL = not_local()
+            ORDINARY = ordinary()
         ))?;
         let rows = stmt.query_map([server.0], draft_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Drafts the automatic upload works on (pending create, update or
-    /// delete), oldest first. `Failed` ones are not included, and neither
-    /// are drafts on a local change or a local patch set: they wait for
-    /// consolidation, and the retry loop, which stops at the first draft
-    /// that stays pending, must never see them.
+    /// delete), oldest first. `Failed` ones are not included, and only
+    /// ordinary drafts are ([`Draft::is_ordinary`]): drafts of local changes
+    /// reach the server through consolidation, and the retry loop, which
+    /// stops at the first draft that stays pending, must never see them.
     pub fn pending_drafts(&self, server: ServerId) -> Result<Vec<Draft>, Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM drafts WHERE server_id = ?1
                AND state IN ('pending_create', 'pending_update', 'pending_delete')
-               AND {NOT_LOCAL}
+               AND {ORDINARY}
              ORDER BY id",
-            NOT_LOCAL = not_local()
+            ORDINARY = ordinary()
         ))?;
         let rows = stmt.query_map([server.0], draft_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Counts the drafts of the server that are not on it, pending and
-    /// failed, over all changes. Drafts on local numbers are not counted
-    /// (see [`Self::local_draft_count`]).
+    /// failed, over all changes. Only ordinary drafts are counted (see
+    /// [`Self::local_draft_count`] for the rest).
     pub fn draft_counts(&self, server: ServerId) -> Result<DraftCounts, Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT state = 'failed', COUNT(*) FROM drafts
-             WHERE server_id = ?1 AND state != 'synced' AND {NOT_LOCAL}
+             WHERE server_id = ?1 AND state != 'synced' AND {ORDINARY}
              GROUP BY state = 'failed'",
-            NOT_LOCAL = not_local()
+            ORDINARY = ordinary()
         ))?;
         let rows = stmt.query_map([server.0], |r| {
             Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?))
@@ -500,13 +532,14 @@ impl Store {
         Ok(counts)
     }
 
-    /// Counts the drafts of the server on a local change or a local patch
-    /// set, which wait for the change to reach Gerrit.
+    /// Counts the drafts of the server that are not ordinary: on local
+    /// numbers, sealed, reserved or held. They belong to local changes and
+    /// wait for consolidation or the user.
     pub fn local_draft_count(&self, server: ServerId) -> Result<usize, Error> {
         let n: i64 = self.conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM drafts WHERE server_id = ?1 AND NOT ({NOT_LOCAL})",
-                NOT_LOCAL = not_local()
+                "SELECT COUNT(*) FROM drafts WHERE server_id = ?1 AND NOT ({ORDINARY})",
+                ORDINARY = ordinary()
             ),
             [server.0],
             |r| r.get(0),
@@ -543,7 +576,9 @@ impl Store {
     /// edited meanwhile, the server id is kept but the draft stays pending
     /// (as an update). Returns the stored draft, or `None` if it was
     /// deleted locally in the meantime: the caller then deletes the copy it
-    /// just created on the server.
+    /// just created on the server. A draft that is not ordinary is never to
+    /// be uploaded, so it is treated the same way: `None`, and it never
+    /// gets a server draft id.
     pub fn record_draft_uploaded(
         &mut self,
         server: ServerId,
@@ -555,6 +590,9 @@ impl Store {
         let Some(d) = self.load_draft(server, id)? else {
             return Ok(None);
         };
+        if !d.is_ordinary() {
+            return Ok(None);
+        }
         if d.sync == DraftSync::PendingDelete {
             // Deleted while the upload was in flight; the draft exists on
             // the server now, so the pending delete has something to do.
@@ -659,7 +697,8 @@ impl Store {
     /// Forgets the `Synced` drafts of a change after the server published
     /// them (a review with `PUBLISH` or `PUBLISH_ALL_REVISIONS`): they are
     /// comments now. `revision` limits it to one patch set (`PUBLISH`).
-    /// Drafts with pending work are kept. Returns how many were removed.
+    /// Drafts with pending work are kept, and so are drafts that are not
+    /// ordinary. Returns how many were removed.
     pub fn remove_synced_drafts(
         &mut self,
         server: ServerId,
@@ -667,8 +706,11 @@ impl Store {
         revision: Option<&RevisionId>,
     ) -> Result<usize, Error> {
         Ok(self.conn.execute(
-            "DELETE FROM drafts WHERE server_id = ?1 AND change_number = ?2
-               AND state = 'synced' AND (?3 IS NULL OR revision_sha = ?3)",
+            &format!(
+                "DELETE FROM drafts WHERE server_id = ?1 AND change_number = ?2
+                   AND state = 'synced' AND (?3 IS NULL OR revision_sha = ?3) AND {ORDINARY}",
+                ORDINARY = ordinary()
+            ),
             params![server.0, number(change), revision.map(RevisionId::as_str)],
         )?)
     }
@@ -679,7 +721,8 @@ impl Store {
     /// documentation for the rules. `patch_sets` maps patch set numbers to
     /// commits for drafts the server sent without `commit_id`;
     /// `fetch_started` is when the request began, so that a draft uploaded
-    /// while it was in flight is not mistaken for one that vanished.
+    /// while it was in flight is not mistaken for one that vanished. Only
+    /// ordinary local drafts take part: the others are never on the server.
     pub fn merge_server_drafts(
         &mut self,
         server: ServerId,
@@ -689,7 +732,11 @@ impl Store {
         fetch_started: Timestamp,
         now: Timestamp,
     ) -> Result<MergeReport, Error> {
-        let local = self.load_drafts(server, change)?;
+        let local: Vec<Draft> = self
+            .load_drafts(server, change)?
+            .into_iter()
+            .filter(Draft::is_ordinary)
+            .collect();
         let synced_at: std::collections::HashMap<i64, i64> = {
             let mut stmt = self.conn.prepare(
                 "SELECT id, synced_ms FROM drafts

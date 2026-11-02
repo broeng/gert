@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ChangeNumber, Location, PatchSetNumber, PendingReviewId, RevisionId, Side, Timestamp};
+use crate::{
+    ChangeNumber, LocalChangeId, Location, PatchSetNumber, PendingReviewId, RevisionId, Side,
+    Timestamp,
+};
 
 /// The id of a draft in the local database. Stable for the draft's whole
 /// life, unlike the server's draft id, which only exists once the draft was
@@ -125,9 +128,19 @@ pub struct Draft {
     /// flight and must stay pending.
     pub version: u32,
     /// Set on the message of a pending review (a patch-set-level draft):
-    /// such a draft is *sealed*, edited only through its review.
+    /// such a draft is *sealed*, edited only through its review, and never
+    /// uploaded on its own: it is posted with its review.
     #[serde(default)]
     pub pending_review: Option<PendingReviewId>,
+    /// Set on a draft that consolidation moved from a local patch set onto
+    /// the Gerrit change: it is posted inline with that local change's
+    /// review, never uploaded as a draft.
+    #[serde(default)]
+    pub reserved_by: Option<LocalChangeId>,
+    /// Set on a draft of a local patch set that could not be moved onto the
+    /// Gerrit change: why it is held for the user to publish or drop.
+    #[serde(default)]
+    pub held_reason: Option<String>,
 }
 
 impl Draft {
@@ -159,6 +172,19 @@ impl Draft {
     /// never uploaded as it is.
     pub fn is_local(&self) -> bool {
         self.change.is_local() || self.patch_set.is_local()
+    }
+
+    /// Whether this is an ordinary draft of a Gerrit change: one that the
+    /// normal upload, retry, merge and publish paths work on. Drafts on
+    /// local numbers, sealed messages of pending reviews, drafts reserved
+    /// for a consolidation post and held drafts are not; they reach the
+    /// server, if at all, through their local change. The store's draft
+    /// queries for those paths apply the same rule in SQL.
+    pub fn is_ordinary(&self) -> bool {
+        !self.is_local()
+            && self.pending_review.is_none()
+            && self.reserved_by.is_none()
+            && self.held_reason.is_none()
     }
 }
 

@@ -207,11 +207,14 @@ impl PendingReviewState {
 pub struct PendingReview {
     pub id: PendingReviewId,
     /// The local change it belongs to.
-    pub local_change: Option<LocalChangeId>,
+    pub local_change: LocalChangeId,
     /// Where it will be posted: the local numbers until consolidation moves
     /// it onto the Gerrit change and patch set.
     pub change: ChangeNumber,
     pub patch_set: PatchSetNumber,
+    /// The commit of `patch_set`: the local version until consolidation
+    /// moves the review, then the Gerrit patch set's commit.
+    pub revision: RevisionId,
     /// The commit the votes were given on; never changes, so the approval
     /// rules can tell an exact match from a moved vote.
     pub given_on_sha: RevisionId,
@@ -225,10 +228,16 @@ pub struct PendingReview {
     /// Why it is held (in `Held`).
     pub held_reason: Option<String>,
     pub created: Timestamp,
+    /// When the votes were last given or changed (at creation, and by an
+    /// edit that changes the labels). The "purely local" test compares
+    /// this with the Gerrit change's creation.
+    pub voted_at: Timestamp,
     /// Identifies the send attempt (part of the review's tag); set when the
     /// review is marked as sending.
     pub nonce: Option<String>,
-    /// The text of its message draft, if it has one.
+    /// The text of its message draft, if it has one: a read-only copy
+    /// joined in when the review is read. The sealed draft is the source of
+    /// truth; change it through the pending review API.
     pub message: Option<String>,
     /// Its message draft, if it has one.
     pub message_draft: Option<crate::LocalDraftId>,

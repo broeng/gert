@@ -16,9 +16,14 @@ pub enum Error {
     ServerUrlTaken(String),
     #[error("no server with this id")]
     NoSuchServer,
-    /// A pending review was asked for on a patch set that is not local.
+    /// A pending review was asked for on a patch set that is not a local
+    /// patch set of the server.
     #[error("only a local patch set can have a pending review")]
     NotLocal,
+    /// Consolidation was asked to move a local change onto a Gerrit change
+    /// other than the one it already belongs to.
+    #[error("the local change already belongs to Gerrit change {0}")]
+    OtherGerritChange(model::ChangeNumber),
     /// Consolidation was asked to move data onto local numbers instead of
     /// a Gerrit change and patch set.
     #[error("local data can only be moved onto a Gerrit change and patch set")]

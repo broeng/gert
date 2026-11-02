@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use model::{
-    Account, AccountId, ChangeStatus, CommentRange, DraftInput, LocalApproval, PATCHSET_LEVEL_PATH,
+    Account, AccountId, ChangeStatus, DraftInput, LocalApproval, Location, PatchSetRef,
+    PendingReviewState, Side,
 };
 
 use super::*;
@@ -83,14 +84,13 @@ fn gerrit_ps(n: u32) -> PatchSetRef {
     }
 }
 
-fn review(change: ChangeNumber, local: LocalChangeId, p: &LocalPatchSet) -> NewPendingReview {
+fn review(p: &LocalPatchSet) -> NewPendingReview {
     NewPendingReview {
-        local_change: Some(local),
-        change,
-        patch_set: psref(p),
+        patch_set: p.number,
         labels: BTreeMap::from([("Code-Review".to_owned(), 2)]),
         strategy: LocalApproval::Follow,
         message: "LGTM".into(),
+        unresolved: false,
         created: ts(T1),
     }
 }
@@ -391,7 +391,7 @@ fn unsent_data_is_drafts_on_local_numbers_and_unsent_reviews() {
     s.delete_draft(id, d.local_id).unwrap();
 
     // A pending review, until it is sent.
-    let mut r = review(local.number, local.id, &l1);
+    let mut r = review(&l1);
     r.message = String::new();
     let r = s.create_pending_review(id, &r).unwrap();
     assert!(s.has_unsent(id, local.id).unwrap());
@@ -483,15 +483,9 @@ fn deleting_a_local_change_removes_its_drafts_reviews_and_versions_only() {
             ts(T1),
         )
         .unwrap();
-    let r_local = s
-        .create_pending_review(id, &review(local.number, local.id, &l1))
-        .unwrap();
-    let r_g = s
-        .create_pending_review(id, &review(ChangeNumber(7), g.id, &g1))
-        .unwrap();
-    let r_other = s
-        .create_pending_review(id, &review(other.number, other.id, &o1))
-        .unwrap();
+    let r_local = s.create_pending_review(id, &review(&l1)).unwrap();
+    let r_g = s.create_pending_review(id, &review(&g1)).unwrap();
+    let r_other = s.create_pending_review(id, &review(&o1)).unwrap();
 
     assert!(s.delete_local_change(id, local.id).unwrap());
     assert_eq!(s.load_draft(id, on_local.local_id).unwrap(), None);
@@ -518,215 +512,6 @@ fn deleting_a_local_change_removes_its_drafts_reviews_and_versions_only() {
     );
     assert_eq!(s.local_patch_sets(id, other.id).unwrap(), [o1]);
     assert!(!s.delete_local_change(id, local.id).unwrap());
-}
-
-#[test]
-fn a_rewrite_moves_drafts_and_reviews_onto_the_gerrit_change() {
-    let (mut s, id) = setup();
-    let c = add(&mut s, id, upsert("IL", Some("main"), &["v1", "v2"]));
-    let ps = s.local_patch_sets(id, c.id).unwrap();
-    let (v1, v2) = (&ps[0], &ps[1]);
-    let exact = s
-        .create_draft(id, c.number, &psref(v2), &draft_input("exact"), ts(T1))
-        .unwrap();
-    let ported = s
-        .create_draft(id, c.number, &psref(v1), &draft_input("ported"), ts(T1))
-        .unwrap();
-    let held = s
-        .create_draft(id, c.number, &psref(v1), &draft_input("held"), ts(T1))
-        .unwrap();
-    let r1 = s
-        .create_pending_review(id, &review(c.number, c.id, v1))
-        .unwrap();
-    let r2 = s
-        .create_pending_review(id, &review(c.number, c.id, v2))
-        .unwrap();
-    let range = CommentRange {
-        start_line: 10,
-        start_character: 0,
-        end_line: 11,
-        end_character: 4,
-    };
-    let rewrite = ConsolidationRewrite {
-        local_change: c.id,
-        gerrit_number: ChangeNumber(42),
-        moves: vec![
-            // v2 was pushed as patch set 2; v1 never reached Gerrit and is
-            // ported onto patch set 2 as well.
-            PatchSetMove {
-                from: v2.number,
-                to: gerrit_ps(2),
-                exact: true,
-            },
-            PatchSetMove {
-                from: v1.number,
-                to: gerrit_ps(2),
-                exact: false,
-            },
-        ],
-        anchors: vec![DraftAnchor {
-            draft: ported.local_id,
-            path: "src/renamed.rs".into(),
-            side: Side::Revision,
-            parent: None,
-            location: Location::Range(range),
-        }],
-        keep: vec![held.local_id],
-        review_states: vec![ReviewStateChange {
-            review: r1.id,
-            state: PendingReviewState::Held,
-            note: Some("approval not on this commit".into()),
-        }],
-        state: Some(LocalChangeState::Consolidated),
-    };
-    let report = s.rewrite_local_change(id, &rewrite).unwrap().unwrap();
-    // drafts: exact, ported and the two message drafts; held stays.
-    assert_eq!(
-        (
-            report.drafts_moved,
-            report.reviews_moved,
-            report.patch_sets_mapped,
-            report.review_states
-        ),
-        (4, 2, 1, 1)
-    );
-    // Unsent reviews are left, so it is not consolidated yet.
-    assert_eq!(report.state, LocalChangeState::Checking);
-    let c2 = s.local_change(id, c.id).unwrap().unwrap();
-    assert_eq!(c2.gerrit_number, Some(ChangeNumber(42)));
-
-    let d = s.load_draft(id, exact.local_id).unwrap().unwrap();
-    assert_eq!(
-        (d.change, d.patch_set, d.revision.as_str(), d.location),
-        (
-            ChangeNumber(42),
-            PatchSetNumber(2),
-            "gerrit2",
-            Location::Line(7)
-        )
-    );
-    assert!(!d.is_local());
-    let d = s.load_draft(id, ported.local_id).unwrap().unwrap();
-    assert_eq!(
-        (d.change, d.path.as_str(), d.location),
-        (ChangeNumber(42), "src/renamed.rs", Location::Range(range))
-    );
-    let d = s.load_draft(id, held.local_id).unwrap().unwrap();
-    assert_eq!((d.change, d.patch_set), (c.number, v1.number));
-
-    let r1 = s.load_pending_review(id, r1.id).unwrap().unwrap();
-    assert_eq!(
-        (r1.change, r1.patch_set, r1.state),
-        (
-            ChangeNumber(42),
-            PatchSetNumber(2),
-            PendingReviewState::Held
-        )
-    );
-    // The votes still say what they were given on.
-    assert_eq!(r1.given_on_sha, v1.sha);
-    assert_eq!(
-        r1.held_reason.as_deref(),
-        Some("approval not on this commit")
-    );
-    let msg = s
-        .load_draft(id, r1.message_draft.unwrap())
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        (msg.change, msg.path.as_str()),
-        (ChangeNumber(42), PATCHSET_LEVEL_PATH)
-    );
-    assert_eq!(
-        s.pending_reviews(id, ChangeNumber(42))
-            .unwrap()
-            .iter()
-            .map(|r| r.id)
-            .collect::<Vec<_>>(),
-        [r1.id, r2.id]
-    );
-    // Exact versions are mapped; ported ones are not.
-    let ps = s.local_patch_sets(id, c.id).unwrap();
-    assert_eq!(
-        (ps[0].gerrit_patch_set, ps[1].gerrit_patch_set),
-        (None, Some(PatchSetNumber(2)))
-    );
-    // Moved drafts now take part in the normal upload.
-    assert_eq!(s.pending_drafts(id).unwrap().len(), 4);
-
-    // Once everything is sent and the held draft dropped, it is done.
-    for r in [r1.id, r2.id] {
-        s.set_pending_review_state(
-            id,
-            r,
-            &[PendingReviewState::Pending, PendingReviewState::Held],
-            PendingReviewState::Sent,
-            None,
-        )
-        .unwrap();
-    }
-    s.delete_draft(id, held.local_id).unwrap();
-    let done = ConsolidationRewrite {
-        moves: vec![],
-        anchors: vec![],
-        keep: vec![],
-        review_states: vec![],
-        ..rewrite
-    };
-    let report = s.rewrite_local_change(id, &done).unwrap().unwrap();
-    assert_eq!(report.state, LocalChangeState::Consolidated);
-    assert!(s.dashboard_local_changes(id).unwrap().is_empty());
-}
-
-#[test]
-fn a_rewrite_skips_foreign_patch_sets_and_reports_a_missing_change() {
-    let (mut s, id) = setup();
-    let c = add(&mut s, id, upsert("IL", None, &["v1"]));
-    let other = add(&mut s, id, upsert("IO", None, &["o1"]));
-    let o1 = s.local_patch_sets(id, other.id).unwrap()[0].clone();
-    let d = s
-        .create_draft(id, other.number, &psref(&o1), &draft_input("o"), ts(T1))
-        .unwrap();
-    let rewrite = ConsolidationRewrite {
-        local_change: c.id,
-        gerrit_number: ChangeNumber(42),
-        moves: vec![PatchSetMove {
-            from: o1.number,
-            to: gerrit_ps(1),
-            exact: true,
-        }],
-        anchors: vec![],
-        keep: vec![],
-        review_states: vec![],
-        state: None,
-    };
-    let report = s.rewrite_local_change(id, &rewrite).unwrap().unwrap();
-    assert_eq!((report.drafts_moved, report.patch_sets_mapped), (0, 0));
-    assert_eq!(
-        s.load_draft(id, d.local_id).unwrap().unwrap().change,
-        other.number
-    );
-    // Local numbers are no place to move to.
-    let mut onto_local = rewrite.clone();
-    onto_local.moves[0].to.number = PatchSetNumber::local(9).unwrap();
-    assert!(matches!(
-        s.rewrite_local_change(id, &onto_local),
-        Err(Error::LocalTarget)
-    ));
-    let mut onto_local = rewrite.clone();
-    onto_local.gerrit_number = other.number;
-    assert!(matches!(
-        s.rewrite_local_change(id, &onto_local),
-        Err(Error::LocalTarget)
-    ));
-    assert_eq!(
-        s.local_change(id, c.id).unwrap().unwrap().gerrit_number,
-        Some(ChangeNumber(42))
-    );
-    // The server is removed while consolidation runs: nothing to write,
-    // and the caller learns that it should stop.
-    s.delete_server(id).unwrap();
-    assert_eq!(s.rewrite_local_change(id, &rewrite).unwrap(), None);
 }
 
 fn summary(n: u64, project: &str, change_id: &str) -> ChangeSummary {

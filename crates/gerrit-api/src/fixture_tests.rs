@@ -610,6 +610,8 @@ fn drafts_response_joins_the_published_threads() {
             last_error: None,
             version: 0,
             pending_review: None,
+            reserved_by: None,
+            held_reason: None,
         })
         .collect();
     let threads = build_threads(&comments, &drafts);

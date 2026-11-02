@@ -1,5 +1,5 @@
-//! Local changes: the user's unpushed commits shown as changes, their
-//! versions (local patch sets), and moving their review data onto Gerrit.
+//! Local changes: the user's unpushed commits shown as changes, and their
+//! versions (local patch sets).
 //!
 //! # Rows and numbers
 //!
@@ -7,10 +7,10 @@
 //! the branch NULL when unknown. Its synthetic number is
 //! [`ChangeNumber::LOCAL_BASE`] plus its row id, and a local patch set's is
 //! [`PatchSetNumber::LOCAL_BASE`] plus its row id; ids are never reused.
-//! Drafts on a local change or local patch set are ordinary rows of
-//! `drafts` with those numbers. A local patch set of a *Gerrit* change has
-//! a local change row too, with `gerrit_number` set, and its drafts carry
-//! the Gerrit change number and the local patch set number.
+//! Drafts on a local change or local patch set are rows of `drafts` with
+//! those numbers. A local patch set of a *Gerrit* change has a local change
+//! row too, with `gerrit_number` set, and its drafts carry the Gerrit change
+//! number and the local patch set number.
 //!
 //! # Who writes what
 //!
@@ -18,20 +18,18 @@
 //!   [`LocalOp`]s that `sync` computed from the checkout and the cache, in
 //!   one transaction.
 //! * Consolidation moves drafts and pending reviews onto the Gerrit change
-//!   ([`Store::rewrite_local_change`]) and sets states.
+//!   and sets states (`consolidation.rs`).
 //! * Deleting a local change ([`Store::delete_local_change`]) removes its
 //!   versions, its pending reviews and its drafts with it.
 //!
 //! A change has *unsent data* ([`Store::has_unsent`]) while drafts sit on
-//! its numbers or one of its pending reviews is not sent. Such a change is
-//! never deleted by a reconcile and never marked consolidated.
-
-use std::collections::{HashMap, HashSet};
+//! its numbers (held ones included), drafts are reserved for its
+//! consolidation post, or one of its pending reviews is not sent. Such a
+//! change is never deleted by a reconcile and never marked consolidated.
 
 use model::{
-    ChangeNumber, ChangeSummary, LocalChange, LocalChangeId, LocalChangeState, LocalDraftId,
-    LocalPatchSet, LocalPatchSetId, Location, PatchSetNumber, PatchSetRef, PendingReviewId,
-    PendingReviewState, RevisionId, Side, Timestamp,
+    ChangeNumber, ChangeSummary, LocalChange, LocalChangeId, LocalChangeState, LocalPatchSet,
+    LocalPatchSetId, PatchSetNumber, RevisionId, Timestamp,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -135,68 +133,6 @@ impl ReconcileReport {
     }
 }
 
-/// Moves what sits on one local patch set onto a Gerrit patch set.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PatchSetMove {
-    /// A local patch set of the change being rewritten.
-    pub from: PatchSetNumber,
-    pub to: PatchSetRef,
-    /// `to` is the very same commit: the version is mapped to it for
-    /// redirects. Otherwise the drafts were ported.
-    pub exact: bool,
-}
-
-/// A new place for a moved draft whose lines moved (ported).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DraftAnchor {
-    pub draft: LocalDraftId,
-    pub path: String,
-    pub side: Side,
-    pub parent: Option<u32>,
-    pub location: Location,
-}
-
-/// A pending review's new state, see [`Store::set_pending_review_state`]
-/// for `note`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReviewStateChange {
-    pub review: PendingReviewId,
-    pub state: PendingReviewState,
-    pub note: Option<String>,
-}
-
-/// One consolidation step for a local change, applied in one transaction
-/// by [`Store::rewrite_local_change`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConsolidationRewrite {
-    pub local_change: LocalChangeId,
-    /// The Gerrit change it is (or whose versions these are).
-    pub gerrit_number: ChangeNumber,
-    /// All drafts and unsent pending reviews on each `from` move to `to`,
-    /// except the drafts in `keep`.
-    pub moves: Vec<PatchSetMove>,
-    /// New places for moved drafts; moved drafts without one keep theirs.
-    pub anchors: Vec<DraftAnchor>,
-    /// Drafts that stay on their local patch set (they did not port and
-    /// are held for the user).
-    pub keep: Vec<LocalDraftId>,
-    pub review_states: Vec<ReviewStateChange>,
-    /// The change's new state; `Consolidated` only takes effect when
-    /// nothing unsent is left afterwards.
-    pub state: Option<LocalChangeState>,
-}
-
-/// What [`Store::rewrite_local_change`] changed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RewriteReport {
-    pub drafts_moved: usize,
-    pub reviews_moved: usize,
-    pub patch_sets_mapped: usize,
-    pub review_states: usize,
-    /// The change's state afterwards.
-    pub state: LocalChangeState,
-}
-
 const CHANGE_COLUMNS: &str = "id, project, branch, change_id, gerrit_number, subject, \
      author_name, author_email, updated_ms, state, first_seen_ms";
 
@@ -257,14 +193,14 @@ fn synthetic(id: LocalChangeId) -> i64 {
 
 /// An SQL list of the synthetic patch set numbers of local change `?id`
 /// (the parameter named in `id`).
-fn patch_set_numbers(id: &str) -> String {
+pub(crate) fn patch_set_numbers(id: &str) -> String {
     format!(
         "(SELECT {} + id FROM local_patch_sets WHERE local_change_id = {id})",
         PatchSetNumber::LOCAL_BASE
     )
 }
 
-fn load_change(
+pub(crate) fn load_change(
     conn: &Connection,
     server: ServerId,
     id: LocalChangeId,
@@ -277,7 +213,7 @@ fn load_change(
         .optional()?)
 }
 
-fn load_patch_sets(
+pub(crate) fn load_patch_sets(
     conn: &Connection,
     server: ServerId,
     id: LocalChangeId,
@@ -290,7 +226,7 @@ fn load_patch_sets(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn query_changes(
+pub(crate) fn query_changes(
     conn: &Connection,
     sql_where: &str,
     args: impl rusqlite::Params,
@@ -303,13 +239,17 @@ fn query_changes(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn has_unsent(conn: &Connection, server: ServerId, id: LocalChangeId) -> Result<bool, Error> {
+pub(crate) fn has_unsent(
+    conn: &Connection,
+    server: ServerId,
+    id: LocalChangeId,
+) -> Result<bool, Error> {
     let numbers = patch_set_numbers("?3");
     Ok(conn
         .prepare_cached(&format!(
             "SELECT EXISTS (
                  SELECT 1 FROM drafts WHERE server_id = ?1
-                   AND (change_number = ?2 OR patch_set IN {numbers})
+                   AND (change_number = ?2 OR patch_set IN {numbers} OR reserved_by = ?3)
              ) OR EXISTS (
                  SELECT 1 FROM pending_reviews WHERE server_id = ?1 AND state <> 'sent'
                    AND (local_change_id = ?3 OR change_number = ?2 OR patch_set IN {numbers})
@@ -323,12 +263,13 @@ fn has_unsent(conn: &Connection, server: ServerId, id: LocalChangeId) -> Result<
 fn delete_change(conn: &Connection, server: ServerId, id: LocalChangeId) -> Result<bool, Error> {
     let numbers = patch_set_numbers("?3");
     // Drafts first: on its synthetic number, on its local patch sets (also
-    // on a Gerrit change's number), and the message drafts of its pending
-    // reviews wherever consolidation moved them.
+    // on a Gerrit change's number), those reserved for its post, and the
+    // message drafts of its pending reviews wherever consolidation moved
+    // them.
     conn.execute(
         &format!(
             "DELETE FROM drafts WHERE server_id = ?1 AND (
-                 change_number = ?2 OR patch_set IN {numbers}
+                 change_number = ?2 OR patch_set IN {numbers} OR reserved_by = ?3
                  OR pending_review_id IN (
                      SELECT id FROM pending_reviews WHERE server_id = ?1
                        AND (local_change_id = ?3 OR change_number = ?2
@@ -356,7 +297,7 @@ fn delete_change(conn: &Connection, server: ServerId, id: LocalChangeId) -> Resu
 
 /// Sets a change's state, refusing `Consolidated` while it has unsent
 /// data. Returns the state afterwards, `None` if the row is gone.
-fn set_state(
+pub(crate) fn set_state(
     conn: &Connection,
     server: ServerId,
     id: LocalChangeId,
@@ -600,9 +541,10 @@ impl Store {
     }
 
     /// Whether a local change has data that is not on Gerrit yet: drafts on
-    /// its synthetic number or its local patch sets, or pending reviews
-    /// that are not sent (also after consolidation moved them onto the
-    /// Gerrit change). False for an unknown id.
+    /// its synthetic number or its local patch sets (held ones included),
+    /// drafts reserved for its consolidation post, or pending reviews that
+    /// are not sent (also after consolidation moved them onto the Gerrit
+    /// change). False for an unknown id.
     pub fn has_unsent(&self, server: ServerId, change: LocalChangeId) -> Result<bool, Error> {
         has_unsent(&self.conn, server, change)
     }
@@ -812,9 +754,10 @@ impl Store {
     }
 
     /// Deletes a local change with its versions, its pending reviews and
-    /// its drafts (on its synthetic number, on its local patch sets, and
-    /// its pending reviews' message drafts) in one transaction, whatever is
-    /// unsent. False if there is no such change.
+    /// its drafts (on its synthetic number, on its local patch sets, those
+    /// reserved for its consolidation post, and its pending reviews'
+    /// message drafts) in one transaction, whatever is unsent. False if
+    /// there is no such change.
     pub fn delete_local_change(
         &mut self,
         server: ServerId,
@@ -824,128 +767,6 @@ impl Store {
         let removed = delete_change(&tx, server, change)?;
         tx.commit()?;
         Ok(removed)
-    }
-
-    /// Moves a local change's drafts and pending reviews onto the Gerrit
-    /// change, in one transaction: sets `gerrit_number`, maps exact
-    /// versions to their Gerrit patch sets, moves what sits on each
-    /// `from` patch set (with new anchors where given), applies the review
-    /// states and then the change's state (see [`ConsolidationRewrite`]).
-    ///
-    /// Returns `None`, writing nothing, if the change is gone, which is
-    /// also what a removed server looks like: the caller ends its run.
-    /// Moves whose `from` is not a version of this change are skipped. A
-    /// local `gerrit_number` or move target fails with
-    /// [`Error::LocalTarget`], writing nothing.
-    pub fn rewrite_local_change(
-        &mut self,
-        server: ServerId,
-        rewrite: &ConsolidationRewrite,
-    ) -> Result<Option<RewriteReport>, Error> {
-        if rewrite.gerrit_number.is_local() || rewrite.moves.iter().any(|m| m.to.number.is_local())
-        {
-            return Err(Error::LocalTarget);
-        }
-        let tx = self.conn.transaction()?;
-        let Some(change) = load_change(&tx, server, rewrite.local_change)? else {
-            return Ok(None);
-        };
-        tx.execute(
-            "UPDATE local_changes SET gerrit_number = ?3 WHERE server_id = ?1 AND id = ?2",
-            params![server.0, change.id.0, number(rewrite.gerrit_number)],
-        )?;
-        let versions: HashSet<PatchSetNumber> = load_patch_sets(&tx, server, change.id)?
-            .into_iter()
-            .map(|p| p.number)
-            .collect();
-        let keep: HashSet<LocalDraftId> = rewrite.keep.iter().copied().collect();
-        let anchors: HashMap<LocalDraftId, &DraftAnchor> =
-            rewrite.anchors.iter().map(|a| (a.draft, a)).collect();
-        let mut report = RewriteReport {
-            drafts_moved: 0,
-            reviews_moved: 0,
-            patch_sets_mapped: 0,
-            review_states: 0,
-            state: change.state,
-        };
-        for m in &rewrite.moves {
-            if !versions.contains(&m.from) {
-                continue;
-            }
-            let from = i64::from(m.from.0);
-            if m.exact
-                && let Some(id) = m.from.local_id()
-            {
-                report.patch_sets_mapped += tx.execute(
-                    "UPDATE local_patch_sets SET gerrit_patch_set = ?3
-                     WHERE server_id = ?1 AND id = ?2",
-                    params![server.0, id, m.to.number.0],
-                )?;
-            }
-            let drafts: Vec<i64> = {
-                let mut stmt =
-                    tx.prepare("SELECT id FROM drafts WHERE server_id = ?1 AND patch_set = ?2")?;
-                let rows = stmt.query_map(params![server.0, from], |r| r.get(0))?;
-                rows.collect::<Result<_, _>>()?
-            };
-            for id in drafts.into_iter().map(LocalDraftId) {
-                if keep.contains(&id) {
-                    continue;
-                }
-                tx.execute(
-                    "UPDATE drafts SET change_number = ?3, patch_set = ?4, revision_sha = ?5
-                     WHERE server_id = ?1 AND id = ?2",
-                    params![
-                        server.0,
-                        id.0,
-                        number(rewrite.gerrit_number),
-                        m.to.number.0,
-                        m.to.sha.as_str()
-                    ],
-                )?;
-                if let Some(a) = anchors.get(&id) {
-                    let range = a.location.range();
-                    tx.execute(
-                        "UPDATE drafts SET path = ?3, side = ?4, parent = ?5, line = ?6,
-                             start_line = ?7, start_character = ?8, end_line = ?9,
-                             end_character = ?10
-                         WHERE server_id = ?1 AND id = ?2",
-                        params![
-                            server.0,
-                            id.0,
-                            a.path,
-                            a.side.as_wire(),
-                            a.parent,
-                            a.location.line(),
-                            range.map(|r| r.start_line),
-                            range.map(|r| r.start_character),
-                            range.map(|r| r.end_line),
-                            range.map(|r| r.end_character)
-                        ],
-                    )?;
-                }
-                report.drafts_moved += 1;
-            }
-            report.reviews_moved += tx.execute(
-                "UPDATE pending_reviews SET change_number = ?3, patch_set = ?4
-                 WHERE server_id = ?1 AND patch_set = ?2 AND state <> 'sent'",
-                params![server.0, from, number(rewrite.gerrit_number), m.to.number.0],
-            )?;
-        }
-        for s in &rewrite.review_states {
-            report.review_states += crate::pending_reviews::write_state(
-                &tx,
-                server,
-                s.review,
-                s.state,
-                s.note.as_deref(),
-            )?;
-        }
-        if let Some(state) = rewrite.state {
-            report.state = set_state(&tx, server, change.id, state)?.unwrap_or(change.state);
-        }
-        tx.commit()?;
-        Ok(Some(report))
     }
 }
 

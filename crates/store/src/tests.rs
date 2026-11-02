@@ -881,7 +881,7 @@ fn v11_local_change_key_has_one_row_per_unknown_branch() {
 
 #[test]
 fn v11_cascades_and_unseals() {
-    let conn = db_at_version(MIGRATIONS.len());
+    let conn = db_at_version(11);
     conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
     conn.execute(
         "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
@@ -927,5 +927,157 @@ fn v11_cascades_and_unseals() {
             "SELECT COUNT(*) FROM drafts WHERE pending_review_id IS NULL"
         ),
         1
+    );
+}
+
+// ---- v12: reserved and held drafts, pending reviews rebuilt ----
+
+#[test]
+fn v12_from_every_older_version_keeps_drafts_ordinary() {
+    for from in 1..MIGRATIONS.len() {
+        let mut conn = db_at_version(from);
+        conn.execute(
+            "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+            [],
+        )
+        .unwrap();
+        if from >= 4 {
+            conn.execute(
+                "INSERT INTO drafts (server_id, change_number, patch_set, revision_sha, path,
+                     side, message, unresolved, updated_ms, state)
+                 VALUES (1, 5, 1, 'aaa', 'f', 'REVISION', 'm', 1, 0, 'pending_create')",
+                [],
+            )
+            .unwrap();
+        }
+        migrate(&mut conn, MIGRATIONS).unwrap();
+        assert_eq!(user_version(&conn).unwrap() as usize, MIGRATIONS.len());
+        let s = Store { conn };
+        // An existing draft is still uploaded as before.
+        assert_eq!(
+            s.pending_drafts(ServerId(1)).unwrap().len(),
+            usize::from(from >= 4),
+            "from v{from}"
+        );
+        if let Some(d) = s.pending_drafts(ServerId(1)).unwrap().first() {
+            assert!(d.is_ordinary());
+            assert_eq!((d.reserved_by, d.held_reason.clone()), (None, None));
+        }
+        assert!(
+            s.pending_reviews(ServerId(1), ChangeNumber(5))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn v12_rebuilds_pending_reviews_with_an_owner_and_keeps_the_counter() {
+    let mut conn = db_at_version(11);
+    conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+    let ps1 = model::PatchSetNumber::local(1).unwrap().0;
+    let ps9 = model::PatchSetNumber::local(9).unwrap().0;
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+        [],
+    )
+    .unwrap();
+    conn.execute(INSERT_LOCAL_CHANGE, rusqlite::params![1, "main", "I1"])
+        .unwrap();
+    conn.execute_batch(
+        "INSERT INTO local_patch_sets (local_change_id, server_id, sha, seen_ms, ordinal)
+             VALUES (1, 1, 'aaa', 0, 1);",
+    )
+    .unwrap();
+    let insert_review = |owner: Option<i64>, ps: u32| {
+        conn.execute(
+            "INSERT INTO pending_reviews (server_id, local_change_id, change_number, patch_set,
+                 given_on_sha, labels, strategy, state, held_reason, created_ms, nonce)
+             VALUES (1, ?1, 5, ?2, 'aaa', '{\"Code-Review\":2}', 'follow', 'held', 'why',
+                 7, 'n')",
+            rusqlite::params![owner, ps],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    let with_owner = insert_review(Some(1), ps1);
+    let derived = insert_review(None, ps1);
+    let orphan = insert_review(None, ps9);
+    let removed = insert_review(Some(1), ps1);
+    conn.execute("DELETE FROM pending_reviews WHERE id = ?1", [removed])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO drafts (server_id, change_number, patch_set, revision_sha, path, side,
+             message, unresolved, updated_ms, state, pending_review_id)
+         VALUES (1, 5, ?1, 'aaa', '/PATCHSET_LEVEL', 'REVISION', 'm', 0, 0, 'pending_create',
+             ?2), (1, 5, ?1, 'aaa', '/PATCHSET_LEVEL', 'REVISION', 'o', 0, 0,
+             'pending_create', ?3)",
+        rusqlite::params![ps1, derived, orphan],
+    )
+    .unwrap();
+
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    assert_eq!(user_version(&conn).unwrap() as usize, MIGRATIONS.len());
+    let count =
+        |conn: &Connection, sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count(&conn, "PRAGMA foreign_keys"), 1);
+    // local_change_id is required now.
+    assert!(
+        conn.execute(
+            "INSERT INTO pending_reviews (server_id, change_number, patch_set, revision_sha,
+                 given_on_sha, labels, strategy, state, created_ms, voted_at_ms)
+             VALUES (1, 5, 1, 'a', 'a', '{}', 'exact', 'pending', 0, 0)",
+            [],
+        )
+        .is_err()
+    );
+    let s = Store { conn };
+    let server = ServerId(1);
+    let reviews = s.pending_reviews(server, ChangeNumber(5)).unwrap();
+    let ids: Vec<i64> = reviews.iter().map(|r| r.id.0).collect();
+    assert_eq!(ids, [with_owner, derived]);
+    for r in &reviews {
+        assert_eq!(r.local_change, model::LocalChangeId(1));
+        assert_eq!(
+            (r.revision.as_str(), r.given_on_sha.as_str()),
+            ("aaa", "aaa")
+        );
+        assert_eq!((r.created, r.voted_at), (r.created, r.created));
+        assert_eq!(r.held_reason.as_deref(), Some("why"));
+        assert_eq!(r.nonce.as_deref(), Some("n"));
+    }
+    assert_eq!(reviews[1].message.as_deref(), Some("m"));
+    // The orphan's message draft was unsealed, not left dangling.
+    let orphan_msg = s
+        .load_drafts(server, ChangeNumber(5))
+        .unwrap()
+        .into_iter()
+        .find(|d| d.message == "o")
+        .unwrap();
+    assert_eq!(orphan_msg.pending_review, None);
+    // Ids above the highest ever handed out, also the deleted one.
+    let mut s = s;
+    let next = s
+        .create_pending_review(
+            server,
+            &NewPendingReview {
+                patch_set: model::PatchSetNumber(ps1),
+                labels: Default::default(),
+                strategy: model::LocalApproval::Exact,
+                message: String::new(),
+                unresolved: false,
+                created: ts(T1),
+            },
+        )
+        .unwrap();
+    assert!(next.id.0 > removed, "{} <= {removed}", next.id.0);
+    // Removing the local change still takes its reviews along.
+    s.conn
+        .execute("DELETE FROM local_changes WHERE id = 1", [])
+        .unwrap();
+    assert!(
+        s.pending_reviews(server, ChangeNumber(5))
+            .unwrap()
+            .is_empty()
     );
 }

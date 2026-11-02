@@ -52,6 +52,8 @@ fn draft(local: i64, reply_to: Option<&str>, minute: u32) -> Draft {
         last_error: None,
         version: 0,
         pending_review: None,
+        reserved_by: None,
+        held_reason: None,
     }
 }
 
