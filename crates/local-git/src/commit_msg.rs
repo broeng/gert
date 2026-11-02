@@ -24,6 +24,9 @@ pub(crate) fn text(c: &CommitInfo, parent_subjects: &[String]) -> String {
             (true, 0) => "Merge Of:   ",
             (true, _) => "            ",
         };
+        // Gerrit abbreviates to the shortest unique prefix of at least 8
+        // digits (`abbreviate(p, 8)`), so an ambiguous one is longer
+        // there. We always print 8.
         let sha = parent.as_str();
         let subject = parent_subjects.get(i).map_or("", String::as_str);
         s.push_str(&format!(

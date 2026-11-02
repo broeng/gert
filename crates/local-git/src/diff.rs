@@ -395,7 +395,10 @@ fn chunks(
 
     // Without a whitespace option, no change at all in different blobs
     // only happens for `/COMMIT_MSG`, whose two sides are separate texts
-    // to Gerrit even when they are equal.
+    // to Gerrit even when they are equal. (And, wrongly, for files that
+    // differ only in bytes that are not UTF-8, e.g. one Latin-1 letter
+    // for another: lines are read lossily, so both become U+FFFD. Rare
+    // enough to leave.)
     if regions.is_empty() && !same_blob && a.final_newline == b.final_newline {
         let lines = u32::try_from(b.full_len()).unwrap_or(u32::MAX);
         let chunks = if lines == 0 {
@@ -514,6 +517,10 @@ fn hunks(a: &Text, b: &Text, ws: &Whitespace) -> Vec<(Range<usize>, Range<usize>
 /// unchanged lines it shows inside a changed chunk (the boring lines that
 /// join two regions) count as unchanged here. The empty last line maps
 /// when both sides have one.
+///
+/// Lines are compared as read, lossily, as UTF-8, so a line changed only
+/// in bytes that are not UTF-8 (a Latin-1 letter for another) maps as
+/// unchanged. Rare enough to leave.
 pub(crate) fn map_lines(a: &Text, b: &Text) -> Vec<Option<u32>> {
     let line = |i: usize| u32::try_from(i + 1).ok();
     let mut map = Vec::with_capacity(a.full_len());
