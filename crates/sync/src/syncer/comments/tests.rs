@@ -1000,6 +1000,128 @@ fn retrying_failed_drafts_leaves_the_definite_rejections_alone() {
 
 use crate::syncer::tests::add_local_version;
 
+/// A draft on a local patch set of change 7, written locally.
+fn local_draft(f: &Fx, version: &model::LocalPatchSet, message: &str) -> Draft {
+    f.syncer
+        .save_draft_local(DraftSave::Create {
+            change: CHANGE,
+            patch_set: PatchSetRef {
+                number: version.number,
+                sha: version.sha.clone(),
+            },
+            input: input(message),
+        })
+        .unwrap()
+        .unwrap()
+}
+
+fn pending_review(f: &Fx, version: &model::LocalPatchSet) -> model::PendingReview {
+    f.syncer
+        .store()
+        .create_pending_review(
+            f.syncer.server,
+            &store::NewPendingReview {
+                patch_set: version.number,
+                labels: std::collections::BTreeMap::from([("Code-Review".to_owned(), 2)]),
+                strategy: model::LocalApproval::Follow,
+                message: "Ship it".into(),
+                unresolved: false,
+                created: Timestamp::now(),
+            },
+        )
+        .unwrap()
+}
+
+fn all_drafts(f: &Fx) -> Vec<Draft> {
+    let store = f.syncer.store();
+    let mut all = store.load_drafts(f.syncer.server, CHANGE).unwrap();
+    for c in store.local_changes(f.syncer.server).unwrap() {
+        all.extend(store.load_drafts(f.syncer.server, c.number).unwrap());
+    }
+    all.sort_by_key(|d| d.local_id);
+    all
+}
+
+#[test]
+fn local_drafts_neither_block_nor_join_a_normal_reply() {
+    let f = fx();
+    let (_, version) = add_local_version(&f.syncer, Some(7), "localsha");
+    let local = local_draft(&f, &version, "on my local version");
+    let review = pending_review(&f, &version);
+    assert!(review.message_draft.is_some());
+    // Saving it never uploads it.
+    let saved = block_on(f.syncer.upload_draft(local.local_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved, local);
+    let before = all_drafts(&f);
+    assert_eq!(before.len(), 2);
+
+    f.http
+        .push_response(200, xssi(&json!({"labels": {"Code-Review": 1}})));
+    push_refresh(&f.http);
+    let out = block_on(
+        f.syncer
+            .publish_review(CHANGE, &sha2(), &review_with_vote()),
+    )
+    .unwrap();
+    assert_eq!(out.result.labels["Code-Review"], 1);
+    assert_eq!(
+        uris(&f.http),
+        [
+            "POST /a/changes/7/revisions/sha2/review",
+            "GET /a/changes/7",
+            "GET /a/changes/7/comments",
+            "GET /a/changes/7/drafts",
+        ]
+    );
+    // The local drafts (the comment and the sealed message) are as they
+    // were, and nothing named the local commit.
+    assert_eq!(all_drafts(&f), before);
+    assert!(
+        f.http
+            .requests()
+            .iter()
+            .all(|r| !r.uri().path().contains("localsha"))
+    );
+}
+
+#[test]
+fn the_retry_loop_passes_over_local_drafts() {
+    let f = fx();
+    let (_, version) = add_local_version(&f.syncer, Some(7), "localsha");
+    // The oldest pending draft is a local one; behind it an ordinary one
+    // waits from an offline save.
+    let local = local_draft(&f, &version, "local first");
+    pending_review(&f, &version);
+    f.http.push_error("offline");
+    let ordinary = block_on(f.syncer.save_draft(create("ordinary")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(ordinary.sync, DraftSync::PendingCreate);
+    let skip = f.http.requests().len();
+
+    f.http.push_response(201, draft_reply("srv1", "ordinary"));
+    let r = block_on(f.syncer.retry_pending_drafts()).unwrap();
+    assert_eq!(
+        r,
+        RetryReport {
+            synced: 1,
+            ..RetryReport::default()
+        }
+    );
+    assert_eq!(
+        uris(&f.http).split_off(skip),
+        ["PUT /a/changes/7/revisions/sha2/drafts"]
+    );
+    assert_eq!(draft(&f, local.local_id), local);
+    // Retrying the failed ones goes past them too.
+    let r = block_on(f.syncer.retry_failed_drafts()).unwrap();
+    assert_eq!(r, RetryReport::default());
+    assert_eq!(draft(&f, local.local_id), local);
+    assert_eq!(f.syncer.draft_counts().unwrap(), DraftCounts::default());
+}
+
 #[test]
 fn an_ordinary_draft_on_a_local_commit_fails_without_a_request() {
     let f = fx();
@@ -1037,4 +1159,90 @@ fn replies_and_reviewed_marks_on_a_local_commit_are_refused() {
     assert!(matches!(err, Error::Local(_)));
     assert_eq!(reviewed(&f), ["a.rs"]);
     assert!(f.http.requests().is_empty());
+}
+
+#[test]
+fn a_refresh_leaves_reserved_held_and_sealed_drafts_alone() {
+    let http = RouteHttpClient::new();
+    http.route("/changes/7/comments", 200, comments_json());
+    http.route("/changes/7/drafts", 200, drafts_json(&["d1"]));
+    http.route_json("/changes/7?", &change_with_ps2());
+    let syncer = syncer_for(Arc::new(http.clone()), signed_in());
+    let f = Fx {
+        http: FakeHttpClient::new(),
+        syncer,
+    };
+    // A purely local change, consolidated onto change 7 patch set 2: one
+    // draft moved (reserved for the post), one held, and a pending review
+    // whose sealed message moved with it.
+    let (change, version) = add_local_version(&f.syncer, None, "localsha");
+    let on_local = |message: &str| {
+        f.syncer
+            .save_draft_local(DraftSave::Create {
+                change: change.number,
+                patch_set: PatchSetRef {
+                    number: version.number,
+                    sha: version.sha.clone(),
+                },
+                input: input(message),
+            })
+            .unwrap()
+            .unwrap()
+    };
+    let moved = on_local("moved");
+    let held = on_local("held");
+    let review = pending_review(&f, &version);
+    f.syncer
+        .store()
+        .rewrite_local_change(
+            f.syncer.server,
+            &store::ConsolidationRewrite {
+                local_change: change.id,
+                gerrit_number: CHANGE,
+                moves: vec![store::PatchSetMove {
+                    from: version.number,
+                    to: ps(2),
+                    exact: false,
+                    drafts: vec![(
+                        moved.local_id,
+                        Some(store::DraftAnchor {
+                            path: "src/a.rs".into(),
+                            side: Side::Revision,
+                            parent: None,
+                            location: Location::Line(7),
+                        }),
+                    )],
+                    reviews: vec![review.id],
+                }],
+                keep: vec![(held.local_id, "line changed".into())],
+                review_states: vec![],
+                state: None,
+                else_state: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let before = all_drafts(&f);
+    let reserved = before.iter().filter(|d| d.reserved_by.is_some()).count();
+    let held_n = before.iter().filter(|d| d.held_reason.is_some()).count();
+    assert_eq!((before.len(), reserved, held_n), (3, 2, 1));
+
+    // The server's draft d1 matches nothing ordinary: it is added as a
+    // server draft; the local change's drafts stay as they are.
+    let view = block_on(f.syncer.refresh_comments(CHANGE)).unwrap();
+    let after = all_drafts(&f);
+    assert_eq!(after.len(), 4);
+    assert!(before.iter().all(|d| after.contains(d)));
+    let added: Vec<&Draft> = after.iter().filter(|d| !before.contains(d)).collect();
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].server_id.as_deref(), Some("d1"));
+    assert!(added[0].is_ordinary());
+    assert!(view.drafts.iter().any(|d| d.local_id == added[0].local_id));
+
+    // The server's list empties: only the server draft goes.
+    http.route("/changes/7/drafts", 200, xssi(&json!({})));
+    block_on(f.syncer.refresh_comments(CHANGE)).unwrap();
+    assert_eq!(all_drafts(&f), before);
+    // And the draft counts never include them.
+    assert_eq!(f.syncer.draft_counts().unwrap(), DraftCounts::default());
 }

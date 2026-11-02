@@ -22,10 +22,15 @@
 //! (offline, failed, or a delete not yet confirmed) nothing is posted and
 //! [`crate::Error::DraftsNotUploaded`] lists them.
 //!
-//! # Local commits
+//! # Drafts of local changes
 //!
-//! Requests that name a commit that exists only locally fail with
-//! [`crate::Error::Local`] before anything is sent.
+//! All of the above is about *ordinary* drafts ([`Draft::is_ordinary`]).
+//! Drafts on local patch sets (also of a Gerrit change), the sealed
+//! messages of pending reviews, and drafts reserved for or held by a
+//! consolidation are never uploaded, retried or published here, and they
+//! never block a review: they belong to their local change. Requests that
+//! name a commit that exists only locally fail with [`crate::Error::Local`]
+//! before anything is sent.
 //!
 //! # Reviewed marks
 //!
@@ -314,6 +319,9 @@ impl Syncer {
         for (i, d) in pending.into_iter().enumerate() {
             match self.upload_locked(d.local_id).await? {
                 None => report.deleted += 1,
+                // Became a local change's draft meanwhile: not ours to
+                // send, and no sign of being offline.
+                Some(d) if !d.is_ordinary() => {}
                 Some(d) => match d.sync {
                     DraftSync::Synced => report.synced += 1,
                     DraftSync::Failed { .. } => report.rejected += 1,
@@ -351,8 +359,12 @@ impl Syncer {
 
     /// One upload attempt; the caller holds `drafts_lock`.
     ///
-    /// A draft on a commit that exists only locally is marked failed
-    /// (retryable, since the commit may reach Gerrit), without a request.
+    /// Only ordinary drafts ([`Draft::is_ordinary`]) are sent. The others
+    /// (on local numbers, sealed messages of pending reviews, reserved for
+    /// a consolidation post, held) are returned untouched: they reach the
+    /// server through their local change, if at all. An ordinary draft on a
+    /// commit that exists only locally is marked failed (retryable, since
+    /// the commit may reach Gerrit), without a request.
     async fn upload_locked(&self, id: LocalDraftId) -> Result<Option<Draft>, Error> {
         // An update whose draft is gone from the server is created anew,
         // once.
@@ -360,6 +372,9 @@ impl Syncer {
             let Some(d) = self.store().load_draft(self.server, id)? else {
                 return Ok(None);
             };
+            if !d.is_ordinary() {
+                return Ok(Some(d));
+            }
             let sends = d.sync.is_uploadable()
                 && !(d.sync == DraftSync::PendingDelete && d.server_id.is_none());
             if sends && self.store().is_local_sha(self.server, &d.revision)? {
@@ -467,11 +482,14 @@ impl Syncer {
         let result = {
             let _guard = self.drafts_lock.lock().await;
             if review.drafts != DraftHandling::Keep {
+                // Only ordinary drafts: those of local patch sets, pending
+                // reviews' messages, and reserved or held drafts are never
+                // on the server, so they neither block nor join the post.
                 let uploadable: Vec<LocalDraftId> = self
                     .store()
                     .load_drafts(self.server, change)?
                     .iter()
-                    .filter(|d| d.sync.is_uploadable())
+                    .filter(|d| d.is_ordinary() && d.sync.is_uploadable())
                     .map(|d| d.local_id)
                     .collect();
                 for id in uploadable {
@@ -481,7 +499,7 @@ impl Syncer {
                     .store()
                     .load_drafts(self.server, change)?
                     .into_iter()
-                    .filter(|d| d.sync.is_pending())
+                    .filter(|d| d.is_ordinary() && d.sync.is_pending())
                     .map(|d| PendingDraft {
                         reason: match &d.sync {
                             DraftSync::Failed { error, .. } => error.clone(),
