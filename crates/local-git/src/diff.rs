@@ -351,7 +351,7 @@ fn normalize(line: &str, ws: &Whitespace) -> String {
 /// Gerrit joins two changed regions into one chunk when everything between
 /// them is boring (it asks for intraline edits, which is what does this):
 /// blank lines, a line that ends in `{` or `:`, and a lone `}`.
-fn is_boring(line: &str) -> bool {
+pub(crate) fn is_boring(line: &str) -> bool {
     let line = line.trim_end_matches([' ', '\t']);
     line.is_empty() || line.ends_with(['{', ':']) || line.trim_start_matches([' ', '\t']) == "}"
 }

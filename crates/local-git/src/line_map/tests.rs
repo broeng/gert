@@ -1,5 +1,6 @@
 use model::{CommentRange, DiffChunk, LineMap, RevisionId, Whitespace};
 
+use crate::diff::is_boring;
 use crate::testutil::TestRepo;
 use crate::{Local, NotLocal, Repo};
 
@@ -274,7 +275,9 @@ fn commit_message_lines_map_through_the_synthetic_text() {
 
 /// The map agrees with the diff Gerrit would show: every line of a
 /// `Common` chunk maps to its counterpart, every line of a `Changed` chunk
-/// outside the boring lines maps to nothing.
+/// maps to nothing, except boring lines (which may join two changed
+/// regions while unchanged themselves), which map to the same text if they
+/// map at all.
 #[test]
 fn the_map_agrees_with_the_diff() {
     let t = TestRepo::new();
@@ -297,6 +300,7 @@ fn the_map_agrees_with_the_diff() {
         .available()
         .expect("local");
     let (mut la, mut lb) = (1_u32, 1_u32);
+    let mut boring_mapped = 0;
     for chunk in &d.chunks {
         match chunk {
             DiffChunk::Common { lines } => {
@@ -309,9 +313,11 @@ fn the_map_agrees_with_the_diff() {
             DiffChunk::Changed(c) => {
                 for (i, text) in c.a.iter().enumerate() {
                     let mapped = m.map_line(la + i as u32);
-                    // A boring line joining two regions may be unchanged.
-                    if let Some(to) = mapped {
+                    if !is_boring(text) {
+                        assert_eq!(mapped, None, "line {}: {text:?}", la + i as u32);
+                    } else if let Some(to) = mapped {
                         assert_eq!(c.b.get((to - lb) as usize), Some(text));
+                        boring_mapped += 1;
                     }
                 }
                 la += c.a.len() as u32;
@@ -321,4 +327,6 @@ fn the_map_agrees_with_the_diff() {
         }
     }
     assert_eq!(la - 1, d.a_len());
+    // The blank line between `fn one`'s and `fn two`'s regions is one.
+    assert!(boring_mapped > 0, "{:?}", d.chunks);
 }
