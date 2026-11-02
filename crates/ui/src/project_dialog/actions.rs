@@ -15,11 +15,17 @@ actions!(
         /// Tab / Shift-Tab: the next / previous control.
         ProjectNextField,
         ProjectPrevField,
+        /// Up / Down on the vote strategy: the option above / below.
+        ApprovalPrev,
+        ApprovalNext,
     ]
 );
 
 /// Key context of the dialog.
 pub const PROJECT_DIALOG: &str = "ProjectDialog";
+
+/// Around the choice of what happens to votes on a local change.
+pub const PROJECT_APPROVAL: &str = "ProjectApprovalGroup";
 
 /// The text fields give Tab, Esc and Ctrl-Enter up instead of using them:
 /// this binding is as deep as the field's own (`Input`) and registered after
@@ -51,6 +57,14 @@ pub fn entries() -> Vec<Entry> {
         e("", "shift-tab", ProjectPrevField, PROJECT_DIALOG, ""),
         e("", "tab", ProjectNextField, IN_FIELD, ""),
         e("", "shift-tab", ProjectPrevField, IN_FIELD, ""),
+        e(
+            "Up / Down",
+            "up",
+            ApprovalPrev,
+            PROJECT_APPROVAL,
+            "On the vote choice: the option above / below (Space ticks the local changes box)",
+        ),
+        e("", "down", ApprovalNext, PROJECT_APPROVAL, ""),
         e(
             if cfg!(target_os = "macos") {
                 "Cmd-Enter"

@@ -1,6 +1,6 @@
 //! The Projects tab of the settings page: the local git checkouts of the
 //! active server's projects (`[[servers.projects]]`), with whether each one
-//! is usable.
+//! is usable and whether its unpushed commits show as local changes.
 //!
 //! The rows are what the server's [`Checkouts`] holds, in config order, and
 //! the page observes the entity: the status of a row follows while the
@@ -29,6 +29,12 @@ use crate::{
 };
 
 use super::{Mode, SettingsEvent, SettingsPage, without};
+
+/// The word next to the status of a project whose unpushed commits are
+/// shown as local changes.
+pub(crate) fn local_word(project: &ProjectSettings) -> Option<&'static str> {
+    project.local_changes.then_some("local changes")
+}
 
 /// The status words of a checkout: the text, and how to color it (`Some(true)`
 /// good, `Some(false)` bad, `None` still being looked at).
@@ -243,11 +249,21 @@ impl SettingsPage {
                         .child(project.written.clone()),
                 )
                 .child(
-                    div()
-                        .id(("project-status", i))
+                    h_flex()
+                        .gap_2()
                         .text_xs()
-                        .text_color(color)
-                        .child(status),
+                        .child(
+                            div()
+                                .id(("project-status", i))
+                                .text_color(color)
+                                .child(status),
+                        )
+                        .children(local_word(project).map(|word| {
+                            div()
+                                .id(("project-local", i))
+                                .text_color(theme.muted_foreground)
+                                .child(word)
+                        })),
                 ),
         )
         .child(

@@ -2466,6 +2466,7 @@ impl Shell {
             projects: entry.setup.projects.clone(),
             edit,
             name,
+            anonymous: entry.setup.username.is_none(),
         };
         let dialog = cx.new(|cx| ProjectDialog::new(context, window, cx));
         self.project_dialog_subs.push(cx.subscribe_in(

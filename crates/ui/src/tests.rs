@@ -2337,9 +2337,10 @@ mod settings_page {
         filters: Vec<FileFilter>,
         bookmarks: Vec<crate::session::SavedQuery>,
     ) -> Fixture {
-        fixture_all(cx, fail, start_page, filters, bookmarks, Vec::new())
+        fixture_all(cx, fail, start_page, filters, bookmarks, Vec::new(), None)
     }
 
+    /// `username`: `None` is an anonymous server.
     fn fixture_all(
         cx: &mut TestAppContext,
         fail: bool,
@@ -2347,9 +2348,11 @@ mod settings_page {
         filters: Vec<FileFilter>,
         bookmarks: Vec<crate::session::SavedQuery>,
         projects: Vec<crate::session::ProjectSettings>,
+        username: Option<&str>,
     ) -> Fixture {
         let backend = Arc::new(FakeBackend {
             fail,
+            password: username.map(|_| "pw".to_owned()),
             ..Default::default()
         });
         let env = Env {
@@ -2368,6 +2371,7 @@ mod settings_page {
                 queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
                 bookmarks,
                 projects,
+                username: username.map(Into::into),
                 ..setup()
             }],
             active: None,
@@ -2521,9 +2525,18 @@ mod settings_page {
         crate::session::ProjectSettings::new(name, dir.to_string_lossy())
     }
 
+    /// The Projects tab of an anonymous server.
     fn projects_fixture(
         cx: &mut TestAppContext,
         projects: Vec<crate::session::ProjectSettings>,
+    ) -> Fixture {
+        projects_fixture_as(cx, projects, None)
+    }
+
+    fn projects_fixture_as(
+        cx: &mut TestAppContext,
+        projects: Vec<crate::session::ProjectSettings>,
+        username: Option<&str>,
     ) -> Fixture {
         let f = fixture_all(
             cx,
@@ -2532,6 +2545,7 @@ mod settings_page {
             Vec::new(),
             Vec::new(),
             projects,
+            username,
         );
         open_settings(cx, &f);
         show_tab(cx, &f, SettingsTab::Projects);
@@ -2738,6 +2752,122 @@ mod settings_page {
             page.read_with(cx, |p, _| p.project_names_for_test().to_vec()),
             ["two"]
         );
+        let _ = std::fs::remove_dir_all(&a);
+    }
+
+    const SAVE: &str = if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    };
+
+    /// The open dialog's local options, and whether the box and the vote
+    /// choice take input.
+    fn local_state(
+        cx: &mut TestAppContext,
+        f: &Fixture,
+    ) -> (crate::project_dialog::LocalOptions, bool, bool) {
+        let dialog = project_dialog(cx, f).expect("dialog");
+        cx.update(|cx| dialog.read(cx).local_for_test())
+    }
+
+    /// The Projects tab's word next to each project's status.
+    fn local_words(cx: &mut TestAppContext, f: &Fixture) -> Vec<Option<&'static str>> {
+        cx.update(|cx| {
+            let key = crate::session::ServerKey::new("test");
+            let checkouts = f
+                .shell
+                .update(cx, |s, cx| s.checkouts(&key, cx))
+                .expect("server");
+            checkouts
+                .read(cx)
+                .projects()
+                .map(crate::pages::settings::projects::local_word)
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn the_local_changes_box_turns_the_vote_choice_on_and_both_are_saved(cx: &mut TestAppContext) {
+        use model::LocalApproval;
+        let f = projects_fixture_as(cx, Vec::new(), Some("u"));
+        press(cx, &f, "a");
+        fill_dialog(cx, &f, "demo/new", "/src/new");
+        let (local, box_on, choice_on) = local_state(cx, &f);
+        assert!(!local.changes && box_on && !choice_on, "{local:?}");
+        assert_eq!(local.approval, LocalApproval::Exact);
+        // Name, directory, Browse, then the box: Space ticks it.
+        for key in ["tab", "tab", "tab", "space"] {
+            press(cx, &f, key);
+        }
+        let (local, _, choice_on) = local_state(cx, &f);
+        assert!(local.changes && choice_on);
+        // The choice is next; Up goes to the more permissive options.
+        press(cx, &f, "tab");
+        press(cx, &f, "up");
+        assert_eq!(local_state(cx, &f).0.approval, LocalApproval::ExactOrManual);
+        press(cx, &f, "up");
+        press(cx, &f, "up");
+        assert_eq!(local_state(cx, &f).0.approval, LocalApproval::Follow);
+        press(cx, &f, "down");
+        press(cx, &f, "up");
+        // Clearing the box turns the choice off, which keys cannot change
+        // and Tab skips.
+        press(cx, &f, "shift-tab");
+        press(cx, &f, "space");
+        let (local, _, choice_on) = local_state(cx, &f);
+        assert!(!local.changes && !choice_on);
+        assert_eq!(local.approval, LocalApproval::Follow);
+        press(cx, &f, "tab");
+        press(cx, &f, "down");
+        assert_eq!(local_state(cx, &f).0.approval, LocalApproval::Follow);
+        // That Tab went to Save: Space presses it, with the box clear.
+        press(cx, &f, "space");
+        assert!(project_dialog(cx, &f).is_none());
+        let off = crate::session::ProjectSettings {
+            local_approval: LocalApproval::Follow,
+            ..crate::session::ProjectSettings::new("demo/new", "/src/new")
+        };
+        assert_eq!(saved_projects(&f), vec![vec![off.clone()]]);
+        assert_eq!(local_words(cx, &f), [None]);
+
+        // Ticked and saved, the tab says so.
+        press(cx, &f, "e");
+        for key in ["tab", "tab", "tab", "space"] {
+            press(cx, &f, key);
+        }
+        press(cx, &f, SAVE);
+        assert!(project_dialog(cx, &f).is_none());
+        let on = crate::session::ProjectSettings {
+            local_changes: true,
+            ..off
+        };
+        assert_eq!(saved_projects(&f).last(), Some(&vec![on]));
+        assert_eq!(local_words(cx, &f), [Some("local changes")]);
+    }
+
+    #[gpui_kit::test]
+    fn the_local_options_cannot_be_changed_on_an_anonymous_server(cx: &mut TestAppContext) {
+        use model::LocalApproval;
+        let a = tmp_dir("anon-local");
+        // Set by hand in the file.
+        let entry = crate::session::ProjectSettings {
+            local_changes: true,
+            local_approval: LocalApproval::ExactOrManual,
+            ..project("one", &a)
+        };
+        let f = projects_fixture(cx, vec![entry.clone()]);
+        press(cx, &f, "e");
+        let (local, box_on, choice_on) = local_state(cx, &f);
+        assert!(local.changes && !box_on && !choice_on);
+        assert_eq!(local.approval, LocalApproval::ExactOrManual);
+        // Tab skips both: after Browse comes Save, and Space presses it.
+        for key in ["tab", "tab", "tab", "space"] {
+            press(cx, &f, key);
+        }
+        assert!(project_dialog(cx, &f).is_none());
+        // What the entry had is kept.
+        assert_eq!(saved_projects(&f), vec![vec![entry]]);
         let _ = std::fs::remove_dir_all(&a);
     }
 
