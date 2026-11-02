@@ -782,3 +782,79 @@ fn a_merge_hands_a_shared_commit_to_the_surviving_copy() {
     let again = s.reconcile_local(id, "p", &[op], ts(T2)).unwrap();
     assert_eq!(again.stale, 1);
 }
+
+fn detail(summary: ChangeSummary, revisions: Vec<Revision>) -> ChangeDetail {
+    ChangeDetail {
+        summary,
+        current_revision: None,
+        current_patch_set: revisions.last().map(|r| r.number),
+        commit_message: None,
+        reviewers: vec![],
+        cc: vec![],
+        revisions,
+        messages: vec![],
+        submit_requirements: vec![],
+        votes: Default::default(),
+        attention: vec![],
+        permitted_labels: Default::default(),
+        removable_reviewers: Default::default(),
+        label_values: Default::default(),
+        change_actions: Default::default(),
+        revision_actions: Default::default(),
+    }
+}
+
+#[test]
+fn caching_a_change_detail_maps_the_local_versions_it_contains() {
+    let (mut s, id) = setup();
+    // gerrit2 was a local version in p, and in a fork q; gerrit1 is
+    // already mapped elsewhere; v9 never reached Gerrit.
+    let c = add(&mut s, id, upsert("I1", Some("main"), &["gerrit2", "v9"]));
+    let fork = upsert("I1", Some("main"), &["gerrit2"]);
+    s.reconcile_local(id, "q", &[LocalOp::Upsert(fork)], ts(T1))
+        .unwrap();
+    let other = add(&mut s, id, upsert("I2", Some("main"), &["gerrit1"]));
+    let g1 = s.local_patch_sets(id, other.id).unwrap().remove(0);
+    s.reconcile_local(
+        id,
+        "p",
+        &[LocalOp::MapPatchSet {
+            patch_set: g1.id,
+            gerrit_patch_set: PatchSetNumber(7),
+        }],
+        ts(T1),
+    )
+    .unwrap();
+    assert!(s.is_local_sha(id, &"gerrit2".into()).unwrap());
+
+    s.save_change_detail(
+        id,
+        &detail(summary(42, "p", "I1"), vec![revision(1), revision(2)]),
+        ts(T2),
+    )
+    .unwrap();
+    let mapped: Vec<_> = s
+        .local_patch_sets(id, c.id)
+        .unwrap()
+        .iter()
+        .map(|p| (p.sha.to_string(), p.gerrit_patch_set))
+        .collect();
+    assert_eq!(
+        mapped,
+        [
+            ("gerrit2".to_owned(), Some(PatchSetNumber(2))),
+            ("v9".to_owned(), None)
+        ]
+    );
+    // The fork in q is another project; the earlier mapping stays.
+    let q = s.local_changes_of_project(id, "q").unwrap().remove(0);
+    assert_eq!(q.patch_sets[0].gerrit_patch_set, None);
+    assert_eq!(
+        s.local_patch_sets(id, other.id).unwrap()[0].gerrit_patch_set,
+        Some(PatchSetNumber(7))
+    );
+    // Without the fork, gerrit2 may be requested now; v9 may not.
+    s.delete_local_change(id, q.change.id).unwrap();
+    assert!(!s.is_local_sha(id, &"gerrit2".into()).unwrap());
+    assert!(s.is_local_sha(id, &"v9".into()).unwrap());
+}

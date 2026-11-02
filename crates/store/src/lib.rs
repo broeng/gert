@@ -394,6 +394,13 @@ impl Store {
     }
 
     /// Stores the detail, and refreshes the change's list-row summary too.
+    ///
+    /// In the same transaction, every local patch set of the change's
+    /// project whose commit is one of the detail's revisions, and that is
+    /// not mapped yet, is mapped to that Gerrit patch set: the commit is on
+    /// the server now (pushed), so requests may name it at once
+    /// ([`Store::is_local_sha`]), without waiting for the next scan of the
+    /// checkout (a push to `refs/for/...` moves no local ref).
     pub fn save_change_detail(
         &mut self,
         server: ServerId,
@@ -414,6 +421,20 @@ impl Store {
                 fetched_at.to_string()
             ],
         )?;
+        for r in detail.revisions.iter().filter(|r| !r.number.is_local()) {
+            tx.prepare_cached(
+                "UPDATE local_patch_sets SET gerrit_patch_set = ?4
+                 WHERE server_id = ?1 AND sha = ?3 AND gerrit_patch_set IS NULL
+                   AND local_change_id IN (
+                       SELECT id FROM local_changes WHERE server_id = ?1 AND project = ?2)",
+            )?
+            .execute(params![
+                server.0,
+                detail.summary.project,
+                r.sha.as_str(),
+                r.number.0
+            ])?;
+        }
         tx.commit()?;
         Ok(())
     }
