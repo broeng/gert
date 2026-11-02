@@ -2119,6 +2119,34 @@ mod tests {
     }
 
     #[test]
+    fn draft_ids_and_the_attention_opt_out_are_sent_only_when_asked_for() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi("{}"));
+        fake.push_response(200, xssi("{}"));
+        let c = client(&fake, "https://h", basic());
+        // What every caller sent before these fields existed.
+        block_on(c.post_review(ChangeNumber(5), &sha_rev(), &ReviewInput::default())).unwrap();
+        assert_eq!(
+            body_json(&fake.requests()[0]),
+            json!({"drafts": "PUBLISH_ALL_REVISIONS"})
+        );
+        let review = ReviewInput {
+            draft_ids_to_publish: Some(vec!["d1".into(), "d2".into()]),
+            ignore_automatic_attention_set_rules: true,
+            ..ReviewInput::default()
+        };
+        block_on(c.post_review(ChangeNumber(5), &sha_rev(), &review)).unwrap();
+        assert_eq!(
+            body_json(&fake.requests()[1]),
+            json!({
+                "drafts": "PUBLISH_ALL_REVISIONS",
+                "draft_ids_to_publish": ["d1", "d2"],
+                "ignore_automatic_attention_set_rules": true,
+            })
+        );
+    }
+
+    #[test]
     fn review_result_error_is_reported_not_raised() {
         let fake = FakeHttpClient::new();
         fake.push_response(

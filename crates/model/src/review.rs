@@ -75,6 +75,14 @@ pub struct ReviewInput {
     pub ready: Option<bool>,
     /// `Some(true)` marks the change work in progress.
     pub work_in_progress: Option<bool>,
+    /// The ids of the drafts to publish, instead of what `drafts` selects.
+    /// `None` leaves the choice to `drafts`.
+    pub draft_ids_to_publish: Option<Vec<String>>,
+    /// Leaves the attention set alone: the server's automatic rules (the
+    /// owner gets attention after a reply, the replier loses it) are not
+    /// applied. Only the explicit `add_to_attention_set` and
+    /// `remove_from_attention_set` change it.
+    pub ignore_automatic_attention_set_rules: bool,
 }
 
 impl ReviewInput {

@@ -698,6 +698,10 @@ pub(crate) fn review_input(r: &ReviewInput) -> wire::ReviewInput {
         ready: r.ready,
         add_to_attention_set: attention(&r.add_to_attention_set),
         remove_from_attention_set: attention(&r.remove_from_attention_set),
+        draft_ids_to_publish: r.draft_ids_to_publish.clone(),
+        ignore_automatic_attention_set_rules: r
+            .ignore_automatic_attention_set_rules
+            .then_some(true),
     }
 }
 

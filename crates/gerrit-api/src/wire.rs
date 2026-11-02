@@ -403,6 +403,11 @@ pub(crate) struct ReviewInput {
     pub add_to_attention_set: Option<Vec<AttentionSetInput>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remove_from_attention_set: Option<Vec<AttentionSetInput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_ids_to_publish: Option<Vec<String>>,
+    /// Only sent when true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore_automatic_attention_set_rules: Option<bool>,
 }
 
 /// `AbandonInput` and `RestoreInput`, the part we send.
@@ -650,6 +655,8 @@ mod tests {
             ready: Some(true),
             add_to_attention_set: Some(vec![att.clone()]),
             remove_from_attention_set: Some(vec![att]),
+            draft_ids_to_publish: Some(vec!["d".into()]),
+            ignore_automatic_attention_set_rules: Some(true),
         };
         conforms_value(&spec, "ReviewInput", &review);
         let msg = MessageInput {
