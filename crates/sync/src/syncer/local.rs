@@ -1,8 +1,13 @@
 //! Reconciling a checkout's local commits with the store (see
 //! [`crate::local`] for the rules).
 
+use std::{
+    collections::BTreeSet,
+    hash::{DefaultHasher, Hash, Hasher},
+};
+
 use jiff::Timestamp;
-use model::LocalScan;
+use model::{LocalChange, LocalScan};
 use store::ReconcileReport;
 
 use super::Syncer;
@@ -54,6 +59,49 @@ impl Syncer {
             plan_disabled(&entries)
         };
         Ok(store.reconcile_local(self.server, project, &ops, now)?)
+    }
+
+    /// The local changes the dashboard lists (see
+    /// [`store::Store::dashboard_local_changes`]), the most recently
+    /// updated first. Blocking (SQLite).
+    pub fn dashboard_local_changes(&self) -> Result<Vec<LocalChange>, Error> {
+        Ok(self.store().dashboard_local_changes(self.server)?)
+    }
+
+    /// The projects that have local change rows on this server, in any
+    /// state, sorted and each once: those a scanner has to reconcile with
+    /// the option off when the project no longer has it. Blocking
+    /// (SQLite).
+    pub fn local_change_projects(&self) -> Result<Vec<String>, Error> {
+        let rows = self.store().local_changes(self.server)?;
+        let projects: BTreeSet<String> = rows.into_iter().map(|c| c.project).collect();
+        Ok(projects.into_iter().collect())
+    }
+
+    /// A hash of what [`Syncer::reconcile_local`] reads from the cache of
+    /// Gerrit changes for `project` and these Change-Ids: each cached
+    /// change's number, branch, status and `updated`, and its patch sets
+    /// with their commits and the current one when its detail is cached.
+    /// Equal values mean a reconcile of the same scan would classify the
+    /// same, so a scanner keeps it in its skip key: a pushed commit is
+    /// recognised as soon as its change (or the change's detail) is cached,
+    /// even though no local ref moved. Stable within one process run only.
+    /// Blocking (SQLite).
+    pub fn local_cache_generation(
+        &self,
+        project: &str,
+        change_ids: &[String],
+    ) -> Result<u64, Error> {
+        let cached = self
+            .store()
+            .cached_changes_by_change_id(self.server, project, change_ids)?;
+        let mut hasher = DefaultHasher::new();
+        for c in &cached {
+            let s = &c.summary;
+            (s.number, &s.change_id, &s.branch, &s.status, s.updated).hash(&mut hasher);
+            (&c.patch_sets, c.current).hash(&mut hasher);
+        }
+        Ok(hasher.finish())
     }
 }
 

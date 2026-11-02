@@ -180,3 +180,39 @@ fn turning_the_option_off_keeps_only_changes_with_unsent_data() {
     assert!(syncer.store().has_unsent(syncer.server, kept).unwrap());
     assert!(http.requests().is_empty());
 }
+
+#[test]
+fn the_cache_generation_moves_when_a_matching_change_is_cached() {
+    let (http, syncer) = syncer();
+    let ids = vec!["I2".to_owned()];
+    let empty = syncer.local_cache_generation("p", &ids).unwrap();
+    assert_eq!(empty, syncer.local_cache_generation("p", &ids).unwrap());
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    let cached = syncer.local_cache_generation("p", &ids).unwrap();
+    assert_ne!(cached, empty);
+    // Unrelated Change-Ids and other projects do not see it.
+    assert_eq!(
+        syncer
+            .local_cache_generation("p", &["I9".to_owned()])
+            .unwrap(),
+        empty
+    );
+    assert_eq!(syncer.local_cache_generation("q", &ids).unwrap(), empty);
+    // Fetching the same detail again changes nothing.
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    assert_eq!(syncer.local_cache_generation("p", &ids).unwrap(), cached);
+}
+
+#[test]
+fn dashboard_rows_and_projects_with_rows() {
+    let (_http, syncer) = syncer();
+    let sc = scan(vec![commit("c1", "I1")]);
+    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
+    syncer.reconcile_local("q", &sc, &emails(), true).unwrap();
+    assert_eq!(syncer.local_change_projects().unwrap(), ["p", "q"]);
+    let rows = syncer.dashboard_local_changes().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|c| c.number.is_local()));
+}
