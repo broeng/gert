@@ -151,15 +151,32 @@ impl Repo {
         }
     }
 
-    /// `user.email` as git sees it in this repository (repository, global
-    /// and system configuration, includes followed), or `None` if unset.
-    pub fn user_email(&self) -> Result<Option<String>, Error> {
-        let args = ["config", "--get", "user.email"];
+    /// The addresses this checkout's own commits may carry as author:
+    /// `author.email` (which git 2.21 and later prefer for new commits),
+    /// then `user.email`, trimmed, without duplicates and empty values.
+    /// Both count, since older commits may have been made with either. As
+    /// git sees them here: repository, global and system configuration,
+    /// includes followed.
+    pub fn author_emails(&self) -> Result<Vec<String>, Error> {
+        let mut emails: Vec<String> = Vec::new();
+        for key in ["author.email", "user.email"] {
+            if let Some(email) = self.config_value(key)?
+                && !emails.contains(&email)
+            {
+                emails.push(email);
+            }
+        }
+        Ok(emails)
+    }
+
+    /// `git config --get <key>`, trimmed; `None` if unset or empty.
+    fn config_value(&self, key: &str) -> Result<Option<String>, Error> {
+        let args = ["config", "--get", key];
         let out = self.git.run_raw(&args, None)?;
         match out.status.code() {
             Some(0) => {
-                let email = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-                Ok((!email.is_empty()).then_some(email))
+                let value = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                Ok((!value.is_empty()).then_some(value))
             }
             // 1: the key is not set.
             Some(1) => Ok(None),

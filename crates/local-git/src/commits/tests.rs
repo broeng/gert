@@ -320,20 +320,22 @@ fn commit_reads_present_and_missing_commits() {
 }
 
 #[test]
-fn user_email_reads_the_repository_config() {
+fn author_emails_take_author_email_then_user_email() {
     let r = TestRepo::new();
     let repo = open(&r);
-    assert_eq!(
-        repo.user_email().expect("test repo").as_deref(),
-        Some(TEST_EMAIL)
-    );
+    let emails = |want: &[&str]| assert_eq!(repo.author_emails().expect("emails"), want);
+    // The test repository sets both to the same address.
+    emails(&[TEST_EMAIL]);
+    r.git(&["config", "author.email", " work@example.com "]);
+    emails(&["work@example.com", TEST_EMAIL]);
     r.git(&["config", "--unset", "user.email"]);
-    assert_eq!(repo.user_email().expect("unset"), None);
+    emails(&["work@example.com"]);
+    r.git(&["config", "--unset", "author.email"]);
+    emails(&[]);
     r.git(&["config", "user.email", "me@example.com"]);
-    assert_eq!(
-        repo.user_email().expect("set").as_deref(),
-        Some("me@example.com")
-    );
+    emails(&["me@example.com"]);
+    r.git(&["config", "author.email", ""]);
+    emails(&["me@example.com"]);
 }
 
 #[test]
