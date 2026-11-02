@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use model::{
-    Account, AccountId, ChangeStatus, DraftInput, LocalApproval, Location, PatchSetRef,
-    PendingReviewState, Side,
+    Account, AccountId, ChangeStatus, DraftInput, LocalApproval, Location, PendingReviewState,
+    Revision, RevisionKind, Side,
 };
 
 use super::*;
@@ -32,7 +32,7 @@ fn new_ps(sha: &str) -> NewLocalPatchSet {
 
 fn upsert(change_id: &str, branch: Option<&str>, shas: &[&str]) -> LocalChangeUpsert {
     LocalChangeUpsert {
-        id: None,
+        seen: None,
         branch: branch.map(str::to_owned),
         change_id: change_id.into(),
         gerrit_number: None,
@@ -95,6 +95,20 @@ fn review(p: &LocalPatchSet) -> NewPendingReview {
     }
 }
 
+fn seen(c: &LocalChange) -> Seen {
+    Seen {
+        id: c.id,
+        state: c.state,
+    }
+}
+
+fn delete(c: &LocalChange) -> LocalOp {
+    LocalOp::Delete {
+        seen: seen(c),
+        else_state: None,
+    }
+}
+
 #[test]
 fn reconcile_inserts_numbers_and_orders_versions() {
     let (mut s, id) = setup();
@@ -133,9 +147,9 @@ fn reconcile_updates_deletes_and_counts_in_one_transaction() {
         LocalOp::Upsert(amend),
         LocalOp::Upsert(upsert("IC", None, &["c1"])),
         LocalOp::Upsert(upsert("ID", None, &["d1"])),
-        LocalOp::Delete(b.id),
+        delete(&b),
         LocalOp::SetState {
-            change: unchanged.id,
+            seen: seen(&unchanged),
             state: LocalChangeState::Local,
         },
     ];
@@ -157,34 +171,105 @@ fn reconcile_updates_deletes_and_counts_in_one_transaction() {
     let r = s.reconcile_local(id, "p", &again, ts(T2)).unwrap();
     assert!(!r.changed(), "{r:?}");
     // Ops on a row that is gone are skipped as stale.
-    let r = s
-        .reconcile_local(id, "p", &[LocalOp::Delete(b.id)], ts(T2))
-        .unwrap();
+    let r = s.reconcile_local(id, "p", &[delete(&b)], ts(T2)).unwrap();
     assert_eq!((r.stale, r.changed()), (1, false));
 }
 
 #[test]
-fn a_failing_reconcile_writes_nothing() {
+fn a_plan_naming_local_targets_or_a_removed_server_writes_nothing() {
     let (mut s, id) = setup();
-    let a = add(&mut s, id, upsert("IA", Some("main"), &["a1"]));
-    add(&mut s, id, upsert("IA", Some("stable"), &["s1"]));
-    // Re-keying `a` onto the key of the other row fails, and the insert
-    // before it in the same plan is rolled back.
-    let mut rekey = upsert("IA", Some("stable"), &[]);
-    rekey.id = Some(a.id);
-    let ops = [
-        LocalOp::Upsert(upsert("IZ", None, &["z1"])),
-        LocalOp::Upsert(rekey),
-    ];
-    assert!(s.reconcile_local(id, "p", &ops, ts(T2)).is_err());
-    assert_eq!(s.local_changes(id).unwrap().len(), 2);
-    assert!(s.local_changes_by_change_id(id, "IZ").unwrap().is_empty());
+    let a = add(&mut s, id, upsert("IA", None, &["a1"]));
+    let a1 = s.local_patch_sets(id, a.id).unwrap().remove(0);
+    let mut onto_local = upsert("IZ", None, &["z1"]);
+    onto_local.gerrit_number = Some(a.number);
+    let map_local = LocalOp::MapPatchSet {
+        patch_set: a1.id,
+        gerrit_patch_set: a1.number,
+    };
+    for ops in [
+        vec![
+            LocalOp::Upsert(upsert("IY", None, &[])),
+            LocalOp::Upsert(onto_local),
+        ],
+        vec![LocalOp::Upsert(upsert("IY", None, &[])), map_local],
+    ] {
+        assert!(matches!(
+            s.reconcile_local(id, "p", &ops, ts(T2)),
+            Err(Error::LocalTarget)
+        ));
+    }
+    assert_eq!(s.local_changes(id).unwrap().len(), 1);
     // A removed server is reported, not silently recreated.
     s.delete_server(id).unwrap();
     assert!(matches!(
-        s.reconcile_local(id, "p", &ops[..1], ts(T2)),
+        s.reconcile_local(id, "p", &[LocalOp::Upsert(upsert("IY", None, &[]))], ts(T2)),
         Err(Error::NoSuchServer)
     ));
+}
+
+#[test]
+fn ops_on_rows_that_changed_since_the_snapshot_are_stale() {
+    let (mut s, id) = setup();
+    let a = add(&mut s, id, upsert("IA", None, &["a1"]));
+    let snapshot = seen(&a);
+    // Consolidation moves the row on meanwhile.
+    s.set_local_change_state(id, a.id, LocalChangeState::Local)
+        .unwrap();
+    let mut amend = upsert("IA", None, &["a2"]);
+    amend.seen = Some(snapshot);
+    let ops = [
+        LocalOp::Upsert(amend),
+        LocalOp::SetState {
+            seen: snapshot,
+            state: LocalChangeState::Vanished,
+        },
+        LocalOp::Delete {
+            seen: snapshot,
+            else_state: None,
+        },
+    ];
+    let r = s.reconcile_local(id, "p", &ops, ts(T2)).unwrap();
+    assert_eq!((r.stale, r.changed(), r.is_settled()), (3, false, false));
+    let now = s.local_change(id, a.id).unwrap().unwrap();
+    assert_eq!(now.state, LocalChangeState::Local);
+    assert_eq!(s.local_patch_sets(id, a.id).unwrap().len(), 1);
+}
+
+#[test]
+fn an_upsert_whose_row_is_gone_still_records_the_commits() {
+    let (mut s, id) = setup();
+    let a = add(&mut s, id, upsert("IA", None, &["a1"]));
+    s.delete_local_change(id, a.id).unwrap();
+    let mut u = upsert("IA", None, &["a1", "a2"]);
+    u.seen = Some(seen(&a));
+    let r = s
+        .reconcile_local(id, "p", &[LocalOp::Upsert(u)], ts(T2))
+        .unwrap();
+    assert_eq!((r.inserted.len(), r.patch_sets_added, r.stale), (1, 2, 0));
+    assert_ne!(r.inserted[0], a.id);
+}
+
+#[test]
+fn a_refused_delete_can_leave_the_change_vanished() {
+    let (mut s, id) = setup();
+    let c = add(&mut s, id, upsert("IL", None, &["l1"]));
+    let l1 = s.local_patch_sets(id, c.id).unwrap().remove(0);
+    s.create_draft(id, c.number, &psref(&l1), &draft_input("x"), ts(T1))
+        .unwrap();
+    let op = LocalOp::Delete {
+        seen: seen(&c),
+        else_state: Some(LocalChangeState::Vanished),
+    };
+    let r = s.reconcile_local(id, "p", &[op], ts(T2)).unwrap();
+    assert_eq!(
+        (r.kept.clone(), r.updated.clone()),
+        (vec![c.id], vec![c.id])
+    );
+    assert!(!r.is_settled());
+    assert_eq!(
+        s.local_change(id, c.id).unwrap().unwrap().state,
+        LocalChangeState::Vanished
+    );
 }
 
 #[test]
@@ -192,7 +277,7 @@ fn a_row_can_be_rekeyed_to_another_branch() {
     let (mut s, id) = setup();
     let a = add(&mut s, id, upsert("IA", None, &["a1"]));
     let mut rekey = upsert("IA", Some("main"), &[]);
-    rekey.id = Some(a.id);
+    rekey.seen = Some(seen(&a));
     let r = s
         .reconcile_local(id, "p", &[LocalOp::Upsert(rekey)], ts(T2))
         .unwrap();
@@ -322,12 +407,12 @@ fn lookups_by_number_sha_change_id_and_gerrit_change() {
                     patch_set: ps[0].id,
                     gerrit_patch_set: PatchSetNumber(5),
                 },
-                LocalOp::Delete(local.id),
+                delete(&local),
             ],
             ts(T2),
         )
         .unwrap();
-    assert_eq!((r.patch_sets_mapped, r.stale), (0, 1));
+    assert_eq!((r.patch_sets_mapped, r.stale), (0, 2));
     assert!(s.local_change(id, local.id).unwrap().is_some());
 }
 
@@ -424,10 +509,10 @@ fn a_change_with_unsent_data_is_neither_deleted_nor_consolidated_by_a_plan() {
         .unwrap();
     let ops = [
         LocalOp::SetState {
-            change: c.id,
+            seen: seen(&c),
             state: LocalChangeState::Consolidated,
         },
-        LocalOp::Delete(c.id),
+        delete(&c),
     ];
     let r = s.reconcile_local(id, "p", &ops, ts(T2)).unwrap();
     assert_eq!(r.kept, [c.id, c.id]);
@@ -546,6 +631,19 @@ fn summary(n: u64, project: &str, change_id: &str) -> ChangeSummary {
     }
 }
 
+fn revision(n: u32) -> Revision {
+    Revision {
+        number: PatchSetNumber(n),
+        sha: format!("gerrit{n}").as_str().into(),
+        kind: Some(RevisionKind::Rework),
+        created: None,
+        uploader: None,
+        ref_name: None,
+        description: None,
+        commit: None,
+    }
+}
+
 #[test]
 fn cached_gerrit_changes_are_found_by_change_id_within_a_project() {
     let (mut s, id) = setup();
@@ -556,15 +654,131 @@ fn cached_gerrit_changes_are_found_by_change_id_within_a_project() {
         summary(4, "p", "IA"),
     ];
     s.save_query_page(id, "q", &cached, false, ts(T0)).unwrap();
-    let found = |ids: &[&str]| -> Vec<u64> {
+    let found = |s: &Store, ids: &[&str]| -> Vec<CachedGerritChange> {
         let ids: Vec<String> = ids.iter().map(|s| (*s).to_owned()).collect();
-        s.cached_changes_by_change_id(id, "p", &ids)
-            .unwrap()
-            .iter()
-            .map(|c| c.number.0)
-            .collect()
+        s.cached_changes_by_change_id(id, "p", &ids).unwrap()
     };
-    assert_eq!(found(&["IA"]), [1, 4]);
-    assert_eq!(found(&["IA", "IB", "IX"]), [1, 2, 4]);
-    assert_eq!(found(&[]), Vec::<u64>::new());
+    let numbers =
+        |v: Vec<CachedGerritChange>| -> Vec<u64> { v.iter().map(|c| c.summary.number.0).collect() };
+    assert_eq!(numbers(found(&s, &["IA"])), [1, 4]);
+    assert_eq!(numbers(found(&s, &["IA", "IB", "IX"])), [1, 2, 4]);
+    assert_eq!(numbers(found(&s, &[])), Vec::<u64>::new());
+    // Without a cached detail the patch sets are unknown.
+    assert_eq!(found(&s, &["IB"])[0].patch_sets, None);
+    // With one, a pushed commit's SHA maps to its patch set.
+    let detail = ChangeDetail {
+        summary: summary(2, "p", "IB"),
+        current_revision: Some("gerrit2".into()),
+        current_patch_set: Some(PatchSetNumber(2)),
+        commit_message: None,
+        reviewers: vec![],
+        cc: vec![],
+        revisions: vec![revision(1), revision(2)],
+        messages: vec![],
+        submit_requirements: vec![],
+        votes: Default::default(),
+        attention: vec![],
+        permitted_labels: Default::default(),
+        removable_reviewers: Default::default(),
+        label_values: Default::default(),
+        change_actions: Default::default(),
+        revision_actions: Default::default(),
+    };
+    s.save_change_detail(id, &detail, ts(T0)).unwrap();
+    let ib = found(&s, &["IB"]).remove(0);
+    assert_eq!(ib.current, Some(PatchSetNumber(2)));
+    assert_eq!(ib.patch_sets, Some(vec![gerrit_ps(1), gerrit_ps(2)]));
+}
+
+#[test]
+fn a_rekey_onto_another_rows_key_is_a_conflict_that_a_merge_resolves() {
+    let (mut s, id) = setup();
+    // Commit v1 targets main; an amended copy v2 on a branch tracking
+    // stable became its own row.
+    let main = add(&mut s, id, upsert("I1", Some("main"), &["v1"]));
+    let stable = add(&mut s, id, upsert("I1", Some("stable"), &["v2"]));
+    let v1 = s.local_patch_sets(id, main.id).unwrap().remove(0);
+    let v2 = s.local_patch_sets(id, stable.id).unwrap().remove(0);
+    let on_v1 = s
+        .create_draft(id, main.number, &psref(&v1), &draft_input("v1"), ts(T1))
+        .unwrap();
+    let r_v1 = s.create_pending_review(id, &review(&v1)).unwrap();
+    // A new branch that sorts first and tracks stable now contains v1, so
+    // v1's target becomes stable: re-keying `main` collides.
+    let mut rekey = upsert("I1", Some("stable"), &["v1"]);
+    rekey.seen = Some(seen(&main));
+    let r = s
+        .reconcile_local(id, "p", &[LocalOp::Upsert(rekey)], ts(T2))
+        .unwrap();
+    assert_eq!(r.conflicts, [main.id]);
+    assert!(!r.is_settled() && !r.changed());
+    assert_eq!(
+        s.local_change(id, main.id)
+            .unwrap()
+            .unwrap()
+            .branch
+            .as_deref(),
+        Some("main")
+    );
+    // The merge folds `main` into `stable`, keeping numbers.
+    let op = LocalOp::Merge {
+        from: seen(&main),
+        into: seen(&stable),
+    };
+    let r = s.reconcile_local(id, "p", &[op], ts(T2)).unwrap();
+    assert_eq!(r.merged, [(main.id, stable.id)]);
+    assert_eq!(r.updated, [stable.id]);
+    assert_eq!(s.local_change(id, main.id).unwrap(), None);
+    let versions = s.local_patch_sets(id, stable.id).unwrap();
+    let got: Vec<_> = versions
+        .iter()
+        .map(|p| (p.id, p.number, p.ordinal))
+        .collect();
+    assert_eq!(got, [(v2.id, v2.number, 1), (v1.id, v1.number, 2)]);
+    let d = s.load_draft(id, on_v1.local_id).unwrap().unwrap();
+    assert_eq!((d.change, d.patch_set), (stable.number, v1.number));
+    let r_v1 = s.load_pending_review(id, r_v1.id).unwrap().unwrap();
+    assert_eq!((r_v1.local_change, r_v1.change), (stable.id, stable.number));
+    let msg = s
+        .load_draft(id, r_v1.message_draft.unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.change, stable.number);
+    assert!(s.has_unsent(id, stable.id).unwrap());
+}
+
+#[test]
+fn a_merge_hands_a_shared_commit_to_the_surviving_copy() {
+    let (mut s, id) = setup();
+    let a = add(&mut s, id, upsert("I1", None, &["shared", "a-only"]));
+    let mut b = upsert("I1", Some("main"), &["shared"]);
+    b.gerrit_number = Some(ChangeNumber(9));
+    let b = add(&mut s, id, b);
+    let a_shared = s.local_patch_sets(id, a.id).unwrap().remove(0);
+    let b_shared = s.local_patch_sets(id, b.id).unwrap().remove(0);
+    let d = s
+        .create_draft(id, a.number, &psref(&a_shared), &draft_input("x"), ts(T1))
+        .unwrap();
+    let r = s.create_pending_review(id, &review(&a_shared)).unwrap();
+    let op = LocalOp::Merge {
+        from: seen(&a),
+        into: seen(&b),
+    };
+    s.reconcile_local(id, "p", std::slice::from_ref(&op), ts(T2))
+        .unwrap();
+    let shas: Vec<_> = s
+        .local_patch_sets(id, b.id)
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.sha.0, p.ordinal))
+        .collect();
+    assert_eq!(shas, [("shared".to_owned(), 1), ("a-only".to_owned(), 2)]);
+    // On the surviving copy, posted on `into`'s Gerrit change.
+    let d = s.load_draft(id, d.local_id).unwrap().unwrap();
+    assert_eq!((d.change, d.patch_set), (ChangeNumber(9), b_shared.number));
+    let r = s.load_pending_review(id, r.id).unwrap().unwrap();
+    assert_eq!((r.change, r.patch_set), (ChangeNumber(9), b_shared.number));
+    // Merging again names a row that is gone.
+    let again = s.reconcile_local(id, "p", &[op], ts(T2)).unwrap();
+    assert_eq!(again.stale, 1);
 }

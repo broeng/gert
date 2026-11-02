@@ -28,8 +28,8 @@
 //! change is never deleted by a reconcile and never marked consolidated.
 
 use model::{
-    ChangeNumber, ChangeSummary, LocalChange, LocalChangeId, LocalChangeState, LocalPatchSet,
-    LocalPatchSetId, PatchSetNumber, RevisionId, Timestamp,
+    ChangeDetail, ChangeNumber, ChangeSummary, LocalChange, LocalChangeId, LocalChangeState,
+    LocalPatchSet, LocalPatchSetId, PatchSetNumber, PatchSetRef, RevisionId, Timestamp,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -46,9 +46,30 @@ pub struct LocalChangeEntry {
     pub change: LocalChange,
     /// In the order they were first seen.
     pub patch_sets: Vec<LocalPatchSet>,
-    /// Drafts on its numbers, or pending reviews not yet sent: see
-    /// [`Store::has_unsent`].
+    /// See [`Store::has_unsent`].
     pub has_unsent: bool,
+}
+
+/// A cached Gerrit change found by its Change-Id (see
+/// [`Store::cached_changes_by_change_id`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CachedGerritChange {
+    pub summary: ChangeSummary,
+    /// Every patch set with its commit, when the change detail is cached
+    /// (opening the change page caches it); `None` otherwise.
+    pub patch_sets: Option<Vec<PatchSetRef>>,
+    /// The current patch set, from the cached detail.
+    pub current: Option<PatchSetNumber>,
+}
+
+/// A row as the reconcile plan saw it: its id and its state then. An op
+/// naming a row whose state has changed since is skipped as stale, so a
+/// plan computed from an old snapshot cannot undo what consolidation did
+/// in between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seen {
+    pub id: LocalChangeId,
+    pub state: LocalChangeState,
 }
 
 /// A version to add to a local change (see [`LocalChangeUpsert`]).
@@ -63,15 +84,22 @@ pub struct NewLocalPatchSet {
 /// Creates a local change or updates one, and adds versions to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalChangeUpsert {
-    /// The row to update. `None` finds the row by its key (the reconcile's
-    /// project, `branch` and `change_id`) or creates it. With an id, the
-    /// key fields are written too, which re-keys the row (a commit whose
-    /// target branch changed); that fails the reconcile if another row of
-    /// the project already has the new key.
-    pub id: Option<LocalChangeId>,
+    /// The row to update, as the plan saw it.
+    ///
+    /// * `None`: the row is found by its key (the reconcile's project,
+    ///   `branch` and `change_id`), or created.
+    /// * A row that is gone (deleted meanwhile): as `None`, so the commits
+    ///   are not dropped.
+    /// * A row in another state than seen: skipped, counted as stale.
+    /// * Otherwise the key fields are written too, which re-keys the row (a
+    ///   commit whose target branch changed). If another row of the project
+    ///   already has the new key, the op is skipped and the row reported in
+    ///   [`ReconcileReport::conflicts`]; [`LocalOp::Merge`] resolves that.
+    pub seen: Option<Seen>,
     pub branch: Option<String>,
     pub change_id: String,
     /// Set when `Some`; `None` keeps what the row has (NULL for a new one).
+    /// A local number fails the reconcile with [`Error::LocalTarget`].
     pub gerrit_number: Option<ChangeNumber>,
     pub subject: String,
     pub author_name: String,
@@ -85,30 +113,53 @@ pub struct LocalChangeUpsert {
     pub patch_sets: Vec<NewLocalPatchSet>,
 }
 
-/// One step of a reconcile plan (see [`Store::reconcile_local`]). Ops that
-/// name a row by id only touch rows of the reconciled server and project;
-/// a row that is gone (deleted meanwhile) is skipped and counted as stale.
+/// One step of a reconcile plan (see [`Store::reconcile_local`]). Ops only
+/// touch rows of the reconciled server and project; a row that is gone,
+/// belongs to another project or is no longer in the state the plan saw
+/// is skipped and counted as stale.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LocalOp {
     Upsert(LocalChangeUpsert),
-    /// A version turned out to be a Gerrit patch set (the same commit).
+    /// A version turned out to be a Gerrit patch set (the same commit). A
+    /// local `gerrit_patch_set` fails the reconcile with
+    /// [`Error::LocalTarget`].
     MapPatchSet {
         patch_set: LocalPatchSetId,
         gerrit_patch_set: PatchSetNumber,
     },
-    /// `Consolidated` is refused (the state stays) while the change has
-    /// unsent data.
+    /// `Consolidated` is refused (the state stays, and the row is reported
+    /// as kept) while the change has unsent data.
     SetState {
-        change: LocalChangeId,
+        seen: Seen,
         state: LocalChangeState,
     },
     /// Deletes the change as [`Store::delete_local_change`] does, unless it
-    /// has unsent data by the time the plan is applied: then it is kept
-    /// and reported in [`ReconcileReport::kept`].
-    Delete(LocalChangeId),
+    /// has unsent data by the time the plan is applied: then it is kept,
+    /// reported in [`ReconcileReport::kept`], and moved to `else_state`
+    /// (`Vanished`, so it shows dimmed) if one is given.
+    Delete {
+        seen: Seen,
+        else_state: Option<LocalChangeState>,
+    },
+    /// Folds `from` into `into` (two rows of one change, e.g. when a
+    /// re-key collides): `from`'s versions move to `into` with their ids
+    /// and numbers, numbered after `into`'s (a version `into` already has
+    /// gives its drafts and reviews to `into`'s copy), the drafts on
+    /// `from`'s synthetic number and its pending reviews follow, and `from`
+    /// is deleted. `into` keeps its fields and state, and takes `from`'s
+    /// `gerrit_number` if it has none.
+    Merge {
+        from: Seen,
+        into: Seen,
+    },
 }
 
 /// What [`Store::reconcile_local`] changed.
+///
+/// The caller must not record the scan's refs fingerprint as done unless
+/// [`ReconcileReport::is_settled`]: a stale, kept or conflicting op means
+/// the store did not take the plan as computed, and the next scan has to
+/// look again even if the refs did not move.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
     /// New rows, in the order of their upserts.
@@ -119,17 +170,31 @@ pub struct ReconcileReport {
     /// Deletions and moves to `Consolidated` refused because of unsent
     /// data.
     pub kept: Vec<LocalChangeId>,
+    /// Re-keys refused because another row has the new key.
+    pub conflicts: Vec<LocalChangeId>,
+    /// `(from, into)` of each merge done.
+    pub merged: Vec<(LocalChangeId, LocalChangeId)>,
     pub patch_sets_added: usize,
     pub patch_sets_mapped: usize,
-    /// Ops that named a row that no longer exists in the project.
+    /// Ops that named a row that is gone, belongs to another project, or
+    /// is no longer in the state the plan saw.
     pub stale: usize,
 }
 
 impl ReconcileReport {
     /// Whether anything was written.
     pub fn changed(&self) -> bool {
-        !(self.inserted.is_empty() && self.updated.is_empty() && self.deleted.is_empty())
+        !(self.inserted.is_empty()
+            && self.updated.is_empty()
+            && self.deleted.is_empty()
+            && self.merged.is_empty())
             || self.patch_sets_mapped > 0
+    }
+
+    /// Whether the plan was applied as computed: nothing stale, kept or
+    /// conflicting.
+    pub fn is_settled(&self) -> bool {
+        self.stale == 0 && self.kept.is_empty() && self.conflicts.is_empty()
     }
 }
 
@@ -550,30 +615,43 @@ impl Store {
     }
 
     /// The cached Gerrit changes of `project` whose Change-Id is one of
-    /// `change_ids`, from any query or change page that fetched them. For
-    /// classifying local commits.
+    /// `change_ids`, from any query or change page that fetched them, with
+    /// their patch sets when the change detail is cached too. For
+    /// classifying local commits: a commit whose SHA is one of the patch
+    /// sets is on Gerrit.
     pub fn cached_changes_by_change_id(
         &self,
         server: ServerId,
         project: &str,
         change_ids: &[String],
-    ) -> Result<Vec<ChangeSummary>, Error> {
+    ) -> Result<Vec<CachedGerritChange>, Error> {
         if change_ids.is_empty() {
             return Ok(Vec::new());
         }
         let mut stmt = self.conn.prepare_cached(
-            "SELECT json FROM changes WHERE server_id = ?1
-               AND json_extract(json, '$.project') = ?2
-               AND json_extract(json, '$.change_id') IN (SELECT value FROM json_each(?3))
-             ORDER BY number",
+            "SELECT c.json, d.json FROM changes c
+             LEFT JOIN change_details d ON d.server_id = c.server_id AND d.number = c.number
+             WHERE c.server_id = ?1
+               AND json_extract(c.json, '$.project') = ?2
+               AND json_extract(c.json, '$.change_id') IN (SELECT value FROM json_each(?3))
+             ORDER BY c.number",
         )?;
         let rows = stmt.query_map(
             params![server.0, project, serde_json::to_string(change_ids)?],
-            |r| r.get::<_, String>(0),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
         )?;
         let mut out = Vec::new();
-        for json in rows {
-            out.push(serde_json::from_str(&json?)?);
+        for row in rows {
+            let (summary, detail) = row?;
+            let detail: Option<ChangeDetail> =
+                detail.map(|d| serde_json::from_str(&d)).transpose()?;
+            out.push(CachedGerritChange {
+                summary: serde_json::from_str(&summary)?,
+                patch_sets: detail
+                    .as_ref()
+                    .map(|d| d.revisions.iter().map(|r| r.as_ref()).collect()),
+                current: detail.and_then(|d| d.current_patch_set),
+            });
         }
         Ok(out)
     }
@@ -583,7 +661,11 @@ impl Store {
     /// Applies a reconcile plan for one project of a server in one
     /// transaction (see [`LocalOp`] for each step). `now` is the
     /// `first_seen` of new rows. Fails with [`Error::NoSuchServer`] if the
-    /// server row is gone, writing nothing.
+    /// server row is gone, and with [`Error::LocalTarget`] if the plan names
+    /// a local number as a Gerrit change or patch set, writing nothing
+    /// either way. Everything else that does not fit the store as it is
+    /// now is skipped and reported, never an error, so one odd row cannot
+    /// wedge a project's reconcile.
     pub fn reconcile_local(
         &mut self,
         server: ServerId,
@@ -591,6 +673,16 @@ impl Store {
         ops: &[LocalOp],
         now: Timestamp,
     ) -> Result<ReconcileReport, Error> {
+        let local_target = ops.iter().any(|op| match op {
+            LocalOp::Upsert(u) => u.gerrit_number.is_some_and(ChangeNumber::is_local),
+            LocalOp::MapPatchSet {
+                gerrit_patch_set, ..
+            } => gerrit_patch_set.is_local(),
+            _ => false,
+        });
+        if local_target {
+            return Err(Error::LocalTarget);
+        }
         let tx = self.conn.transaction()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM servers WHERE id = ?1)",
@@ -601,134 +693,81 @@ impl Store {
             return Err(Error::NoSuchServer);
         }
         let mut report = ReconcileReport::default();
-        let in_project = |id: LocalChangeId| -> Result<Option<LocalChange>, Error> {
-            Ok(load_change(&tx, server, id)?.filter(|c| c.project == project))
-        };
         for op in ops {
             match op {
-                LocalOp::Upsert(u) => {
-                    let existing = match u.id {
-                        Some(id) => match in_project(id)? {
-                            Some(c) => Some(c),
-                            None => {
-                                report.stale += 1;
-                                continue;
-                            }
-                        },
-                        None => {
-                            find_by_key(&tx, server, project, u.branch.as_deref(), &u.change_id)?
-                        }
-                    };
-                    let (id, mut changed) = match existing {
-                        Some(c) => {
-                            let gerrit_number = u.gerrit_number.or(c.gerrit_number);
-                            let state = u.state.unwrap_or(c.state);
-                            let same = c.branch == u.branch
-                                && c.change_id == u.change_id
-                                && c.gerrit_number == gerrit_number
-                                && c.subject == u.subject
-                                && c.author_name == u.author_name
-                                && c.author_email == u.author_email
-                                && c.updated == u.updated;
-                            if !same {
-                                tx.execute(
-                                    "UPDATE local_changes SET branch = ?3, change_id = ?4,
-                                         gerrit_number = ?5, subject = ?6, author_name = ?7,
-                                         author_email = ?8, updated_ms = ?9
-                                     WHERE server_id = ?1 AND id = ?2",
-                                    params![
-                                        server.0,
-                                        c.id.0,
-                                        u.branch,
-                                        u.change_id,
-                                        gerrit_number.map(number),
-                                        u.subject,
-                                        u.author_name,
-                                        u.author_email,
-                                        millis(u.updated)
-                                    ],
-                                )?;
-                            }
-                            let mut changed = !same;
-                            if state != c.state {
-                                match set_state(&tx, server, c.id, state)? {
-                                    Some(s) if s == state => changed = true,
-                                    _ => report.kept.push(c.id),
-                                }
-                            }
-                            (c.id, changed)
-                        }
-                        None => {
-                            tx.execute(
-                                "INSERT INTO local_changes (server_id, project, branch,
-                                     change_id, gerrit_number, subject, author_name,
-                                     author_email, updated_ms, state, first_seen_ms)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                                params![
-                                    server.0,
-                                    project,
-                                    u.branch,
-                                    u.change_id,
-                                    u.gerrit_number.map(number),
-                                    u.subject,
-                                    u.author_name,
-                                    u.author_email,
-                                    millis(u.updated),
-                                    u.state.unwrap_or(LocalChangeState::Checking).as_str(),
-                                    millis(now)
-                                ],
-                            )?;
-                            let id = LocalChangeId(tx.last_insert_rowid());
-                            report.inserted.push(id);
-                            (id, false)
-                        }
-                    };
-                    let added = add_patch_sets(&tx, server, id, &u.patch_sets)?;
-                    report.patch_sets_added += added;
-                    changed |= added > 0;
-                    if changed && !report.inserted.contains(&id) && !report.updated.contains(&id) {
-                        report.updated.push(id);
-                    }
-                }
+                LocalOp::Upsert(u) => upsert(&tx, server, project, u, now, &mut report)?,
                 LocalOp::MapPatchSet {
                     patch_set,
                     gerrit_patch_set,
                 } => {
-                    let n = tx.execute(
-                        "UPDATE local_patch_sets SET gerrit_patch_set = ?3
-                         WHERE server_id = ?1 AND id = ?2 AND gerrit_patch_set IS NOT ?3
-                           AND local_change_id IN (
-                               SELECT id FROM local_changes WHERE server_id = ?1 AND project = ?4)",
-                        params![server.0, patch_set.0, gerrit_patch_set.0, project],
-                    )?;
-                    report.patch_sets_mapped += n;
+                    let current: Option<Option<i64>> = tx
+                        .query_row(
+                            "SELECT p.gerrit_patch_set FROM local_patch_sets p
+                             JOIN local_changes c ON c.id = p.local_change_id
+                             WHERE p.server_id = ?1 AND p.id = ?2 AND c.project = ?3",
+                            params![server.0, patch_set.0, project],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    match current {
+                        None => report.stale += 1,
+                        Some(c) if c == Some(i64::from(gerrit_patch_set.0)) => {}
+                        Some(_) => {
+                            tx.execute(
+                                "UPDATE local_patch_sets SET gerrit_patch_set = ?3
+                                 WHERE server_id = ?1 AND id = ?2",
+                                params![server.0, patch_set.0, gerrit_patch_set.0],
+                            )?;
+                            report.patch_sets_mapped += 1;
+                        }
+                    }
                 }
-                LocalOp::SetState { change, state } => {
-                    let Some(c) = in_project(*change)? else {
+                LocalOp::SetState { seen, state } => {
+                    let Some(c) = seen_row(&tx, server, project, *seen)? else {
                         report.stale += 1;
                         continue;
                     };
                     if c.state == *state {
                         continue;
                     }
-                    match set_state(&tx, server, c.id, *state)? {
-                        Some(s) if s == *state => {
-                            if !report.updated.contains(&c.id) {
-                                report.updated.push(c.id);
-                            }
-                        }
-                        _ => report.kept.push(c.id),
+                    if set_state(&tx, server, c.id, *state)? == Some(*state) {
+                        touch(&mut report, c.id);
+                    } else {
+                        report.kept.push(c.id);
                     }
                 }
-                LocalOp::Delete(change) => {
-                    if in_project(*change)?.is_none() {
+                LocalOp::Delete { seen, else_state } => {
+                    let Some(c) = seen_row(&tx, server, project, *seen)? else {
                         report.stale += 1;
-                    } else if has_unsent(&tx, server, *change)? {
-                        report.kept.push(*change);
+                        continue;
+                    };
+                    if has_unsent(&tx, server, c.id)? {
+                        report.kept.push(c.id);
+                        if let Some(s) = else_state
+                            && *s != c.state
+                            && set_state(&tx, server, c.id, *s)? == Some(*s)
+                        {
+                            touch(&mut report, c.id);
+                        }
                     } else {
-                        delete_change(&tx, server, *change)?;
-                        report.deleted.push(*change);
-                        report.updated.retain(|id| id != change);
+                        delete_change(&tx, server, c.id)?;
+                        report.deleted.push(c.id);
+                        report.updated.retain(|id| *id != c.id);
+                    }
+                }
+                LocalOp::Merge { from, into } => {
+                    let rows = (
+                        seen_row(&tx, server, project, *from)?,
+                        seen_row(&tx, server, project, *into)?,
+                    );
+                    match rows {
+                        (Some(f), Some(i)) if f.id != i.id => {
+                            merge(&tx, server, &f, &i)?;
+                            report.merged.push((f.id, i.id));
+                            report.updated.retain(|id| *id != f.id);
+                            touch(&mut report, i.id);
+                        }
+                        _ => report.stale += 1,
                     }
                 }
             }
@@ -768,6 +807,204 @@ impl Store {
         tx.commit()?;
         Ok(removed)
     }
+}
+
+/// Records that `id` changed, once.
+fn touch(report: &mut ReconcileReport, id: LocalChangeId) {
+    if !report.inserted.contains(&id) && !report.updated.contains(&id) {
+        report.updated.push(id);
+    }
+}
+
+/// The row `seen` names, if it is still in the project and in the state
+/// the plan saw.
+fn seen_row(
+    conn: &Connection,
+    server: ServerId,
+    project: &str,
+    seen: Seen,
+) -> Result<Option<LocalChange>, Error> {
+    Ok(load_change(conn, server, seen.id)?
+        .filter(|c| c.project == project && c.state == seen.state))
+}
+
+fn upsert(
+    conn: &Connection,
+    server: ServerId,
+    project: &str,
+    u: &LocalChangeUpsert,
+    now: Timestamp,
+    report: &mut ReconcileReport,
+) -> Result<(), Error> {
+    let by_id = match u.seen {
+        Some(seen) => match load_change(conn, server, seen.id)?.filter(|c| c.project == project) {
+            Some(c) if c.state != seen.state => {
+                report.stale += 1;
+                return Ok(());
+            }
+            found => found,
+        },
+        None => None,
+    };
+    let existing = match by_id {
+        Some(c) => {
+            // Re-keying onto another row's key would break the unique key:
+            // leave it to a merge.
+            let other = find_by_key(conn, server, project, u.branch.as_deref(), &u.change_id)?;
+            if other.is_some_and(|o| o.id != c.id) {
+                report.conflicts.push(c.id);
+                return Ok(());
+            }
+            Some(c)
+        }
+        None => find_by_key(conn, server, project, u.branch.as_deref(), &u.change_id)?,
+    };
+    let (id, mut changed) = match existing {
+        Some(c) => {
+            let gerrit_number = u.gerrit_number.or(c.gerrit_number);
+            let same = c.branch == u.branch
+                && c.change_id == u.change_id
+                && c.gerrit_number == gerrit_number
+                && c.subject == u.subject
+                && c.author_name == u.author_name
+                && c.author_email == u.author_email
+                && c.updated == u.updated;
+            if !same {
+                conn.execute(
+                    "UPDATE local_changes SET branch = ?3, change_id = ?4, gerrit_number = ?5,
+                         subject = ?6, author_name = ?7, author_email = ?8, updated_ms = ?9
+                     WHERE server_id = ?1 AND id = ?2",
+                    params![
+                        server.0,
+                        c.id.0,
+                        u.branch,
+                        u.change_id,
+                        gerrit_number.map(number),
+                        u.subject,
+                        u.author_name,
+                        u.author_email,
+                        millis(u.updated)
+                    ],
+                )?;
+            }
+            let mut changed = !same;
+            if let Some(state) = u.state
+                && state != c.state
+            {
+                if set_state(conn, server, c.id, state)? == Some(state) {
+                    changed = true;
+                } else {
+                    report.kept.push(c.id);
+                }
+            }
+            (c.id, changed)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO local_changes (server_id, project, branch, change_id,
+                     gerrit_number, subject, author_name, author_email, updated_ms, state,
+                     first_seen_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    server.0,
+                    project,
+                    u.branch,
+                    u.change_id,
+                    u.gerrit_number.map(number),
+                    u.subject,
+                    u.author_name,
+                    u.author_email,
+                    millis(u.updated),
+                    u.state.unwrap_or(LocalChangeState::Checking).as_str(),
+                    millis(now)
+                ],
+            )?;
+            let id = LocalChangeId(conn.last_insert_rowid());
+            report.inserted.push(id);
+            (id, false)
+        }
+    };
+    let added = add_patch_sets(conn, server, id, &u.patch_sets)?;
+    report.patch_sets_added += added;
+    changed |= added > 0;
+    if changed {
+        touch(report, id);
+    }
+    Ok(())
+}
+
+/// Folds local change `from` into `into`, see [`LocalOp::Merge`].
+fn merge(
+    conn: &Connection,
+    server: ServerId,
+    from: &LocalChange,
+    into: &LocalChange,
+) -> Result<(), Error> {
+    let gerrit_number = into.gerrit_number.or(from.gerrit_number);
+    // Where drafts and reviews of `from` are posted from now on.
+    let target = number(gerrit_number.unwrap_or(into.number));
+    let into_versions = load_patch_sets(conn, server, into.id)?;
+    let mut versions = Vec::new();
+    for p in load_patch_sets(conn, server, from.id)? {
+        match into_versions.iter().find(|q| q.sha == p.sha) {
+            Some(q) => {
+                // The same commit twice: `into`'s copy takes over.
+                conn.execute(
+                    "UPDATE drafts SET patch_set = ?3 WHERE server_id = ?1 AND patch_set = ?2",
+                    params![server.0, p.number.0, q.number.0],
+                )?;
+                conn.execute(
+                    "UPDATE pending_reviews SET patch_set = ?3
+                     WHERE server_id = ?1 AND patch_set = ?2",
+                    params![server.0, p.number.0, q.number.0],
+                )?;
+                conn.execute(
+                    "DELETE FROM local_patch_sets WHERE server_id = ?1 AND id = ?2",
+                    params![server.0, p.id.0],
+                )?;
+                versions.push(q.number.0);
+            }
+            None => {
+                conn.execute(
+                    "UPDATE local_patch_sets SET local_change_id = ?3,
+                         ordinal = (SELECT COALESCE(MAX(ordinal), 0) + 1 FROM local_patch_sets
+                                    WHERE local_change_id = ?3)
+                     WHERE server_id = ?1 AND id = ?2",
+                    params![server.0, p.id.0, into.id.0],
+                )?;
+                versions.push(p.number.0);
+            }
+        }
+    }
+    let versions = serde_json::to_string(&versions)?;
+    let from_synthetic = number(from.number);
+    let from_gerrit = from.gerrit_number.map(number);
+    // Drafts: on `from`'s synthetic number, or on the versions it brought
+    // (which may carry its Gerrit number), and those reserved for its post.
+    conn.execute(
+        "UPDATE drafts SET change_number = ?2
+         WHERE server_id = ?1 AND (change_number = ?3
+               OR (change_number IS ?4 AND patch_set IN (SELECT value FROM json_each(?5))))",
+        params![server.0, target, from_synthetic, from_gerrit, versions],
+    )?;
+    conn.execute(
+        "UPDATE drafts SET reserved_by = ?3 WHERE server_id = ?1 AND reserved_by = ?2",
+        params![server.0, from.id.0, into.id.0],
+    )?;
+    conn.execute(
+        "UPDATE pending_reviews SET local_change_id = ?3,
+             change_number = CASE WHEN change_number = ?4 THEN ?5 ELSE change_number END
+         WHERE server_id = ?1 AND local_change_id = ?2",
+        params![server.0, from.id.0, into.id.0, from_synthetic, target],
+    )?;
+    if gerrit_number != into.gerrit_number {
+        conn.execute(
+            "UPDATE local_changes SET gerrit_number = ?3 WHERE server_id = ?1 AND id = ?2",
+            params![server.0, into.id.0, gerrit_number.map(number)],
+        )?;
+    }
+    delete_change(conn, server, from.id)?;
+    Ok(())
 }
 
 #[cfg(test)]

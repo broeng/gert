@@ -22,7 +22,7 @@ struct Fx {
 /// Gerrit number, local patch sets of that Gerrit change.
 fn add_change(s: &mut Store, id: ServerId, change_id: &str, gerrit: Option<u64>) -> LocalChange {
     let u = LocalChangeUpsert {
-        id: None,
+        seen: None,
         branch: Some("main".into()),
         change_id: change_id.into(),
         gerrit_number: gerrit.map(ChangeNumber),

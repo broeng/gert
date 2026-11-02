@@ -38,7 +38,10 @@ pub use drafts::{CachedComments, DeleteOutcome, DraftCounts, DraftFailure, Merge
 pub use error::Error;
 pub use events::EVENT_RETENTION;
 pub use inbox::{INBOX_KEEP, INBOX_RETENTION, InboxId, InboxItem, NewInboxItem};
-pub use local::{LocalChangeEntry, LocalChangeUpsert, LocalOp, NewLocalPatchSet, ReconcileReport};
+pub use local::{
+    CachedGerritChange, LocalChangeEntry, LocalChangeUpsert, LocalOp, NewLocalPatchSet,
+    ReconcileReport, Seen,
+};
 pub use pending_reviews::{NewPendingReview, PendingReviewEdit};
 pub use review_cache::{
     CachedDiff, CachedDiffPreferences, CachedFileList, CachedRelated, PrunePolicy, PruneReport,
