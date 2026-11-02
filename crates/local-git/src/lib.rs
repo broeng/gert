@@ -17,6 +17,7 @@ mod diff;
 mod error;
 mod files;
 mod git;
+mod intraline;
 
 pub use compare::{BaseKind, CommitData, Comparison};
 pub use error::{Error, NotLocal};

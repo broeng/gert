@@ -1,5 +1,6 @@
 use model::{
-    ChangedChunk, Diff, DiffChangeType, DiffChunk, FileEntry, FileStatus, RevisionId, Whitespace,
+    ChangedChunk, Diff, DiffChangeType, DiffChunk, FileEntry, FileStatus, IntralineStatus,
+    RevisionId, Whitespace,
 };
 
 use crate::testutil::{TestRepo, git_in};
@@ -318,7 +319,7 @@ fn diff_of_a_modified_file_alternates_common_and_changed() {
     assert_eq!((mb.name.as_str(), mb.lines), ("a.txt", 5));
     assert_eq!(d.a_len(), 4);
     assert_eq!(d.b_len(), 5);
-    assert!(d.intraline_status.is_none());
+    assert_eq!(d.intraline_status, Some(IntralineStatus::Ok));
     assert_eq!(
         d.diff_header,
         [
@@ -652,4 +653,28 @@ fn headers_for_a_pure_rename_and_a_mode_change() {
         ]
     );
     assert_eq!(plain(&m), [common(&["echo", ""])]);
+}
+
+#[test]
+fn a_huge_changed_region_gets_no_intraline_edits() {
+    let t = TestRepo::new();
+    let text = |word: &str| -> Vec<u8> {
+        (0..30_000)
+            .map(|i| format!("line {i} {word}\n"))
+            .collect::<String>()
+            .into_bytes()
+    };
+    t.write("big.txt", &text("old"));
+    t.commit("one");
+    t.write("big.txt", &text("new"));
+    let second = t.commit("two");
+    let repo = Repo::open(t.path()).expect("open");
+    let cmp = comparison(&repo, &second, None);
+    let d = diff(&repo, &cmp, "big.txt", None, &Whitespace::IgnoreNone);
+    assert_eq!(d.intraline_status, Some(IntralineStatus::Timeout));
+    assert!(d.chunks.iter().all(|c| match c {
+        DiffChunk::Changed(c) => c.edits_a.is_empty() && c.edits_b.is_empty(),
+        _ => true,
+    }));
+    assert_eq!(d.a_len(), 30_001);
 }

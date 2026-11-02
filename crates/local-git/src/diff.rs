@@ -4,14 +4,22 @@ use std::ops::Range;
 
 use imara_diff::{Algorithm, Diff as LineDiff, InternedInput};
 use model::{
-    COMMIT_MSG_PATH, ChangedChunk, Diff, DiffChangeType, DiffChunk, DiffFileMeta, MERGE_LIST_PATH,
-    Whitespace,
+    COMMIT_MSG_PATH, ChangedChunk, Diff, DiffChangeType, DiffChunk, DiffFileMeta, IntralineStatus,
+    MERGE_LIST_PATH, Whitespace,
 };
 
 use crate::compare::Comparison;
 use crate::files::{RawChange, parse_diff_tree};
 use crate::git::Object;
 use crate::{Error, Local, NotLocal, Repo};
+
+/// How much changed text (bytes of the lines of both sides, summed over a
+/// file) gets intraline edits before we give up and answer like Gerrit does
+/// when its intraline diff runs out of time: status `Timeout` and no edits
+/// at all. Gerrit's limit is a time, ours is a size: the character diff is
+/// quick up to this and the cap keeps one huge generated file from
+/// stalling the background thread.
+const INTRALINE_BUDGET: usize = 500_000;
 
 /// Git's own rule for "this is a binary file".
 const BINARY_SNIFF_BYTES: usize = 8000;
@@ -20,7 +28,8 @@ impl Repo {
     /// The diff of `path` in `cmp`: the whole file as alternating `Common`
     /// and `Changed` chunks (the UI folds context itself), computed with the
     /// histogram algorithm. `old_path` is the path on the base side when the
-    /// file was renamed. Intraline edits are not computed here.
+    /// file was renamed. The chunks carry intraline edits (as if the server
+    /// had been asked for them), see the `intraline` module.
     ///
     /// [`Local::NotLocal`] for the synthetic `/COMMIT_MSG` and `/MERGE_LIST`
     /// files, unknown whitespace modes, and paths git cannot be asked about.
@@ -95,6 +104,7 @@ impl Repo {
         );
         let text = |b: &Option<Blob>| b.as_ref().map(|b| Text::new(&b.data));
         let (text_a, text_b) = (text(&old), text(&new));
+        let mut timed_out = false;
         let chunks = if binary {
             // Gerrit has no chunks for an added or deleted binary file and
             // one `skip` over the (meaningless) lines of a changed one.
@@ -105,12 +115,14 @@ impl Repo {
                 _ => Vec::new(),
             }
         } else {
-            chunks(
+            let (chunks, over_budget) = chunks(
                 text_a.as_ref(),
                 text_b.as_ref(),
                 whitespace,
                 matches!((&old, &new), (Some(o), Some(n)) if o.oid == n.oid),
-            )
+            );
+            timed_out = over_budget;
+            chunks
         };
         let meta = |t: &Option<Text>, name: &str| {
             t.as_ref().map(|t| DiffFileMeta {
@@ -123,7 +135,11 @@ impl Repo {
             meta_a: meta(&text_a, old_name),
             meta_b: meta(&text_b, path),
             change_type: Some(change_type),
-            intraline_status: None,
+            intraline_status: Some(if timed_out {
+                IntralineStatus::Timeout
+            } else {
+                IntralineStatus::Ok
+            }),
             diff_header,
             chunks,
             binary,
@@ -350,7 +366,12 @@ fn is_boring(line: &str) -> bool {
 ///   sides' text); lines equal as text are `Common`.
 /// - If the mode finds no change at all in files with different content,
 ///   the whole file is one `Skip`.
-fn chunks(a: Option<&Text>, b: Option<&Text>, ws: &Whitespace, same_blob: bool) -> Vec<DiffChunk> {
+fn chunks(
+    a: Option<&Text>,
+    b: Option<&Text>,
+    ws: &Whitespace,
+    same_blob: bool,
+) -> (Vec<DiffChunk>, bool) {
     let empty = Text::new(b"");
     let (a, b) = (a.unwrap_or(&empty), b.unwrap_or(&empty));
     let keep_newline = matches!(ws, Whitespace::IgnoreNone | Whitespace::Unknown(_));
@@ -388,18 +409,39 @@ fn chunks(a: Option<&Text>, b: Option<&Text>, ws: &Whitespace, same_blob: bool) 
         } else {
             vec![DiffChunk::Skip { lines }]
         };
-        return chunks;
+        return (chunks, false);
     }
 
     let mut out = Vec::new();
+    let mut budget = INTRALINE_BUDGET;
+    let mut over_budget = false;
     let (mut pa, mut pb) = (0_usize, 0_usize);
     for (ra, rb) in regions {
         push_equal_run(&mut out, &a.lines[pa..ra.start], &b.lines[pb..rb.start]);
-        out.push(DiffChunk::Changed(ChangedChunk {
+        let mut chunk = ChangedChunk {
             a: a.lines[ra.clone()].to_vec(),
             b: b.lines[rb.clone()].to_vec(),
             ..Default::default()
-        }));
+        };
+        let size = chunk
+            .a
+            .iter()
+            .chain(&chunk.b)
+            .map(|l| l.len() + 1)
+            .sum::<usize>();
+        if !chunk.a.is_empty() && !chunk.b.is_empty() && budget.checked_sub(size).is_none() {
+            // Like Gerrit when it runs out of time: no edits at all.
+            over_budget = true;
+        } else if !chunk.a.is_empty() && !chunk.b.is_empty() {
+            budget -= size;
+            (chunk.edits_a, chunk.edits_b) = crate::intraline::edits(
+                &chunk.a,
+                &chunk.b,
+                a.final_newline || ra.end < a.lines.len(),
+                b.final_newline || rb.end < b.lines.len(),
+            );
+        }
+        out.push(DiffChunk::Changed(chunk));
         (pa, pb) = (ra.end, rb.end);
     }
     push_equal_run(&mut out, &a.lines[pa..], &b.lines[pb..]);
@@ -435,7 +477,15 @@ fn chunks(a: Option<&Text>, b: Option<&Text>, ws: &Whitespace, same_blob: bool) 
         }
         (false, false) => {}
     }
-    out
+    if over_budget {
+        for c in &mut out {
+            if let DiffChunk::Changed(c) = c {
+                c.edits_a.clear();
+                c.edits_b.clear();
+            }
+        }
+    }
+    (out, over_budget)
 }
 
 /// Lines the diff found equal (`a` and `b` have the same length): runs that
