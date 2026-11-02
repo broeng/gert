@@ -7869,6 +7869,7 @@ dependencies = [
  "gpui-kit",
  "http",
  "jiff",
+ "local-git",
  "log",
  "model",
  "serde_json",

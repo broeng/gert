@@ -14,6 +14,7 @@ gerrit-api.workspace = true
 globset.workspace = true
 gpui-kit.workspace = true
 jiff.workspace = true
+local-git.workspace = true
 log.workspace = true
 model.workspace = true
 serde_json.workspace = true

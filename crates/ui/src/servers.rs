@@ -20,6 +20,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    checkouts::Checkouts,
     outbox::DraftOutbox,
     session::{ServerConfig, ServerKey, ServerSetup, Session},
     syntax_cache::SyntaxCache,
@@ -133,6 +134,10 @@ pub(crate) struct ServerEntry {
     /// across servers, so a shared cache could serve one server's colors
     /// for another's file. Made on first use.
     pub syntax: Option<Entity<SyntaxCache>>,
+    /// The local checkouts of this server's projects and their opened
+    /// repositories. Made on first use from `setup.projects`; a settings
+    /// save updates it in place ([`Checkouts::set_projects`]).
+    pub checkouts: Option<Entity<Checkouts>>,
     /// The server's own diff preferences (the user's settings on that
     /// server), as last loaded; the shell's shared settings show the
     /// active server's.
@@ -141,6 +146,8 @@ pub(crate) struct ServerEntry {
     pub credentials_task: Option<Task<()>>,
     /// Saving the bookmarks.
     pub bookmarks_task: Option<Task<()>>,
+    /// Saving the project checkouts.
+    pub projects_task: Option<Task<()>>,
     /// How many changes want the user's attention on this server, as of the
     /// last background poll (or an earlier run's, from the cache). `None`:
     /// not known. Only polled while the server is not the active one.
@@ -168,9 +175,11 @@ impl ServerEntry {
             connection: Connection::Connecting,
             outbox_subs: Vec::new(),
             syntax: None,
+            checkouts: None,
             diff_prefs: None,
             credentials_task: None,
             bookmarks_task: None,
+            projects_task: None,
             attention_count: None,
             attention_task: None,
             me: None,

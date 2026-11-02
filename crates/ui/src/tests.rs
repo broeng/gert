@@ -2435,6 +2435,33 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    fn saving_projects_updates_the_setup_and_the_server_checkouts(cx: &mut TestAppContext) {
+        use crate::session::{ProjectSettings, ServerKey};
+        let f = fixture(cx, false);
+        let key = ServerKey::new("test");
+        let checkouts = f
+            .shell
+            .update(cx, |s, cx| s.checkouts(&key, cx))
+            .expect("server");
+        assert_eq!(checkouts.read_with(cx, |c, _| c.all().len()), 0);
+
+        let list = vec![ProjectSettings::new("demo/a", "/nowhere/a")];
+        f.shell
+            .update(cx, |s, cx| s.save_projects(list.clone(), cx));
+        cx.run_until_parked();
+        assert_eq!(*f.backend.saved_projects.lock().unwrap(), vec![list]);
+        let now = checkouts.read_with(cx, |c, _| c.all());
+        assert_eq!(now.len(), 1);
+        assert_eq!(now[0].project, "demo/a");
+        // The shell hands out the same entity again.
+        let again = f
+            .shell
+            .update(cx, |s, cx| s.checkouts(&key, cx))
+            .expect("server");
+        assert_eq!(again.entity_id(), checkouts.entity_id());
+    }
+
+    #[gpui_kit::test]
     fn moving_a_query_saves_it_and_the_dashboard_follows(cx: &mut TestAppContext) {
         let f = fixture(cx, false);
         open_settings(cx, &f);

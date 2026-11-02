@@ -20,6 +20,7 @@ use crate::{
     action_menu::{ActionDialog, ActionEvent, Done},
     actions::{self, *},
     attention::{self, Polled},
+    checkouts::Checkouts,
     filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
     goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, LinkServer, resolve_link},
     inbox::{self, InboxOp},
@@ -40,8 +41,8 @@ use crate::{
     row::server_label,
     servers::{ACTIVE_SERVER_STATE, Connection, Servers},
     session::{
-        Env, SavedQuery, ServerConfig, ServerKey, ServerSetup, Session, Startup, StartupPage,
-        server_name_from_url,
+        Env, ProjectSettings, SavedQuery, ServerConfig, ServerKey, ServerSetup, Session, Startup,
+        StartupPage, server_name_from_url,
     },
     settings::{DiffSettings, FileFilters, PageLayout},
     switcher::{ServerSwitcher, SwitcherEvent, SwitcherRow},
@@ -403,6 +404,60 @@ impl Shell {
                 .clone(),
             None => cx.new(|_| SyntaxCache::new()),
         }
+    }
+
+    /// The local checkouts of server `key` (made on first use), the way the
+    /// change and diff pages ask for "the repository of project X on this
+    /// server" and the settings page lists the projects.
+    #[cfg_attr(not(test), allow(dead_code))] // L2b/L3 are the consumers.
+    pub(crate) fn checkouts(
+        &mut self,
+        key: &ServerKey,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Checkouts>> {
+        let entry = self.servers.get_mut(key)?;
+        let projects = &entry.setup.projects;
+        Some(
+            entry
+                .checkouts
+                .get_or_insert_with(|| cx.new(|_| Checkouts::new(projects.clone())))
+                .clone(),
+        )
+    }
+
+    /// Writes the project checkouts of the active server in the background.
+    /// Once the config file has them the server's setup and its
+    /// [`Checkouts`] follow; on failure the old list stays.
+    #[cfg_attr(not(test), allow(dead_code))] // L2b is the consumer.
+    pub(crate) fn save_projects(&mut self, list: Vec<ProjectSettings>, cx: &mut Context<Self>) {
+        let Some(entry) = self.servers.active_mut() else {
+            return;
+        };
+        let Some(session) = &entry.session else {
+            return;
+        };
+        let backend = session.backend().clone();
+        let key = entry.setup.key.clone();
+        entry.projects_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { backend.save_projects(&list) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(saved) => {
+                        if let Some(e) = this.servers.get_mut(&key) {
+                            e.setup.projects = saved.clone();
+                            if let Some(c) = &e.checkouts {
+                                c.update(cx, |c, cx| c.set_projects(saved, cx));
+                            }
+                        }
+                    }
+                    Err(e) => log::warn!("saving the projects: {e}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// The outbox of the active server.

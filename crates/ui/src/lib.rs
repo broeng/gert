@@ -5,6 +5,7 @@ mod action_menu;
 mod actions;
 mod attention;
 mod card;
+mod checkouts;
 mod comments;
 pub mod diff;
 mod diff_load;
@@ -43,6 +44,7 @@ mod testing;
 #[cfg(test)]
 mod tests;
 
+pub use checkouts::{Checkout, CheckoutState, Checkouts};
 pub use login::{LoginError, LoginOutcome, LoginRequest};
 pub use notifier::{Clicked, Notifier};
 pub use servers::{ACTIVE_SERVER_STATE, Connection};
