@@ -68,7 +68,8 @@
           '';
           postFixup = ''
             wrapProgram $out/bin/gert \
-              --suffix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs}
+              --suffix LD_LIBRARY_PATH : ${lib.makeLibraryPath runtimeLibs} \
+              --suffix PATH : ${lib.makeBinPath [ pkgs.gitMinimal ]}
           '';
         });
 
