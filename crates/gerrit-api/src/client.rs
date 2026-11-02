@@ -498,7 +498,7 @@ impl GerritClient {
     ) -> Result<ChangeSummary, Error> {
         let base = base.map(str::trim).filter(|b| !b.is_empty());
         // The one request body that can name a change by number.
-        if let Some(what) = base.and_then(reserved::local_change) {
+        if let Some(what) = base.and_then(reserved::local_rebase_base) {
             return Err(Error::LocalNumber(what));
         }
         let body = wire::RebaseInput {

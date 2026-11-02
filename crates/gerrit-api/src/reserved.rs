@@ -20,13 +20,21 @@
 //!   SHA without letters), and the `base` parameter (the files and diff
 //!   endpoints): patch set numbers, refused at or above
 //!   [`PatchSetNumber::LOCAL_BASE`];
-//! - the search `q`: `change:N` terms and bare numbers (which Gerrit reads
-//!   as change numbers), refused above `i32::MAX`. Other operators that take
-//!   numbers are not built from change numbers by this client.
+//! - the search `q` of the change query (`/changes/?q=`): `change:N` terms
+//!   (also `project~branch~N` and a quoted value), as the client builds
+//!   them for the relation chain, refused above `i32::MAX`; bare numbers
+//!   only from [`ChangeNumber::LOCAL_BASE`] on, since a user's search may
+//!   hold any long number. Quoted (`"…"`) and braced (`{…}`) text is the
+//!   value of some other operator and is skipped, and so are other
+//!   operators that take numbers: the client builds none of them from
+//!   change numbers, and local numbers never reach text the user types
+//!   (they are never displayed).
+//!
+//! The rebase `base` in a request body is checked by [`local_rebase_base`].
 //!
 //! [`ChangeNumber::LOCAL_BASE`]: model::ChangeNumber::LOCAL_BASE
 
-use model::PatchSetNumber;
+use model::{ChangeNumber, PatchSetNumber};
 
 /// The first reserved number in the request target `target` (a path with
 /// an optional `?query`, percent-encoded as sent), described for an error
@@ -34,6 +42,13 @@ use model::PatchSetNumber;
 pub(crate) fn local_number_in(target: &str) -> Option<String> {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let segments: Vec<String> = path.split('/').map(|s| decode(s, false)).collect();
+    // `q` is a change search only on the collection; elsewhere (the
+    // reviewer suggestions) it is free text.
+    let change_query = segments
+        .iter()
+        .rev()
+        .find(|s| !s.is_empty())
+        .is_some_and(|s| s == "changes");
     for pair in segments.windows(2) {
         let found = match pair[0].as_str() {
             "changes" => {
@@ -52,7 +67,7 @@ pub(crate) fn local_number_in(target: &str) -> Option<String> {
         let value = decode(value, true);
         let found = match decode(key, true).as_str() {
             "base" => local_patch_set(&value),
-            "q" => local_number_in_query(&value),
+            "q" if change_query => local_number_in_query(&value),
             _ => None,
         };
         if found.is_some() {
@@ -63,27 +78,90 @@ pub(crate) fn local_number_in(target: &str) -> Option<String> {
 }
 
 /// The first reserved change number in the Gerrit search `query`: a
-/// `change:N` term or a bare number, also negated or in parentheses.
+/// `change:N` term (also negated, in parentheses, or with a quoted value)
+/// or a bare number from the local range. See the module comment.
 fn local_number_in_query(query: &str) -> Option<String> {
-    query
-        .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
-        .find_map(|term| {
-            let term = term.trim_start_matches(['-', '!']);
-            let value = match term.split_once(':') {
-                Some((op, value)) if op.eq_ignore_ascii_case("change") => value,
-                Some(_) => return None,
-                None => term,
-            };
-            let value = value.trim_matches(['"', '{', '}']);
-            // `project~branch~number` names a change by number too.
-            local_change(value.rsplit('~').next().unwrap_or_default())
-        })
+    terms(query).into_iter().find_map(|(text, quoted)| {
+        let text = text.trim_start_matches(['-', '!']);
+        match text.split_once(':') {
+            Some((op, value)) if op.eq_ignore_ascii_case("change") => {
+                let value = if value.is_empty() {
+                    quoted.as_deref().unwrap_or_default()
+                } else {
+                    value
+                };
+                // `project~branch~number` names a change by number too.
+                local_change(value.rsplit('~').next().unwrap_or_default())
+            }
+            Some(_) => None,
+            None if quoted.is_some() => None,
+            None => in_local_range(text),
+        }
+    })
+}
+
+/// The terms of a Gerrit search: split on blanks and parentheses outside
+/// quotes and braces. Each is its unquoted text and the content of its
+/// (last) quoted or braced part, if it has one.
+fn terms(query: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut quoted: Option<String> = None;
+    let mut chars = query.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() || c == '(' || c == ')' => {
+                if !text.is_empty() || quoted.is_some() {
+                    out.push((std::mem::take(&mut text), quoted.take()));
+                }
+            }
+            '"' | '{' => {
+                let close = if c == '"' { '"' } else { '}' };
+                let mut inner = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' if close == '"' => inner.extend(chars.next()),
+                        c if c == close => break,
+                        c => inner.push(c),
+                    }
+                }
+                quoted = Some(inner);
+            }
+            c => text.push(c),
+        }
+    }
+    if !text.is_empty() || quoted.is_some() {
+        out.push((text, quoted));
+    }
+    out
+}
+
+/// `"change N"` if `id` is a number in the local change range.
+fn in_local_range(id: &str) -> Option<String> {
+    let local = is_number(id)
+        && id
+            .parse::<u64>()
+            .is_ok_and(|n| n >= ChangeNumber::LOCAL_BASE);
+    local.then(|| format!("change {id}"))
+}
+
+/// The local number named by the rebase `base` (a commit SHA, a change
+/// number, or `refs/changes/NN/<change>/<patch set>`), if it names one. A
+/// bare run of digits counts only from [`ChangeNumber::LOCAL_BASE`] on:
+/// a shorter one may be a SHA prefix the user typed.
+pub(crate) fn local_rebase_base(base: &str) -> Option<String> {
+    if let Some(rest) = base.strip_prefix("refs/changes/") {
+        let mut parts = rest.split('/').skip(1);
+        let change = parts.next().and_then(local_change);
+        return change.or_else(|| parts.next().and_then(local_patch_set));
+    }
+    in_local_range(base)
 }
 
 /// `"change N"` if `id` is a number no Gerrit change can have: one that
 /// fits a [`model::ChangeNumber`] but not Gerrit's `int`. Longer runs of
 /// digits are not numbers this client builds.
-pub(crate) fn local_change(id: &str) -> Option<String> {
+fn local_change(id: &str) -> Option<String> {
     let reserved = is_number(id) && id.parse::<u64>().is_ok_and(|n| n > i32::MAX as u64);
     reserved.then(|| format!("change {id}"))
 }
@@ -135,8 +213,6 @@ fn decode(s: &str, query: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use model::ChangeNumber;
-
     use super::*;
 
     const LOCAL: u64 = ChangeNumber::LOCAL_BASE + 1;
@@ -224,13 +300,82 @@ mod tests {
             Some(format!("change {LOCAL}"))
         );
         assert_eq!(local_number_in(&q("change:5 OR change:2147483647")), None);
+        assert_eq!(
+            local_number_in(&q(&format!("message:\"x\" change:\"{LOCAL}\""))),
+            Some(format!("change {LOCAL}"))
+        );
+        assert_eq!(
+            local_number_in(&q(&format!("{LOCAL}"))),
+            Some(format!("change {LOCAL}"))
+        );
         assert_eq!(local_number_in(&q(&format!("message:{LOCAL}"))), None);
         assert_eq!(local_number_in(&q("change:I0123abcd project:p")), None);
-        // Only `q` is a query.
+        // Only `q` is a query, and only on the change collection.
         assert_eq!(
             local_number_in(&format!("/changes/5/suggest_reviewers?n={LOCAL}")),
             None
         );
+        assert_eq!(
+            local_number_in(&format!("/a/changes/5/suggest_reviewers?q={LOCAL}&n=5")),
+            None
+        );
+        assert_eq!(
+            local_number_in(&format!("/r/a/changes/?q={LOCAL}")),
+            Some(format!("change {LOCAL}"))
+        );
+    }
+
+    /// What users write in searches is theirs: long numbers in it are not
+    /// change numbers, quoted or braced text is not looked at.
+    #[test]
+    fn ordinary_searches_with_long_numbers_are_sent() {
+        let q = |s: &str| format!("/changes/?q={}", crate::query::encode_component(s));
+        for search in [
+            "message:\"fixes bug 12345678901\"",
+            "message:{build 20231102123456}",
+            "owner:self 1699999999999",
+            "message:\"see change:99999999999\"",
+            "message:\"a \\\" change:99999999999\"",
+            "(is:open OR 99999999999) -2147483648",
+        ] {
+            assert_eq!(local_number_in(&q(search)), None, "{search}");
+        }
+        // A `change:` term with a number no Gerrit change can have still is
+        // refused.
+        assert_eq!(
+            local_number_in(&q("change:99999999999")),
+            Some("change 99999999999".into())
+        );
+    }
+
+    #[test]
+    fn rebase_bases() {
+        assert_eq!(
+            local_rebase_base(&LOCAL.to_string()),
+            Some(format!("change {LOCAL}"))
+        );
+        assert_eq!(
+            local_rebase_base(&format!("refs/changes/01/{LOCAL}/1")),
+            Some(format!("change {LOCAL}"))
+        );
+        assert_eq!(
+            local_rebase_base(&format!("refs/changes/05/5/{LOCAL_PS}")),
+            Some(format!("patch set {LOCAL_PS}"))
+        );
+        // A SHA prefix of digits, a real change, a real ref, a SHA.
+        assert_eq!(local_rebase_base("12345678901234"), None);
+        assert_eq!(local_rebase_base("5"), None);
+        assert_eq!(local_rebase_base("refs/changes/05/5/2"), None);
+        assert_eq!(local_rebase_base("0123abcd"), None);
+    }
+
+    #[test]
+    fn an_encoded_tilde_still_separates_the_number() {
+        assert_eq!(
+            local_number_in(&format!("/changes/demo%2Fx%7E{LOCAL}/detail")),
+            Some(format!("change {LOCAL}"))
+        );
+        assert_eq!(local_number_in("/changes/demo%2Fx%7E5/detail"), None);
     }
 
     #[test]
