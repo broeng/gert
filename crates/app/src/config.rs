@@ -670,12 +670,16 @@ pub struct ProjectConfig {
     /// The directory, as the user wrote it (it may start with `~`).
     pub checkout: String,
     /// Show the user's own unpushed commits in the checkout as local
-    /// changes.
-    #[serde(skip_serializing_if = "is_false")]
+    /// changes. A value that is not a boolean reads as `false`, with a
+    /// warning.
+    #[serde(
+        deserialize_with = "lenient_local_changes",
+        skip_serializing_if = "is_false"
+    )]
     pub local_changes: bool,
     /// What happens to votes on a local change that was amended before it
-    /// was uploaded. An unknown value reads as the default, `exact`, with a
-    /// warning.
+    /// was uploaded. An unknown value (or one that is not a string) reads
+    /// as the default, `exact`, with a warning.
     #[serde(
         deserialize_with = "lenient_local_approval",
         skip_serializing_if = "is_default_approval"
@@ -691,13 +695,28 @@ fn is_default_approval(a: &LocalApproval) -> bool {
     *a == LocalApproval::default()
 }
 
-/// Reads `local_approval`: an unknown spelling is the default, with a
+/// Reads `local_changes`: anything but a boolean is `false`, with a
 /// warning, so that a typo never fails the file.
+fn lenient_local_changes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(match toml::Value::deserialize(d)? {
+        toml::Value::Boolean(b) => b,
+        other => {
+            log::warn!("config: local_changes = {other} is not true or false; using false");
+            false
+        }
+    })
+}
+
+/// Reads `local_approval`: an unknown spelling, or a value that is not a
+/// string, is the default, with a warning, so that a typo never fails the
+/// file.
 fn lenient_local_approval<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<LocalApproval, D::Error> {
-    let text = String::deserialize(d)?;
-    Ok(local_approval_of(&text))
+    Ok(match toml::Value::deserialize(d)? {
+        toml::Value::String(text) => local_approval_of(&text),
+        other => local_approval_of(&other.to_string()),
+    })
 }
 
 /// The strategy spelled `text`; `exact` (with a warning) if it is none.
@@ -1539,6 +1558,10 @@ fn apply_projects(new: &[ProjectConfig], root: &mut toml_edit::Table) {
             if local_changes.unwrap_or_default() != p.local_changes {
                 set_or_remove(t, "local_changes", p.local_changes.then(|| true.into()));
             }
+            // An unknown spelling reads as the default, so it is left
+            // alone while the project table is unchanged, but this fill
+            // runs whenever any field of the project changes, and then it
+            // is replaced (or, for the default, removed).
             let approval = t
                 .get("local_approval")
                 .and_then(Item::as_str)
@@ -2185,6 +2208,48 @@ local_approval = "exact-or-manual" # ask me
         );
         assert_eq!(local_approval_of("Follow"), LocalApproval::Follow);
         assert_eq!(local_approval_of("nope"), LocalApproval::Exact);
+    }
+
+    #[test]
+    fn an_unknown_local_approval_goes_when_its_project_is_edited() {
+        let path = with_projects("proj-local-unknown-edit");
+        let text = WITH_PROJECTS.replace(
+            "checkout = \"/srv/b\"\n",
+            "checkout = \"/srv/b\"\nlocal_approval = \"strict\"\n",
+        );
+        fs::write(&path, &text).unwrap();
+        // Another project's edit leaves it.
+        Config::update(&path, |c| {
+            c.servers[0].projects[0].checkout = "/srv/a2".into()
+        })
+        .unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("\"strict\""));
+        // An edit of its own project writes what it reads as: the default,
+        // so the key goes.
+        Config::update(&path, |c| {
+            c.servers[0].projects[1].checkout = "/srv/b2".into()
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("local_approval"), "{text}");
+        assert!(text.contains("checkout = \"/srv/b2\""), "{text}");
+    }
+
+    #[test]
+    fn local_options_of_the_wrong_type_read_as_the_defaults() {
+        let path = with_projects("proj-local-types");
+        let text = WITH_PROJECTS.replace(
+            "checkout = \"/srv/b\"\n",
+            "checkout = \"/srv/b\"\nlocal_changes = \"yes\"\nlocal_approval = 1\n",
+        );
+        fs::write(&path, &text).unwrap();
+        let cfg = Config::load(&path).unwrap().unwrap();
+        let p = &cfg.servers[0].projects[1];
+        assert!(!p.local_changes);
+        assert_eq!(p.local_approval, LocalApproval::Exact);
+        // The rest of the file is read as usual.
+        assert_eq!(cfg.servers[0].projects[0], proj("demo/a", "~/src/a"));
+        assert_eq!(cfg.servers[0].queries.len(), 1);
     }
 
     #[test]
