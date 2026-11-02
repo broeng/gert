@@ -1,11 +1,13 @@
-//! Temporary repositories built with the git CLI.
+//! Temporary repositories built with the git CLI. Panicking on failure is
+//! the point here.
+#![allow(clippy::expect_used, clippy::new_without_default)]
 
 use std::path::Path;
 use std::process::Command;
 
 use tempfile::TempDir;
 
-pub(crate) struct TestRepo {
+pub struct TestRepo {
     pub dir: TempDir,
 }
 
@@ -45,7 +47,7 @@ impl TestRepo {
     }
 }
 
-pub(crate) fn git_in(dir: &Path, args: &[&str]) -> String {
+pub fn git_in(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)

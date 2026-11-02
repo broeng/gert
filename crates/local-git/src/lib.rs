@@ -108,5 +108,5 @@ pub(crate) fn is_object_id(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod testutil;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testutil;

@@ -13,6 +13,13 @@ imara-diff = "0.2"
 log.workspace = true
 model.workspace = true
 thiserror.workspace = true
+# Only for the `test-support` feature (temporary repositories).
+tempfile = { version = "3", optional = true }
+
+[features]
+# Exports `testutil` (temporary git repositories built with the git CLI) so
+# that other crates' tests can use them.
+test-support = ["dep:tempfile"]
 
 [dev-dependencies]
 # For tests/dev_gerrit.rs, the opt-in comparison with a local dev Gerrit.
