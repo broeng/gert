@@ -1835,24 +1835,65 @@ fn a_missing_commit_gives_no_local_list(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_late_local_list_does_not_replace_gerrits(cx: &mut TestAppContext) {
     let repo = lt::fixture();
-    let f = unlisted_page(
+    // No checkout settling first: the page is up with no list, git not run.
+    let projects = vec![ProjectSettings::new(
+        "platform/foo",
+        repo.repo.path().to_string_lossy(),
+    )];
+    let f = page_in_with(
         cx,
         unlisted_store(&repo.target),
-        &repo,
         Some(Auth::Anonymous),
-        |http| {
-            http.route("/files", 200, format!(")]}}'\n{}", gerrit_files()));
-        },
+        setup(),
+        ChangeView::default(),
+        |_| {},
+        projects,
     );
-    let detail = lt::detail_at(&repo.target);
-    f.page.update(cx, |p, cx| p.detail_refreshed(&detail, cx));
-    settle_git(cx);
-    assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "gerrit/only.rs"]);
-    // Asking for the local list now, as a slow start would have, changes
-    // nothing: a list is on screen.
     let key = lt::files_key(&repo.target);
-    f.page.update(cx, |p, cx| p.start_local_files(&key, cx));
+    let gerrit = store::CachedFileList {
+        files: ["/COMMIT_MSG", "gerrit/only.rs"]
+            .iter()
+            .map(|p| crate::testing::file(p, model::FileStatus::Modified))
+            .collect(),
+        reviewed: None,
+        fetched_at: ts(),
+    };
+    // The local list is asked for, then Gerrit's arrives before git is done.
+    f.page.update(cx, |p, cx| {
+        p.start_local_files(&key, cx);
+        p.apply_files(&key, gerrit, cx);
+    });
     settle_git(cx);
     assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "gerrit/only.rs"]);
     cx.update(|cx| assert_eq!(f.page.read(cx).files_local_for_test(), None));
+}
+
+#[gpui_kit::test]
+fn r_waits_while_the_list_is_the_local_one(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    let mut server = setup();
+    server.username = Some("u".into());
+    let auth = Auth::Basic {
+        username: "u".into(),
+        password: "p".into(),
+    };
+    let projects = vec![ProjectSettings::new(
+        "platform/foo",
+        repo.repo.path().to_string_lossy(),
+    )];
+    let f = page_in_with(
+        cx,
+        unlisted_store(&repo.target),
+        Some(auth),
+        server,
+        ChangeView::default(),
+        |_| {},
+        projects,
+    );
+    settle_git(cx);
+    cx.update(|cx| assert!(f.page.read(cx).files_local_for_test().is_some()));
+    press(cx, &f, &["j", "r"]);
+    let hint = cx.update(|cx| f.page.read(cx).hint_for_test());
+    assert!(hint.expect("a hint").0.contains("Gerrit's file list"));
+    assert!(!f.http.sent().iter().any(|r| r.method == "PUT"));
 }

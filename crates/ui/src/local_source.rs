@@ -354,6 +354,28 @@ async fn resolve_source(
     }
 }
 
+/// The file list of the lazy source and the checkout it was made in, or
+/// `None` when there is no source, git cannot list it, or git takes longer
+/// than [`RESOLVE_TIMEOUT`] (logged). Call from a foreground task; git runs
+/// on the background executor.
+pub async fn local_file_list(
+    lazy: LocalLazy,
+    cx: &mut AsyncApp,
+) -> Option<(std::path::PathBuf, Vec<FileEntry>)> {
+    let timer = cx.background_executor().timer(RESOLVE_TIMEOUT);
+    let work = cx.background_spawn(async move {
+        let source = lazy.get().await?;
+        Some((source.path().to_owned(), source.file_list()?))
+    });
+    match futures::future::select(std::pin::pin!(work), std::pin::pin!(timer)).await {
+        Either::Left((made, _)) => made,
+        Either::Right(_) => {
+            log::warn!("the local file list took longer than {RESOLVE_TIMEOUT:?}; asking Gerrit");
+            None
+        }
+    }
+}
+
 /// The quiet "local" marker for a diff computed from the checkout at
 /// `path`. `id` must be unique on the page.
 pub fn local_marker(id: impl Into<ElementId>, path: &Path, cx: &App) -> Stateful<Div> {

@@ -54,7 +54,9 @@ use crate::{
     diff_load::{DiffSource, LoadError, load_diff},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
-    local_source::{LocalLazy, LocalSource, LocalState, Lookup, Renames, lookup, renames_of},
+    local_source::{
+        LocalLazy, LocalSource, LocalState, Lookup, Renames, local_file_list, lookup, renames_of,
+    },
     nav::{ChangeView, DiffRoute},
     outbox::DraftOutbox,
     pages::list::Status,
@@ -107,6 +109,9 @@ pub enum ChangeEvent {
 }
 
 /// The file list of the current patch set pair.
+/// Why `r` waits for Gerrit's file list.
+const REVIEWED_WAITS: &str = "Reviewed marks come with Gerrit's file list";
+
 #[derive(Default)]
 struct Files {
     key: Option<FilesKey>,
@@ -742,15 +747,13 @@ impl ChangePage {
             return;
         }
         self.update_local(cx);
+        if matches!(&self.local, LocalState::Ready(_, None)) {
+            return; // no checkout, or it cannot serve this comparison
+        }
         let lazy = self.local.lazy(key, &Arc::default());
         let key = key.clone();
         self.local_files_task = Some(cx.spawn(async move |this, cx| {
-            let made = cx
-                .background_spawn(async move {
-                    let source = lazy.get().await?;
-                    Some((source.path().to_owned(), source.file_list()?))
-                })
-                .await;
+            let made = local_file_list(lazy, cx).await;
             if let Some((path, files)) = made {
                 this.update(cx, |this, cx| {
                     // Gerrit's list (or a stored one) may have come first,
@@ -1844,6 +1847,11 @@ impl ChangePage {
     fn toggle_reviewed(&mut self, _: &ToggleReviewed, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(why) = reviewed::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        if !self.files.loaded || self.files.local.is_some() {
+            // Gerrit's list, computed before the mark, would replace it.
+            self.hint.say(REVIEWED_WAITS, false, cx, |p| &mut p.hint);
             return;
         }
         let (Some(key), Some(path)) = (

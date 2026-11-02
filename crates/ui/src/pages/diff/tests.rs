@@ -210,13 +210,39 @@ fn diff_page_loading_in(
     local: LocalDiff,
     projects: Vec<crate::session::ProjectSettings>,
 ) -> Page {
+    diff_page_loading_as(
+        cx,
+        store,
+        route,
+        http,
+        Some(auth),
+        rules,
+        seed,
+        local,
+        projects,
+    )
+}
+
+/// Like [`diff_page_loading_in`]; `None` is a session that cannot sync.
+#[allow(clippy::too_many_arguments)]
+fn diff_page_loading_as(
+    cx: &mut TestAppContext,
+    store: Store,
+    route: DiffRoute,
+    http: RouteHttpClient,
+    auth: Option<gerrit_api::Auth>,
+    rules: Vec<FileFilter>,
+    seed: Vec<(DiffKey, Highlight)>,
+    local: LocalDiff,
+    projects: Vec<crate::session::ProjectSettings>,
+) -> Page {
     let env = env_with(store, &http);
     let store = env.store.clone();
     let mut server = setup();
-    if let gerrit_api::Auth::Basic { username, .. } = &auth {
+    if let Some(gerrit_api::Auth::Basic { username, .. }) = &auth {
         server.username = Some(username.clone());
     }
-    let session = crate::session::Session::new(&env, &server, Some(auth)).expect("session");
+    let session = crate::session::Session::new(&env, &server, auth).expect("session");
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
     let mut settings_out = None;
@@ -1560,6 +1586,61 @@ mod local {
     }
 
     #[gpui_kit::test]
+    fn offline_with_a_checkout_a_stored_diff_does_not_wait_for_git(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        let mut store = unlisted_store_for(&f.target);
+        let key = crate::syntax_cache::diff_key(
+            &lt::files_key(&f.target),
+            "src/a.rs",
+            Whitespace::IgnoreNone,
+        );
+        let cached = crate::diff::tests::fixture("handwritten/diff_rename.response.json");
+        store
+            .save_diff(store::ServerId(1), &key, &cached, now())
+            .expect("save");
+        let projects = vec![ProjectSettings::new(
+            "platform/foo",
+            f.repo.path().to_string_lossy(),
+        )];
+        let p = diff_page_loading_as(
+            cx,
+            store,
+            DiffRoute {
+                target: PatchSetNumber(1),
+                ..route("src/a.rs")
+            },
+            RouteHttpClient::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            LocalDiff::default(),
+            projects,
+        );
+        // One pass, no waiting for the real threads git runs on.
+        cx.run_until_parked();
+        assert_eq!(shown(cx, &p), Some(DiffSource::Cache));
+    }
+
+    #[gpui_kit::test]
+    fn r_does_nothing_while_the_list_is_the_local_one(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        let p = open_local(
+            cx,
+            &f,
+            unlisted_store_for(&f.target),
+            RouteHttpClient::new(),
+            signed_in(),
+            "src/a.rs",
+        );
+        p.page
+            .read_with(cx, |p, _| assert!(p.files_local_for_test().is_some()));
+        press(cx, p.window, &["r"]);
+        let hint = p.page.read_with(cx, |p, _| p.hint_for_test());
+        assert!(hint.expect("a hint").0.contains("Gerrit's file list"));
+        assert!(!p.http.sent().iter().any(|r| r.method == "PUT"));
+    }
+
+    #[gpui_kit::test]
     fn gerrits_list_replaces_the_local_one(cx: &mut TestAppContext) {
         let f = lt::fixture();
         let http = RouteHttpClient::new();
@@ -1676,4 +1757,156 @@ mod local {
         );
         assert_eq!(shown(cx, &p), Some(DiffSource::Gerrit));
     }
+}
+
+// ---- a store miss: the file list comes after the page opens ----
+
+fn unlisted_store() -> Store {
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server");
+    store
+        .save_change_detail(server, &detail(7, 3, 3), now())
+        .expect("detail");
+    store
+}
+
+fn gerrit_files() -> Vec<u8> {
+    let entries: Vec<_> = PATHS
+        .iter()
+        .map(|p| format!("\"{p}\":{{\"size\":1}}"))
+        .collect();
+    format!(")]}}'\n{{{}}}", entries.join(",")).into_bytes()
+}
+
+fn http_with_files() -> RouteHttpClient {
+    let http = http();
+    http.route("/files", 200, gerrit_files());
+    http
+}
+
+fn miss_page(
+    cx: &mut TestAppContext,
+    store: Store,
+    http: RouteHttpClient,
+    auth: Option<gerrit_api::Auth>,
+) -> Page {
+    diff_page_loading_as(
+        cx,
+        store,
+        route("src/a.rs"),
+        http,
+        auth,
+        Vec::new(),
+        Vec::new(),
+        syntax_off(),
+        Vec::new(),
+    )
+}
+
+#[gpui_kit::test]
+fn after_a_miss_gerrits_list_comes_and_the_diff_is_fetched_once(cx: &mut TestAppContext) {
+    let p = miss_page(
+        cx,
+        unlisted_store(),
+        http_with_files(),
+        Some(gerrit_api::Auth::Anonymous),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        requests(&p.http, "src%2Fa.rs/diff"),
+        1,
+        "{:?}",
+        p.http.requested()
+    );
+    cx.update(|cx| {
+        let page = p.page.read(cx);
+        assert_eq!(page.file_paths_for_test(), PATHS);
+        assert_eq!(page.files_local_for_test(), None);
+        assert!(page.shown_for_test().is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn a_bracket_pressed_during_a_miss_goes_to_the_right_file(cx: &mut TestAppContext) {
+    let p = miss_page(
+        cx,
+        unlisted_store(),
+        http_with_files(),
+        Some(gerrit_api::Auth::Anonymous),
+    );
+    cx.update(|cx| assert!(p.page.read(cx).file_paths_for_test().is_empty()));
+    press(cx, p.window, &["]"]);
+    assert_eq!(opened(&p), ["open src/b.rs"]);
+}
+
+#[gpui_kit::test]
+fn the_diff_is_fetched_although_the_files_request_fails(cx: &mut TestAppContext) {
+    // No /files route: a 404.
+    let p = miss_page(
+        cx,
+        unlisted_store(),
+        http(),
+        Some(gerrit_api::Auth::Anonymous),
+    );
+    cx.run_until_parked();
+    assert!(requests(&p.http, "/files") > 0);
+    cx.update(|cx| {
+        let page = p.page.read(cx);
+        assert!(
+            page.shown_for_test().is_some(),
+            "{:?}",
+            page.error_for_test()
+        );
+        assert!(page.file_paths_for_test().is_empty());
+    });
+}
+
+use crate::diff_load::DiffSource;
+
+fn with_stored_diff(mut store: Store) -> Store {
+    let server = store.server_id(URL).expect("server");
+    let key = crate::syntax_cache::diff_key(&files_key(), "src/a.rs", Whitespace::IgnoreNone);
+    let cached = crate::diff::tests::fixture("handwritten/diff_rename.response.json");
+    store.save_diff(server, &key, &cached, now()).expect("diff");
+    store
+}
+
+#[gpui_kit::test]
+fn offline_a_miss_still_shows_a_stored_diff(cx: &mut TestAppContext) {
+    let p = miss_page(cx, with_stored_diff(unlisted_store()), http(), None);
+    cx.run_until_parked();
+    assert_eq!(
+        p.page.read_with(cx, |p, _| p.source_for_test()),
+        Some(DiffSource::Cache)
+    );
+    assert!(p.http.requested().is_empty(), "{:?}", p.http.requested());
+}
+
+#[gpui_kit::test]
+fn r_waits_for_gerrits_list(cx: &mut TestAppContext) {
+    let http = http_with_files();
+    http.route(PUT_A, 201, "");
+    let p = diff_page_loading_as(
+        cx,
+        unlisted_store(),
+        route("src/a.rs"),
+        http,
+        Some(signed_in()),
+        Vec::new(),
+        Vec::new(),
+        syntax_off(),
+        Vec::new(),
+    );
+    cx.run_until_parked();
+    // The window between the page knowing the comparison and the list
+    // arriving cannot be held open with a synchronous fake: put it back.
+    p.page.update(cx, |p, _| {
+        p.files_loaded = false;
+        p.files_pending = 1;
+    });
+    press(cx, p.window, &["r"]);
+    let hint = p.page.read_with(cx, |p, _| p.hint_for_test());
+    assert!(hint.expect("a hint").0.contains("Gerrit's file list"));
+    assert!(!is_reviewed(cx, &p));
+    assert!(!p.http.sent().iter().any(|r| r.method == "PUT"));
 }

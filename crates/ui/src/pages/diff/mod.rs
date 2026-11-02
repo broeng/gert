@@ -46,7 +46,9 @@ use crate::{
     diff_load::{DiffSource, LoadError, context_label, load_diff},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
-    local_source::{LocalSource, LocalState, Lookup, Renames, local_marker, lookup, renames_of},
+    local_source::{
+        LocalSource, LocalState, Lookup, Renames, local_file_list, local_marker, lookup, renames_of,
+    },
     nav::DiffRoute,
     outbox::DraftOutbox,
     reply, reviewed,
@@ -107,7 +109,11 @@ pub struct DiffPage {
     /// How many of the requests for a missing list (Gerrit, the checkout)
     /// have not answered yet.
     files_pending: u8,
-    files_tasks: Vec<Task<()>>,
+    files_task: Option<Task<()>>,
+    /// Making the list in the checkout.
+    local_files_task: Option<Task<()>>,
+    /// Looking for a stored diff while the list is missing.
+    stored_probe: Option<Task<()>>,
     /// The server's local checkouts, when it has any.
     checkouts: Option<Entity<Checkouts>>,
     /// The local source for `files_key`, once resolved.
@@ -190,7 +196,9 @@ impl DiffPage {
             files_loaded: false,
             files_local: None,
             files_pending: 0,
-            files_tasks: Vec::new(),
+            files_task: None,
+            local_files_task: None,
+            stored_probe: None,
             checkouts: None,
             local: LocalState::Unknown,
             local_task: None,
@@ -298,20 +306,17 @@ impl DiffPage {
         let Some(key) = self.files_key.clone() else {
             return;
         };
-        self.files_tasks.clear();
+        self.files_task = None;
+        self.local_files_task = None;
         self.files_pending = 0;
+        self.probe_stored_diff(&key, cx);
         self.ensure_local(&key, cx);
         if !matches!(self.local, LocalState::Ready(_, None)) {
             let lazy = self.local.lazy(&key, &Arc::default());
             self.files_pending += 1;
             let task_key = key.clone();
-            self.files_tasks.push(cx.spawn(async move |this, cx| {
-                let made = cx
-                    .background_spawn(async move {
-                        let source = lazy.get().await?;
-                        Some((source.path().to_owned(), source.file_list()?))
-                    })
-                    .await;
+            self.local_files_task = Some(cx.spawn(async move |this, cx| {
+                let made = local_file_list(lazy, cx).await;
                 this.update(cx, |this, cx| {
                     this.files_pending = this.files_pending.saturating_sub(1);
                     // Gerrit's list may have come first.
@@ -329,7 +334,7 @@ impl DiffPage {
             self.files_pending += 1;
             let syncer = self.session.syncer().clone();
             let task_key = key.clone();
-            self.files_tasks.push(cx.spawn(async move |this, cx| {
+            self.files_task = Some(cx.spawn(async move |this, cx| {
                 let fetched = cx
                     .background_spawn(async move { syncer.refresh_files(&key).await })
                     .await;
@@ -348,6 +353,22 @@ impl DiffPage {
             }));
         }
         self.files_settled(cx);
+    }
+
+    /// A stored diff is shown without waiting for a list: the diff is
+    /// fetched at once if the store has it (`load_diff` then reads the
+    /// store and never touches git).
+    fn probe_stored_diff(&mut self, files: &FilesKey, cx: &mut Context<Self>) {
+        let key = self.make_key(files, cx);
+        let syncer = self.session.syncer().clone();
+        self.stored_probe = Some(cx.spawn(async move |this, cx| {
+            let hit = cx
+                .background_spawn(async move { matches!(syncer.cached_diff(&key), Ok(Some(_))) })
+                .await;
+            if hit {
+                this.update(cx, |this, cx| this.fetch(cx)).ok();
+            }
+        }));
     }
 
     /// Fetches the diff and does the step asked for meanwhile, once a list
@@ -374,6 +395,10 @@ impl DiffPage {
     ) {
         if self.files_key.as_ref() != Some(key) {
             return;
+        }
+        if local.is_none() {
+            // The checkout's list is not needed any more.
+            self.local_files_task = None;
         }
         self.files = files;
         self.files_loaded = true;
@@ -410,6 +435,7 @@ impl DiffPage {
             // The diff is fetched, and the step done, once a list is there.
             self.pending_step = step;
             self.miss_files(cx);
+            cx.notify(); // the header, from the detail
             return;
         }
         if self.files_key.is_some() {
@@ -926,6 +952,16 @@ impl DiffPage {
         let Some(key) = self.files_key.clone() else {
             return;
         };
+        if (self.files_pending > 0 && !self.files_loaded) || self.files_local.is_some() {
+            // Gerrit's list, computed before the mark, would replace it.
+            self.hint.say(
+                "Reviewed marks come with Gerrit's file list",
+                false,
+                cx,
+                |p| &mut p.hint,
+            );
+            return;
+        }
         let path = self.route.path.clone();
         let reviewed = !self.reviewed.contains(&path);
         self.mark_reviewed(&path, reviewed);
