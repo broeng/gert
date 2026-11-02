@@ -398,6 +398,17 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX pending_reviews_by_change ON pending_reviews (server_id, change_number);
     CREATE INDEX pending_reviews_by_local ON pending_reviews (local_change_id);
     ",
+    // v12 -> v13: a consolidation post claims its drafts.
+    //
+    // `drafts.posting_nonce` is set on the reserved drafts a consolidation
+    // post sends when the post is claimed, with the post's nonce (also the
+    // claimed review's), and cleared when the post is finished or released.
+    // A crash in between leaves it, so the next run checks the Gerrit
+    // change's messages for the post's tag before posting again; this
+    // works for posts without a review too.
+    "
+    ALTER TABLE drafts ADD COLUMN posting_nonce TEXT;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

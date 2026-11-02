@@ -12,6 +12,11 @@
 //! not be moved are *held* (`drafts.held_reason`) on their local patch set,
 //! for the user to publish or drop ([`Store::held_items`]).
 //!
+//! A post is claimed first ([`Store::claim_local_post`]): its drafts and
+//! its review get the post's nonce, which is also in the review's tag, so
+//! after a crash [`Store::unfinished_local_posts`] names the posts to check
+//! against the change's messages before posting again.
+//!
 //! The rewrite moves exactly what it is told. Anything created after the
 //! run's snapshot stays where it is and counts as unsent, so the change is
 //! not consolidated and the next run handles it.
@@ -115,6 +120,17 @@ pub struct FinishReport {
     /// flight (or are not this change's): they stay for the next post.
     pub drafts_kept: usize,
     pub review_states: usize,
+}
+
+/// What [`Store::claim_local_post`] claimed for one consolidation post.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalPost {
+    /// The review, now `Sending` with the post's nonce, if one was claimed.
+    pub review: Option<PendingReview>,
+    /// The drafts the post sends inline: the change's reserved drafts,
+    /// except the message drafts of its other reviews, each now carrying
+    /// the post's nonce. In creation order.
+    pub drafts: Vec<Draft>,
 }
 
 /// What the held card of a Gerrit change shows.
@@ -308,10 +324,126 @@ impl Store {
         )
     }
 
+    /// Claims a consolidation post of local change `change` under `nonce`,
+    /// in one transaction: marks the change's reserved drafts (except the
+    /// message drafts of other reviews) with the nonce, and, if `review` is
+    /// given and in one of the states `from`, claims it as
+    /// [`Store::mark_pending_review_sending`] does, with the same nonce. A
+    /// crash after the post leaves the nonce on both, for
+    /// [`Store::unfinished_local_posts`]; [`Store::finish_local_post`] or
+    /// [`Store::release_local_post`] clear it.
+    ///
+    /// Claiming again with the same nonce returns the same post (a retry
+    /// after a crash). `None`, writing nothing, if the change is gone, if
+    /// a draft or the review is claimed under another nonce, or if the
+    /// review is not the change's or in none of the states `from`.
+    pub fn claim_local_post(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        review: Option<(PendingReviewId, &[PendingReviewState])>,
+        nonce: &str,
+    ) -> Result<Option<LocalPost>, Error> {
+        let tx = self.conn.transaction()?;
+        if load_change(&tx, server, change)?.is_none() {
+            return Ok(None);
+        }
+        // The drafts of this post: reserved for the change, except the
+        // messages of its other reviews.
+        let mine = "server_id = ?1 AND reserved_by = ?2
+                    AND (pending_review_id IS NULL OR pending_review_id IS ?3)";
+        let review_id = review.map(|(id, _)| id.0);
+        let taken: bool = tx.query_row(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM drafts WHERE {mine}
+                     AND posting_nonce IS NOT NULL AND posting_nonce <> ?4)"
+            ),
+            params![server.0, change.0, review_id, nonce],
+            |r| r.get(0),
+        )?;
+        if taken {
+            return Ok(None);
+        }
+        let claimed = match review {
+            None => None,
+            Some((id, from)) => {
+                let Some(r) = pending_reviews::load(&tx, server, id)? else {
+                    return Ok(None);
+                };
+                let again =
+                    r.state == PendingReviewState::Sending && r.nonce.as_deref() == Some(nonce);
+                let claimable = from.contains(&r.state) && r.state != PendingReviewState::Sending;
+                if r.local_change != change || !(again || claimable) {
+                    return Ok(None);
+                }
+                tx.execute(
+                    "UPDATE pending_reviews SET state = 'sending', nonce = ?3, error = NULL,
+                         held_reason = NULL
+                     WHERE server_id = ?1 AND id = ?2",
+                    params![server.0, id.0, nonce],
+                )?;
+                pending_reviews::load(&tx, server, id)?
+            }
+        };
+        tx.execute(
+            &format!("UPDATE drafts SET posting_nonce = ?4 WHERE {mine}"),
+            params![server.0, change.0, review_id, nonce],
+        )?;
+        let drafts = crate::drafts::query(&tx, mine, &[&server.0, &change.0, &review_id])?;
+        tx.commit()?;
+        Ok(Some(LocalPost {
+            review: claimed,
+            drafts,
+        }))
+    }
+
+    /// Gives up a claimed post that was not sent (the server refused it, or
+    /// a check after a crash found it was not posted): clears `nonce` from
+    /// the change's drafts so a later post can claim them. The review's
+    /// state is the caller's (`set_pending_review_state`). Returns how many
+    /// drafts were released.
+    pub fn release_local_post(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        nonce: &str,
+    ) -> Result<usize, Error> {
+        Ok(self.conn.execute(
+            "UPDATE drafts SET posting_nonce = NULL
+             WHERE server_id = ?1 AND reserved_by = ?2 AND posting_nonce = ?3",
+            params![server.0, change.0, nonce],
+        )?)
+    }
+
+    /// The consolidation posts that were claimed and not finished or
+    /// released: `(local change, nonce)` from drafts carrying a posting
+    /// nonce and from reviews being sent. After a crash, the caller checks
+    /// the Gerrit change's messages for the post's tag before posting
+    /// again. Sorted, without duplicates.
+    pub fn unfinished_local_posts(
+        &self,
+        server: ServerId,
+    ) -> Result<Vec<(LocalChangeId, String)>, Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT reserved_by, posting_nonce FROM drafts
+             WHERE server_id = ?1 AND reserved_by IS NOT NULL AND posting_nonce IS NOT NULL
+             UNION
+             SELECT local_change_id, nonce FROM pending_reviews
+             WHERE server_id = ?1 AND state = 'sending' AND nonce IS NOT NULL
+             ORDER BY 1, 2",
+        )?;
+        let rows = stmt.query_map([server.0], |r| {
+            Ok((LocalChangeId(r.get(0)?), r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Records a successful consolidation post, in one transaction: removes
     /// the posted drafts (`(id, version)` as they were sent) whose version
     /// is unchanged, and applies the review states. A draft edited while
-    /// the post was in flight stays reserved, so the next post sends it.
+    /// the post was in flight stays reserved, so the next post sends it;
+    /// the post's claim on the change's drafts is cleared (see
+    /// [`Store::claim_local_post`]).
     /// Only the change's own drafts (reserved for it, its reviews' message
     /// drafts, or held on its versions) are removed. `None`, writing
     /// nothing, if the change is gone.
@@ -349,6 +481,13 @@ impl Store {
                 report.drafts_kept += 1;
             }
         }
+        // What stays (edited while the post was in flight) is free for the
+        // next post.
+        tx.execute(
+            "UPDATE drafts SET posting_nonce = NULL
+             WHERE server_id = ?1 AND reserved_by = ?2 AND posting_nonce IS NOT NULL",
+            params![server.0, change.0],
+        )?;
         for s in review_states {
             if pending_reviews::transition(
                 &tx,

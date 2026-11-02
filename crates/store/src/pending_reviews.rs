@@ -111,7 +111,7 @@ fn review_from_row(r: &Row<'_>) -> rusqlite::Result<PendingReview> {
     })
 }
 
-fn load(
+pub(crate) fn load(
     conn: &Connection,
     server: ServerId,
     id: PendingReviewId,

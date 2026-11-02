@@ -1081,3 +1081,68 @@ fn v12_rebuilds_pending_reviews_with_an_owner_and_keeps_the_counter() {
             .is_empty()
     );
 }
+
+// ---- v13: consolidation posts claim their drafts ----
+
+#[test]
+fn v13_from_every_older_version_leaves_no_post_claimed() {
+    for from in 1..MIGRATIONS.len() {
+        let mut conn = db_at_version(from);
+        conn.execute(
+            "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+            [],
+        )
+        .unwrap();
+        if from >= 4 {
+            conn.execute(
+                "INSERT INTO drafts (server_id, change_number, patch_set, revision_sha, path,
+                     side, message, unresolved, updated_ms, state)
+                 VALUES (1, 5, 1, 'aaa', 'f', 'REVISION', 'm', 1, 0, 'pending_create')",
+                [],
+            )
+            .unwrap();
+        }
+        migrate(&mut conn, MIGRATIONS).unwrap();
+        assert_eq!(user_version(&conn).unwrap() as usize, MIGRATIONS.len());
+        let claimed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM drafts WHERE posting_nonce IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(claimed, 0, "from v{from}");
+        let s = Store { conn };
+        assert!(s.unfinished_local_posts(ServerId(1)).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn v13_keeps_a_reserved_draft_claimable() {
+    let mut conn = db_at_version(12);
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+        [],
+    )
+    .unwrap();
+    conn.execute(INSERT_LOCAL_CHANGE, rusqlite::params![1, "main", "I1"])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO drafts (server_id, change_number, patch_set, revision_sha, path, side,
+             message, unresolved, updated_ms, state, reserved_by)
+         VALUES (1, 42, 1, 'aaa', 'f', 'REVISION', 'm', 1, 0, 'pending_create', 1)",
+        [],
+    )
+    .unwrap();
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    let mut s = Store { conn };
+    let post = s
+        .claim_local_post(ServerId(1), model::LocalChangeId(1), None, "n1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(post.drafts.len(), 1);
+    assert_eq!(
+        s.unfinished_local_posts(ServerId(1)).unwrap(),
+        [(model::LocalChangeId(1), "n1".to_owned())]
+    );
+}

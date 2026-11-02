@@ -423,13 +423,13 @@ fn finishing_the_post_removes_what_was_sent_and_then_it_consolidates() {
         }],
     );
     s.rewrite_local_change(id, &rw).unwrap().unwrap();
-    let claimed = s
-        .mark_pending_review_sending(id, r.id, &[Pending], "n")
+    let claim = s
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n")
         .unwrap()
         .unwrap();
-    let post: Vec<(LocalDraftId, u32)> = s
-        .consolidation_drafts(id, c.id)
-        .unwrap()
+    let claimed = claim.review.unwrap();
+    let post: Vec<(LocalDraftId, u32)> = claim
+        .drafts
         .iter()
         .map(|d| (d.local_id, d.version))
         .collect();
@@ -471,6 +471,9 @@ fn finishing_the_post_removes_what_was_sent_and_then_it_consolidates() {
             .collect::<Vec<_>>(),
         [b.local_id]
     );
+    // `b` is free for the next post.
+    assert_eq!(posting_nonce(&s, b.local_id), None);
+    assert!(s.unfinished_local_posts(id).unwrap().is_empty());
     // Not done while `b` waits; done once it went too.
     assert_eq!(
         s.set_local_change_state(id, c.id, LocalChangeState::Consolidated)
@@ -573,4 +576,161 @@ fn the_changes_to_consolidate_are_the_open_ones_and_those_with_leftovers() {
         .collect();
     want.sort();
     assert_eq!(got, want);
+}
+
+/// The posting nonce of a draft.
+fn posting_nonce(s: &Store, id: LocalDraftId) -> Option<String> {
+    s.conn
+        .query_row(
+            "SELECT posting_nonce FROM drafts WHERE id = ?1",
+            [id.0],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// A local change with drafts `a` (moved) and a review `r` on v2, both
+/// moved onto change 42, and a review `other` on v1 that also moved.
+fn moved(
+    s: &mut Store,
+    id: ServerId,
+    c: &LocalChange,
+    v1: &LocalPatchSet,
+    v2: &LocalPatchSet,
+) -> (Draft, PendingReview, PendingReview) {
+    let a = draft(s, id, c, v2, "a");
+    let r = review(s, id, v2);
+    let other = review(s, id, v1);
+    let rw = rewrite(
+        c,
+        vec![
+            PatchSetMove {
+                from: v2.number,
+                to: gerrit_ps(1),
+                exact: true,
+                drafts: vec![(a.local_id, None)],
+                reviews: vec![r.id],
+            },
+            PatchSetMove {
+                from: v1.number,
+                to: gerrit_ps(1),
+                exact: false,
+                drafts: vec![],
+                reviews: vec![other.id],
+            },
+        ],
+    );
+    s.rewrite_local_change(id, &rw).unwrap().unwrap();
+    (a, r, other)
+}
+
+#[test]
+fn claiming_a_post_marks_its_drafts_and_review_with_one_nonce() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (a, r, other) = moved(&mut s, id, &c, &v1, &v2);
+    let post = s
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1")
+        .unwrap()
+        .unwrap();
+    let review = post.review.unwrap();
+    assert_eq!(
+        (review.state, review.nonce.as_deref()),
+        (Sending, Some("n1"))
+    );
+    // Its drafts: the moved comment and its own message, not the other
+    // review's message.
+    let ids: Vec<LocalDraftId> = post.drafts.iter().map(|d| d.local_id).collect();
+    assert_eq!(ids, [a.local_id, r.message_draft.unwrap()]);
+    for id in &ids {
+        assert_eq!(posting_nonce(&s, *id).as_deref(), Some("n1"));
+    }
+    assert_eq!(posting_nonce(&s, other.message_draft.unwrap()), None);
+    assert_eq!(
+        s.unfinished_local_posts(id).unwrap(),
+        [(c.id, "n1".to_owned())]
+    );
+
+    // Another run cannot claim it, with or without the review; the same
+    // run can (a retry after a crash).
+    assert_eq!(s.claim_local_post(id, c.id, None, "n2").unwrap(), None);
+    assert_eq!(
+        s.claim_local_post(id, c.id, Some((other.id, &[Pending][..])), "n2")
+            .unwrap(),
+        None
+    );
+    let again = s
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.drafts.len(), 2);
+    assert_eq!(
+        s.load_pending_review(id, other.id).unwrap().unwrap().state,
+        Pending
+    );
+
+    // Released (the server refused it): claimable again.
+    assert_eq!(s.release_local_post(id, c.id, "n1").unwrap(), 2);
+    s.set_pending_review_state(id, r.id, &[Sending], Failed, Some("409"))
+        .unwrap();
+    assert!(s.unfinished_local_posts(id).unwrap().is_empty());
+    let retry = s
+        .claim_local_post(id, c.id, Some((r.id, &[Failed][..])), "n3")
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.review.unwrap().nonce.as_deref(), Some("n3"));
+}
+
+#[test]
+fn a_comment_only_post_has_a_nonce_too() {
+    let (mut s, id, c, _v1, v2) = setup();
+    let a = draft(&mut s, id, &c, &v2, "a");
+    let rw = rewrite(
+        &c,
+        vec![PatchSetMove {
+            from: v2.number,
+            to: gerrit_ps(1),
+            exact: true,
+            drafts: vec![(a.local_id, None)],
+            reviews: vec![],
+        }],
+    );
+    s.rewrite_local_change(id, &rw).unwrap().unwrap();
+    let post = s.claim_local_post(id, c.id, None, "n1").unwrap().unwrap();
+    assert_eq!((post.review, post.drafts.len()), (None, 1));
+    assert_eq!(
+        s.unfinished_local_posts(id).unwrap(),
+        [(c.id, "n1".to_owned())]
+    );
+    // Finished: nothing is left claimed.
+    s.finish_local_post(id, c.id, &[(a.local_id, post.drafts[0].version)], &[])
+        .unwrap()
+        .unwrap();
+    assert!(s.unfinished_local_posts(id).unwrap().is_empty());
+}
+
+#[test]
+fn claims_that_do_not_fit_write_nothing() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (a, r, _) = moved(&mut s, id, &c, &v1, &v2);
+    let other_change = add(&mut s, id, "IO", None);
+    // Not in the states named, another change's review, a gone change.
+    assert_eq!(
+        s.claim_local_post(id, c.id, Some((r.id, &[Held][..])), "n")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        s.claim_local_post(id, other_change.id, Some((r.id, &[Pending][..])), "n")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        s.claim_local_post(id, LocalChangeId(999), None, "n")
+            .unwrap(),
+        None
+    );
+    assert_eq!(posting_nonce(&s, a.local_id), None);
+    assert!(s.unfinished_local_posts(id).unwrap().is_empty());
 }
