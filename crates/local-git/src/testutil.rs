@@ -1,11 +1,23 @@
 //! Temporary repositories built with the git CLI. Panicking on failure is
 //! the point here.
+//!
+//! [`TestRepo::new`] sets the repository's own identity (see
+//! [`TEST_EMAIL`]), which overrides the developer's global git
+//! configuration when [`Repo`](crate::Repo) reads it. Tests in other
+//! crates must rely on that: local-git's own tests also run git without
+//! global and system configuration, but that is `cfg(test)` of this crate
+//! only and does not reach a crate using the `test-support` feature.
 #![allow(clippy::expect_used, clippy::new_without_default)]
 
 use std::path::Path;
 use std::process::Command;
 
 use tempfile::TempDir;
+
+/// The author name and email of every commit made here, also set as the
+/// repository's `user.name`, `user.email` and `author.email`.
+pub const TEST_NAME: &str = "Test Author";
+pub const TEST_EMAIL: &str = "author@example.com";
 
 pub struct TestRepo {
     pub dir: TempDir,
@@ -17,6 +29,9 @@ impl TestRepo {
             dir: tempfile::tempdir().expect("temp dir"),
         };
         r.git(&["init", "-q", "-b", "main"]);
+        r.git(&["config", "user.name", TEST_NAME]);
+        r.git(&["config", "user.email", TEST_EMAIL]);
+        r.git(&["config", "author.email", TEST_EMAIL]);
         r
     }
 
@@ -63,8 +78,8 @@ pub fn git_in(dir: &Path, args: &[&str]) -> String {
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Test Author")
-        .env("GIT_AUTHOR_EMAIL", "author@example.com")
+        .env("GIT_AUTHOR_NAME", TEST_NAME)
+        .env("GIT_AUTHOR_EMAIL", TEST_EMAIL)
         .env("GIT_COMMITTER_NAME", "Test Committer")
         .env("GIT_COMMITTER_EMAIL", "committer@example.com")
         .env("GIT_AUTHOR_DATE", "2013-02-01T09:59:32+0100")

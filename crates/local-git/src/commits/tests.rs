@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use model::{BranchTargets, LocalCommit, RevisionId, Timestamp, Upstream};
 
 use super::change_id_trailer;
-use crate::testutil::TestRepo;
+use crate::testutil::{TEST_EMAIL, TestRepo};
 use crate::{Local, NotLocal, Repo};
 
 const ID_A: &str = "I0123456789abcdef0123456789abcdef01234567";
@@ -265,6 +265,11 @@ fn commit_reads_present_and_missing_commits() {
 fn user_email_reads_the_repository_config() {
     let r = TestRepo::new();
     let repo = open(&r);
+    assert_eq!(
+        repo.user_email().expect("test repo").as_deref(),
+        Some(TEST_EMAIL)
+    );
+    r.git(&["config", "--unset", "user.email"]);
     assert_eq!(repo.user_email().expect("unset"), None);
     r.git(&["config", "user.email", "me@example.com"]);
     assert_eq!(
