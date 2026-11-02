@@ -33,8 +33,9 @@
 use std::collections::BTreeMap;
 
 use model::{
-    ChangeNumber, LocalApproval, LocalChangeId, LocalDraftId, PATCHSET_LEVEL_PATH, PatchSetNumber,
-    PendingReview, PendingReviewId, PendingReviewState, RevisionId, Side, Timestamp,
+    ChangeNumber, LocalApproval, LocalChangeId, LocalChangeState, LocalDraftId,
+    PATCHSET_LEVEL_PATH, PatchSetNumber, PendingReview, PendingReviewId, PendingReviewState,
+    RevisionId, Side, Timestamp,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -238,28 +239,34 @@ impl Store {
     /// is posted on its Gerrit change if it has one, else on its synthetic
     /// number; the votes are given on the patch set's commit. Fails with
     /// [`Error::NotLocal`] for a patch set that is not a local patch set of
-    /// this server.
+    /// this server, and with [`Error::NotReviewable`] when the patch set's
+    /// change is consolidated or closed.
     pub fn create_pending_review(
         &mut self,
         server: ServerId,
         input: &NewPendingReview,
     ) -> Result<PendingReview, Error> {
         let tx = self.conn.transaction()?;
-        let owner: Option<(i64, Option<i64>, String)> = match input.patch_set.local_id() {
+        let owner: Option<(i64, Option<i64>, String, String)> = match input.patch_set.local_id() {
             Some(ps) => tx
                 .query_row(
-                    "SELECT c.id, c.gerrit_number, p.sha
+                    "SELECT c.id, c.gerrit_number, p.sha, c.state
                      FROM local_patch_sets p JOIN local_changes c ON c.id = p.local_change_id
                      WHERE p.server_id = ?1 AND p.id = ?2",
                     params![server.0, ps],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?,
             None => None,
         };
-        let Some((local_change, gerrit_number, sha)) = owner else {
+        let Some((local_change, gerrit_number, sha, state)) = owner else {
             return Err(Error::NotLocal);
         };
+        if let Some(state @ (LocalChangeState::Consolidated | LocalChangeState::Closed)) =
+            LocalChangeState::parse(&state)
+        {
+            return Err(Error::NotReviewable(state));
+        }
         let change = match gerrit_number {
             Some(n) => n,
             None => LocalChangeId(local_change)

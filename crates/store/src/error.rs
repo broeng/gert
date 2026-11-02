@@ -20,6 +20,11 @@ pub enum Error {
     /// patch set of the server.
     #[error("only a local patch set can have a pending review")]
     NotLocal,
+    /// A pending review was asked for on a local patch set whose change is
+    /// consolidated or closed: what it was given on is on Gerrit already,
+    /// so a review belongs on the Gerrit change.
+    #[error("the local change is {} and takes no new pending reviews", .0.as_str())]
+    NotReviewable(model::LocalChangeState),
     /// Consolidation was asked to move a local change onto a Gerrit change
     /// other than the one it already belongs to.
     #[error("the local change already belongs to Gerrit change {0}")]

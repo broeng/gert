@@ -165,6 +165,29 @@ fn only_known_local_patch_sets_get_pending_reviews() {
 }
 
 #[test]
+fn a_consolidated_or_closed_change_takes_no_new_reviews() {
+    let Fx {
+        mut s,
+        id,
+        change,
+        versions,
+    } = fx();
+    for state in [LocalChangeState::Consolidated, LocalChangeState::Closed] {
+        s.set_local_change_state(id, change.id, state).unwrap();
+        assert!(matches!(
+            s.create_pending_review(id, &new_review(versions[0].number, "m")),
+            Err(Error::NotReviewable(st)) if st == state
+        ));
+    }
+    assert_eq!(s.local_draft_count(id).unwrap(), 0);
+    // Any other state does.
+    s.set_local_change_state(id, change.id, LocalChangeState::Vanished)
+        .unwrap();
+    s.create_pending_review(id, &new_review(versions[0].number, "m"))
+        .unwrap();
+}
+
+#[test]
 fn editing_changes_votes_and_message_while_pending() {
     let Fx {
         mut s,
