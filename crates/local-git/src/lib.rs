@@ -4,7 +4,8 @@
 //! the server when the checkout has the commits.
 //!
 //! It also finds the user's unpushed commits on local branches
-//! ([`Repo::scan`]) for local changes.
+//! ([`Repo::scan`]) for local changes, and maps a file's lines from one
+//! commit to another ([`Repo::line_map`]) to carry comments over.
 //!
 //! The repository is only ever read: no fetch, no checkout, no gc (see
 //! [`git`] for the flags every invocation carries). Everything here is
@@ -23,6 +24,7 @@ mod error;
 mod files;
 mod git;
 mod intraline;
+mod line_map;
 
 pub use compare::{BaseKind, Comparison};
 pub use error::{Error, NotLocal};

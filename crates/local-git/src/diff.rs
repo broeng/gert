@@ -175,18 +175,18 @@ impl Repo {
 /// A path we do not hand to git: a newline would break the line protocol
 /// of `cat-file --batch`, and `./` and `../` would be resolved against the
 /// current directory.
-fn unsupported_path(p: &str) -> bool {
+pub(crate) fn unsupported_path(p: &str) -> bool {
     p.is_empty() || p.contains(['\n', '\0']) || p.starts_with("./") || p.starts_with("../")
 }
 
-struct Blob {
-    oid: String,
-    data: Vec<u8>,
+pub(crate) struct Blob {
+    pub oid: String,
+    pub data: Vec<u8>,
 }
 
 /// A blob, nothing (the file is absent on this side) or the reason this
 /// cannot be diffed from the checkout.
-fn side(obj: Object, name: &str) -> Result<Result<Option<Blob>, NotLocal>, Error> {
+pub(crate) fn side(obj: Object, name: &str) -> Result<Result<Option<Blob>, NotLocal>, Error> {
     Ok(match obj {
         Object::Missing => Ok(None),
         Object::Found { oid, kind, data } if kind == "blob" => Ok(Some(Blob { oid, data })),
@@ -195,7 +195,7 @@ fn side(obj: Object, name: &str) -> Result<Result<Option<Blob>, NotLocal>, Error
     })
 }
 
-fn is_binary(data: &[u8]) -> bool {
+pub(crate) fn is_binary(data: &[u8]) -> bool {
     data[..data.len().min(BINARY_SNIFF_BYTES)].contains(&0)
 }
 
@@ -207,7 +207,7 @@ fn is_binary(data: &[u8]) -> bool {
 /// ([`Text::full_len`] counts it, `a\n` shows as `["a", ""]`). A file
 /// without a final newline just has no empty last line, and an empty file
 /// has no lines at all.
-struct Text {
+pub(crate) struct Text {
     lines: Vec<String>,
     /// Whether the data ends with a newline (and so shows one more, empty,
     /// line).
@@ -215,7 +215,7 @@ struct Text {
 }
 
 impl Text {
-    fn new(data: &[u8]) -> Self {
+    pub(crate) fn new(data: &[u8]) -> Self {
         if data.is_empty() {
             return Self {
                 lines: Vec::new(),
@@ -239,7 +239,7 @@ impl Text {
 
     /// The number of lines as shown, with the empty one after a final
     /// newline.
-    fn full_len(&self) -> usize {
+    pub(crate) fn full_len(&self) -> usize {
         self.lines.len() + usize::from(self.final_newline)
     }
 }
@@ -506,6 +506,38 @@ fn hunks(a: &Text, b: &Text, ws: &Whitespace) -> Vec<(Range<usize>, Range<usize>
             )
         })
         .collect()
+}
+
+/// Where each line of `a` (as Gerrit numbers them, from 1, with the empty
+/// line after a final newline) is in `b`, if it is unchanged there. The
+/// same diff as Gerrit's view with no whitespace option, except that the
+/// unchanged lines it shows inside a changed chunk (the boring lines that
+/// join two regions) count as unchanged here. The empty last line maps
+/// when both sides have one.
+pub(crate) fn map_lines(a: &Text, b: &Text) -> Vec<Option<u32>> {
+    let line = |i: usize| u32::try_from(i + 1).ok();
+    let mut map = Vec::with_capacity(a.full_len());
+    let (mut pa, mut pb) = (0, 0);
+    for (ra, rb) in hunks(a, b, &Whitespace::IgnoreNone) {
+        for _ in pa..ra.start {
+            map.push(line(pb));
+            pb += 1;
+        }
+        map.extend(ra.clone().map(|_| None));
+        (pa, pb) = (ra.end, rb.end);
+    }
+    for _ in pa..a.lines.len() {
+        map.push(line(pb));
+        pb += 1;
+    }
+    if a.final_newline {
+        map.push(if b.final_newline {
+            line(b.lines.len())
+        } else {
+            None
+        });
+    }
+    map
 }
 
 /// Gerrit's content type for `/COMMIT_MSG`.
