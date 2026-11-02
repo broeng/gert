@@ -20,6 +20,15 @@ impl TestRepo {
         r
     }
 
+    /// An empty bare repository, to push to as a "remote".
+    pub fn bare() -> Self {
+        let r = Self {
+            dir: tempfile::tempdir().expect("temp dir"),
+        };
+        r.git(&["init", "-q", "--bare", "-b", "main"]);
+        r
+    }
+
     pub fn path(&self) -> &Path {
         self.dir.path()
     }

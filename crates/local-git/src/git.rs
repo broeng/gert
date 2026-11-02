@@ -61,6 +61,11 @@ impl Git {
             .env("GIT_LITERAL_PATHSPECS", "1")
             // Stable messages, since we recognise a few of them.
             .env("LC_ALL", "C");
+        // Unit tests must not see the developer's own git configuration
+        // (`user.email`, for one).
+        #[cfg(test)]
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         cmd.stdin(if stdin.is_some() {
             Stdio::piped()

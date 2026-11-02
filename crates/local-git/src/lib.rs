@@ -3,6 +3,9 @@
 //! from a Gerrit server, so a change's files can be shown without asking
 //! the server when the checkout has the commits.
 //!
+//! It also finds the user's unpushed commits on local branches
+//! ([`Repo::local_commits`]) for local changes.
+//!
 //! The repository is only ever read: no fetch, no checkout, no gc (see
 //! [`git`] for the flags every invocation carries). Everything here is
 //! **blocking** `std::process` work; callers run it on a background executor.
@@ -12,6 +15,7 @@
 //! the synthetic `/COMMIT_MSG` file, ...) is not an error: it yields
 //! [`Local::NotLocal`] and the caller asks Gerrit instead.
 
+mod commits;
 mod compare;
 mod diff;
 mod error;
