@@ -31,8 +31,10 @@ struct RefRecord {
 
 impl Repo {
     /// The commits reachable from a named local branch (`refs/heads/*`) and
-    /// from no remote-tracking branch (`refs/remotes/*`), newest first in
-    /// topological order (no parent before its children), at most `limit`.
+    /// from no remote-tracking branch (`refs/remotes/*`), the `limit` newest
+    /// by committer date, newest first but never a parent before its
+    /// children (`--date-order`; `--topo-order` would finish one line of
+    /// history before the next, so the limit could drop a newer branch).
     ///
     /// A detached HEAD does not count. Merge commits are included (see
     /// [`LocalCommit::is_merge`]); nothing is filtered by author.
@@ -44,7 +46,7 @@ impl Repo {
         let out = self.git.run(
             &[
                 "rev-list",
-                "--topo-order",
+                "--date-order",
                 &max,
                 "--branches",
                 "--not",
@@ -82,7 +84,7 @@ impl Repo {
     ///
     /// That is exact: a branch whose tip is not listed is either on a
     /// remote (and so is everything it reaches) or was cut off by the
-    /// limit, and topological order puts all its ancestors after it, so
+    /// limit, and the order puts all its ancestors after it, so
     /// they were cut off too. For the same reason a walk never has to
     /// step through an unlisted commit to reach a listed one.
     fn fill_branches(&self, commits: &mut [LocalCommit]) -> Result<(), Error> {

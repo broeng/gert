@@ -98,7 +98,7 @@ fn unpushed_commits_on_named_branches_are_listed_with_their_branches() {
 }
 
 #[test]
-fn commits_are_in_topological_order_not_date_order() {
+fn children_come_before_their_parents_whatever_the_dates() {
     let (_remote, r, base) = pushed();
     // b1 is a child of a0 but older than it, so date order would list a0
     // before b1.
@@ -124,6 +124,48 @@ fn commits_are_in_topological_order_not_date_order() {
     }
     assert_eq!(branches_of(&local, &a0), ["a", "b"]);
     assert_eq!(branches_of(&local, &b1), ["b"]);
+}
+
+#[test]
+fn the_limit_keeps_the_newest_commits_of_every_branch() {
+    let (_remote, r, base) = pushed();
+    // An old line of history with a new tip, and a newer branch.
+    let mut old = vec![base.clone()];
+    for i in 0..10 {
+        let parent = old[old.len() - 1].clone();
+        old.push(raw_commit(
+            &r,
+            &[&parent],
+            1_580_000_000 + i * 1000,
+            "old\n",
+        ));
+    }
+    let old_last = old[old.len() - 1].clone();
+    let old_tip = raw_commit(&r, &[&old_last], 1_790_000_000, "old tip\n");
+    let mut new = vec![base];
+    for i in 0..3 {
+        let parent = new[new.len() - 1].clone();
+        new.push(raw_commit(
+            &r,
+            &[&parent],
+            1_789_900_000 + i * 1000,
+            "new\n",
+        ));
+    }
+    r.git(&["update-ref", "refs/heads/old", &old_tip]);
+    r.git(&["update-ref", "refs/heads/new", &new[3]]);
+    let local = open(&r).local_commits(5).expect("local commits");
+
+    assert_eq!(
+        shas(&local),
+        [
+            old_tip.as_str(),
+            new[3].as_str(),
+            new[2].as_str(),
+            new[1].as_str(),
+            old[10].as_str()
+        ]
+    );
 }
 
 #[test]
