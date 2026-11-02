@@ -1637,4 +1637,42 @@ fn an_inline_diff_of_a_missing_commit_comes_from_gerrit(cx: &mut TestAppContext)
             Some(DiffSource::Gerrit | DiffSource::Cache)
         ));
     });
+    assert!(
+        f.http.requested().iter().any(|r| r.contains("/diff")),
+        "{:?}",
+        f.http.requested()
+    );
+}
+
+#[gpui_kit::test]
+fn an_inline_diff_opened_while_the_checkout_resolves_still_ends_up_local(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    let projects = vec![ProjectSettings::new(
+        "platform/foo",
+        repo.repo.path().to_string_lossy(),
+    )];
+    let f = page_in_with(
+        cx,
+        local_store(&repo.target),
+        Some(Auth::Anonymous),
+        setup(),
+        ChangeView::default(),
+        |http| {
+            http.route("/diff", 404, Vec::new());
+        },
+        projects,
+    );
+    // No settling first: the checkout may still be opening and resolving.
+    open_a(cx, &f);
+    cx.update(|cx| {
+        assert_eq!(
+            f.page.read(cx).inline_source("src/a.rs"),
+            Some(DiffSource::Local)
+        );
+    });
+    assert!(
+        !f.http.requested().iter().any(|r| r.contains("/diff")),
+        "{:?}",
+        f.http.requested()
+    );
 }

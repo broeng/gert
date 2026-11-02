@@ -2,7 +2,7 @@
 //! rules, against a real temporary repository.
 
 use gerrit_api::fake::RouteHttpClient;
-use gpui_kit::TestAppContext;
+use gpui_kit::{AppContext as _, TestAppContext};
 use local_git::testutil::TestRepo;
 use model::{
     ChangeDetail, ChangeNumber, DiffKey, FileEntry, FileStatus, FilesKey, PatchSetNumber,
@@ -10,7 +10,7 @@ use model::{
 };
 use store::Store;
 
-use super::LocalSource;
+use super::{LocalLazy, LocalSource, renames_of};
 use crate::{
     diff_load::{DiffSource, LoadError, load_diff},
     session::Session,
@@ -101,6 +101,10 @@ fn gerrit_diff() -> RouteHttpClient {
     http
 }
 
+fn lazy(source: LocalSource) -> LocalLazy {
+    LocalLazy::ready(Some(source), renames_of(&paths()))
+}
+
 fn run<T>(f: impl std::future::Future<Output = T>) -> T {
     futures::executor::block_on(f)
 }
@@ -115,7 +119,7 @@ fn a_local_diff_needs_no_request_and_is_not_stored(_cx: &mut TestAppContext) {
         s.syncer().clone(),
         key.clone(),
         true,
-        Some(source(&f)),
+        lazy(source(&f)),
     ))
     .expect("diff");
     assert_eq!(from, DiffSource::Local);
@@ -130,7 +134,7 @@ fn a_local_diff_shows_offline(_cx: &mut TestAppContext) {
     let http = RouteHttpClient::new();
     let s = session(fresh_store(), &http, false);
     let key = diff_key(&f.target, "src/a.rs");
-    let (_, from) = run(load_diff(s.syncer().clone(), key, false, Some(source(&f)))).expect("diff");
+    let (_, from) = run(load_diff(s.syncer().clone(), key, false, lazy(source(&f)))).expect("diff");
     assert_eq!(from, DiffSource::Local);
 }
 
@@ -147,7 +151,7 @@ fn a_cached_diff_wins_over_the_checkout(_cx: &mut TestAppContext) {
         .expect("save");
     let s = session(store, &http, true);
     let (diff, from) =
-        run(load_diff(s.syncer().clone(), key, true, Some(source(&f)))).expect("diff");
+        run(load_diff(s.syncer().clone(), key, true, lazy(source(&f)))).expect("diff");
     assert_eq!(from, DiffSource::Cache);
     assert_eq!(diff, cached);
 }
@@ -169,7 +173,7 @@ fn what_the_checkout_cannot_serve_comes_from_gerrit(_cx: &mut TestAppContext) {
             s.syncer().clone(),
             key.clone(),
             true,
-            Some(local.clone()),
+            lazy(local.clone()),
         ))
         .expect("diff");
         assert_eq!(from, DiffSource::Gerrit, "{}", key.path);
@@ -195,7 +199,7 @@ fn a_missing_commit_means_no_local_source_and_gerrit_answers(_cx: &mut TestAppCo
         s.syncer().clone(),
         diff_key(missing, "src/a.rs"),
         true,
-        None,
+        LocalLazy::none(),
     ))
     .expect("diff");
     assert_eq!(from, DiffSource::Gerrit);
@@ -205,7 +209,7 @@ fn a_missing_commit_means_no_local_source_and_gerrit_answers(_cx: &mut TestAppCo
         offline.syncer().clone(),
         diff_key(missing, "src/a.rs"),
         false,
-        None,
+        LocalLazy::none(),
     ))
     .expect_err("fails");
     assert!(matches!(err, LoadError::Failed(_)));
@@ -233,4 +237,77 @@ fn a_rename_is_diffed_against_the_old_path(_cx: &mut TestAppContext) {
             .any(|c| matches!(c, model::DiffChunk::Common { .. })),
         "{diff:?}"
     );
+}
+
+#[gpui_kit::test]
+fn a_stored_diff_does_not_wait_for_the_resolve(cx: &mut TestAppContext) {
+    use futures::FutureExt as _;
+    let f = fixture();
+    let http = RouteHttpClient::new();
+    let mut store = fresh_store();
+    let server = store.server_id(URL).expect("server");
+    let key = diff_key(&f.target, "src/a.rs");
+    let cached = crate::diff::tests::fixture("handwritten/diff_rename.response.json");
+    store
+        .save_diff(server, &key, &cached, jiff::Timestamp::now())
+        .expect("save");
+    let s = session(store, &http, true);
+    // A resolve that never finishes: awaiting it would hang the test.
+    let stuck = cx.update(|cx| {
+        cx.spawn(async move |_| {
+            std::future::pending::<()>().await;
+            None::<LocalSource>
+        })
+    });
+    let local = LocalLazy::pending(stuck.shared(), renames_of(&paths()));
+    let (_, from) = run(load_diff(s.syncer().clone(), key, true, local)).expect("diff");
+    assert_eq!(from, DiffSource::Cache);
+}
+
+#[gpui_kit::test]
+fn a_patch_set_against_a_patch_set_is_served_locally(_cx: &mut TestAppContext) {
+    let r = TestRepo::new();
+    r.write("src/a.rs", b"l1\nl2\nl3\n");
+    let parent = r.commit("parent");
+    r.write("src/a.rs", b"l1\nONE\nl3\n");
+    let ps1 = r.commit("ps1");
+    r.git(&["reset", "-q", "--hard", &parent]);
+    r.write("src/a.rs", b"l1\nTWO\nl3\n");
+    let ps2 = r.commit("ps2");
+    let mut files = files_key(&ps2);
+    files.base = Some(PatchSetRef {
+        number: PatchSetNumber(1),
+        sha: ps1.as_str().into(),
+    });
+    let repo = local_git::Repo::open(r.path()).expect("open");
+    let local = LocalSource::resolve(repo, &files)
+        .expect("same parents resolve")
+        .with_files(&paths());
+    let mut key = diff_key(&ps2, "src/a.rs");
+    key.base = files.base.clone();
+    assert!(local.serves(&key));
+    // A key without the base is another comparison.
+    assert!(!local.serves(&diff_key(&ps2, "src/a.rs")));
+    let text = format!("{:?}", local.diff(&key).expect("diff").chunks);
+    assert!(text.contains("ONE") && text.contains("TWO"), "{text}");
+}
+
+#[gpui_kit::test]
+fn resolved_comparisons_are_remembered_until_the_projects_change(cx: &mut TestAppContext) {
+    use crate::{checkouts::Checkouts, session::ProjectSettings};
+    let f = fixture();
+    let files = files_key(&f.target);
+    let project = ProjectSettings::new("platform/foo", f.repo.path().to_string_lossy());
+    let c = cx.new(|_| Checkouts::new(vec![project.clone()]));
+    let local = source(&f);
+    c.update(cx, |c, _| c.memoize("platform/foo", &files, local));
+    c.read_with(cx, |c, _| {
+        assert!(c.memoized("platform/foo", &files).is_some());
+        assert!(c.memoized("other", &files).is_none());
+        assert!(c.memoized("platform/foo", &files_key("x")).is_none());
+    });
+    c.update(cx, |c, cx| c.set_projects(vec![project], cx));
+    c.read_with(cx, |c, _| {
+        assert!(c.memoized("platform/foo", &files).is_none());
+    });
 }

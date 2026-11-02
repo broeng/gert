@@ -54,7 +54,7 @@ use crate::{
     diff_load::{DiffSource, LoadError, load_diff},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
-    local_source::{LocalSource, LocalState, resolve_source},
+    local_source::{LocalLazy, LocalSource, LocalState, Lookup, Renames, lookup, renames_of},
     nav::{ChangeView, DiffRoute},
     outbox::DraftOutbox,
     pages::list::Status,
@@ -193,6 +193,8 @@ pub struct ChangePage {
     /// The local source for the file list in use (see `update_local`).
     local: LocalState,
     local_task: Option<Task<()>>,
+    /// The renames of the file list, for the local source.
+    renames: Arc<Renames>,
     /// The filter style of each entry of `files.list`.
     styles: Vec<FileStyle>,
     /// Indexes into `files.list` of the files the filters do not hide. The
@@ -283,6 +285,7 @@ impl ChangePage {
             checkouts: None,
             local: LocalState::Unknown,
             local_task: None,
+            renames: Arc::default(),
             styles: Vec::new(),
             visible: Vec::new(),
             number,
@@ -636,6 +639,8 @@ impl ChangePage {
             self.visible.clear();
             self.cursor = 0;
             self.jump = true;
+            // Stop the syntax worker on the old comparison now.
+            self.queue_syntax(cx);
         }
         // An adopted chain stays until this change's own list replaces it.
         if self
@@ -705,6 +710,7 @@ impl ChangePage {
         self.files.reviewed = list.reviewed.unwrap_or_default().into_iter().collect();
         self.files.loaded = true;
         self.files.error = None;
+        self.renames = renames_of(&self.files.list);
         self.update_local(cx);
         self.compute_styles(cx);
         self.queue_syntax(cx);
@@ -724,10 +730,10 @@ impl ChangePage {
         self.checkouts = checkouts;
     }
 
-    /// Keeps the local source in step with the file list. The comparison is
-    /// resolved once per file list key (waiting for the checkout to open if
-    /// need be; inline diffs wait for that); later lists of the same key
-    /// only replace the renames.
+    /// Starts finding the local source for the file list's comparison
+    /// unless that is done or under way. Nothing waits for it: stored
+    /// diffs are read first, and a diff that has to be computed awaits it
+    /// in `load_diff`.
     fn update_local(&mut self, cx: &mut Context<Self>) {
         let (Some(files), Some(project)) = (
             self.files.key.clone(),
@@ -736,42 +742,36 @@ impl ChangePage {
             return;
         };
         if self.local.is_for(&files) {
-            if let LocalState::Ready(_, Some(source)) = &self.local {
-                self.local = LocalState::Ready(files, Some(source.with_files(&self.files.list)));
-            }
             return;
         }
-        let Some(checkouts) = self
-            .checkouts
-            .clone()
-            .filter(|_| crate::local_source::configured(&self.checkouts, &project, cx))
-        else {
-            self.local = LocalState::Ready(files, None);
-            return;
+        self.local_task = None;
+        self.local = match lookup(&self.checkouts, &project, &files, cx) {
+            Lookup::Unconfigured => LocalState::Ready(files, None),
+            Lookup::Ready(s) => LocalState::Ready(files, Some(s)),
+            Lookup::Pending(p) => {
+                let (key, shared) = (files.clone(), p.clone());
+                self.local_task = Some(cx.spawn(async move |this, cx| {
+                    let source = shared.await;
+                    this.update(cx, |this, cx| this.local_resolved(&key, source, cx))
+                        .ok();
+                }));
+                LocalState::Resolving(files, p)
+            }
         };
-        self.local = LocalState::Resolving(files.clone());
-        self.local_task = Some(cx.spawn(async move |this, cx| {
-            let source = resolve_source(checkouts, project, files.clone(), cx).await;
-            this.update(cx, |this, cx| this.local_resolved(files, source, cx))
-                .ok();
-        }));
     }
 
     fn local_resolved(
         &mut self,
-        files: FilesKey,
+        files: &FilesKey,
         source: Option<LocalSource>,
         cx: &mut Context<Self>,
     ) {
-        if self.files.key.as_ref() != Some(&files) {
+        if !matches!(&self.local, LocalState::Resolving(k, _) if k == files) {
             return;
         }
-        let source = source.map(|s| s.with_files(&self.files.list));
-        self.local = LocalState::Ready(files, source);
+        self.local = LocalState::Ready(files.clone(), source);
         self.local_task = None;
-        self.queued.clear(); // the syntax worker's queue may now use it
-        self.queue_syntax(cx);
-        self.pump(cx);
+        cx.notify(); // the "local" marker
     }
 
     fn load_related(&mut self, sha: RevisionId, network: bool, cx: &mut Context<Self>) {
@@ -1051,9 +1051,6 @@ impl ChangePage {
     /// the list, the filters, the whitespace option or the preference may
     /// have changed; does nothing when the queue would be the same.
     fn queue_syntax(&mut self, cx: &mut Context<Self>) {
-        if self.local.is_resolving() {
-            return; // local_resolved queues it, with the local source
-        }
         let enabled = self.settings.read(cx).resolved().syntax_highlighting;
         let keys: Vec<DiffKey> = match &self.files.key {
             Some(files) if enabled && self.files.loaded => {
@@ -1071,7 +1068,7 @@ impl ChangePage {
         }
         self.queued = keys.clone();
         let session = self.session.clone();
-        let local = self.local_source();
+        let local = self.local_lazy();
         self.syntax
             .update(cx, |c, cx| c.set_queue(keys, &session, local, enabled, cx));
     }
@@ -1083,7 +1080,17 @@ impl ChangePage {
 
     /// The local source for the file list in use, once resolved.
     fn local_source(&self) -> Option<LocalSource> {
-        self.local.source_for(self.files.key.as_ref()?).cloned()
+        let source = self.local.source_for(self.files.key.as_ref()?)?;
+        Some(source.with_renames(self.renames.clone()))
+    }
+
+    /// The local source for `load_diff` and the syntax worker, resolved or
+    /// not yet.
+    fn local_lazy(&self) -> LocalLazy {
+        match &self.files.key {
+            Some(files) => self.local.lazy(files, &self.renames),
+            None => LocalLazy::none(),
+        }
     }
 
     fn expand_inline(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -1125,9 +1132,6 @@ impl ChangePage {
     /// Starts queued fetches while fewer than [`MAX_PARALLEL_DIFFS`] run.
     /// Files are served in list order.
     fn pump(&mut self, cx: &mut Context<Self>) {
-        if self.local.is_resolving() {
-            return; // local_resolved pumps
-        }
         let mut running = self
             .inline
             .values()
@@ -1157,7 +1161,7 @@ impl ChangePage {
     }
 
     fn start_fetch(&mut self, path: &str, cx: &mut Context<Self>) {
-        let local = self.local_source();
+        let local = self.local_lazy();
         let Some(inline) = self.inline.get_mut(path) else {
             return;
         };
@@ -1169,7 +1173,7 @@ impl ChangePage {
         let task_key = key.clone();
         inline.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { load_diff(syncer, task_key, can_sync, local).await })
+                .background_spawn(load_diff(syncer, task_key, can_sync, local))
                 .await;
             this.update(cx, |this, cx| this.diff_arrived(&path, &key, result, cx))
                 .ok();

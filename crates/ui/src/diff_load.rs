@@ -5,7 +5,7 @@
 use model::{Diff, DiffContext, DiffKey};
 use sync::Syncer;
 
-use crate::{local_source::LocalSource, session::is_unauthorized};
+use crate::{local_source::LocalLazy, session::is_unauthorized};
 
 /// Why a diff could not be shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub enum DiffSource {
 }
 
 /// The diff for `key` and where it came from, in this order: the store,
-/// the local checkout (`local`, when it can serve this file), Gerrit.
+/// the local checkout (`local`, awaited only on a store miss), Gerrit.
 ///
 /// Diffs are keyed by revision SHA and immutable, so a cached one is final
 /// and nothing else is asked. A local diff is not written to the store, so
@@ -57,14 +57,18 @@ pub async fn load_diff(
     syncer: Syncer,
     key: DiffKey,
     can_sync: bool,
-    local: Option<LocalSource>,
+    local: LocalLazy,
 ) -> Result<(Diff, DiffSource), LoadError> {
     match syncer.cached_diff(&key) {
         Ok(Some(cached)) => return Ok((cached.diff, DiffSource::Cache)),
         Ok(None) => {}
         Err(e) => log::warn!("reading cached diff of {}: {e}", key.path),
     }
-    if let Some(diff) = local.as_ref().and_then(|l| l.diff(&key)) {
+    // Only now is the checkout needed (it may still be resolving), so a
+    // stored diff never waits for git.
+    if let Some(local) = local.get().await
+        && let Some(diff) = local.diff(&key)
+    {
         return Ok((diff, DiffSource::Local));
     }
     if !can_sync {

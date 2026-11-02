@@ -21,7 +21,7 @@ use crate::{
     diff::syntax::{DiffSyntax, highlight_diff},
     diff_load::load_diff,
     filters::{FileStyle, skips},
-    local_source::LocalSource,
+    local_source::LocalLazy,
     session::Session,
 };
 
@@ -142,15 +142,15 @@ impl SyntaxCache {
     /// Replaces the work queue: the worker highlights `keys` in order, one at
     /// a time, and drops what it was doing. Keys already cached are skipped;
     /// diffs not in the cache are fetched through the session's syncer (only
-    /// when it can sync), from `local` first when it serves them. The queue is cut at [`MAX_ENTRIES`]. With `enabled`
-    /// false (the `syntax_highlighting` preference is off) the queue is just
+    /// when it can sync), from `local` first when it serves them. The queue
+    /// is cut at [`MAX_ENTRIES`]. With `enabled` false (the `syntax_highlighting` preference is off) the queue is just
     /// cleared. Callers pass the resolved preference, and call again when it
     /// turns on.
     pub fn set_queue(
         &mut self,
         keys: Vec<DiffKey>,
         session: &Session,
-        local: Option<LocalSource>,
+        local: LocalLazy,
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
@@ -262,7 +262,7 @@ async fn highlight_key(
     syncer: Syncer,
     key: DiffKey,
     can_sync: bool,
-    local: Option<LocalSource>,
+    local: LocalLazy,
 ) -> Result<Highlight, crate::diff_load::LoadError> {
     let (diff, _) = load_diff(syncer, key.clone(), can_sync, local).await?;
     Ok(highlight_diff(&key.path, &diff))

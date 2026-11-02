@@ -10,7 +10,12 @@
 //! Everything here that touches git blocks: call from the background
 //! executor. Locally computed diffs are never written to the store.
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+
+use futures::{
+    FutureExt as _,
+    future::{Either, Shared},
+};
 
 use gpui_kit::component::{ActiveTheme as _, tooltip::Tooltip};
 use gpui_kit::*;
@@ -33,7 +38,7 @@ pub struct LocalSource {
     /// Path in the target to the path on the base side (`None`: not
     /// renamed or copied). `None` while the file list is not known; then
     /// nothing is served, since a rename cannot be told from an added file.
-    renames: Option<Arc<HashMap<String, Option<String>>>>,
+    renames: Option<Arc<Renames>>,
 }
 
 impl std::fmt::Debug for LocalSource {
@@ -84,14 +89,16 @@ impl LocalSource {
     }
 
     /// The same comparison with the renames of `files`, the list in use.
+    #[cfg(test)]
     pub fn with_files(&self, files: &[FileEntry]) -> Self {
-        let renames = files
-            .iter()
-            .map(|f| (f.path.clone(), f.old_path.clone()))
-            .collect();
+        self.with_renames(renames_of(files))
+    }
+
+    /// The same comparison with these renames.
+    pub fn with_renames(&self, renames: Arc<Renames>) -> Self {
         Self {
             core: self.core.clone(),
-            renames: Some(Arc::new(renames)),
+            renames: Some(renames),
         }
     }
 
@@ -145,20 +152,87 @@ impl LocalSource {
     }
 }
 
+/// The renames of a file list: path in the target to the path on the base
+/// side (`None`: not renamed or copied).
+pub type Renames = HashMap<String, Option<String>>;
+
+/// The renames of `files`, shared by every diff of the list.
+pub fn renames_of(files: &[FileEntry]) -> Arc<Renames> {
+    Arc::new(
+        files
+            .iter()
+            .map(|f| (f.path.clone(), f.old_path.clone()))
+            .collect(),
+    )
+}
+
+/// A local source that may still be resolving. Cloneable; all clones wait
+/// for the same resolve. [`load_diff`](crate::diff_load::load_diff) awaits it
+/// only after the store missed, so a stored diff never waits for git.
+#[derive(Clone, Default)]
+pub struct LocalLazy {
+    base: Option<Base>,
+    renames: Option<Arc<Renames>>,
+}
+
+#[derive(Clone)]
+enum Base {
+    Ready(LocalSource),
+    Pending(SharedSource),
+}
+
+/// A resolve in flight: the comparison without renames.
+pub type SharedSource = Shared<Task<Option<LocalSource>>>;
+
+impl LocalLazy {
+    /// Nothing local: Gerrit serves it all.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Already resolved (a source without renames, or `None`).
+    pub fn ready(source: Option<LocalSource>, renames: Arc<Renames>) -> Self {
+        Self {
+            base: source.map(Base::Ready),
+            renames: Some(renames),
+        }
+    }
+
+    /// Resolving; the answer arrives with `renames` applied.
+    pub fn pending(source: SharedSource, renames: Arc<Renames>) -> Self {
+        Self {
+            base: Some(Base::Pending(source)),
+            renames: Some(renames),
+        }
+    }
+
+    /// The source, waiting for the resolve if it is still running.
+    pub async fn get(self) -> Option<LocalSource> {
+        let source = match self.base? {
+            Base::Ready(s) => s,
+            Base::Pending(p) => p.await?,
+        };
+        Some(match self.renames {
+            Some(r) => source.with_renames(r),
+            None => source,
+        })
+    }
+}
+
 /// What a page knows about the local source of its current file list.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub enum LocalState {
     /// Nothing asked yet (no file list).
     #[default]
     Unknown,
-    /// Resolving in the background; diffs wait for it.
-    Resolving(FilesKey),
+    /// Resolving in the background.
+    Resolving(FilesKey, SharedSource),
     /// Resolved for this comparison: `None` means Gerrit serves it all.
     Ready(FilesKey, Option<LocalSource>),
 }
 
 impl LocalState {
-    /// The source for `files`, if resolved for it.
+    /// The resolved source (without renames) for `files`.
     pub fn source_for(&self, files: &FilesKey) -> Option<&LocalSource> {
         match self {
             Self::Ready(k, Some(s)) if k == files => Some(s),
@@ -166,46 +240,100 @@ impl LocalState {
         }
     }
 
-    pub fn is_resolving(&self) -> bool {
-        matches!(self, Self::Resolving(_))
-    }
-
     /// Whether this state is (or is becoming) the answer for `files`.
     pub fn is_for(&self, files: &FilesKey) -> bool {
         match self {
             Self::Unknown => false,
-            Self::Resolving(k) | Self::Ready(k, _) => k == files,
+            Self::Resolving(k, _) | Self::Ready(k, _) => k == files,
+        }
+    }
+
+    /// For [`load_diff`](crate::diff_load::load_diff) and the syntax worker.
+    pub fn lazy(&self, files: &FilesKey, renames: &Arc<Renames>) -> LocalLazy {
+        match self {
+            Self::Resolving(k, p) if k == files => LocalLazy::pending(p.clone(), renames.clone()),
+            Self::Ready(k, s) if k == files => LocalLazy::ready(s.clone(), renames.clone()),
+            _ => LocalLazy::none(),
         }
     }
 }
 
-/// Whether a checkout is configured for `project` at all, so a page can
-/// skip the whole business (and the wait for a task) when not.
-pub fn configured(
+/// How long opening and resolving may take before the checkout is given up
+/// on for this load (a hung git: stale NFS, a locked repository).
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The answer to "what about the local source of `files`".
+pub enum Lookup {
+    /// No checkout is configured for the project.
+    Unconfigured,
+    /// Known from an earlier look (positive answers only).
+    Ready(LocalSource),
+    /// Being worked out in the background.
+    Pending(SharedSource),
+}
+
+/// Looks the comparison up in the checkouts' memo, else starts resolving it
+/// on the background executor. Never blocks.
+pub fn lookup(
     checkouts: &Option<Entity<Checkouts>>,
     project: &str,
-    cx: &gpui_kit::App,
-) -> bool {
-    checkouts
-        .as_ref()
-        .is_some_and(|c| c.read(cx).state(project).is_some())
+    files: &FilesKey,
+    cx: &mut App,
+) -> Lookup {
+    let Some(checkouts) = checkouts else {
+        return Lookup::Unconfigured;
+    };
+    let (configured, memo) = {
+        let c = checkouts.read(cx);
+        (c.state(project).is_some(), c.memoized(project, files))
+    };
+    if !configured {
+        return Lookup::Unconfigured;
+    }
+    if let Some(source) = memo {
+        return Lookup::Ready(source);
+    }
+    let (checkouts, project, files) = (checkouts.clone(), project.to_owned(), files.clone());
+    let task = cx.spawn(async move |cx| {
+        let source = resolve_source(&checkouts, &project, &files, cx).await;
+        if let Some(s) = &source {
+            checkouts.update(cx, |c, _| c.memoize(&project, &files, s.clone()));
+        }
+        source
+    });
+    Lookup::Pending(task.shared())
 }
 
 /// Opens (waiting for an open in flight) the checkout of `project` and
-/// resolves `files` in it, on the background executor. `None` when there is
-/// no usable checkout or it cannot serve the comparison.
-pub async fn resolve_source(
-    checkouts: Entity<Checkouts>,
-    project: String,
-    files: FilesKey,
+/// resolves `files` in it. `None` when there is no usable checkout, it
+/// cannot serve the comparison, or this takes longer than
+/// [`RESOLVE_TIMEOUT`] (logged).
+async fn resolve_source(
+    checkouts: &Entity<Checkouts>,
+    project: &str,
+    files: &FilesKey,
     cx: &mut AsyncApp,
 ) -> Option<LocalSource> {
-    let ck = Checkouts::opened(&checkouts, &project, cx).await?;
-    let CheckoutState::Open(repo) = ck.state else {
-        return None;
+    let timer = cx.background_executor().timer(RESOLVE_TIMEOUT);
+    let work = async {
+        let ck = Checkouts::opened(checkouts, project, cx).await?;
+        let CheckoutState::Open(repo) = ck.state else {
+            return None;
+        };
+        let files = files.clone();
+        cx.background_spawn(async move { LocalSource::resolve(repo, &files) })
+            .await
     };
-    cx.background_spawn(async move { LocalSource::resolve(repo, &files) })
-        .await
+    match futures::future::select(std::pin::pin!(work), std::pin::pin!(timer)).await {
+        Either::Left((source, _)) => source,
+        Either::Right(_) => {
+            log::warn!(
+                "the local checkout of {project} did not answer in {RESOLVE_TIMEOUT:?}; \
+                 asking Gerrit"
+            );
+            None
+        }
+    }
 }
 
 /// The quiet "local" marker for a diff computed from the checkout at

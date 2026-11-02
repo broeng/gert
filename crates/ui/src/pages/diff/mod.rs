@@ -25,7 +25,7 @@ mod prefs;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -46,7 +46,7 @@ use crate::{
     diff_load::{DiffSource, LoadError, context_label, load_diff},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
-    local_source::{LocalSource, LocalState, local_marker, resolve_source},
+    local_source::{LocalSource, LocalState, Lookup, Renames, local_marker, lookup, renames_of},
     nav::DiffRoute,
     outbox::DraftOutbox,
     reply, reviewed,
@@ -100,6 +100,9 @@ pub struct DiffPage {
     checkouts: Option<Entity<Checkouts>>,
     /// The local source for `files_key`, once resolved.
     local: LocalState,
+    local_task: Option<Task<()>>,
+    /// The renames of `files`, for the local source.
+    renames: Arc<Renames>,
     /// Where the diff on screen came from.
     source: Option<DiffSource>,
     /// The file filter rules and which are on, shared by all pages.
@@ -174,6 +177,8 @@ impl DiffPage {
             files: Vec::new(),
             checkouts: None,
             local: LocalState::Unknown,
+            local_task: None,
+            renames: Arc::default(),
             source: None,
             filters: filters.clone(),
             syntax,
@@ -273,6 +278,7 @@ impl DiffPage {
         self.files_key = l.files_key;
         if let Some((files, reviewed)) = l.files {
             self.files = files;
+            self.renames = renames_of(&self.files);
             self.reviewed = reviewed;
             self.restyle(cx);
         }
@@ -336,39 +342,15 @@ impl DiffPage {
                 v.set_status(Some(DiffStatus::Busy(msg.into())), cx)
             });
         }
-        // The local source is resolved once, by the first load: it waits
-        // for the checkout to open (one `git rev-parse`) rather than
-        // going to Gerrit, which would leave the first look at a project
-        // in every run without a local diff.
-        let known = match &self.local {
-            LocalState::Ready(k, s) if *k == files => Some(s.clone()),
-            _ => None,
-        };
-        let project = self.detail.as_ref().map(|d| d.summary.project.clone());
-        let checkouts = project
-            .as_deref()
-            .filter(|p| crate::local_source::configured(&self.checkouts, p, cx))
-            .and(self.checkouts.clone())
-            .zip(project);
-        let list = self.files.clone();
+        // A stored diff is shown without waiting for git: load_diff awaits
+        // the local source only after the store missed.
+        self.ensure_local(&files, cx);
+        let local = self.local.lazy(&files, &self.renames);
         self.task = Some(cx.spawn(async move |this, cx| {
-            let source = match (known, checkouts) {
-                (Some(source), _) => source,
-                (None, Some((checkouts, project))) => {
-                    resolve_source(checkouts, project, files.clone(), cx)
-                        .await
-                        .map(|s| s.with_files(&list))
-                }
-                (None, None) => None,
-            };
-            let local = source.clone();
             let result = cx
                 .background_spawn(load_diff(syncer, key.clone(), can_sync, local))
                 .await;
             this.update(cx, |this, cx| {
-                if this.files_key.as_ref() == Some(&files) {
-                    this.local = LocalState::Ready(files, source);
-                }
                 this.diff_arrived(key, result, cx);
                 cx.notify();
             })
@@ -538,19 +520,65 @@ impl DiffPage {
         }
         let session = self.session.clone();
         let keys = state.keys.clone();
-        let local = self.local_source();
+        let local = self.local.lazy(&files, &self.renames);
         self.syntax
             .update(cx, |c, cx| c.set_queue(keys, &session, local, enabled, cx));
         let covered = enabled && state.next.as_deref().is_some_and(|p| !is_magic(p));
-        if !covered && state.next.is_some() {
-            self.prefetch_next(&shown, cx);
+        if !covered && let Some(next) = &state.next {
+            self.prefetch_next(&shown, next, cx);
         }
         self.ahead_state = Some(state);
     }
 
+    /// Starts finding the local source for `files` unless that is done or
+    /// under way.
+    fn ensure_local(&mut self, files: &FilesKey, cx: &mut Context<Self>) {
+        if self.local.is_for(files) {
+            return;
+        }
+        let project = self.detail.as_ref().map(|d| d.summary.project.clone());
+        let found = match &project {
+            Some(p) => lookup(&self.checkouts, p, files, cx),
+            None => Lookup::Unconfigured,
+        };
+        self.local_task = None;
+        self.local = match found {
+            Lookup::Unconfigured => LocalState::Ready(files.clone(), None),
+            Lookup::Ready(s) => LocalState::Ready(files.clone(), Some(s)),
+            Lookup::Pending(p) => {
+                let key = files.clone();
+                let shared = p.clone();
+                self.local_task = Some(cx.spawn(async move |this, cx| {
+                    let source = shared.await;
+                    this.update(cx, |this, cx| this.local_resolved(&key, source, cx))
+                        .ok();
+                }));
+                LocalState::Resolving(files.clone(), p)
+            }
+        };
+    }
+
+    fn local_resolved(
+        &mut self,
+        files: &FilesKey,
+        source: Option<LocalSource>,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(&self.local, LocalState::Resolving(k, _) if k == files) {
+            return;
+        }
+        self.local = LocalState::Ready(files.clone(), source);
+        self.local_task = None;
+        // The prefetch decision and the marker depend on it.
+        self.ahead_state = None;
+        self.ahead(cx);
+        cx.notify();
+    }
+
     /// The local source for the comparison on show, once resolved.
     fn local_source(&self) -> Option<LocalSource> {
-        self.local.source_for(self.files_key.as_ref()?).cloned()
+        let source = self.local.source_for(self.files_key.as_ref()?)?;
+        Some(source.with_renames(self.renames.clone()))
     }
 
     /// Names the server's checkouts, so diffs can come from the project's
@@ -567,20 +595,15 @@ impl DiffPage {
 
     /// Fetches the next file's diff in the background so that `]` is
     /// instant.
-    fn prefetch_next(&mut self, shown: &DiffKey, cx: &mut Context<Self>) {
+    fn prefetch_next(&mut self, shown: &DiffKey, next: &str, cx: &mut Context<Self>) {
         if !self.session.can_sync() || self.files.is_empty() {
             return;
         }
         let syncer: Syncer = self.session.syncer().clone();
         // The checkout can serve the next file when it is needed: no
         // diffing ahead for a diff that costs a git call.
-        let next = self
-            .files
-            .iter()
-            .position(|f| f.path == self.route.path)
-            .and_then(|i| self.files.get(i + 1));
-        if let (Some(local), Some(next)) = (self.local_source(), next)
-            && local.serves(&shown.with_path(&next.path))
+        if let Some(local) = self.local_source()
+            && local.serves(&shown.with_path(next))
         {
             return;
         }

@@ -29,7 +29,9 @@ use futures::channel::oneshot;
 use gpui_kit::{AppContext as _, AsyncApp, Context, Entity, Task};
 use local_git::Repo;
 
-use crate::session::ProjectSettings;
+use model::FilesKey;
+
+use crate::{local_source::LocalSource, session::ProjectSettings};
 
 /// How opening one checkout went.
 #[derive(Clone, Debug)]
@@ -96,13 +98,23 @@ pub struct Checkouts {
     /// Woken whenever an open finishes or the list is replaced (see
     /// [`Checkouts::opened`]).
     waiters: Vec<oneshot::Sender<()>>,
+    /// Comparisons found to be servable, by project name: so that opening
+    /// another file of the change (every `]` makes a new page) does not
+    /// spawn git again. Positive answers only: a commit that was missing is
+    /// looked for again on the next load, since the user may have fetched
+    /// it. Dropped when the projects change.
+    memo: Vec<(String, FilesKey, LocalSource)>,
 }
+
+/// How many resolved comparisons are remembered.
+const MEMO_LIMIT: usize = 32;
 
 impl Checkouts {
     pub fn new(projects: Vec<ProjectSettings>) -> Self {
         Self {
             entries: projects.into_iter().map(Entry::new).collect(),
             waiters: Vec::new(),
+            memo: Vec::new(),
         }
     }
 
@@ -152,6 +164,23 @@ impl Checkouts {
         }
     }
 
+    /// The remembered comparison of `files` in the checkout of `project`.
+    pub fn memoized(&self, project: &str, files: &FilesKey) -> Option<LocalSource> {
+        self.memo
+            .iter()
+            .find(|(p, k, _)| p == project && k == files)
+            .map(|(.., s)| s.clone())
+    }
+
+    /// Remembers a servable comparison (see [`Checkouts::memoized`]).
+    pub fn memoize(&mut self, project: &str, files: &FilesKey, source: LocalSource) {
+        if self.memo.len() >= MEMO_LIMIT {
+            self.memo.remove(0);
+        }
+        self.memo.retain(|(p, k, _)| !(p == project && k == files));
+        self.memo.push((project.to_owned(), files.clone(), source));
+    }
+
     fn wake(&mut self) {
         for w in self.waiters.drain(..) {
             w.send(()).ok();
@@ -195,6 +224,7 @@ impl Checkouts {
     /// whose name and path are unchanged keep what they have; one whose path
     /// changed is opened again, at once if the old one had been opened.
     pub fn set_projects(&mut self, projects: Vec<ProjectSettings>, cx: &mut Context<Self>) {
+        self.memo.clear();
         let mut old: Vec<Option<Entry>> = std::mem::take(&mut self.entries)
             .into_iter()
             .map(Some)
@@ -406,6 +436,88 @@ mod tests {
         c.update(cx, |c, cx| c.set_projects(vec![project("a", &a)], cx));
         assert!(state(&c, "b", cx).is_none());
         for d in [&a, &b, &b2] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// What `wait_for` collects: unanswered, or the answer.
+    type Cell = Arc<std::sync::Mutex<Option<Option<Checkout>>>>;
+
+    /// Runs `Checkouts::opened` as a task; the answer lands in the cell.
+    fn wait_for(c: &Entity<Checkouts>, name: &str, cx: &mut TestAppContext) -> (Task<()>, Cell) {
+        let out = Arc::new(std::sync::Mutex::new(None));
+        let (c, name, cell) = (c.clone(), name.to_owned(), out.clone());
+        let task = cx.spawn(async move |cx| {
+            let answer = Checkouts::opened(&c, &name, &mut cx.clone()).await;
+            *cell.lock().expect("cell") = Some(answer);
+        });
+        (task, out)
+    }
+
+    fn answer(cell: &Cell) -> Option<Option<Checkout>> {
+        cell.lock().expect("cell").clone()
+    }
+
+    #[gpui_kit::test]
+    fn opened_is_woken_when_the_open_succeeds(cx: &mut TestAppContext) {
+        let dir = tmp("wait-ok");
+        git_init(&dir);
+        let c = cx.new(|_| Checkouts::new(vec![project("a", &dir)]));
+        let (_task, cell) = wait_for(&c, "a", cx);
+        cx.run_until_parked();
+        let got = answer(&cell).expect("answered").expect("configured");
+        assert_eq!(got.repo().map(|r| r.path().to_owned()), Some(dir.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    fn opened_is_woken_when_the_open_fails(cx: &mut TestAppContext) {
+        let plain = tmp("wait-fail");
+        let c = cx.new(|_| Checkouts::new(vec![project("a", &plain)]));
+        let (_task, cell) = wait_for(&c, "a", cx);
+        cx.run_until_parked();
+        let got = answer(&cell).expect("answered").expect("configured");
+        assert!(got.error().is_some(), "{got:?}");
+        let _ = std::fs::remove_dir_all(&plain);
+    }
+
+    /// An entry that is stuck in `Opening`, so a waiter really waits.
+    fn stuck(cx: &mut TestAppContext, projects: Vec<ProjectSettings>) -> Entity<Checkouts> {
+        let c = cx.new(|_| Checkouts::new(projects));
+        c.update(cx, |c, _| {
+            c.entries[0].state = Some(CheckoutState::Opening);
+        });
+        c
+    }
+
+    #[gpui_kit::test]
+    fn opened_answers_none_when_the_project_is_removed_meanwhile(cx: &mut TestAppContext) {
+        let dir = tmp("wait-removed");
+        git_init(&dir);
+        let c = stuck(cx, vec![project("a", &dir)]);
+        let (_task, cell) = wait_for(&c, "a", cx);
+        cx.run_until_parked();
+        assert!(answer(&cell).is_none(), "still waiting");
+        c.update(cx, |c, cx| c.set_projects(Vec::new(), cx));
+        cx.run_until_parked();
+        assert_eq!(answer(&cell).map(|a| a.is_none()), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    fn opened_waits_for_the_new_open_when_the_path_changes(cx: &mut TestAppContext) {
+        let (a, b) = (tmp("wait-path-a"), tmp("wait-path-b"));
+        git_init(&a);
+        git_init(&b);
+        let c = stuck(cx, vec![project("a", &a)]);
+        let (_task, cell) = wait_for(&c, "a", cx);
+        cx.run_until_parked();
+        assert!(answer(&cell).is_none(), "still waiting");
+        c.update(cx, |c, cx| c.set_projects(vec![project("a", &b)], cx));
+        cx.run_until_parked();
+        let got = answer(&cell).expect("answered").expect("configured");
+        assert_eq!(got.repo().map(|r| r.path().to_owned()), Some(b.clone()));
+        for d in [&a, &b] {
             let _ = std::fs::remove_dir_all(d);
         }
     }
