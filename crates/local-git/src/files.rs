@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 use model::{COMMIT_MSG_PATH, FileEntry, FileStatus, file_order};
 
-use crate::compare::{BaseKind, Comparison};
-use crate::{Error, Local, Repo, commit_msg};
+use crate::compare::Comparison;
+use crate::{Error, Local, Repo};
 
 /// Gerrit's rename similarity threshold.
-const RENAME_SCORE: &str = "-M60%";
+pub(crate) const RENAME_SCORE: &str = "-M60%";
 
 const NULL_OID_CHAR: u8 = b'0';
 
@@ -196,11 +196,8 @@ pub(crate) fn parse_diff_tree(out: &[u8]) -> Result<Vec<RawChange>, Error> {
 /// The `/COMMIT_MSG` entry: the synthetic file against nothing (a parent
 /// comparison) or against the base patch set's synthetic file.
 fn commit_msg_entry(cmp: &Comparison) -> FileEntry {
-    let new = commit_msg::text(&cmp.target, &cmp.parent_subjects);
-    let old = match (cmp.base_kind, &cmp.base_commit) {
-        (BaseKind::PatchSet, Some(base)) => commit_msg::text(base, &cmp.parent_subjects),
-        _ => String::new(),
-    };
+    let (old, new) = cmp.commit_msg_texts();
+    let old = old.unwrap_or_default();
     let (inserted, deleted) = crate::diff::count_changed_lines(&old, &new);
     let size = new.len() as u64;
     FileEntry {

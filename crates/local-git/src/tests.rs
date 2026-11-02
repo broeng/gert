@@ -566,17 +566,20 @@ fn diff_of_a_root_commit_uses_the_empty_tree() {
 }
 
 #[test]
-fn diffs_that_gerrit_synthesizes_or_we_cannot_name_are_not_local() {
+fn merge_lists_and_paths_we_cannot_name_are_not_local() {
     let (t, _, second) = two_commits();
     let repo = Repo::open(t.path()).expect("open");
     let cmp = comparison(&repo, &second, None);
     let none = Whitespace::IgnoreNone;
-    for path in ["/COMMIT_MSG", "/MERGE_LIST"] {
-        assert!(matches!(
-            repo.diff(&cmp, path, None, &none).expect("diff"),
-            Local::NotLocal(NotLocal::SpecialFile(_))
-        ));
-    }
+    assert!(matches!(
+        repo.diff(&cmp, "/MERGE_LIST", None, &none).expect("diff"),
+        Local::NotLocal(NotLocal::SpecialFile(_))
+    ));
+    assert_eq!(
+        repo.diff(&cmp, "/COMMIT_MSG", None, &Whitespace::Unknown("X".into()))
+            .expect("diff"),
+        Local::NotLocal(NotLocal::UnknownWhitespace)
+    );
     assert_eq!(
         repo.diff(&cmp, "a.txt", None, &Whitespace::Unknown("X".into()))
             .expect("diff"),
@@ -713,4 +716,127 @@ fn a_huge_changed_region_gets_no_intraline_edits() {
         _ => true,
     }));
     assert_eq!(d.a_len(), 30_001);
+}
+
+/// The `/COMMIT_MSG` lines of a commit made by `TestRepo`, after `header`
+/// (the parent line, if any).
+fn commit_msg_lines(header: &[String], message: &[&str]) -> Vec<String> {
+    let mut l = header.to_vec();
+    l.extend(s(&[
+        "Author:     Test Author <author@example.com>",
+        "AuthorDate: 2013-02-01 09:59:32 +0100",
+        "Commit:     Test Committer <committer@example.com>",
+        "CommitDate: 2013-02-01 09:59:32 +0100",
+        "",
+    ]));
+    l.extend(s(message));
+    l
+}
+
+#[test]
+fn commit_msg_against_the_parent_is_an_added_file() {
+    let (t, first, second) = two_commits();
+    let repo = Repo::open(t.path()).expect("open");
+    let cmp = comparison(&repo, &second, None);
+    let d = diff(&repo, &cmp, "/COMMIT_MSG", None, &Whitespace::IgnoreNone);
+    // As Gerrit 3.14 answers: no base side, the whole text added.
+    assert_eq!(d.change_type, Some(DiffChangeType::Added));
+    assert!(d.meta_a.is_none());
+    let meta = d.meta_b.clone().expect("meta b");
+    assert_eq!(meta.name, "/COMMIT_MSG");
+    assert_eq!(
+        meta.content_type.as_deref(),
+        Some("text/x-gerrit-commit-message")
+    );
+    assert_eq!(meta.lines, 10);
+    assert_eq!(
+        d.diff_header,
+        [
+            "diff --git /dev/null b//COMMIT_MSG",
+            "--- /dev/null",
+            "+++ b//COMMIT_MSG"
+        ]
+    );
+    let parent = format!("Parent:     {} (first)", &first[..8]);
+    let want = commit_msg_lines(&[parent], &["second", "", "Change-Id: I1", ""]);
+    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    assert_eq!(d.chunks, [changed(&[], &want)]);
+    assert_eq!(d.intraline_status, Some(IntralineStatus::Ok));
+    assert!(!d.binary);
+    // The file list counts the same text.
+    let entry = files(&repo, &cmp).remove(0);
+    assert_eq!(entry.lines_inserted, 9);
+}
+
+#[test]
+fn commit_msg_against_another_patch_set_diffs_the_two_texts() {
+    let t = TestRepo::new();
+    t.write("f", b"base\n");
+    let base = t.commit("base");
+    t.write("f", b"one\n");
+    let one = t.commit("Subject\n\nOld body.\n\nChange-Id: I1\n");
+    t.write("f", b"two\n");
+    t.git(&["commit", "-q", "-a", "--amend", "--no-edit"]);
+    let same_message = t.git(&["rev-parse", "HEAD"]);
+    t.git(&[
+        "commit",
+        "-q",
+        "--amend",
+        "-m",
+        "Subject\n\nNew  body.\n\nChange-Id: I1",
+    ]);
+    let new_message = t.git(&["rev-parse", "HEAD"]);
+    let repo = Repo::open(t.path()).expect("open");
+    let parent = format!("Parent:     {} (base)", &base[..8]);
+
+    let cmp = comparison(&repo, &new_message, Some(&one));
+    let d = diff(&repo, &cmp, "/COMMIT_MSG", None, &Whitespace::IgnoreNone);
+    assert_eq!(d.change_type, Some(DiffChangeType::Modified));
+    assert_eq!(d.meta_a.as_ref().map(|m| m.lines), Some(12));
+    assert_eq!(d.meta_b.as_ref().map(|m| m.lines), Some(12));
+    assert_eq!(
+        d.diff_header,
+        [
+            "diff --git a//COMMIT_MSG b//COMMIT_MSG",
+            "--- a//COMMIT_MSG",
+            "+++ b//COMMIT_MSG"
+        ]
+    );
+    let head = commit_msg_lines(std::slice::from_ref(&parent), &["Subject", ""]);
+    let head: Vec<&str> = head.iter().map(String::as_str).collect();
+    assert_eq!(
+        plain(&d),
+        [
+            common(&head),
+            changed(&["Old body."], &["New  body."]),
+            common(&["", "Change-Id: I1", ""]),
+        ]
+    );
+    // Intraline edits as for any file.
+    let DiffChunk::Changed(c) = &d.chunks[1] else {
+        panic!("changed chunk");
+    };
+    assert!(!c.edits_a.is_empty() && !c.edits_b.is_empty());
+    // Whitespace modes as for any file.
+    let d = diff(&repo, &cmp, "/COMMIT_MSG", None, &Whitespace::IgnoreAll);
+    assert!(matches!(&d.chunks[1], DiffChunk::Changed(c) if c.a == ["Old body."]));
+
+    // Equal texts are one skip (two separate texts to Gerrit), not common.
+    let cmp = comparison(&repo, &same_message, Some(&one));
+    let d = diff(&repo, &cmp, "/COMMIT_MSG", None, &Whitespace::IgnoreNone);
+    assert_eq!(d.change_type, Some(DiffChangeType::Modified));
+    assert_eq!(d.chunks, [DiffChunk::Skip { lines: 12 }]);
+}
+
+#[test]
+fn commit_msg_of_a_root_commit_has_no_parent_line() {
+    let (t, first, _) = two_commits();
+    let repo = Repo::open(t.path()).expect("open");
+    let cmp = comparison(&repo, &first, None);
+    let d = diff(&repo, &cmp, "/COMMIT_MSG", None, &Whitespace::IgnoreNone);
+    assert_eq!(d.change_type, Some(DiffChangeType::Added));
+    assert!(d.meta_a.is_none());
+    let want = commit_msg_lines(&[], &["first", "", "Body.", ""]);
+    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    assert_eq!(plain(&d), [changed(&[], &want)]);
 }

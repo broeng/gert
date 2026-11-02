@@ -4,7 +4,7 @@ use model::{CommitInfo, RevisionId};
 
 use crate::commits::parse_commit;
 use crate::git::Object;
-use crate::{Error, Local, NotLocal, Repo, is_object_id};
+use crate::{Error, Local, NotLocal, Repo, commit_msg, is_object_id};
 
 /// What the base side of a [`Comparison`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +40,16 @@ impl Comparison {
     /// The target commit.
     pub fn target(&self) -> &CommitInfo {
         &self.target
+    }
+
+    /// The `/COMMIT_MSG` texts of the base (none against the parent) and
+    /// the target.
+    pub(crate) fn commit_msg_texts(&self) -> (Option<String>, String) {
+        let old = match (self.base_kind, &self.base_commit) {
+            (BaseKind::PatchSet, Some(base)) => Some(commit_msg::text(base, &self.parent_subjects)),
+            _ => None,
+        };
+        (old, commit_msg::text(&self.target, &self.parent_subjects))
     }
 }
 

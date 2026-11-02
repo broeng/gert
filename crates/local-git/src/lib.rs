@@ -12,7 +12,7 @@
 //!
 //! A comparison that Gerrit computes in ways we cannot reproduce (merge
 //! commits against their auto-merge, patch sets with different parents,
-//! the synthetic `/COMMIT_MSG` file, ...) is not an error: it yields
+//! the synthetic `/MERGE_LIST` file, ...) is not an error: it yields
 //! [`Local::NotLocal`] and the caller asks Gerrit instead.
 
 mod commit_msg;

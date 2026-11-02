@@ -9,7 +9,7 @@ use model::{
 };
 
 use crate::compare::Comparison;
-use crate::files::{RawChange, parse_diff_tree};
+use crate::files::{RENAME_SCORE, RawChange, parse_diff_tree};
 use crate::git::Object;
 use crate::{Error, Local, NotLocal, Repo};
 
@@ -31,8 +31,9 @@ impl Repo {
     /// file was renamed. The chunks carry intraline edits (as if the server
     /// had been asked for them), see the `intraline` module.
     ///
-    /// [`Local::NotLocal`] for the synthetic `/COMMIT_MSG` and `/MERGE_LIST`
-    /// files, unknown whitespace modes, and paths git cannot be asked about.
+    /// The synthetic `/COMMIT_MSG` is diffed as Gerrit builds it (see
+    /// [`commit_msg_diff`]). [`Local::NotLocal`] for `/MERGE_LIST`,
+    /// unknown whitespace modes, and paths git cannot be asked about.
     /// Reads both blobs with one `cat-file --batch`.
     pub fn diff(
         &self,
@@ -41,23 +42,18 @@ impl Repo {
         old_path: Option<&str>,
         whitespace: &Whitespace,
     ) -> Result<Local<Diff>, Error> {
-        if path == COMMIT_MSG_PATH || path == MERGE_LIST_PATH {
+        if path == MERGE_LIST_PATH {
             return Ok(Local::NotLocal(NotLocal::SpecialFile(path.to_owned())));
         }
         if matches!(whitespace, Whitespace::Unknown(_)) {
             return Ok(Local::NotLocal(NotLocal::UnknownWhitespace));
         }
+        if path == COMMIT_MSG_PATH {
+            return Ok(Local::Available(commit_msg_diff(cmp, whitespace)));
+        }
         let old_name = old_path.unwrap_or(path);
-        for p in [path, old_name] {
-            // A newline would break the line protocol; `./` and `../`
-            // would be resolved against the current directory.
-            if p.is_empty()
-                || p.contains(['\n', '\0'])
-                || p.starts_with("./")
-                || p.starts_with("../")
-            {
-                return Ok(Local::NotLocal(NotLocal::UnsupportedPath(p.to_owned())));
-            }
+        if let Some(p) = [path, old_name].into_iter().find(|p| unsupported_path(p)) {
+            return Ok(Local::NotLocal(NotLocal::UnsupportedPath(p.to_owned())));
         }
         let names = [
             format!("{}:{old_name}", cmp.base),
@@ -161,7 +157,7 @@ impl Repo {
             "--no-ext-diff",
             "--no-textconv",
             "--no-commit-id",
-            "-M60%",
+            RENAME_SCORE,
             "--raw",
             cmp.base.as_str(),
             cmp.target.sha.as_str(),
@@ -174,6 +170,13 @@ impl Repo {
         let out = self.git.run(&args, None)?;
         Ok(parse_diff_tree(&out)?.into_iter().find(|r| r.path == path))
     }
+}
+
+/// A path we do not hand to git: a newline would break the line protocol
+/// of `cat-file --batch`, and `./` and `../` would be resolved against the
+/// current directory.
+fn unsupported_path(p: &str) -> bool {
+    p.is_empty() || p.contains(['\n', '\0']) || p.starts_with("./") || p.starts_with("../")
 }
 
 struct Blob {
@@ -364,7 +367,8 @@ fn is_boring(line: &str) -> bool {
 /// - Lines that are equal under the whitespace mode but not as text are
 ///   `Changed` with `common` set (a run of them is one chunk, with both
 ///   sides' text); lines equal as text are `Common`.
-/// - If the mode finds no change at all in files with different content,
+/// - If the mode finds no change at all in sides that are not the same
+///   blob (files with different content, or two `/COMMIT_MSG` texts),
 ///   the whole file is one `Skip`.
 fn chunks(
     a: Option<&Text>,
@@ -374,23 +378,10 @@ fn chunks(
 ) -> (Vec<DiffChunk>, bool) {
     let empty = Text::new(b"");
     let (a, b) = (a.unwrap_or(&empty), b.unwrap_or(&empty));
-    let keep_newline = matches!(ws, Whitespace::IgnoreNone | Whitespace::Unknown(_));
-    let key = |t: &Text, i: usize, l: &String| {
-        (
-            normalize(l, ws),
-            keep_newline && !t.final_newline && i + 1 == t.lines.len(),
-        )
-    };
-    let mut input = InternedInput::default();
-    input.update_before(a.lines.iter().enumerate().map(|(i, l)| key(a, i, l)));
-    input.update_after(b.lines.iter().enumerate().map(|(i, l)| key(b, i, l)));
-    let diff = LineDiff::compute(Algorithm::Histogram, &input);
 
     // The changed regions as (a range, b range), joined across boring gaps.
     let mut regions: Vec<(Range<usize>, Range<usize>)> = Vec::new();
-    for h in diff.hunks() {
-        let ra = h.before.start as usize..h.before.end as usize;
-        let rb = h.after.start as usize..h.after.end as usize;
+    for (ra, rb) in hunks(a, b, ws) {
         if let Some((pa, pb)) = regions.last_mut()
             && a.lines[pa.end..ra.start].iter().all(|l| is_boring(l))
             && b.lines[pb.end..rb.start].iter().all(|l| is_boring(l))
@@ -402,7 +393,10 @@ fn chunks(
         regions.push((ra, rb));
     }
 
-    if regions.is_empty() && !keep_newline && !same_blob && a.final_newline == b.final_newline {
+    // Without a whitespace option, no change at all in different blobs
+    // only happens for `/COMMIT_MSG`, whose two sides are separate texts
+    // to Gerrit even when they are equal.
+    if regions.is_empty() && !same_blob && a.final_newline == b.final_newline {
         let lines = u32::try_from(b.full_len()).unwrap_or(u32::MAX);
         let chunks = if lines == 0 {
             Vec::new()
@@ -486,6 +480,87 @@ fn chunks(
         }
     }
     (out, over_budget)
+}
+
+/// The changed regions of the line diff of `a` and `b` under `ws`, as
+/// ranges of [`Text::lines`] (so without the empty line a final newline
+/// adds), in order. With no whitespace option, a last line without a
+/// newline differs from the same text with one.
+fn hunks(a: &Text, b: &Text, ws: &Whitespace) -> Vec<(Range<usize>, Range<usize>)> {
+    let keep_newline = matches!(ws, Whitespace::IgnoreNone | Whitespace::Unknown(_));
+    let key = |t: &Text, i: usize, l: &String| {
+        (
+            normalize(l, ws),
+            keep_newline && !t.final_newline && i + 1 == t.lines.len(),
+        )
+    };
+    let mut input = InternedInput::default();
+    input.update_before(a.lines.iter().enumerate().map(|(i, l)| key(a, i, l)));
+    input.update_after(b.lines.iter().enumerate().map(|(i, l)| key(b, i, l)));
+    LineDiff::compute(Algorithm::Histogram, &input)
+        .hunks()
+        .map(|h| {
+            (
+                h.before.start as usize..h.before.end as usize,
+                h.after.start as usize..h.after.end as usize,
+            )
+        })
+        .collect()
+}
+
+/// Gerrit's content type for `/COMMIT_MSG`.
+const COMMIT_MSG_CONTENT_TYPE: &str = "text/x-gerrit-commit-message";
+
+/// The diff of the synthetic `/COMMIT_MSG`, as Gerrit makes it (checked
+/// against 3.14): against the parent the base side is absent and the file
+/// is added; against another patch set it is modified, with that patch
+/// set's text as the base, even when both are equal (then the whole file
+/// is one `skip`). The header names `/COMMIT_MSG` with its slash and has no
+/// `index` line. Chunks, whitespace modes and intraline edits are as for
+/// any other file.
+fn commit_msg_diff(cmp: &Comparison, ws: &Whitespace) -> Diff {
+    let (old, new) = cmp.commit_msg_texts();
+    let text_a = old.map(|t| Text::new(t.as_bytes()));
+    let text_b = Text::new(new.as_bytes());
+    let (chunks, timed_out) = chunks(text_a.as_ref(), Some(&text_b), ws, false);
+    let meta = |t: &Text| DiffFileMeta {
+        name: COMMIT_MSG_PATH.to_owned(),
+        content_type: Some(COMMIT_MSG_CONTENT_TYPE.to_owned()),
+        lines: u32::try_from(t.full_len()).unwrap_or(u32::MAX),
+    };
+    let p = COMMIT_MSG_PATH;
+    let (change_type, diff_header) = if text_a.is_some() {
+        (
+            DiffChangeType::Modified,
+            vec![
+                format!("diff --git a/{p} b/{p}"),
+                format!("--- a/{p}"),
+                format!("+++ b/{p}"),
+            ],
+        )
+    } else {
+        (
+            DiffChangeType::Added,
+            vec![
+                format!("diff --git /dev/null b/{p}"),
+                "--- /dev/null".to_owned(),
+                format!("+++ b/{p}"),
+            ],
+        )
+    };
+    Diff {
+        meta_a: text_a.as_ref().map(meta),
+        meta_b: Some(meta(&text_b)),
+        change_type: Some(change_type),
+        intraline_status: Some(if timed_out {
+            IntralineStatus::Timeout
+        } else {
+            IntralineStatus::Ok
+        }),
+        diff_header,
+        chunks,
+        binary: false,
+    }
 }
 
 /// Lines the diff found equal (`a` and `b` have the same length): runs that
