@@ -132,7 +132,7 @@ impl std::fmt::Display for BadColumn {
 
 impl std::error::Error for BadColumn {}
 
-fn bad(col: usize, v: &str) -> rusqlite::Error {
+pub(crate) fn bad(col: usize, v: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         col,
         rusqlite::types::Type::Text,

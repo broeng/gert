@@ -16,6 +16,9 @@ pub enum Error {
     ServerUrlTaken(String),
     #[error("no server with this id")]
     NoSuchServer,
+    /// A pending review was asked for on a patch set that is not local.
+    #[error("only a local patch set can have a pending review")]
+    NotLocal,
     #[error("cached timestamp {0:?} is invalid")]
     BadTimestamp(String),
 }
