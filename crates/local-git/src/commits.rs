@@ -318,9 +318,11 @@ fn branch_targets(records: &[RefRecord]) -> BranchTargets {
     targets
 }
 
-/// Parses a raw commit object. The message is read as UTF-8, lossily (the
-/// `encoding` header is ignored); malformed identities give empty fields
-/// and the Unix epoch rather than an error.
+/// Parses a raw commit object. Malformed identities give empty fields and
+/// the Unix epoch rather than an error.
+///
+/// The message is always read as UTF-8, lossily: honouring the `encoding`
+/// header (commits written in Latin-1 and the like) is out of scope.
 fn parse_commit(sha: &str, raw: &[u8]) -> CommitInfo {
     let text = String::from_utf8_lossy(raw);
     let (headers, message) = text.split_once("\n\n").unwrap_or((&text, ""));
@@ -382,14 +384,18 @@ fn parse_tz(s: &str) -> Option<i32> {
     Some(sign * (hours * 60 + minutes))
 }
 
-/// The `Change-Id: I<40 hex>` trailer of a commit message: only lines in
-/// the last paragraph count (never the subject line), and the last such
-/// line wins, as with Gerrit's footer parsing. The key is matched without
-/// regard to case.
+/// The `Change-Id: I<40 hex>` trailer of a commit message. As in JGit's
+/// footer parsing, only lines of the last paragraph count, never the
+/// message's first line, and only an empty line ends a paragraph (one with
+/// spaces does not); unlike JGit, an empty CRLF line does too. The key is
+/// matched without regard to case.
+///
+/// Gerrit rejects a push whose footer has several Change-Id lines, so such
+/// a commit never becomes a change as it is; taking the last one is just a
+/// harmless choice.
 pub(crate) fn change_id_trailer(message: &str) -> Option<String> {
-    // `lines` drops `\n` and `\r\n`; trimming also drops a stray `\r` and
-    // makes whitespace-only lines blank.
-    let lines: Vec<&str> = message.lines().map(str::trim_end).collect();
+    // `lines` drops `\n` and `\r\n`.
+    let lines: Vec<&str> = message.lines().collect();
     let end = lines.iter().rposition(|l| !l.is_empty())?;
     let start = lines[..end]
         .iter()

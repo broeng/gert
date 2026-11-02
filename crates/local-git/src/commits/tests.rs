@@ -227,8 +227,12 @@ fn change_id_trailer_takes_the_last_one_in_the_last_paragraph() {
         ),
         (format!("Subject\n\nChange-Id: {ID_A}"), Some(ID_A)),
         (format!("Subject\n\nChange-Id: {ID_A}\n\n\n"), Some(ID_A)),
-        // A whitespace-only line ends a paragraph.
-        (format!("Subject\n\nChange-Id: {ID_A}\n \t\nBody\n"), None),
+        // A line with only whitespace does not end a paragraph.
+        (
+            format!("Subject\n\nChange-Id: {ID_A}\n \t\nBody\n"),
+            Some(ID_A),
+        ),
+        (format!("Subject\n\nChange-Id: {ID_A}\n\nBody\n \n"), None),
         (format!("Subject\nChange-Id: {ID_A}\n"), Some(ID_A)),
         (format!("change-id:   {ID_A}  "), None),
         (format!("Subject\n\nchange-id:   {ID_A}  \n"), Some(ID_A)),

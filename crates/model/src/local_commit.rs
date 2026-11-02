@@ -36,9 +36,14 @@ pub struct CommitInfo {
 }
 
 impl CommitInfo {
-    /// The first line of the message.
-    pub fn subject(&self) -> &str {
-        self.message.lines().next().unwrap_or("").trim_end()
+    /// The subject as Gerrit shows it (JGit's short message): the lines of
+    /// the message's first paragraph, joined with single spaces.
+    pub fn subject(&self) -> String {
+        self.message
+            .lines()
+            .take_while(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Whether this is a merge commit (more than one parent).
@@ -206,6 +211,15 @@ mod tests {
             change_id: None,
         };
         assert_eq!(c.subject(), "Subject");
+        for (message, subject) in [
+            ("Line one\nline two\n\nBody\n", "Line one line two"),
+            ("Two\r\nlines\r\n", "Two lines"),
+            ("Keeps  spaces \n", "Keeps  spaces "),
+            ("", ""),
+        ] {
+            c.message = message.into();
+            assert_eq!(c.subject(), subject, "{message:?}");
+        }
         assert!(!c.is_merge());
         c.parents.push("p2".into());
         assert!(c.is_merge());
