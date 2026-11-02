@@ -40,4 +40,7 @@ pub enum NotLocal {
     UnsupportedPath(String),
     #[error("{0} is not a regular file in the checkout")]
     NotAFile(String),
+    /// The file is there, but its content is not (a partial clone).
+    #[error("the content of {0} is not in the checkout")]
+    MissingContent(String),
 }

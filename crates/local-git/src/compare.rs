@@ -123,36 +123,35 @@ impl Repo {
 
     /// The subject of each of the commit's parents, as Gerrit shows it
     /// ([`CommitInfo::subject`]), empty for a parent that is not in the
-    /// checkout.
+    /// checkout. One `cat-file`.
     pub(crate) fn parent_subjects(&self, commit: &CommitInfo) -> Result<Vec<String>, Error> {
-        commit
-            .parents
-            .iter()
-            .map(|p| {
-                Ok(self
-                    .commit_data(p.as_str())?
-                    .map(|c| c.subject())
-                    .unwrap_or_default())
-            })
-            .collect()
+        let shas: Vec<&str> = commit.parents.iter().map(RevisionId::as_str).collect();
+        Ok(self
+            .read_commits(&shas)?
+            .into_iter()
+            .map(|c| c.map(|c| c.subject()).unwrap_or_default())
+            .collect())
     }
 
     /// The commit's parents and message, or `None` when it is not here.
     /// Read from the raw object, so shallow and graft files do not hide
     /// parents.
     pub(crate) fn commit_data(&self, sha: &str) -> Result<Option<CommitInfo>, Error> {
-        if !is_object_id(sha) || !self.has_commit(&RevisionId(sha.to_owned()))? {
-            return Ok(None);
-        }
-        let objects = self.git.read_objects(&[format!("{sha}^{{commit}}")])?;
-        // `cat-file --batch` prints the commit's raw object for a commit.
-        let Some(Object::Found { kind, data, .. }) = objects.into_iter().next() else {
-            return Ok(None);
-        };
-        if kind != "commit" {
-            return Ok(None);
-        }
-        Ok(Some(parse_commit(sha, &data)))
+        Ok(self.read_commits(&[sha])?.into_iter().next().flatten())
+    }
+
+    /// [`commit_data`](Self::commit_data) for several commits with one
+    /// `cat-file --batch`, in order.
+    pub(crate) fn read_commits(&self, shas: &[&str]) -> Result<Vec<Option<CommitInfo>>, Error> {
+        let names: Vec<String> = shas.iter().filter_map(|s| commit_name(s)).collect();
+        let mut objects = self.git.read_objects(&names)?.into_iter();
+        Ok(shas
+            .iter()
+            .map(|sha| {
+                commit_name(sha)?;
+                commit_from_object(sha, objects.next()?)
+            })
+            .collect())
     }
 
     /// The id of the empty tree in this repository's hash format.
@@ -161,5 +160,19 @@ impl Repo {
             .git
             .run(&["hash-object", "-t", "tree", "--stdin"], Some(b""))?;
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
+    }
+}
+
+/// The `cat-file` name that reads `sha` as a commit, or `None` when it is
+/// not an object id (so nothing that looks like an option reaches git).
+pub(crate) fn commit_name(sha: &str) -> Option<String> {
+    is_object_id(sha).then(|| format!("{sha}^{{commit}}"))
+}
+
+/// The commit in a `cat-file --batch` answer for [`commit_name`].
+pub(crate) fn commit_from_object(sha: &str, object: Object) -> Option<CommitInfo> {
+    match object {
+        Object::Found { kind, data, .. } if kind == "commit" => Some(parse_commit(sha, &data)),
+        _ => None,
     }
 }

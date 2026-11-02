@@ -1,7 +1,8 @@
 use model::{CommentRange, DiffChunk, LineMap, RevisionId, Whitespace};
 
 use crate::diff::is_boring;
-use crate::testutil::TestRepo;
+use crate::git::spawn_log;
+use crate::testutil::{TestRepo, git_in};
 use crate::{Local, NotLocal, Repo};
 
 fn rev(s: &str) -> RevisionId {
@@ -329,4 +330,140 @@ fn the_map_agrees_with_the_diff() {
     assert_eq!(la - 1, d.a_len());
     // The blank line between `fn one`'s and `fn two`'s regions is one.
     assert!(boring_mapped > 0, "{:?}", d.chunks);
+}
+
+/// A repository whose second commit touches a file in every way that
+/// matters for a line map.
+fn every_kind() -> (TestRepo, String, String) {
+    let t = TestRepo::new();
+    let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+    t.write("modified.txt", b"a\nb\nc\n");
+    t.write("same.txt", b"same\n");
+    t.write("old.rs", body.as_bytes());
+    t.write("deleted.txt", b"gone\n");
+    t.write("logo.png", b"\0\x01");
+    let first = t.commit("Subject\n\nBody.\n");
+    t.write("modified.txt", b"a\nB\nc\nd\n");
+    t.remove("old.rs");
+    t.write("new.rs", body.replace("line 4\n", "line four\n").as_bytes());
+    t.remove("deleted.txt");
+    t.write("logo.png", b"\0\x02");
+    t.write("added.txt", b"new\n");
+    let second = t.commit("Subject\n\nNew body.\n");
+    (t, first, second)
+}
+
+#[test]
+fn a_batch_gives_what_single_calls_give() {
+    let (t, first, second) = every_kind();
+    let repo = Repo::open(t.path()).expect("open");
+    let paths = [
+        "modified.txt",
+        "same.txt",
+        "old.rs",
+        "deleted.txt",
+        "logo.png",
+        "added.txt",
+        "/COMMIT_MSG",
+        "/PATCHSET_LEVEL",
+        "/MERGE_LIST",
+        "a\nb",
+        "modified.txt",
+    ];
+    let maps = repo
+        .line_maps(&rev(&first), &rev(&second), &paths)
+        .expect("line maps")
+        .available()
+        .expect("local");
+    assert_eq!(maps.len(), paths.len() - 1, "one entry per distinct path");
+    for path in paths {
+        let single = repo
+            .line_map(&rev(&first), &rev(&second), path)
+            .expect("line map");
+        assert_eq!(maps.get(path), Some(&single), "{path:?}");
+    }
+    // A few of them, to be sure the comparison is not trivially equal.
+    let available = |p: &str| maps[p].clone().available().expect(p);
+    assert_eq!(available("old.rs").target_path(), Some("new.rs"));
+    assert!(available("deleted.txt").is_file_gone());
+    assert!(available("same.txt").is_identity());
+    assert_eq!(available("logo.png"), LineMap::opaque("logo.png"));
+    assert_eq!(available("/COMMIT_MSG").map_line(8), None);
+    assert_eq!(
+        maps["/PATCHSET_LEVEL"],
+        Local::NotLocal(NotLocal::SpecialFile("/PATCHSET_LEVEL".into()))
+    );
+    assert_eq!(
+        maps["added.txt"],
+        Local::NotLocal(NotLocal::NotAFile("added.txt".into()))
+    );
+
+    let missing = "1".repeat(40);
+    assert_eq!(
+        repo.line_maps(&rev(&first), &rev(&missing), &paths)
+            .expect("line maps"),
+        Local::NotLocal(NotLocal::MissingCommit(missing))
+    );
+}
+
+#[test]
+fn renames_are_only_looked_for_when_a_file_is_missing_from_to() {
+    let (t, first, second) = every_kind();
+    let repo = Repo::open(t.path()).expect("open");
+    let run = |paths: &[&str]| {
+        spawn_log::take();
+        repo.line_maps(&rev(&first), &rev(&second), paths)
+            .expect("line maps");
+        spawn_log::take()
+    };
+    // Every file is in both commits: the commits, then every blob and the
+    // parents for `/COMMIT_MSG`.
+    assert_eq!(
+        run(&["modified.txt", "same.txt", "logo.png", "/COMMIT_MSG"]),
+        ["cat-file", "cat-file"]
+    );
+    // A renamed or deleted one needs `diff-tree`, once for all of them,
+    // and the renamed file's new blob.
+    assert_eq!(
+        run(&["modified.txt", "old.rs", "deleted.txt"]),
+        ["cat-file", "cat-file", "diff-tree", "cat-file"]
+    );
+    assert_eq!(run(&["deleted.txt"]), ["cat-file", "cat-file", "diff-tree"]);
+}
+
+#[test]
+fn a_file_whose_content_is_not_in_a_partial_clone_is_not_gone() {
+    let origin = TestRepo::new();
+    origin.write("f.txt", b"old\n");
+    origin.write("g.txt", b"keep\n");
+    let first = origin.commit("one");
+    origin.write("f.txt", b"new\n");
+    let second = origin.commit("two");
+    origin.git(&["config", "uploadpack.allowFilter", "true"]);
+    let clone = tempfile::tempdir().expect("dir");
+    let url = format!("file://{}", origin.path().display());
+    git_in(
+        clone.path(),
+        &[
+            "clone",
+            "-q",
+            "--no-checkout",
+            "--filter=blob:none",
+            &url,
+            ".",
+        ],
+    );
+    // Only the old content is here.
+    let blob = clone.path().join("old-blob");
+    std::fs::write(&blob, b"old\n").expect("write");
+    git_in(
+        clone.path(),
+        &["hash-object", "-w", blob.to_str().expect("utf8")],
+    );
+    let repo = Repo::open(clone.path()).expect("open");
+    assert_eq!(
+        repo.line_map(&rev(&first), &rev(&second), "f.txt")
+            .expect("line map"),
+        Local::NotLocal(NotLocal::MissingContent("f.txt".into()))
+    );
 }

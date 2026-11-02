@@ -77,6 +77,8 @@ impl Git {
             Stdio::null()
         });
         log::trace!("git {}", args.join(" "));
+        #[cfg(test)]
+        spawn_log::record(args);
         let mut child = cmd.spawn().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Error::GitNotFound,
             _ => Error::Io(e),
@@ -102,6 +104,30 @@ impl Git {
         } else {
             Err(failure(args, &out))
         }
+    }
+}
+
+/// The git commands this thread ran, for tests that check how many
+/// processes an operation costs. Per thread, so parallel tests do not see
+/// each other's commands.
+#[cfg(test)]
+pub(crate) mod spawn_log {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record(args: &[&str]) {
+        LOG.with(|l| {
+            l.borrow_mut()
+                .push(args.first().copied().unwrap_or("").to_owned())
+        });
+    }
+
+    /// The subcommands run since the last call, oldest first.
+    pub(crate) fn take() -> Vec<String> {
+        LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
     }
 }
 
