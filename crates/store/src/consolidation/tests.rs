@@ -133,6 +133,8 @@ fn a_rewrite_moves_reserves_and_holds_what_it_is_told() {
     let held = draft(&mut s, id, &c, &v1, "held");
     let r1 = review(&mut s, id, &v1);
     let r2 = review(&mut s, id, &v2);
+    // A review the run did not move (created after its snapshot).
+    let r3 = review(&mut s, id, &v1);
     let mut rw = rewrite(
         &c,
         vec![
@@ -238,12 +240,13 @@ fn a_rewrite_moves_reserves_and_holds_what_it_is_told() {
     // None of it enters the ordinary draft paths.
     assert!(s.pending_drafts(id).unwrap().is_empty());
     assert!(s.draft_counts(id).unwrap().is_empty());
-    assert_eq!(s.local_draft_count(id).unwrap(), 5);
+    assert_eq!(s.local_draft_count(id).unwrap(), 6);
     assert_eq!(
         s.remove_synced_drafts(id, ChangeNumber(42), None).unwrap(),
         0
     );
-    // The post sends the reserved drafts and both messages.
+    // The post sends the reserved drafts and the moved reviews' messages,
+    // not the message of the review that stayed.
     let post: Vec<LocalDraftId> = s
         .consolidation_drafts(id, c.id)
         .unwrap()
@@ -259,6 +262,7 @@ fn a_rewrite_moves_reserves_and_holds_what_it_is_told() {
             r2.message_draft.unwrap()
         ]
     );
+    assert!(!post.contains(&r3.message_draft.unwrap()));
     let held_items = s.held_items(id, ChangeNumber(42)).unwrap();
     assert_eq!(held_items.drafts.len(), 1);
     assert_eq!(held_items.drafts[0].local_id, held.local_id);

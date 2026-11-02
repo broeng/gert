@@ -291,9 +291,11 @@ impl Store {
         Ok(Some(report))
     }
 
-    /// The drafts a local change's consolidation post sends: the drafts
-    /// reserved for it and the message drafts of its pending reviews, in
-    /// creation order.
+    /// The drafts reserved for a local change's consolidation post, in
+    /// creation order: the drafts the rewrite moved onto the Gerrit change
+    /// and the message drafts of the reviews it moved. The messages of
+    /// reviews that were not moved (held, or still on a local patch set)
+    /// are not among them: they must not be posted.
     pub fn consolidation_drafts(
         &self,
         server: ServerId,
@@ -301,8 +303,7 @@ impl Store {
     ) -> Result<Vec<Draft>, Error> {
         crate::drafts::query(
             &self.conn,
-            "server_id = ?1 AND (reserved_by = ?2 OR pending_review_id IN (
-                 SELECT id FROM pending_reviews WHERE server_id = ?1 AND local_change_id = ?2))",
+            "server_id = ?1 AND reserved_by = ?2",
             &[&server.0, &change.0],
         )
     }
