@@ -83,6 +83,7 @@ struct Fixture {
     syntax: Entity<SyntaxCache>,
     settings: Entity<DiffSettings>,
     http: RouteHttpClient,
+    store: Arc<Mutex<Store>>,
     events: Arc<Mutex<Vec<String>>>,
 }
 
@@ -141,10 +142,24 @@ fn page_in(
     view: ChangeView,
     routes: impl FnOnce(&RouteHttpClient),
 ) -> Fixture {
+    page_in_with(cx, store, auth, server, view, routes, Vec::new())
+}
+
+/// Like [`page_in`], with local checkouts configured.
+fn page_in_with(
+    cx: &mut TestAppContext,
+    store: Store,
+    auth: Option<Auth>,
+    server: crate::session::ServerSetup,
+    view: ChangeView,
+    routes: impl FnOnce(&RouteHttpClient),
+    projects: Vec<crate::session::ProjectSettings>,
+) -> Fixture {
     let http = RouteHttpClient::new();
     http.route("/diff", 200, diff_body());
     routes(&http);
     let env = env_with(store, &http);
+    let store = env.store.clone();
     let session = Session::new(&env, &server, auth).expect("session");
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
@@ -160,8 +175,9 @@ fn page_in(
         filters_out = Some(filters.clone());
         let syntax = cx.new(|_| SyntaxCache::new());
         syntax_out = Some(syntax.clone());
+        let checkouts = cx.new(|_| crate::checkouts::Checkouts::new(projects));
         let page = cx.new(|cx| {
-            ChangePage::new(
+            let mut page = ChangePage::new(
                 session,
                 settings,
                 layout,
@@ -172,7 +188,9 @@ fn page_in(
                 true,
                 outbox,
                 cx,
-            )
+            );
+            page.set_checkouts(Some(checkouts));
+            page
         });
         cx.subscribe(&page, move |_, ev: &ChangeEvent, _| {
             let text = match ev {
@@ -214,6 +232,7 @@ fn page_in(
         syntax: syntax_out.expect("syntax cache was created"),
         settings: settings_out.expect("settings were created"),
         http,
+        store,
         events,
     }
 }
@@ -1502,4 +1521,120 @@ fn blocking_votes_name_the_label_and_vote() {
         ["Rejected", "Style -1", "Verified -1"]
     );
     assert!(super::view::blocking_votes(None).is_empty());
+}
+
+// ---- inline diffs from the local checkout ----
+
+use crate::{
+    diff_load::DiffSource,
+    local_source::tests::{self as lt},
+    session::ProjectSettings,
+};
+
+fn local_store(sha: &str) -> Store {
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server");
+    store
+        .save_change_detail(server, &lt::detail_at(sha), ts())
+        .expect("detail");
+    store
+        .save_file_list(server, &lt::files_key(sha), &lt::paths(), None, ts())
+        .expect("files");
+    store
+}
+
+fn local_page(cx: &mut TestAppContext, f: &lt::Fixture, sha: &str) -> Fixture {
+    let projects = vec![ProjectSettings::new(
+        "platform/foo",
+        f.repo.path().to_string_lossy(),
+    )];
+    // Gerrit has no /diff for these: a request would fail the inline diff.
+    let f = page_in_with(
+        cx,
+        local_store(sha),
+        Some(Auth::Anonymous),
+        setup(),
+        ChangeView::default(),
+        |http| {
+            http.route("/diff", 404, Vec::new());
+        },
+        projects,
+    );
+    for _ in 0..50 {
+        cx.executor().allow_parking();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+    f
+}
+
+fn open_a(cx: &mut TestAppContext, f: &Fixture) {
+    // j: onto src/a.rs (the first entry is /COMMIT_MSG), i: expand.
+    press(cx, f, &["j", "i"]);
+    for _ in 0..50 {
+        if cx.update(|cx| f.page.read(cx).inline_ready("src/a.rs")) {
+            break;
+        }
+        cx.executor().allow_parking();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn an_inline_diff_comes_from_the_checkout_and_is_not_stored(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    let f = local_page(cx, &repo, &repo.target);
+    open_a(cx, &f);
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert!(p.inline_ready("src/a.rs"));
+        assert_eq!(p.inline_source("src/a.rs"), Some(DiffSource::Local));
+    });
+    assert!(
+        !f.http.requested().iter().any(|r| r.contains("/diff")),
+        "{:?}",
+        f.http.requested()
+    );
+    let key = crate::syntax_cache::diff_key(
+        &lt::files_key(&repo.target),
+        "src/a.rs",
+        model::Whitespace::IgnoreNone,
+    );
+    assert!(
+        !f.store
+            .lock()
+            .expect("store")
+            .has_diff(ServerId(1), &key)
+            .expect("has")
+    );
+}
+
+#[gpui_kit::test]
+fn an_inline_diff_of_a_missing_commit_comes_from_gerrit(cx: &mut TestAppContext) {
+    let repo = lt::fixture();
+    let missing = "0123456789012345678901234567890123456789";
+    let projects = vec![ProjectSettings::new(
+        "platform/foo",
+        repo.repo.path().to_string_lossy(),
+    )];
+    let f = page_in_with(
+        cx,
+        local_store(missing),
+        Some(Auth::Anonymous),
+        setup(),
+        ChangeView::default(),
+        |_| {},
+        projects,
+    );
+    open_a(cx, &f);
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert!(p.inline_ready("src/a.rs"));
+        // From Gerrit, or already stored by the syntax worker's fetch.
+        assert!(matches!(
+            p.inline_source("src/a.rs"),
+            Some(DiffSource::Gerrit | DiffSource::Cache)
+        ));
+    });
 }

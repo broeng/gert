@@ -5,7 +5,7 @@
 use model::{Diff, DiffContext, DiffKey};
 use sync::Syncer;
 
-use crate::session::is_unauthorized;
+use crate::{local_source::LocalSource, session::is_unauthorized};
 
 /// Why a diff could not be shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,14 +33,39 @@ impl std::fmt::Display for LoadError {
     }
 }
 
-/// The diff for `key`. Diffs are keyed by revision SHA and immutable, so a
-/// cached one is final and nothing is requested. Blocking (SQLite, network):
-/// call from the background executor.
-pub async fn load_diff(syncer: Syncer, key: DiffKey, can_sync: bool) -> Result<Diff, LoadError> {
+/// Where a loaded diff came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffSource {
+    /// The store: what Gerrit sent earlier.
+    Cache,
+    /// Computed from the project's local checkout (never stored).
+    Local,
+    /// Just fetched from Gerrit (and stored).
+    Gerrit,
+}
+
+/// The diff for `key` and where it came from, in this order: the store,
+/// the local checkout (`local`, when it can serve this file), Gerrit.
+///
+/// Diffs are keyed by revision SHA and immutable, so a cached one is final
+/// and nothing else is asked. A local diff is not written to the store, so
+/// the cache only ever holds what Gerrit sent. The checkout never fails a
+/// load: when it cannot serve, the diff comes from Gerrit. With `can_sync`
+/// false (offline, not signed in) a local diff still shows. Blocking
+/// (SQLite, git, network): call from the background executor.
+pub async fn load_diff(
+    syncer: Syncer,
+    key: DiffKey,
+    can_sync: bool,
+    local: Option<LocalSource>,
+) -> Result<(Diff, DiffSource), LoadError> {
     match syncer.cached_diff(&key) {
-        Ok(Some(cached)) => return Ok(cached.diff),
+        Ok(Some(cached)) => return Ok((cached.diff, DiffSource::Cache)),
         Ok(None) => {}
         Err(e) => log::warn!("reading cached diff of {}: {e}", key.path),
+    }
+    if let Some(diff) = local.as_ref().and_then(|l| l.diff(&key)) {
+        return Ok((diff, DiffSource::Local));
     }
     if !can_sync {
         return Err(LoadError::Failed(
@@ -50,6 +75,7 @@ pub async fn load_diff(syncer: Syncer, key: DiffKey, can_sync: bool) -> Result<D
     syncer
         .refresh_diff(&key)
         .await
+        .map(|d| (d, DiffSource::Gerrit))
         .map_err(|e| LoadError::from_sync(&e))
 }
 

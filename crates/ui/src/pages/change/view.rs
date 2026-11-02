@@ -21,7 +21,9 @@ use super::{
 };
 use crate::{
     actions::*,
+    diff_load::DiffSource,
     filters::{FileStyle, FilterAction},
+    local_source::local_marker,
     pages::list::Status,
     row::{browser_url, chips, has_merge_conflict},
     search_link::{account_query, person_query, project_query, search_link},
@@ -1019,6 +1021,9 @@ impl ChangePage {
                     })
                     .into_any_element(),
             };
+            let local_path = (i.source == Some(DiffSource::Local))
+                .then(|| self.local_path())
+                .flatten();
             div()
                 .ml(px(20.))
                 .mb_1()
@@ -1026,6 +1031,14 @@ impl ChangePage {
                 .border_color(theme.border)
                 .rounded_sm()
                 .overflow_hidden()
+                .children(local_path.map(|p| {
+                    // A quiet strip above the diff, on the right.
+                    h_flex().justify_end().px_1().pt_0p5().child(local_marker(
+                        ("inline-local", ix),
+                        &p,
+                        cx,
+                    ))
+                }))
                 .child(body)
         });
         v_flex()

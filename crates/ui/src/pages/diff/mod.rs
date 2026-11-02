@@ -37,14 +37,16 @@ use sync::Syncer;
 use crate::{
     action_menu,
     actions::*,
+    checkouts::Checkouts,
     comments::{ChangeComments, CommentsEvent},
     diff::{
         DiffEvent, DiffSizing, DiffStatus, DiffView, ThreadContext,
         actions::{NextFile, PrevFile},
     },
-    diff_load::{LoadError, context_label, load_diff},
+    diff_load::{DiffSource, LoadError, context_label, load_diff},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
+    local_source::{LocalSource, LocalState, local_marker, resolve_source},
     nav::DiffRoute,
     outbox::DraftOutbox,
     reply, reviewed,
@@ -81,8 +83,9 @@ pub enum DiffPageEvent {
 /// What the first background task brings back.
 struct Loaded {
     detail: Option<ChangeDetail>,
-    files: Option<(FilesKey, Vec<FileEntry>, HashSet<String>)>,
-    diff: Option<(DiffKey, Result<model::Diff, LoadError>)>,
+    /// The comparison, also when its file list could not be had.
+    files_key: Option<FilesKey>,
+    files: Option<(Vec<FileEntry>, HashSet<String>)>,
     error: Option<String>,
 }
 
@@ -93,6 +96,12 @@ pub struct DiffPage {
     detail: Option<ChangeDetail>,
     files_key: Option<FilesKey>,
     files: Vec<FileEntry>,
+    /// The server's local checkouts, when it has any.
+    checkouts: Option<Entity<Checkouts>>,
+    /// The local source for `files_key`, once resolved.
+    local: LocalState,
+    /// Where the diff on screen came from.
+    source: Option<DiffSource>,
     /// The file filter rules and which are on, shared by all pages.
     filters: Entity<FileFilters>,
     /// Finished syntax colors, shared by all pages: a hit is shown at once,
@@ -163,6 +172,9 @@ impl DiffPage {
             detail: None,
             files_key: None,
             files: Vec::new(),
+            checkouts: None,
+            local: LocalState::Unknown,
+            source: None,
             filters: filters.clone(),
             syntax,
             styles: Vec::new(),
@@ -247,11 +259,10 @@ impl DiffPage {
         let syncer = self.session.syncer().clone();
         let can_sync = self.session.can_sync();
         let route = self.route.clone();
-        let prefs = self.prefs(cx);
         self.loading = true;
         self.task = Some(cx.spawn(async move |this, cx| {
             let loaded = cx
-                .background_spawn(load_everything(syncer, can_sync, route, prefs))
+                .background_spawn(load_everything(syncer, can_sync, route))
                 .await;
             this.update(cx, |this, cx| this.loaded(loaded, cx)).ok();
         }));
@@ -259,8 +270,8 @@ impl DiffPage {
 
     fn loaded(&mut self, l: Loaded, cx: &mut Context<Self>) {
         self.detail = l.detail;
-        if let Some((key, files, reviewed)) = l.files {
-            self.files_key = Some(key);
+        self.files_key = l.files_key;
+        if let Some((files, reviewed)) = l.files {
             self.files = files;
             self.reviewed = reviewed;
             self.restyle(cx);
@@ -272,15 +283,11 @@ impl DiffPage {
             cx.notify();
             return;
         }
-        match l.diff {
-            Some((key, result)) => {
-                self.diff_arrived(key, result, cx);
-                self.fetch(cx); // preferences may have changed meanwhile
-            }
-            None => {
-                self.loading = false;
-                self.error = Some("the diff could not be requested".into());
-            }
+        if self.files_key.is_some() {
+            self.fetch(cx);
+        } else {
+            self.loading = false;
+            self.error = Some("the diff could not be requested".into());
         }
         if let Some(forward) = step {
             self.step_file(forward, cx);
@@ -329,11 +336,39 @@ impl DiffPage {
                 v.set_status(Some(DiffStatus::Busy(msg.into())), cx)
             });
         }
+        // The local source is resolved once, by the first load: it waits
+        // for the checkout to open (one `git rev-parse`) rather than
+        // going to Gerrit, which would leave the first look at a project
+        // in every run without a local diff.
+        let known = match &self.local {
+            LocalState::Ready(k, s) if *k == files => Some(s.clone()),
+            _ => None,
+        };
+        let project = self.detail.as_ref().map(|d| d.summary.project.clone());
+        let checkouts = project
+            .as_deref()
+            .filter(|p| crate::local_source::configured(&self.checkouts, p, cx))
+            .and(self.checkouts.clone())
+            .zip(project);
+        let list = self.files.clone();
         self.task = Some(cx.spawn(async move |this, cx| {
+            let source = match (known, checkouts) {
+                (Some(source), _) => source,
+                (None, Some((checkouts, project))) => {
+                    resolve_source(checkouts, project, files.clone(), cx)
+                        .await
+                        .map(|s| s.with_files(&list))
+                }
+                (None, None) => None,
+            };
+            let local = source.clone();
             let result = cx
-                .background_spawn(load_diff(syncer, key.clone(), can_sync))
+                .background_spawn(load_diff(syncer, key.clone(), can_sync, local))
                 .await;
             this.update(cx, |this, cx| {
+                if this.files_key.as_ref() == Some(&files) {
+                    this.local = LocalState::Ready(files, source);
+                }
                 this.diff_arrived(key, result, cx);
                 cx.notify();
             })
@@ -345,7 +380,7 @@ impl DiffPage {
     fn diff_arrived(
         &mut self,
         key: DiffKey,
-        result: Result<model::Diff, LoadError>,
+        result: Result<(model::Diff, DiffSource), LoadError>,
         cx: &mut Context<Self>,
     ) {
         if self.key.as_ref().is_some_and(|k| *k != key) {
@@ -353,8 +388,9 @@ impl DiffPage {
         }
         self.loading = false;
         match result {
-            Ok(diff) => {
+            Ok((diff, source)) => {
                 self.error = None;
+                self.source = Some(source);
                 self.key = Some(key.clone());
                 self.shown = Some(key.clone());
                 let path = self.route.path.clone();
@@ -502,13 +538,31 @@ impl DiffPage {
         }
         let session = self.session.clone();
         let keys = state.keys.clone();
+        let local = self.local_source();
         self.syntax
-            .update(cx, |c, cx| c.set_queue(keys, &session, enabled, cx));
+            .update(cx, |c, cx| c.set_queue(keys, &session, local, enabled, cx));
         let covered = enabled && state.next.as_deref().is_some_and(|p| !is_magic(p));
         if !covered && state.next.is_some() {
             self.prefetch_next(&shown, cx);
         }
         self.ahead_state = Some(state);
+    }
+
+    /// The local source for the comparison on show, once resolved.
+    fn local_source(&self) -> Option<LocalSource> {
+        self.local.source_for(self.files_key.as_ref()?).cloned()
+    }
+
+    /// Names the server's checkouts, so diffs can come from the project's
+    /// local checkout. Set right after the page is made, before anything
+    /// has loaded.
+    pub fn set_checkouts(&mut self, checkouts: Option<Entity<Checkouts>>) {
+        self.checkouts = checkouts;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_for_test(&self) -> Option<DiffSource> {
+        self.source
     }
 
     /// Fetches the next file's diff in the background so that `]` is
@@ -518,6 +572,18 @@ impl DiffPage {
             return;
         }
         let syncer: Syncer = self.session.syncer().clone();
+        // The checkout can serve the next file when it is needed: no
+        // diffing ahead for a diff that costs a git call.
+        let next = self
+            .files
+            .iter()
+            .position(|f| f.path == self.route.path)
+            .and_then(|i| self.files.get(i + 1));
+        if let (Some(local), Some(next)) = (self.local_source(), next)
+            && local.serves(&shown.with_path(&next.path))
+        {
+            return;
+        }
         // The file after the shown one that `]` would go to: the shown file
         // and the ones that are not skipped, since the prefetch takes the
         // next entry of the list it is given.
@@ -924,6 +990,9 @@ impl DiffPage {
         let key = self.shown.as_ref().or(self.key.as_ref());
         let pending = self.key != self.shown && self.shown.is_some();
         let context = self.prefs(cx).context;
+        let local_path = (self.source == Some(DiffSource::Local))
+            .then(|| self.local_source().map(|s| s.path().to_owned()))
+            .flatten();
         v_flex()
             .px_3()
             .py_2()
@@ -1022,6 +1091,7 @@ impl DiffPage {
                             if pending { "  (updating\u{2026})" } else { "" }
                         )))
                     })
+                    .children(local_path.map(|p| local_marker("diff-local", &p, cx)))
                     .child(
                         div()
                             .px_1()
@@ -1168,16 +1238,11 @@ impl DiffPage {
     }
 }
 
-async fn load_everything(
-    syncer: Syncer,
-    can_sync: bool,
-    route: DiffRoute,
-    prefs: ResolvedDiffPreferences,
-) -> Loaded {
+async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Loaded {
     let fail = |detail: Option<ChangeDetail>, error: String| Loaded {
         detail,
+        files_key: None,
         files: None,
-        diff: None,
         error: Some(error),
     };
     let mut detail = match syncer.cached_change(route.change) {
@@ -1233,18 +1298,10 @@ async fn load_everything(
             .ok(),
         _ => None,
     };
-    let key = DiffKey {
-        change: files_key.change,
-        base: files_key.base.clone(),
-        target: files_key.target.clone(),
-        path: route.path.clone(),
-        whitespace: prefs.ignore_whitespace,
-    };
-    let diff = load_diff(syncer, key.clone(), can_sync).await;
     Loaded {
         detail: Some(d),
-        files: files.map(|(f, r)| (files_key, f, r.unwrap_or_default().into_iter().collect())),
-        diff: Some((key, diff)),
+        files_key: Some(files_key),
+        files: files.map(|(f, r)| (f, r.unwrap_or_default().into_iter().collect())),
         error: None,
     }
 }

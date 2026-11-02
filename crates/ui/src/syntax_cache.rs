@@ -21,6 +21,7 @@ use crate::{
     diff::syntax::{DiffSyntax, highlight_diff},
     diff_load::load_diff,
     filters::{FileStyle, skips},
+    local_source::LocalSource,
     session::Session,
 };
 
@@ -141,7 +142,7 @@ impl SyntaxCache {
     /// Replaces the work queue: the worker highlights `keys` in order, one at
     /// a time, and drops what it was doing. Keys already cached are skipped;
     /// diffs not in the cache are fetched through the session's syncer (only
-    /// when it can sync). The queue is cut at [`MAX_ENTRIES`]. With `enabled`
+    /// when it can sync), from `local` first when it serves them. The queue is cut at [`MAX_ENTRIES`]. With `enabled`
     /// false (the `syntax_highlighting` preference is off) the queue is just
     /// cleared. Callers pass the resolved preference, and call again when it
     /// turns on.
@@ -149,6 +150,7 @@ impl SyntaxCache {
         &mut self,
         keys: Vec<DiffKey>,
         session: &Session,
+        local: Option<LocalSource>,
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
@@ -171,8 +173,11 @@ impl SyntaxCache {
                 };
                 let syncer = syncer.clone();
                 let job = key.clone();
+                let local = local.clone();
                 let result = cx
-                    .background_spawn(async move { highlight_key(syncer, job, can_sync).await })
+                    .background_spawn(
+                        async move { highlight_key(syncer, job, can_sync, local).await },
+                    )
                     .await;
                 let stored = this.update(cx, |this, cx| {
                     match result {
@@ -251,14 +256,15 @@ pub fn ahead_paths<'a>(
         .collect()
 }
 
-/// Gets the diff (cache first, the network for a miss) and highlights it.
+/// Gets the diff (cache first, then the checkout, the network for a miss) and highlights it.
 /// Blocking: call from the background executor.
 async fn highlight_key(
     syncer: Syncer,
     key: DiffKey,
     can_sync: bool,
+    local: Option<LocalSource>,
 ) -> Result<Highlight, crate::diff_load::LoadError> {
-    let diff = load_diff(syncer, key.clone(), can_sync).await?;
+    let (diff, _) = load_diff(syncer, key.clone(), can_sync, local).await?;
     Ok(highlight_diff(&key.path, &diff))
 }
 

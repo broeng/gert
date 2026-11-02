@@ -25,7 +25,8 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use gpui_kit::{AppContext as _, Context, Task};
+use futures::channel::oneshot;
+use gpui_kit::{AppContext as _, AsyncApp, Context, Entity, Task};
 use local_git::Repo;
 
 use crate::session::ProjectSettings;
@@ -92,12 +93,16 @@ impl Entry {
 /// The checkouts of one server. See the module comment.
 pub struct Checkouts {
     entries: Vec<Entry>,
+    /// Woken whenever an open finishes or the list is replaced (see
+    /// [`Checkouts::opened`]).
+    waiters: Vec<oneshot::Sender<()>>,
 }
 
 impl Checkouts {
     pub fn new(projects: Vec<ProjectSettings>) -> Self {
         Self {
             entries: projects.into_iter().map(Entry::new).collect(),
+            waiters: Vec::new(),
         }
     }
 
@@ -124,6 +129,33 @@ impl Checkouts {
             .iter()
             .find(|e| e.project.name == name)
             .map(Entry::checkout)
+    }
+
+    /// Like [`Checkouts::get`], but waits until the open (if one is running)
+    /// has finished, so it answers `Open`, `Failed` or `None` (not
+    /// configured), never `Opening`. For the pages that load diffs: the
+    /// first look at a project in a run would otherwise always go to Gerrit.
+    pub async fn opened(this: &Entity<Self>, name: &str, cx: &mut AsyncApp) -> Option<Checkout> {
+        loop {
+            let waiting = this.update(cx, |c, cx| match c.get(name, cx) {
+                Some(ck) if matches!(ck.state, CheckoutState::Opening) => {
+                    let (tx, rx) = oneshot::channel();
+                    c.waiters.push(tx);
+                    Err(rx)
+                }
+                other => Ok(other),
+            });
+            match waiting {
+                Ok(answer) => return answer,
+                Err(rx) => rx.await.ok()?,
+            }
+        }
+    }
+
+    fn wake(&mut self) {
+        for w in self.waiters.drain(..) {
+            w.send(()).ok();
+        }
     }
 
     /// Starts opening every configured project that has not been tried.
@@ -189,6 +221,7 @@ impl Checkouts {
         for i in restart {
             self.open(i, cx);
         }
+        self.wake();
         cx.notify();
     }
 
@@ -223,6 +256,7 @@ impl Checkouts {
                     e.task = None;
                     cx.notify();
                 }
+                this.wake();
             })
             .ok();
         }));

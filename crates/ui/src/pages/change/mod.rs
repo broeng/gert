@@ -45,14 +45,16 @@ use sync::PollPolicy;
 use crate::{
     action_menu,
     actions::*,
+    checkouts::Checkouts,
     comments::{ChangeComments, CommentsEvent},
     diff::{
         DiffEvent, DiffSizing, DiffStatus, DiffView, ThreadContext,
         actions::{NextFile, PrevFile},
     },
-    diff_load::{LoadError, load_diff},
+    diff_load::{DiffSource, LoadError, load_diff},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
+    local_source::{LocalSource, LocalState, resolve_source},
     nav::{ChangeView, DiffRoute},
     outbox::DraftOutbox,
     pages::list::Status,
@@ -149,6 +151,8 @@ struct Inline {
     view: Option<Entity<DiffView>>,
     phase: Phase,
     error: Option<String>,
+    /// Where the diff on show came from.
+    source: Option<DiffSource>,
     task: Option<Task<()>>,
     _sub: Option<Subscription>,
 }
@@ -184,6 +188,11 @@ pub struct ChangePage {
     syntax: Entity<SyntaxCache>,
     /// What this page last asked the syntax worker to do.
     queued: Vec<DiffKey>,
+    /// The server's local checkouts, when it has any.
+    checkouts: Option<Entity<Checkouts>>,
+    /// The local source for the file list in use (see `update_local`).
+    local: LocalState,
+    local_task: Option<Task<()>>,
     /// The filter style of each entry of `files.list`.
     styles: Vec<FileStyle>,
     /// Indexes into `files.list` of the files the filters do not hide. The
@@ -271,6 +280,9 @@ impl ChangePage {
             filters: filters.clone(),
             syntax,
             queued: Vec::new(),
+            checkouts: None,
+            local: LocalState::Unknown,
+            local_task: None,
             styles: Vec::new(),
             visible: Vec::new(),
             number,
@@ -433,6 +445,11 @@ impl ChangePage {
             .iter()
             .map(|&i| self.files.list[i].path.as_str())
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inline_source(&self, path: &str) -> Option<DiffSource> {
+        self.inline.get(path).and_then(|i| i.source)
     }
 
     #[cfg(test)]
@@ -613,6 +630,8 @@ impl ChangePage {
                 ..Default::default()
             };
             self.inline.clear();
+            self.local = LocalState::Unknown;
+            self.local_task = None;
             self.styles.clear();
             self.visible.clear();
             self.cursor = 0;
@@ -686,6 +705,7 @@ impl ChangePage {
         self.files.reviewed = list.reviewed.unwrap_or_default().into_iter().collect();
         self.files.loaded = true;
         self.files.error = None;
+        self.update_local(cx);
         self.compute_styles(cx);
         self.queue_syntax(cx);
         self.cursor = self.cursor_on(keep.as_deref());
@@ -695,6 +715,63 @@ impl ChangePage {
         self.rebuild_blocks();
         self.restore_scroll();
         cx.notify();
+    }
+
+    /// Names the server's checkouts, so diffs can come from the project's
+    /// local checkout. Set right after the page is made, before anything
+    /// has loaded.
+    pub fn set_checkouts(&mut self, checkouts: Option<Entity<Checkouts>>) {
+        self.checkouts = checkouts;
+    }
+
+    /// Keeps the local source in step with the file list. The comparison is
+    /// resolved once per file list key (waiting for the checkout to open if
+    /// need be; inline diffs wait for that); later lists of the same key
+    /// only replace the renames.
+    fn update_local(&mut self, cx: &mut Context<Self>) {
+        let (Some(files), Some(project)) = (
+            self.files.key.clone(),
+            self.detail.as_ref().map(|d| d.summary.project.clone()),
+        ) else {
+            return;
+        };
+        if self.local.is_for(&files) {
+            if let LocalState::Ready(_, Some(source)) = &self.local {
+                self.local = LocalState::Ready(files, Some(source.with_files(&self.files.list)));
+            }
+            return;
+        }
+        let Some(checkouts) = self
+            .checkouts
+            .clone()
+            .filter(|_| crate::local_source::configured(&self.checkouts, &project, cx))
+        else {
+            self.local = LocalState::Ready(files, None);
+            return;
+        };
+        self.local = LocalState::Resolving(files.clone());
+        self.local_task = Some(cx.spawn(async move |this, cx| {
+            let source = resolve_source(checkouts, project, files.clone(), cx).await;
+            this.update(cx, |this, cx| this.local_resolved(files, source, cx))
+                .ok();
+        }));
+    }
+
+    fn local_resolved(
+        &mut self,
+        files: FilesKey,
+        source: Option<LocalSource>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.files.key.as_ref() != Some(&files) {
+            return;
+        }
+        let source = source.map(|s| s.with_files(&self.files.list));
+        self.local = LocalState::Ready(files, source);
+        self.local_task = None;
+        self.queued.clear(); // the syntax worker's queue may now use it
+        self.queue_syntax(cx);
+        self.pump(cx);
     }
 
     fn load_related(&mut self, sha: RevisionId, network: bool, cx: &mut Context<Self>) {
@@ -974,6 +1051,9 @@ impl ChangePage {
     /// the list, the filters, the whitespace option or the preference may
     /// have changed; does nothing when the queue would be the same.
     fn queue_syntax(&mut self, cx: &mut Context<Self>) {
+        if self.local.is_resolving() {
+            return; // local_resolved queues it, with the local source
+        }
         let enabled = self.settings.read(cx).resolved().syntax_highlighting;
         let keys: Vec<DiffKey> = match &self.files.key {
             Some(files) if enabled && self.files.loaded => {
@@ -991,8 +1071,19 @@ impl ChangePage {
         }
         self.queued = keys.clone();
         let session = self.session.clone();
+        let local = self.local_source();
         self.syntax
-            .update(cx, |c, cx| c.set_queue(keys, &session, enabled, cx));
+            .update(cx, |c, cx| c.set_queue(keys, &session, local, enabled, cx));
+    }
+
+    /// The checkout the local diffs come from.
+    fn local_path(&self) -> Option<std::path::PathBuf> {
+        self.local_source().map(|s| s.path().to_owned())
+    }
+
+    /// The local source for the file list in use, once resolved.
+    fn local_source(&self) -> Option<LocalSource> {
+        self.local.source_for(self.files.key.as_ref()?).cloned()
     }
 
     fn expand_inline(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -1009,6 +1100,7 @@ impl ChangePage {
                 view: None,
                 phase: Phase::Queued,
                 error: None,
+                source: None,
                 task: None,
                 _sub: None,
             },
@@ -1033,6 +1125,9 @@ impl ChangePage {
     /// Starts queued fetches while fewer than [`MAX_PARALLEL_DIFFS`] run.
     /// Files are served in list order.
     fn pump(&mut self, cx: &mut Context<Self>) {
+        if self.local.is_resolving() {
+            return; // local_resolved pumps
+        }
         let mut running = self
             .inline
             .values()
@@ -1062,6 +1157,7 @@ impl ChangePage {
     }
 
     fn start_fetch(&mut self, path: &str, cx: &mut Context<Self>) {
+        let local = self.local_source();
         let Some(inline) = self.inline.get_mut(path) else {
             return;
         };
@@ -1073,7 +1169,7 @@ impl ChangePage {
         let task_key = key.clone();
         inline.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(load_diff(syncer, task_key, can_sync))
+                .background_spawn(async move { load_diff(syncer, task_key, can_sync, local).await })
                 .await;
             this.update(cx, |this, cx| this.diff_arrived(&path, &key, result, cx))
                 .ok();
@@ -1084,7 +1180,7 @@ impl ChangePage {
         &mut self,
         path: &str,
         key: &DiffKey,
-        result: Result<model::Diff, LoadError>,
+        result: Result<(model::Diff, DiffSource), LoadError>,
         cx: &mut Context<Self>,
     ) {
         let (prefs, font) = {
@@ -1102,8 +1198,9 @@ impl ChangePage {
         inline.phase = Phase::Idle;
         inline.task = None;
         match result {
-            Ok(diff) => {
+            Ok((diff, source)) => {
                 inline.error = None;
+                inline.source = Some(source);
                 match &inline.view {
                     Some(view) => view.update(cx, |v, cx| {
                         v.set_diff(diff, cx);
@@ -1354,6 +1451,7 @@ impl ChangePage {
                             view: None,
                             phase: Phase::Queued,
                             error: None,
+                            source: None,
                             task: None,
                             _sub: None,
                         },

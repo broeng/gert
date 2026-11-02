@@ -416,7 +416,6 @@ impl Shell {
     /// The local checkouts of server `key` (made on first use), the way the
     /// change and diff pages ask for "the repository of project X on this
     /// server" and the settings page lists the projects.
-    #[cfg_attr(not(test), allow(dead_code))] // L3 is the consumer.
     pub(crate) fn checkouts(
         &mut self,
         key: &ServerKey,
@@ -1691,10 +1690,12 @@ impl Shell {
         let outbox = self.outbox_for(&session, cx);
         let owner = session.key.clone();
         let badge = self.servers.badge(&owner);
+        let checkouts = self.checkouts(&owner, cx);
         let page = cx.new(|cx| {
             let mut page = ChangePage::new(
                 session, settings, layout, filters, syntax, number, view, active, outbox, cx,
             );
+            page.set_checkouts(checkouts);
             page.set_server_badge(badge, cx);
             if let Some(chain) = chain {
                 page.adopt_chain(chain, cx);
@@ -1769,8 +1770,10 @@ impl Shell {
         let syntax = self.syntax_cache(cx);
         let owner = session.key.clone();
         let badge = self.servers.badge(&owner);
+        let checkouts = self.checkouts(&owner, cx);
         let page = cx.new(|cx| {
             let mut page = DiffPage::new(session, settings, filters, syntax, route, outbox, cx);
+            page.set_checkouts(checkouts);
             page.set_server_badge(badge, cx);
             page
         });

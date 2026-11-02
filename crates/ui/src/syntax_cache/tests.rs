@@ -137,7 +137,7 @@ fn queue(cx: &mut TestAppContext, r: &Rig, keys: &[&str], enabled: bool) {
     let keys = keys.iter().map(|p| key(p)).collect();
     let session = r.session.clone();
     r.cache
-        .update(cx, |c, cx| c.set_queue(keys, &session, enabled, cx));
+        .update(cx, |c, cx| c.set_queue(keys, &session, None, enabled, cx));
 }
 
 fn cached(cx: &mut TestAppContext, r: &Rig, path: &str) -> Option<Highlight> {

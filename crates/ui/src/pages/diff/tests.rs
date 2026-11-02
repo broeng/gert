@@ -102,6 +102,7 @@ struct Page {
     filters: Entity<FileFilters>,
     syntax: Entity<SyntaxCache>,
     http: RouteHttpClient,
+    store: Arc<Mutex<Store>>,
     events: Arc<Mutex<Vec<String>>>,
 }
 
@@ -193,7 +194,24 @@ fn diff_page_loading(
     seed: Vec<(DiffKey, Highlight)>,
     local: LocalDiff,
 ) -> Page {
+    diff_page_loading_in(cx, store, route, http, auth, rules, seed, local, Vec::new())
+}
+
+/// Like [`diff_page_loading`], with local checkouts configured.
+#[allow(clippy::too_many_arguments)]
+fn diff_page_loading_in(
+    cx: &mut TestAppContext,
+    store: Store,
+    route: DiffRoute,
+    http: RouteHttpClient,
+    auth: gerrit_api::Auth,
+    rules: Vec<FileFilter>,
+    seed: Vec<(DiffKey, Highlight)>,
+    local: LocalDiff,
+    projects: Vec<crate::session::ProjectSettings>,
+) -> Page {
     let env = env_with(store, &http);
+    let store = env.store.clone();
     let mut server = setup();
     if let gerrit_api::Auth::Basic { username, .. } = &auth {
         server.username = Some(username.clone());
@@ -218,8 +236,12 @@ fn diff_page_loading(
             c
         });
         syntax_out = Some(syntax.clone());
-        let page =
-            cx.new(|cx| DiffPage::new(session, settings, filters, syntax, route, outbox, cx));
+        let checkouts = cx.new(|_| crate::checkouts::Checkouts::new(projects));
+        let page = cx.new(|cx| {
+            let mut page = DiffPage::new(session, settings, filters, syntax, route, outbox, cx);
+            page.set_checkouts(Some(checkouts));
+            page
+        });
         cx.subscribe(&page, move |_, ev: &super::DiffPageEvent, _| {
             let text = match ev {
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
@@ -242,6 +264,7 @@ fn diff_page_loading(
         filters: filters_out.expect("filters were created"),
         syntax: syntax_out.expect("cache was created"),
         http,
+        store,
         events,
     }
 }
@@ -1355,4 +1378,193 @@ fn the_last_file_that_is_not_skipped_counts_as_the_last(cx: &mut TestAppContext)
     let p = filtered_page(cx, "src/b.rs", vec![rule("Gen", "c.rs", FilterAction::Dim)]);
     press(cx, p.window, &["]"]);
     assert_eq!(opened(&p), ["up"]);
+}
+
+// ---- diffs from the local checkout ----
+
+mod local {
+    use super::*;
+    use crate::{
+        diff_load::DiffSource,
+        local_source::tests::{self as lt, Fixture},
+        session::ProjectSettings,
+    };
+
+    fn store_for(sha: &str) -> Store {
+        let mut store = Store::open_in_memory().expect("store");
+        let server = store.server_id(URL).expect("server");
+        store
+            .save_change_detail(server, &lt::detail_at(sha), now())
+            .expect("detail");
+        store
+            .save_file_list(server, &lt::files_key(sha), &lt::paths(), None, now())
+            .expect("files");
+        store
+    }
+
+    fn open_local(
+        cx: &mut TestAppContext,
+        f: &Fixture,
+        store: Store,
+        http: RouteHttpClient,
+        auth: gerrit_api::Auth,
+        path: &str,
+    ) -> Page {
+        open_local_with(cx, f, store, http, auth, path, LocalDiff::default())
+    }
+
+    fn open_local_with(
+        cx: &mut TestAppContext,
+        f: &Fixture,
+        store: Store,
+        http: RouteHttpClient,
+        auth: gerrit_api::Auth,
+        path: &str,
+        local: LocalDiff,
+    ) -> Page {
+        let projects = vec![ProjectSettings::new(
+            "platform/foo",
+            f.repo.path().to_string_lossy(),
+        )];
+        let route = DiffRoute {
+            target: PatchSetNumber(1),
+            ..route(path)
+        };
+        let p = diff_page_loading_in(
+            cx,
+            store,
+            route,
+            http,
+            auth,
+            Vec::new(),
+            Vec::new(),
+            local,
+            projects,
+        );
+        cx.run_until_parked();
+        // The checkout opens and git runs on real threads.
+        for _ in 0..50 {
+            if p.page.read_with(cx, |p, _| p.shown_for_test().is_some()) {
+                break;
+            }
+            cx.executor().allow_parking();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        p
+    }
+
+    fn shown(cx: &TestAppContext, p: &Page) -> Option<DiffSource> {
+        p.page.read_with(cx, |p, _| {
+            p.view_for_test().and_then(|_| p.source_for_test())
+        })
+    }
+
+    #[gpui_kit::test]
+    fn a_diff_comes_from_the_checkout_when_the_server_cannot_serve_it(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        // No /diff route: any request to Gerrit would fail the page.
+        let p = open_local(
+            cx,
+            &f,
+            store_for(&f.target),
+            RouteHttpClient::new(),
+            gerrit_api::Auth::Anonymous,
+            "src/a.rs",
+        );
+        assert_eq!(shown(cx, &p), Some(DiffSource::Local));
+        assert_eq!(requests(&p.http, "/diff"), 0, "{:?}", p.http.requested());
+        // Nothing local reaches the store, neither the shown file nor the
+        // ones highlighted ahead.
+        for path in ["src/a.rs", "src/b.rs"] {
+            let key = crate::syntax_cache::diff_key(
+                &lt::files_key(&f.target),
+                path,
+                Whitespace::IgnoreNone,
+            );
+            let server = store::ServerId(1);
+            assert!(
+                !p.store
+                    .lock()
+                    .expect("store")
+                    .has_diff(server, &key)
+                    .expect("has")
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_next_file_is_not_prefetched_from_gerrit_when_the_checkout_serves_it(
+        cx: &mut TestAppContext,
+    ) {
+        let f = lt::fixture();
+        // Without highlighting the syntax worker is idle, so only the
+        // prefetch could ask Gerrit for src/b.rs.
+        let p = open_local_with(
+            cx,
+            &f,
+            store_for(&f.target),
+            http(),
+            gerrit_api::Auth::Anonymous,
+            "src/a.rs",
+            syntax_off(),
+        );
+        assert_eq!(requests(&p.http, "/diff"), 0, "{:?}", p.http.requested());
+    }
+
+    #[gpui_kit::test]
+    fn a_commit_the_checkout_lacks_goes_to_the_server(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        let missing = "0123456789012345678901234567890123456789";
+        let p = open_local(
+            cx,
+            &f,
+            store_for(missing),
+            http(),
+            gerrit_api::Auth::Anonymous,
+            "src/a.rs",
+        );
+        assert_eq!(shown(cx, &p), Some(DiffSource::Gerrit));
+        assert_eq!(requests(&p.http, "src%2Fa.rs/diff"), 1);
+    }
+
+    #[gpui_kit::test]
+    fn a_cached_diff_is_shown_as_cached_even_with_a_checkout(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        let mut store = store_for(&f.target);
+        let key = crate::syntax_cache::diff_key(
+            &lt::files_key(&f.target),
+            "src/a.rs",
+            Whitespace::IgnoreNone,
+        );
+        let cached = crate::diff::tests::fixture("handwritten/diff_rename.response.json");
+        store
+            .save_diff(store::ServerId(1), &key, &cached, now())
+            .expect("save");
+        let p = open_local(
+            cx,
+            &f,
+            store,
+            RouteHttpClient::new(),
+            gerrit_api::Auth::Anonymous,
+            "src/a.rs",
+        );
+        assert_eq!(shown(cx, &p), Some(DiffSource::Cache));
+    }
+
+    #[gpui_kit::test]
+    fn without_a_configured_checkout_nothing_changes(cx: &mut TestAppContext) {
+        let f = lt::fixture();
+        let p = diff_page_route(
+            cx,
+            store_for(&f.target),
+            DiffRoute {
+                target: PatchSetNumber(1),
+                ..route("src/a.rs")
+            },
+            http(),
+            gerrit_api::Auth::Anonymous,
+        );
+        assert_eq!(shown(cx, &p), Some(DiffSource::Gerrit));
+    }
 }
