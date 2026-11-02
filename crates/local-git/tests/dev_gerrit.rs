@@ -26,10 +26,19 @@
 //! handful on the seed data), and fails only if fewer than 80% are, because
 //! the character diff is modelled on Gerrit's, not a copy.
 //!
-//! The changes tested are 1-9 (the seeded ones); `GERT_TEST_CHANGES=10,11`
-//! picks others. `GERT_TEST_USER` / `GERT_TEST_PASSWORD` default to alice.
-//! Nothing is written to the server. As in the other dev tests, any URL but
-//! `http://127.0.0.1:PORT` / `http://localhost:PORT` is refused.
+//! The changes tested are 1-9 (the seeded ones; `GERT_TEST_CHANGES=10,11`
+//! picks others) and four probe changes for `/COMMIT_MSG` cases the seed
+//! lacks: author and committer in the zones +0530, -0700, -0000 and +1245,
+//! a parent subject wrapped over two lines, a message without a final
+//! newline, two patch sets with the same `/COMMIT_MSG` text (one skip),
+//! and a merge (its `Merge Of:` header, between two patch sets, since a
+//! merge against its parent is Gerrit's auto-merge). The test pushes the
+//! probes itself as alice, with the topic `local-git-parity`, the first
+//! time it runs against a site; later runs find them by that topic. That
+//! push is the only write, and it adds changes after the seeded ones, so
+//! changes 1-9 keep their numbers. `GERT_TEST_USER` /
+//! `GERT_TEST_PASSWORD` default to alice. As in the other dev tests, any
+//! URL but `http://127.0.0.1:PORT` / `http://localhost:PORT` is refused.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -38,7 +47,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use futures::{FutureExt, executor::block_on, future::BoxFuture};
-use gerrit_api::{Auth, DiffParams, GerritClient, HttpClient, HttpError};
+use gerrit_api::{Auth, ChangeQuery, DiffParams, GerritClient, HttpClient, HttpError};
 use local_git::{Local, Repo};
 use model::{
     COMMIT_MSG_PATH, ChangeNumber, ChangedChunk, Diff, DiffChunk, FileEntry, MERGE_LIST_PATH,
@@ -152,6 +161,176 @@ fn changes_under_test() -> Vec<ChangeNumber> {
         .collect()
 }
 
+/// The topic of the probe changes, which finds them on later runs.
+const PROBE_TOPIC: &str = "local-git-parity";
+const PROBE_CHANGES: usize = 4;
+
+/// Runs git in `dir` as alice with `env` and `stdin`, returning stdout.
+fn git_with(dir: &Path, args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "Alice Anderson")
+        .env("GIT_AUTHOR_EMAIL", "alice@example.com")
+        .env("GIT_COMMITTER_NAME", "Alice Anderson")
+        .env("GIT_COMMITTER_EMAIL", "alice@example.com")
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run git");
+    let mut pipe = child.stdin.take().expect("stdin");
+    pipe.write_all(stdin.unwrap_or("").as_bytes())
+        .expect("write stdin");
+    drop(pipe);
+    let out = child.wait_with_output().expect("wait for git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Makes a commit without touching the work tree: the tree of `tree_of`
+/// plus `files`, the message exactly as given (`commit-tree` adds no
+/// newline), and fixed dates (`<unix seconds> <zone>`), so the probes are
+/// the same commits on every site.
+fn probe_commit(
+    dir: &Path,
+    parents: &[&str],
+    tree_of: &str,
+    files: &[(&str, &str)],
+    message: &str,
+    (author_date, committer_date): (&str, &str),
+) -> String {
+    let index = dir.join(".git").join("probe-index");
+    let index = index.to_str().expect("utf8 path");
+    let env = [
+        ("GIT_INDEX_FILE", index),
+        ("GIT_AUTHOR_DATE", author_date),
+        ("GIT_COMMITTER_DATE", committer_date),
+    ];
+    git_with(dir, &["read-tree", tree_of], &env, None);
+    for (path, content) in files {
+        let blob = git_with(dir, &["hash-object", "-w", "--stdin"], &env, Some(content));
+        let info = format!("100644,{blob},{path}");
+        git_with(
+            dir,
+            &["update-index", "--add", "--cacheinfo", &info],
+            &env,
+            None,
+        );
+    }
+    let tree = git_with(dir, &["write-tree"], &env, None);
+    let mut args = vec!["commit-tree", tree.as_str()];
+    for p in parents {
+        args.extend(["-p", p]);
+    }
+    git_with(dir, &args, &env, Some(message))
+}
+
+/// The probe changes, pushed first if the server does not have them.
+fn probe_changes(c: &GerritClient, dir: &Path) -> Vec<ChangeNumber> {
+    let find = || {
+        let q = format!("project:demo/scheduler topic:{PROBE_TOPIC}");
+        let page = block_on(c.query_changes(&ChangeQuery::new(q))).expect("probe query");
+        let mut numbers: Vec<ChangeNumber> = page.changes.iter().map(|ch| ch.number).collect();
+        numbers.sort();
+        numbers
+    };
+    let found = find();
+    if found.len() == PROBE_CHANGES {
+        return found;
+    }
+    assert!(
+        found.is_empty(),
+        "found {} of the {PROBE_CHANGES} probe changes; reset the dev Gerrit",
+        found.len()
+    );
+    let id = |n: u64| format!("I{:040x}", 0x7061_7269_7479_0000_u64 + n);
+    let base = git_with(dir, &["rev-parse", "origin/main"], &[], None);
+    let a = probe_commit(
+        dir,
+        &[&base],
+        &base,
+        &[("probe/a.txt", "a\n")],
+        &format!(
+            "Parity probe with a subject\nthat wraps onto a second line\n\nChange-Id: {}\n",
+            id(1)
+        ),
+        ("1774728000 +0530", "1774780200 -0700"),
+    );
+    // No final newline, and a zero offset written as -0000.
+    let b_message = format!(
+        "Parity probe without a final newline\n\nChange-Id: {}",
+        id(2)
+    );
+    let b_dates = ("1700000000 -0000", "1700000000 +1245");
+    let b1 = probe_commit(
+        dir,
+        &[&a],
+        &a,
+        &[("probe/b.txt", "one\n")],
+        &b_message,
+        b_dates,
+    );
+    // Another patch set with the same message and dates: the same text.
+    let b2 = probe_commit(
+        dir,
+        &[&a],
+        &a,
+        &[("probe/b.txt", "two\n")],
+        &b_message,
+        b_dates,
+    );
+    let dates = ("1767225600 +0100", "1767225600 +0100");
+    let side = probe_commit(
+        dir,
+        &[&base],
+        &base,
+        &[("probe/side.txt", "side\n")],
+        &format!("Parity probe side commit\n\nChange-Id: {}\n", id(3)),
+        dates,
+    );
+    let merge_files = [("probe/side.txt", "side\n")];
+    let m1 = probe_commit(
+        dir,
+        &[&side, &b2],
+        &b2,
+        &merge_files,
+        &format!("Parity probe merge\n\nChange-Id: {}\n", id(4)),
+        dates,
+    );
+    let m2 = probe_commit(
+        dir,
+        &[&side, &b2],
+        &b2,
+        &merge_files,
+        &format!(
+            "Parity probe merge\n\nNow with a body.\n\nChange-Id: {}\n",
+            id(4)
+        ),
+        dates,
+    );
+    for commit in [&b1, &b2, &m1, &m2] {
+        let refspec = format!("{commit}:refs/for/main%topic={PROBE_TOPIC}");
+        git_with(dir, &["push", "-q", "origin", &refspec], &[], None);
+    }
+    git(
+        dir,
+        &["fetch", "-q", "origin", "+refs/changes/*:refs/changes/*"],
+    );
+    let found = find();
+    assert_eq!(found.len(), PROBE_CHANGES, "probe changes after the push");
+    found
+}
+
 const MODES: [Whitespace; 4] = [
     Whitespace::IgnoreNone,
     Whitespace::IgnoreTrailing,
@@ -165,6 +344,10 @@ struct Tally {
     not_local: usize,
     diffs: usize,
     commit_msg_diffs: usize,
+    /// `/COMMIT_MSG` diffs that Gerrit answered with one skip (equal texts).
+    commit_msg_skips: usize,
+    /// `/COMMIT_MSG` diffs whose text has a `Merge Of:` line.
+    merge_headers: usize,
     changed_chunks: usize,
     intraline_chunks: usize,
     intraline_identical: usize,
@@ -180,8 +363,15 @@ fn local_git_matches_gerrit() {
     clone_project(&dir);
     let repo = Repo::open(&dir).expect("open clone");
 
+    let mut numbers = changes_under_test();
+    for n in probe_changes(&c, &dir) {
+        if !numbers.contains(&n) {
+            numbers.push(n);
+        }
+    }
+
     let mut t = Tally::default();
-    for number in changes_under_test() {
+    for number in numbers {
         let detail = block_on(c.get_change(number)).expect("change detail");
         for (i, rev) in detail.revisions.iter().enumerate() {
             let bases: Vec<Option<&Revision>> = if i == 0 {
@@ -200,8 +390,8 @@ fn local_git_matches_gerrit() {
         t.comparisons, t.not_local, t.diffs
     );
     println!(
-        "{} of them /COMMIT_MSG diffs (x 4 whitespace modes)",
-        t.commit_msg_diffs
+        "{} of them /COMMIT_MSG diffs (x 4 whitespace modes), {} with equal texts, {} of merges",
+        t.commit_msg_diffs, t.commit_msg_skips, t.merge_headers
     );
     println!(
         "intraline: {} of {} chunks with edits on both sides carry exactly Gerrit's marks",
@@ -220,6 +410,11 @@ fn local_git_matches_gerrit() {
     );
     assert!(t.diffs > 0, "nothing was compared");
     assert!(t.commit_msg_diffs > 0, "no /COMMIT_MSG was compared");
+    assert!(
+        t.commit_msg_skips > 0,
+        "no equal /COMMIT_MSG texts compared"
+    );
+    assert!(t.merge_headers > 0, "no merge's /COMMIT_MSG compared");
 }
 
 fn compare_one(
@@ -247,7 +442,10 @@ fn compare_one(
     };
     let base_ps: Option<PatchSetNumber> = base.map(|b| b.number);
 
-    let server = block_on(c.get_files(number, &rev.sha, base_ps)).expect("server files");
+    let mut server = block_on(c.get_files(number, &rev.sha, base_ps)).expect("server files");
+    // Gerrit lists `/MERGE_LIST` for a merge; local-git does not make it
+    // (local changes skip merges).
+    server.retain(|e| e.path != MERGE_LIST_PATH);
     let local = repo
         .file_list(&cmp)
         .expect("local files")
@@ -255,8 +453,7 @@ fn compare_one(
         .expect("local file list");
     compare_file_lists(&label, &server, &local, t);
 
-    // `/MERGE_LIST` is not made locally (local changes skip merges).
-    for entry in server.iter().filter(|e| e.path != MERGE_LIST_PATH) {
+    for entry in &server {
         t.diffs += 1;
         if entry.path == COMMIT_MSG_PATH {
             t.commit_msg_diffs += 1;
@@ -281,6 +478,19 @@ fn compare_one(
                 continue;
             };
             let what = format!("{label} {} [{}]", entry.path, ws.as_wire());
+            if entry.path == COMMIT_MSG_PATH && ws == Whitespace::IgnoreNone {
+                if matches!(s.chunks.as_slice(), [DiffChunk::Skip { .. }]) {
+                    t.commit_msg_skips += 1;
+                }
+                let merge_of = |c: &DiffChunk| match c {
+                    DiffChunk::Common { lines } => lines.iter().any(|l| l.starts_with("Merge Of:")),
+                    DiffChunk::Changed(c) => c.b.iter().any(|l| l.starts_with("Merge Of:")),
+                    DiffChunk::Skip { .. } => false,
+                };
+                if s.chunks.iter().any(merge_of) {
+                    t.merge_headers += 1;
+                }
+            }
             compare_diff(&what, &s, &l, t);
         }
     }

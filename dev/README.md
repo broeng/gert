@@ -101,10 +101,15 @@ GERT_TEST_GERRIT=http://127.0.0.1:8080 \
   cargo test -p gerrit-api -p sync --test dev_gerrit -- --ignored --nocapture
 ```
 
-`local-git` has a read-only parity test of its own (needs the `git` binary): it
+`local-git` has a parity test of its own (needs the `git` binary): it
 clones `demo/scheduler` over HTTP into a temporary directory, fetches
 `refs/changes/*` and compares its file lists and diffs (all four whitespace
-modes, intraline edits loosely) with the server's for changes 1-9:
+modes, intraline edits loosely, `/COMMIT_MSG` included) with the server's for
+changes 1-9 and four probe changes. It pushes the probes itself, as alice
+with the topic `local-git-parity`, the first time it runs against a site
+(commit message cases the seed lacks: odd time zones, a wrapped parent
+subject, no final newline, equal texts in two patch sets, a merge); later
+runs find them by the topic. That push is its only write:
 
 ```
 GERT_TEST_GERRIT=http://127.0.0.1:8080 \
