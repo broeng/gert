@@ -14,9 +14,12 @@
 //! previous patch set (when the parents agree, else local-git declines):
 //!
 //! - the file list, `/COMMIT_MSG` included (its text is rebuilt locally in
-//!   Gerrit's format; its own diff is not computed locally),
+//!   Gerrit's format),
 //! - every file's whole-file diff in each of the four whitespace modes:
-//!   metadata, change type, header and chunk structure **exactly**.
+//!   metadata, change type, header and chunk structure **exactly**; also
+//!   for `/COMMIT_MSG`, whose chunks hold the synthetic header lines
+//!   (parent, author, committer, dates) and so compare their exact text,
+//!   and whose content type is compared too.
 //!
 //! Intraline edits are compared loosely: the test prints every chunk whose
 //! marks differ from Gerrit's, reports how many are identical (all but a
@@ -38,7 +41,8 @@ use futures::{FutureExt, executor::block_on, future::BoxFuture};
 use gerrit_api::{Auth, DiffParams, GerritClient, HttpClient, HttpError};
 use local_git::{Local, Repo};
 use model::{
-    ChangeNumber, ChangedChunk, Diff, DiffChunk, FileEntry, PatchSetNumber, Revision, Whitespace,
+    COMMIT_MSG_PATH, ChangeNumber, ChangedChunk, Diff, DiffChunk, FileEntry, MERGE_LIST_PATH,
+    PatchSetNumber, Revision, Whitespace,
 };
 
 /// Blocking `ureq` behind the async trait; fine for tests.
@@ -160,6 +164,7 @@ struct Tally {
     comparisons: usize,
     not_local: usize,
     diffs: usize,
+    commit_msg_diffs: usize,
     changed_chunks: usize,
     intraline_chunks: usize,
     intraline_identical: usize,
@@ -195,6 +200,10 @@ fn local_git_matches_gerrit() {
         t.comparisons, t.not_local, t.diffs
     );
     println!(
+        "{} of them /COMMIT_MSG diffs (x 4 whitespace modes)",
+        t.commit_msg_diffs
+    );
+    println!(
         "intraline: {} of {} chunks with edits on both sides carry exactly Gerrit's marks",
         t.intraline_identical, t.intraline_chunks
     );
@@ -210,6 +219,7 @@ fn local_git_matches_gerrit() {
         t.intraline_chunks
     );
     assert!(t.diffs > 0, "nothing was compared");
+    assert!(t.commit_msg_diffs > 0, "no /COMMIT_MSG was compared");
 }
 
 fn compare_one(
@@ -245,8 +255,12 @@ fn compare_one(
         .expect("local file list");
     compare_file_lists(&label, &server, &local, t);
 
-    for entry in server.iter().filter(|e| !e.is_special()) {
+    // `/MERGE_LIST` is not made locally (local changes skip merges).
+    for entry in server.iter().filter(|e| e.path != MERGE_LIST_PATH) {
         t.diffs += 1;
+        if entry.path == COMMIT_MSG_PATH {
+            t.commit_msg_diffs += 1;
+        }
         for ws in MODES {
             let params = DiffParams {
                 base: base_ps,
@@ -324,7 +338,21 @@ fn structure(d: &Diff) -> Vec<DiffChunk> {
 
 fn compare_diff(what: &str, server: &Diff, local: &Diff, t: &mut Tally) {
     let mut problems = Vec::new();
-    let meta = |m: &Option<model::DiffFileMeta>| m.as_ref().map(|m| (m.name.clone(), m.lines));
+    // Local diffs of files carry no content type; `/COMMIT_MSG` has
+    // Gerrit's fixed one.
+    let commit_msg = server
+        .meta_b
+        .as_ref()
+        .is_some_and(|m| m.name == COMMIT_MSG_PATH);
+    let meta = |m: &Option<model::DiffFileMeta>| {
+        m.as_ref().map(|m| {
+            (
+                m.name.clone(),
+                m.lines,
+                commit_msg.then(|| m.content_type.clone()),
+            )
+        })
+    };
     if meta(&server.meta_a) != meta(&local.meta_a) {
         problems.push(format!(
             "meta_a {:?} vs local {:?}",
