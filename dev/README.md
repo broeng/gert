@@ -101,6 +101,18 @@ GERT_TEST_GERRIT=http://127.0.0.1:8080 \
   cargo test -p gerrit-api -p sync --test dev_gerrit -- --ignored --nocapture
 ```
 
+`local-git` has a read-only parity test of its own (needs the `git` binary): it
+clones `demo/scheduler` over HTTP into a temporary directory, fetches
+`refs/changes/*` and compares its file lists and diffs (all four whitespace
+modes, intraline edits loosely) with the server's for changes 1-9:
+
+```
+GERT_TEST_GERRIT=http://127.0.0.1:8080 \
+  cargo test -p local-git --test dev_gerrit -- --ignored --nocapture
+```
+
+`GERT_TEST_CHANGES=10,11` picks other changes.
+
 `GERT_TEST_USER` / `GERT_TEST_PASSWORD` (gerrit-api only) default to
 alice. Without the variable they are not run (`cargo test --workspace` never
 touches the network). They refuse any URL but `http://127.0.0.1:PORT` or
@@ -142,6 +154,23 @@ changes; `--reset` clears them.
   accepted (a new change).
 - Setting a reviewed mark twice, and clearing one that is not set, are both
   fine (no error).
+- Diff details (checked while building `local-git`, which reproduces them):
+  lines split on `\n` only, so a final newline shows as one more, empty,
+  line and `\r` stays on its line; an empty file has no lines. Without a
+  whitespace option a last line without a newline differs from the same text
+  with one. `IGNORE_LEADING_AND_TRAILING` is JGit's "ignore change in amount
+  of whitespace" (`x` and ` x` still differ); whitespace is only space, tab,
+  CR and LF. Lines equal under the mode but not as text come as chunks with
+  `common: true`; a file with no other change (and a changed binary file) is
+  one `skip` over all lines, the only case of a `skip` chunk.
+  With `intraline`, changed regions separated only by blank lines, a line
+  ending in `{` or `:` or a lone `}` are one chunk. Intraline edits are
+  character level (gaps of up to 5 characters are joined), count UTF-16
+  units over the lines with their line breaks, and a mark over whole lines
+  includes the last line break. Rename detection is the usual 60%, copies are
+  not detected; a binary file has `lines` counted as pieces between `\n`.
+  `/COMMIT_MSG` is `Parent: <8 hex> (subject)`, author, author date, committer
+  and commit date lines, a blank line and the message as stored.
 
 ## Troubleshooting
 

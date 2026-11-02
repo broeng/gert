@@ -15,7 +15,14 @@ model.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# For tests/dev_gerrit.rs, the opt-in comparison with a local dev Gerrit.
+# `ureq` is blocking HTTP without TLS (the dev Gerrit is plain http on
+# 127.0.0.1), as in the gerrit-api and sync dev tests.
+futures.workspace = true
+gerrit-api.workspace = true
+http.workspace = true
 tempfile = "3"
+ureq = { version = "3", default-features = false }
 
 [lints]
 workspace = true
