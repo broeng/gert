@@ -133,6 +133,26 @@ impl Checkouts {
         }
     }
 
+    /// Like [`Checkouts::open_all`], and tries again every project whose
+    /// last open failed. A failure is remembered until the settings change
+    /// (so a page that asks about a project does not start `git` over and
+    /// over), but the user may have fixed the directory since; the settings
+    /// tab calls this each time it is shown.
+    pub fn recheck(&mut self, cx: &mut Context<Self>) {
+        let mut reset = false;
+        for e in &mut self.entries {
+            if matches!(e.state, Some(CheckoutState::Failed(_))) {
+                e.state = None;
+                e.task = None;
+                reset = true;
+            }
+        }
+        self.open_all(cx);
+        if reset {
+            cx.notify();
+        }
+    }
+
     /// Every configured project with its state, in config order. Starts
     /// nothing; see [`Checkouts::open_all`].
     pub fn all(&self) -> Vec<Checkout> {

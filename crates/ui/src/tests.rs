@@ -2337,6 +2337,17 @@ mod settings_page {
         filters: Vec<FileFilter>,
         bookmarks: Vec<crate::session::SavedQuery>,
     ) -> Fixture {
+        fixture_all(cx, fail, start_page, filters, bookmarks, Vec::new())
+    }
+
+    fn fixture_all(
+        cx: &mut TestAppContext,
+        fail: bool,
+        start_page: StartupPage,
+        filters: Vec<FileFilter>,
+        bookmarks: Vec<crate::session::SavedQuery>,
+        projects: Vec<crate::session::ProjectSettings>,
+    ) -> Fixture {
         let backend = Arc::new(FakeBackend {
             fail,
             ..Default::default()
@@ -2356,6 +2367,7 @@ mod settings_page {
             servers: vec![crate::session::ServerSetup {
                 queries: vec![spec("Open", "status:open"), spec("Mine", "owner:self")],
                 bookmarks,
+                projects,
                 ..setup()
             }],
             active: None,
@@ -2459,6 +2471,233 @@ mod settings_page {
             .update(cx, |s, cx| s.checkouts(&key, cx))
             .expect("server");
         assert_eq!(again.entity_id(), checkouts.entity_id());
+    }
+
+    // ---- the Projects tab and the project dialog ----
+
+    fn tmp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("projects-tab-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// `git init` with an environment that ignores the user's git config.
+    fn git_init(dir: &std::path::Path) {
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .arg(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("run git");
+        assert!(status.success());
+    }
+
+    fn project(name: &str, dir: &std::path::Path) -> crate::session::ProjectSettings {
+        crate::session::ProjectSettings::new(name, dir.to_string_lossy())
+    }
+
+    fn projects_fixture(
+        cx: &mut TestAppContext,
+        projects: Vec<crate::session::ProjectSettings>,
+    ) -> Fixture {
+        let f = fixture_all(
+            cx,
+            false,
+            StartupPage::Dashboard,
+            Vec::new(),
+            Vec::new(),
+            projects,
+        );
+        open_settings(cx, &f);
+        show_tab(cx, &f, SettingsTab::Projects);
+        cx.run_until_parked();
+        f
+    }
+
+    /// The status words of every project the tab lists.
+    fn statuses(cx: &mut TestAppContext, f: &Fixture) -> Vec<(String, String)> {
+        cx.update(|cx| {
+            let key = crate::session::ServerKey::new("test");
+            let checkouts = f
+                .shell
+                .update(cx, |s, cx| s.checkouts(&key, cx))
+                .expect("server");
+            checkouts
+                .read(cx)
+                .all()
+                .iter()
+                .map(|c| {
+                    (
+                        c.project.clone(),
+                        crate::pages::settings::projects::status_text(c).0,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn project_dialog(
+        cx: &mut TestAppContext,
+        f: &Fixture,
+    ) -> Option<Entity<crate::project_dialog::ProjectDialog>> {
+        cx.update(|cx| f.shell.read(cx).project_dialog_for_test())
+    }
+
+    /// Types `name` and `path` into the open dialog.
+    fn fill_dialog(cx: &mut TestAppContext, f: &Fixture, name: &'static str, path: &'static str) {
+        let dialog = project_dialog(cx, f).expect("dialog");
+        let (n, p) = cx.update(|cx| {
+            let d = dialog.read(cx);
+            (d.name_input_for_test(), d.path_input_for_test())
+        });
+        type_into(cx, f, &n, name);
+        type_into(cx, f, &p, path);
+    }
+
+    fn saved_projects(f: &Fixture) -> Vec<Vec<crate::session::ProjectSettings>> {
+        f.backend.saved_projects.lock().unwrap().clone()
+    }
+
+    #[gpui_kit::test]
+    fn the_projects_tab_lists_the_checkouts_with_their_status(cx: &mut TestAppContext) {
+        let repo = tmp_dir("repo");
+        git_init(&repo);
+        let plain = tmp_dir("plain");
+        let f = projects_fixture(
+            cx,
+            vec![project("demo/ok", &repo), project("demo/no", &plain)],
+        );
+        let page = cx.update(|cx| f.shell.read(cx).settings_page_for_test().expect("page"));
+        assert_eq!(
+            page.read_with(cx, |p, _| p.project_names_for_test().to_vec()),
+            ["demo/ok", "demo/no"]
+        );
+        let st = statuses(cx, &f);
+        assert_eq!(st[0], ("demo/ok".into(), "Git checkout".into()));
+        assert!(st[1].1.contains("is not a git repository"), "{st:?}");
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&plain);
+    }
+
+    #[gpui_kit::test]
+    fn showing_the_tab_again_checks_a_failed_checkout_again(cx: &mut TestAppContext) {
+        let dir = tmp_dir("again");
+        let f = projects_fixture(cx, vec![project("demo/a", &dir)]);
+        assert!(statuses(cx, &f)[0].1.contains("not a git repository"));
+        git_init(&dir);
+        // Nothing changes by itself.
+        cx.run_until_parked();
+        assert!(statuses(cx, &f)[0].1.contains("not a git repository"));
+        show_tab(cx, &f, SettingsTab::Review);
+        show_tab(cx, &f, SettingsTab::Projects);
+        cx.run_until_parked();
+        assert_eq!(statuses(cx, &f)[0].1, "Git checkout");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    fn the_seven_key_shows_the_projects_tab(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        open_settings(cx, &f);
+        press(cx, &f, "7");
+        assert_eq!(tab_state(cx, &f).0, SettingsTab::Projects);
+    }
+
+    #[gpui_kit::test]
+    fn adding_a_checkout_saves_the_list_with_the_path_as_written(cx: &mut TestAppContext) {
+        let f = projects_fixture(cx, Vec::new());
+        // The empty-state row also adds.
+        press(cx, &f, "a");
+        assert!(project_dialog(cx, &f).is_some());
+        fill_dialog(cx, &f, " demo/new ", "~/src/new");
+        press(cx, &f, "enter");
+        assert!(project_dialog(cx, &f).is_none());
+        assert_eq!(
+            saved_projects(&f),
+            vec![vec![crate::session::ProjectSettings::new(
+                "demo/new",
+                "~/src/new"
+            )]]
+        );
+        // The tab follows what the shell saved.
+        let page = cx.update(|cx| f.shell.read(cx).settings_page_for_test().expect("page"));
+        assert_eq!(
+            page.read_with(cx, |p, _| p.project_names_for_test().to_vec()),
+            ["demo/new"]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn editing_a_checkout_replaces_it_in_place(cx: &mut TestAppContext) {
+        let a = tmp_dir("edit-a");
+        let b = tmp_dir("edit-b");
+        let f = projects_fixture(cx, vec![project("one", &a), project("two", &a)]);
+        press(cx, &f, "j");
+        press(cx, &f, "e");
+        let dialog = project_dialog(cx, &f).expect("dialog");
+        assert!(cx.update(|cx| dialog.read(cx).is_edit_for_test()));
+        let path = b.to_string_lossy().into_owned();
+        let path: &'static str = Box::leak(path.into_boxed_str());
+        fill_dialog(cx, &f, "two", path);
+        press(cx, &f, "enter");
+        assert_eq!(
+            saved_projects(&f),
+            vec![vec![project("one", &a), project("two", &b)]]
+        );
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[gpui_kit::test]
+    fn a_duplicate_name_or_an_empty_field_is_not_saved(cx: &mut TestAppContext) {
+        let a = tmp_dir("dup");
+        let f = projects_fixture(cx, vec![project("one", &a)]);
+        press(cx, &f, "a");
+        fill_dialog(cx, &f, "one", "/somewhere");
+        press(cx, &f, "enter");
+        let dialog = project_dialog(cx, &f).expect("still open");
+        assert_eq!(
+            cx.update(|cx| dialog.read(cx).problem_for_test(cx)),
+            Some("This project already has a checkout.")
+        );
+        fill_dialog(cx, &f, "", "/somewhere");
+        press(cx, &f, "enter");
+        assert!(
+            cx.update(|cx| dialog.read(cx).problem_for_test(cx))
+                .is_some()
+        );
+        fill_dialog(cx, &f, "two", "  ");
+        press(cx, &f, "enter");
+        assert!(
+            cx.update(|cx| dialog.read(cx).problem_for_test(cx))
+                .is_some()
+        );
+        assert!(saved_projects(&f).is_empty());
+        // Escape discards.
+        press(cx, &f, "escape");
+        assert!(project_dialog(cx, &f).is_none());
+        assert!(saved_projects(&f).is_empty());
+        let _ = std::fs::remove_dir_all(&a);
+    }
+
+    #[gpui_kit::test]
+    fn removing_a_checkout_asks_first(cx: &mut TestAppContext) {
+        let a = tmp_dir("rm");
+        let f = projects_fixture(cx, vec![project("one", &a), project("two", &a)]);
+        press(cx, &f, "d");
+        press(cx, &f, "n");
+        assert!(saved_projects(&f).is_empty());
+        press(cx, &f, "d");
+        press(cx, &f, "y");
+        assert_eq!(saved_projects(&f), vec![vec![project("two", &a)]]);
+        let page = cx.update(|cx| f.shell.read(cx).settings_page_for_test().expect("page"));
+        assert_eq!(
+            page.read_with(cx, |p, _| p.project_names_for_test().to_vec()),
+            ["two"]
+        );
+        let _ = std::fs::remove_dir_all(&a);
     }
 
     #[gpui_kit::test]
@@ -2885,8 +3124,12 @@ mod settings_page {
         assert_eq!(tab(cx), SettingsTab::Filters);
         press(cx, &f, "l");
         assert_eq!(tab(cx), SettingsTab::Notifications);
+        press(cx, &f, "l");
+        assert_eq!(tab(cx), SettingsTab::Projects);
         // The strip has ends.
         press(cx, &f, "l");
+        assert_eq!(tab(cx), SettingsTab::Projects);
+        press(cx, &f, "h");
         assert_eq!(tab(cx), SettingsTab::Notifications);
         press(cx, &f, "h");
         assert_eq!(tab(cx), SettingsTab::Filters);
@@ -2896,6 +3139,7 @@ mod settings_page {
         assert_eq!(tab(cx), SettingsTab::Review);
         for (key, want) in [
             ("1", SettingsTab::Servers),
+            ("7", SettingsTab::Projects),
             ("6", SettingsTab::Notifications),
             ("5", SettingsTab::Filters),
             ("2", SettingsTab::Queries),

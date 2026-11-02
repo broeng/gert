@@ -33,6 +33,7 @@ use gpui_kit::*;
 use sync::notify::NotificationSettings;
 
 pub(crate) mod notifications;
+pub(crate) mod projects;
 pub(crate) mod servers;
 
 use servers::ServerForm;
@@ -41,11 +42,15 @@ pub(crate) use servers::ServerRow;
 use crate::{
     actions::*,
     card,
+    checkouts::Checkouts,
     filters::{FileFilter, FilterAction},
     hint::Hint,
     login::LoginOutcome,
     servers::Connection,
-    session::{BackendError, Env, SavedQuery, ServerBackend, ServerConfig, ServerKey, StartupPage},
+    session::{
+        BackendError, Env, ProjectSettings, SavedQuery, ServerBackend, ServerConfig, ServerKey,
+        StartupPage,
+    },
     settings::{FileFilters, PageLayout},
     theme::{self as app_theme, ColorMode, ColorModes, ThemeName},
 };
@@ -90,6 +95,13 @@ pub enum SettingsEvent {
     EditNotificationRule { index: usize },
     /// Show a sample notification now (see `Shell::test_notification`).
     TestNotification,
+    /// Open the project dialog on the checkout of project `name`, or on a
+    /// new one when it is `None`.
+    EditProject { name: Option<String> },
+    /// Write this list of project checkouts (after a delete); the shell
+    /// does it through `Shell::save_projects`, and the page follows the
+    /// server's `Checkouts`.
+    SaveProjects(Vec<ProjectSettings>),
 }
 
 /// The tabs of the page, in the order they are shown. To add one: a variant
@@ -106,10 +118,12 @@ pub enum SettingsTab {
     Appearance,
     Filters,
     Notifications,
+    /// The local git checkouts of the active server's projects.
+    Projects,
 }
 
 impl SettingsTab {
-    pub const fn all() -> [SettingsTab; 6] {
+    pub const fn all() -> [SettingsTab; 7] {
         [
             SettingsTab::Servers,
             SettingsTab::Queries,
@@ -117,6 +131,7 @@ impl SettingsTab {
             SettingsTab::Appearance,
             SettingsTab::Filters,
             SettingsTab::Notifications,
+            SettingsTab::Projects,
         ]
     }
 
@@ -128,6 +143,7 @@ impl SettingsTab {
             SettingsTab::Appearance => "Appearance",
             SettingsTab::Filters => "Filters",
             SettingsTab::Notifications => "Notifications",
+            SettingsTab::Projects => "Projects",
         }
     }
 
@@ -149,6 +165,7 @@ impl SettingsTab {
                 "Space: toggle    Enter / e: edit    a: add a rule    d: delete    \
                  Shift-J / Shift-K: move    t: send a test notification"
             }
+            SettingsTab::Projects => "a: add    Enter / e: edit    d: remove",
         };
         format!(
             "j / k: select    h / l, 1 .. {}: tab    {own}    u: back to the dashboard",
@@ -194,6 +211,8 @@ enum Mode {
     ConfirmingRule(usize),
     /// Asking whether to replace the notification rules by the defaults.
     ConfirmingReset,
+    /// Asking whether to remove the checkout of project `index`.
+    ConfirmingProject(usize),
 }
 
 // ---- pure list logic ----
@@ -307,6 +326,12 @@ pub struct SettingsPage {
     /// The names of the rules on screen, to keep the cursor on its rule when
     /// the list changes under it.
     filter_names: Vec<String>,
+    /// The checkouts of the active server (`None` without a server), for the
+    /// Projects tab.
+    checkouts: Option<Entity<Checkouts>>,
+    /// The names of the projects on screen, in the same role as
+    /// `filter_names`.
+    project_names: Vec<String>,
     /// Why the row being edited cannot be saved.
     invalid: Option<&'static str>,
     /// A save is in flight: keys that change the list wait.
@@ -343,6 +368,7 @@ impl SettingsPage {
         layout: Entity<PageLayout>,
         filters: Entity<FileFilters>,
         notify: NotificationSettings,
+        checkouts: Option<Entity<Checkouts>>,
         tab: SettingsTab,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -369,6 +395,15 @@ impl SettingsPage {
             this.follow_filters(&filters, cx)
         }));
         let filter_names = filters.read(cx).rules().iter().map(rule_name).collect();
+        // The Projects tab lists what the shell's `Checkouts` holds and
+        // follows it while opens finish and the shell saves.
+        if let Some(c) = &checkouts {
+            subs.push(cx.observe(c, |this, _, cx| this.follow_projects(cx)));
+        }
+        let project_names = checkouts
+            .as_ref()
+            .map(|c| c.read(cx).projects().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
         let mut page = Self {
             env,
             server,
@@ -390,6 +425,8 @@ impl SettingsPage {
             layout,
             filters,
             filter_names,
+            checkouts,
+            project_names,
             invalid: None,
             busy: false,
             hint: Hint::default(),
@@ -401,6 +438,9 @@ impl SettingsPage {
             _subs: subs,
         };
         page.cursor = *page.tab_rows(tab).start();
+        if tab == SettingsTab::Projects {
+            page.recheck_projects(cx);
+        }
         page
     }
 
@@ -569,7 +609,7 @@ impl SettingsPage {
 
     /// The last row the cursor can be on.
     fn last_row(&self) -> usize {
-        self.last_notification_row()
+        self.last_project_row()
     }
 
     /// The cursor rows of `tab`. Never empty: a list without items has one
@@ -582,6 +622,7 @@ impl SettingsPage {
             SettingsTab::Appearance => self.theme_row()..=self.diff_mode_row(),
             SettingsTab::Filters => self.filters_row()..=self.servers_row() - 1,
             SettingsTab::Notifications => self.notify_row()..=self.last_notification_row(),
+            SettingsTab::Projects => self.projects_row()..=self.last_project_row(),
         }
     }
 
@@ -613,6 +654,9 @@ impl SettingsPage {
         let offset = self.scrolled.get(&tab).copied().unwrap_or_default();
         self.scroll.set_offset(offset);
         cx.emit(SettingsEvent::TabShown(tab));
+        if tab == SettingsTab::Projects {
+            self.recheck_projects(cx);
+        }
         cx.notify();
     }
 
@@ -632,7 +676,7 @@ impl SettingsPage {
     }
 
     fn in_notifications(&self) -> bool {
-        self.cursor >= self.notify_row()
+        (self.notify_row()..self.projects_row()).contains(&self.cursor)
     }
 
     /// The server the cursor is on, if it is on one.
@@ -691,7 +735,9 @@ impl SettingsPage {
         if !self.can_change() {
             return;
         }
-        if self.in_notifications() {
+        if self.in_projects() {
+            self.edit_project(cx);
+        } else if self.in_notifications() {
             self.edit_notification_row(window, cx);
         } else if self.in_filters() {
             self.manage_filters(self.filter_under_cursor(), self.filter_names.is_empty(), cx);
@@ -750,7 +796,9 @@ impl SettingsPage {
     }
 
     fn add_query(&mut self, _: &AddQuery, window: &mut Window, cx: &mut Context<Self>) {
-        if self.in_notifications() {
+        if self.in_projects() {
+            self.add_project(cx);
+        } else if self.in_notifications() {
             self.add_notification_rule(cx);
         } else if self.in_filters() {
             self.manage_filters(None, true, cx);
@@ -901,7 +949,9 @@ impl SettingsPage {
     fn delete_query(&mut self, _: &DeleteQuery, _: &mut Window, cx: &mut Context<Self>) {
         // The dialog asks before it deletes a rule; the page has no path of
         // its own for that.
-        if self.in_notifications() {
+        if self.in_projects() {
+            self.ask_delete_project(cx);
+        } else if self.in_notifications() {
             self.ask_delete_rule(cx);
         } else if let Some(i) = self.filter_under_cursor() {
             self.manage_filters(Some(i), false, cx);
@@ -924,6 +974,9 @@ impl SettingsPage {
     }
 
     fn confirm_delete(&mut self, _: &ConfirmDelete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.can_change() && self.confirm_project_question(cx) {
+            return;
+        }
         if self.can_change() && self.confirm_rule_question(window, cx) {
             return;
         }
@@ -947,6 +1000,7 @@ impl SettingsPage {
                 | Mode::ConfirmingServer(_)
                 | Mode::ConfirmingRule(_)
                 | Mode::ConfirmingReset
+                | Mode::ConfirmingProject(_)
         ) && !self.busy
         {
             self.mode = Mode::Browsing;
@@ -1172,7 +1226,8 @@ impl SettingsPage {
             Mode::Confirming(..)
             | Mode::ConfirmingServer(_)
             | Mode::ConfirmingRule(_)
-            | Mode::ConfirmingReset => "SettingsPage Confirming",
+            | Mode::ConfirmingReset
+            | Mode::ConfirmingProject(_) => "SettingsPage Confirming",
         }
     }
 
@@ -1912,6 +1967,7 @@ impl SettingsPage {
             SettingsTab::Appearance => vec![self.render_appearance(cx)],
             SettingsTab::Filters => vec![self.render_filters(cx)],
             SettingsTab::Notifications => self.render_notifications(cx),
+            SettingsTab::Projects => vec![self.render_projects(cx)],
         }
     }
 

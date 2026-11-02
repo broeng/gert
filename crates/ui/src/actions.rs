@@ -244,6 +244,10 @@ pub fn help_groups() -> Vec<HelpGroup> {
             "Notification rule (settings, Notifications tab)",
             crate::notify_rule_dialog::actions::entries(),
         ),
+        g(
+            "Project checkout (settings, Projects tab)",
+            crate::project_dialog::actions::entries(),
+        ),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
         g("Go to a change ( G )", crate::goto::entries()),
         g("Server switcher ( Ctrl-K )", crate::switcher::entries()),
@@ -706,7 +710,7 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "Enter / e",
             KeyBinding::new("enter", EditQuery, Some(b)),
-            "Edit the query (Tab: other field, Enter: save, Esc: cancel); on a file filter: open the dialog on it",
+            "Edit the query (Tab: other field, Enter: save, Esc: cancel); on a file filter or a project checkout: open the dialog on it",
         ),
         e("", KeyBinding::new("e", EditQuery, Some(b)), ""),
         e(
@@ -717,12 +721,12 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "a",
             KeyBinding::new("a", AddQuery, Some(b)),
-            "Add a query; in File filters: a new rule in the dialog; in Notifications: a new notification rule",
+            "Add a query; in File filters: a new rule in the dialog; in Notifications: a new notification rule; in Projects: a new checkout",
         ),
         e(
             "d",
             KeyBinding::new("d", DeleteQuery, Some(b)),
-            "Delete the query or notification rule (y / Enter: yes, n / Esc: no); on a file filter: open the dialog on it",
+            "Delete the query, notification rule or project checkout (y / Enter: yes, n / Esc: no); on a file filter: open the dialog on it",
         ),
         e(
             "Shift-J / Shift-K",
@@ -733,13 +737,13 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "l / h",
             KeyBinding::new("l", NextSettingsTab, Some(b)),
-            "Next / previous tab (Servers, Queries, Review, Appearance, Filters, Notifications)",
+            "Next / previous tab (Servers, Queries, Review, Appearance, Filters, Notifications, Projects)",
         ),
         e("", KeyBinding::new("h", PrevSettingsTab, Some(b)), ""),
         e("", KeyBinding::new("right", NextSettingsTab, Some(b)), ""),
         e("", KeyBinding::new("left", PrevSettingsTab, Some(b)), ""),
         e(
-            "1 .. 6",
+            "1 .. 7",
             KeyBinding::new("1", ShowSettingsTab { position: 0 }, Some(b)),
             "Go to the tab at that position",
         ),
@@ -766,6 +770,11 @@ pub fn settings_entries() -> Vec<Entry> {
         e(
             "",
             KeyBinding::new("6", ShowSettingsTab { position: 5 }, Some(b)),
+            "",
+        ),
+        e(
+            "",
+            KeyBinding::new("7", ShowSettingsTab { position: 6 }, Some(b)),
             "",
         ),
         e(
@@ -1019,6 +1028,7 @@ mod tests {
             .chain(crate::action_menu::actions::entries())
             .chain(crate::filters_dialog::actions::entries())
             .chain(crate::notify_rule_dialog::actions::entries())
+            .chain(crate::project_dialog::actions::entries())
             .chain(crate::goto::entries())
             .chain(crate::switcher::entries())
             .collect()

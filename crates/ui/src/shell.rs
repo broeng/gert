@@ -37,6 +37,7 @@ use crate::{
         login::{LoginPage, LoginPrefill},
         settings::{SettingsEvent, SettingsPage, SettingsTab},
     },
+    project_dialog::{ProjectContext, ProjectDialog, ProjectEvent},
     reply::{ReplyDialog, ReplyEvent, Sent},
     row::server_label,
     servers::{ACTIVE_SERVER_STATE, Connection, Servers},
@@ -107,6 +108,7 @@ pub fn init(cx: &mut App) {
     crate::action_menu::actions::bind_keys(cx);
     crate::filters_dialog::actions::bind_keys(cx);
     crate::notify_rule_dialog::actions::bind_keys(cx);
+    crate::project_dialog::actions::bind_keys(cx);
     crate::goto::bind_keys(cx);
     crate::switcher::bind_keys(cx);
 }
@@ -142,6 +144,8 @@ pub struct Shell {
     /// others).
     rule_dialog: Option<Entity<NotifyRuleDialog>>,
     rule_dialog_subs: Vec<Subscription>,
+    project_dialog: Option<Entity<ProjectDialog>>,
+    project_dialog_subs: Vec<Subscription>,
     /// The Go to dialog while it is open (modal, like the others).
     goto: Option<Entity<GotoDialog>>,
     goto_subs: Vec<Subscription>,
@@ -223,6 +227,7 @@ impl Shell {
             let modal = modal.or_else(|| this.menu.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.filters_dialog.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.rule_dialog.as_ref().map(|d| d.focus_handle(cx)));
+            let modal = modal.or_else(|| this.project_dialog.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.goto.as_ref().map(|d| d.focus_handle(cx)));
             if let Some(handle) = modal {
                 window.focus(&handle, cx);
@@ -262,6 +267,8 @@ impl Shell {
             filters_dialog_subs: Vec::new(),
             rule_dialog: None,
             rule_dialog_subs: Vec::new(),
+            project_dialog: None,
+            project_dialog_subs: Vec::new(),
             goto: None,
             goto_subs: Vec::new(),
             switcher: None,
@@ -409,7 +416,7 @@ impl Shell {
     /// The local checkouts of server `key` (made on first use), the way the
     /// change and diff pages ask for "the repository of project X on this
     /// server" and the settings page lists the projects.
-    #[cfg_attr(not(test), allow(dead_code))] // L2b/L3 are the consumers.
+    #[cfg_attr(not(test), allow(dead_code))] // L3 is the consumer.
     pub(crate) fn checkouts(
         &mut self,
         key: &ServerKey,
@@ -428,7 +435,6 @@ impl Shell {
     /// Writes the project checkouts of the active server in the background.
     /// Once the config file has them the server's setup and its
     /// [`Checkouts`] follow; on failure the old list stays.
-    #[cfg_attr(not(test), allow(dead_code))] // L2b is the consumer.
     pub(crate) fn save_projects(&mut self, list: Vec<ProjectSettings>, cx: &mut Context<Self>) {
         let Some(entry) = self.servers.active_mut() else {
             return;
@@ -1318,6 +1324,7 @@ impl Shell {
         self.drop_menu();
         self.drop_filters_dialog();
         self.drop_rule_dialog();
+        self.drop_project_dialog();
         self.drop_goto();
         self.drop_switcher();
         let mut route = self.nav.current().clone();
@@ -1600,10 +1607,11 @@ impl Shell {
         let (servers, active) = (self.servers.rows(), self.servers.active_key().cloned());
         let tab = self.settings_tab;
         let notify = self.notify_settings.clone();
+        let checkouts = active.clone().and_then(|key| self.checkouts(&key, cx));
         let page = cx.new(|cx| {
             SettingsPage::new(
                 env, server, servers, active, queries, bookmarks, start, layout, filters, notify,
-                tab, window, cx,
+                checkouts, tab, window, cx,
             )
         });
         self.page_subs.push(cx.subscribe_in(
@@ -1648,6 +1656,10 @@ impl Shell {
                         page.update(cx, |p, cx| p.test_sent(sent, cx));
                     }
                 }
+                SettingsEvent::EditProject { name } => {
+                    this.open_project_dialog(name.clone(), None, window, cx)
+                }
+                SettingsEvent::SaveProjects(list) => this.save_projects(list.clone(), cx),
                 SettingsEvent::ManageFilters { select, add } => {
                     let context = FiltersContext {
                         select: select.clone(),
@@ -1994,6 +2006,7 @@ impl Shell {
         self.drop_menu();
         self.drop_filters_dialog();
         self.drop_rule_dialog();
+        self.drop_project_dialog();
         if let Some(first) = self.servers.keys().first().cloned() {
             let start = self.start_route();
             self.nav.visit(&first, start);
@@ -2077,6 +2090,7 @@ impl Shell {
             || self.menu.is_some()
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
             || self.goto.is_some()
         {
             return;
@@ -2094,6 +2108,7 @@ impl Shell {
             self.drop_menu();
             self.drop_filters_dialog();
             self.drop_rule_dialog();
+            self.drop_project_dialog();
         }
         let session = self.servers.get(key).and_then(|e| e.session.clone());
         self.servers.set_connection(key, Connection::Unauthorized);
@@ -2130,6 +2145,7 @@ impl Shell {
             || self.menu.is_some()
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
         {
             return;
         }
@@ -2204,6 +2220,7 @@ impl Shell {
             || self.reply.is_some()
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
         {
             return;
         }
@@ -2298,6 +2315,7 @@ impl Shell {
             || self.menu.is_some()
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
         {
             return;
         }
@@ -2347,6 +2365,7 @@ impl Shell {
             || self.menu.is_some()
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
         {
             return;
         }
@@ -2395,6 +2414,62 @@ impl Shell {
 
     fn close_rule_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.drop_rule_dialog();
+        let handle = self.page.focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    // ---- project checkout dialog ----
+
+    /// Opens the project dialog on the checkout of project `edit` of the
+    /// active server, or on a new one starting with the name `name`.
+    fn open_project_dialog(
+        &mut self,
+        edit: Option<String>,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
+        {
+            return;
+        }
+        let Some(entry) = self.servers.active() else {
+            return;
+        };
+        let context = ProjectContext {
+            projects: entry.setup.projects.clone(),
+            edit,
+            name,
+        };
+        let dialog = cx.new(|cx| ProjectDialog::new(context, window, cx));
+        self.project_dialog_subs.push(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, ev: &ProjectEvent, window, cx| match ev {
+                ProjectEvent::Close => this.close_project_dialog(window, cx),
+                ProjectEvent::Save(list) => {
+                    this.save_projects(list.clone(), cx);
+                    this.close_project_dialog(window, cx);
+                }
+            },
+        ));
+        self.project_dialog = Some(dialog);
+        cx.notify();
+    }
+
+    /// Takes the dialog away for everything that replaces the page under it.
+    fn drop_project_dialog(&mut self) {
+        self.project_dialog_subs.clear();
+        self.project_dialog = None;
+    }
+
+    fn close_project_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_project_dialog();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
@@ -2469,6 +2544,7 @@ impl Shell {
             || self.menu.is_some()
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
             || self.goto.is_some()
             || self.switcher.is_some();
         let servers = self.link_servers();
@@ -2530,6 +2606,7 @@ impl Shell {
             || self.menu.is_some()
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
             || self.goto.is_some()
         {
             return;
@@ -2687,6 +2764,11 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn rule_dialog_for_test(&self) -> Option<Entity<NotifyRuleDialog>> {
         self.rule_dialog.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project_dialog_for_test(&self) -> Option<Entity<ProjectDialog>> {
+        self.project_dialog.clone()
     }
 
     #[cfg(test)]
@@ -3209,6 +3291,7 @@ impl Render for Shell {
                     .children(self.menu.clone())
                     .children(self.filters_dialog.clone())
                     .children(self.rule_dialog.clone())
+                    .children(self.project_dialog.clone())
                     .children(self.goto.clone())
                     .children(self.switcher.clone()),
             )

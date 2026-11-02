@@ -23,6 +23,7 @@ mod notifier;
 mod notify_rule_dialog;
 mod outbox;
 mod pages;
+mod project_dialog;
 mod reply;
 mod reviewed;
 mod row;
