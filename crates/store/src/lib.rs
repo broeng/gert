@@ -8,15 +8,16 @@
 //! database. Schema changes are ordered steps tracked with
 //! `PRAGMA user_version`; see `migrations.rs`. The change and diff view
 //! caches (file lists, diffs, related changes, diff preferences) live in
-//! `review_cache.rs`, including the pruning policy. Reviews given on local
-//! patch sets, waiting for them to reach Gerrit, live in
-//! `pending_reviews.rs`.
+//! `review_cache.rs`, including the pruning policy. Local changes (unpushed
+//! commits shown as changes) live in `local.rs`, the reviews waiting for
+//! them to reach Gerrit in `pending_reviews.rs`.
 
 mod drafts;
 mod error;
 mod events;
 mod inbox;
 mod labels;
+mod local;
 mod migrations;
 mod pending_reviews;
 mod review_cache;
@@ -31,6 +32,7 @@ pub use drafts::{CachedComments, DeleteOutcome, DraftCounts, DraftFailure, Merge
 pub use error::Error;
 pub use events::EVENT_RETENTION;
 pub use inbox::{INBOX_KEEP, INBOX_RETENTION, InboxId, InboxItem, NewInboxItem};
+pub use local::{LocalChangeEntry, LocalChangeUpsert, LocalOp, NewLocalPatchSet, ReconcileReport};
 pub use pending_reviews::{NewPendingReview, PendingReviewEdit};
 pub use review_cache::{
     CachedDiff, CachedDiffPreferences, CachedFileList, CachedRelated, PrunePolicy, PruneReport,
