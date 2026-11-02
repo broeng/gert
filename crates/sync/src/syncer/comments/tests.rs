@@ -1246,3 +1246,37 @@ fn a_refresh_leaves_reserved_held_and_sealed_drafts_alone() {
     // And the draft counts never include them.
     assert_eq!(f.syncer.draft_counts().unwrap(), DraftCounts::default());
 }
+
+#[test]
+fn a_pushed_local_version_may_be_used_once_its_change_is_fetched() {
+    let f = fx();
+    // sha2 was a local patch set of change 7, then pushed as patch set 2:
+    // no local ref moved, so no scan maps it.
+    add_local_version(&f.syncer, Some(7), "sha2");
+    assert!(matches!(
+        block_on(f.syncer.refresh_files(&files_key())),
+        Err(Error::Local(_))
+    ));
+    assert!(f.http.requests().is_empty());
+
+    // Fetching the change caches its detail, which maps the version.
+    f.http.push_response(
+        200,
+        xssi(&serde_json::from_str(&change_with_ps2()).unwrap()),
+    );
+    block_on(f.syncer.refresh_change(CHANGE)).unwrap();
+    f.http
+        .push_response(200, xssi(&json!({"src/a.rs": {"lines_inserted": 1}})));
+    f.http.push_response(200, xssi(&json!([])));
+    let files = block_on(f.syncer.refresh_files(&files_key())).unwrap();
+    assert_eq!(files.files.len(), 1);
+    f.http
+        .push_response(200, xssi(&json!({"labels": {"Code-Review": 1}})));
+    push_refresh(&f.http);
+    block_on(
+        f.syncer
+            .publish_review(CHANGE, &sha2(), &review_with_vote()),
+    )
+    .unwrap();
+    assert!(uris(&f.http).contains(&"POST /a/changes/7/revisions/sha2/review".to_owned()));
+}
