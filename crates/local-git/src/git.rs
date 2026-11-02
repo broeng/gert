@@ -60,7 +60,11 @@ impl Git {
             // Paths are paths, never patterns or `:(magic)`.
             .env("GIT_LITERAL_PATHSPECS", "1")
             // Stable messages, since we recognise a few of them.
-            .env("LC_ALL", "C");
+            .env("LC_ALL", "C")
+            // In a partial clone, asking for an absent object would make
+            // git fetch it from the promisor remote: a network call and a
+            // repository write. Absent means absent (git 2.44 and later).
+            .env("GIT_NO_LAZY_FETCH", "1");
         // Unit tests must not see the developer's own git configuration
         // (`user.email`, for one).
         #[cfg(test)]

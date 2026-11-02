@@ -154,6 +154,42 @@ fn has_commit_finds_present_and_absent_commits() {
 }
 
 #[test]
+fn a_partial_clone_never_fetches_absent_objects() {
+    let origin = TestRepo::new();
+    origin.write("a.txt", b"a\n");
+    origin.commit("first");
+    origin.git(&["config", "uploadpack.allowFilter", "true"]);
+    let clone = tempfile::tempdir().expect("dir");
+    let url = format!("file://{}", origin.path().display());
+    git_in(
+        clone.path(),
+        &["clone", "-q", "--filter=blob:none", &url, "."],
+    );
+    // Only on the promisor remote.
+    let later = origin.commit("later");
+    let objects = || {
+        let mut names = Vec::new();
+        for dir in ["objects", "objects/pack"] {
+            let dir = clone.path().join(".git").join(dir);
+            for entry in std::fs::read_dir(dir).expect("objects dir") {
+                names.push(entry.expect("entry").file_name());
+            }
+        }
+        names.sort();
+        names
+    };
+    let before = objects();
+    let repo = Repo::open(clone.path()).expect("open");
+
+    assert_eq!(
+        repo.commit(&rev(&later)).expect("commit"),
+        Local::NotLocal(NotLocal::MissingCommit(later.clone()))
+    );
+    assert!(!repo.has_commit(&rev(&later)).expect("has"));
+    assert_eq!(objects(), before, "git fetched from the promisor remote");
+}
+
+#[test]
 fn file_list_covers_every_status() {
     let (t, first, second) = two_commits();
     let repo = Repo::open(t.path()).expect("open");
