@@ -151,7 +151,9 @@ pub enum LocalOp {
     /// `from`'s synthetic number and its pending reviews follow, and `from`
     /// is deleted. `into` keeps its fields and state, and takes `from`'s
     /// `gerrit_number` if it has none (moving its own drafts and reviews on
-    /// its synthetic number onto that change too).
+    /// its synthetic number onto that change too). While either row has a
+    /// consolidation post in flight (a review being sent, or drafts claimed
+    /// by [`Store::claim_local_post`]), the merge is skipped as stale.
     Merge {
         from: Seen,
         into: Seen,
@@ -788,7 +790,11 @@ impl Store {
                         seen_row(&tx, server, project, *into)?,
                     );
                     match rows {
-                        (Some(f), Some(i)) if f.id != i.id => {
+                        (Some(f), Some(i))
+                            if f.id != i.id
+                                && !posting(&tx, server, f.id)?
+                                && !posting(&tx, server, i.id)? =>
+                        {
                             merge(&tx, server, &f, &i)?;
                             report.merged.push((f.id, i.id));
                             report.updated.retain(|id| *id != f.id);
@@ -834,6 +840,20 @@ impl Store {
         tx.commit()?;
         Ok(removed)
     }
+}
+
+/// Whether a consolidation post of local change `id` is in flight: a
+/// review being sent, or drafts claimed by a post. Such a row is not
+/// merged until the post is finished or released.
+fn posting(conn: &Connection, server: ServerId, id: LocalChangeId) -> Result<bool, Error> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM pending_reviews
+                     WHERE server_id = ?1 AND local_change_id = ?2 AND state = 'sending')
+                 OR EXISTS (SELECT 1 FROM drafts
+                     WHERE server_id = ?1 AND reserved_by = ?2 AND posting_nonce IS NOT NULL)",
+        )?
+        .query_row(params![server.0, id.0], |r| r.get(0))?)
 }
 
 /// Records that `id` changed, once.

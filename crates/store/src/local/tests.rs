@@ -922,3 +922,54 @@ fn a_merge_that_brings_a_gerrit_change_moves_the_survivors_data_too() {
         (ChangeNumber(42), v2.number)
     );
 }
+
+#[test]
+fn rows_with_a_post_in_flight_are_not_merged() {
+    for in_flight in ["sending review", "claimed draft"] {
+        for on_into in [false, true] {
+            let (mut s, id) = setup();
+            let main = add(&mut s, id, upsert("I1", Some("main"), &["v1"]));
+            let stable = add(&mut s, id, upsert("I1", Some("stable"), &["v2"]));
+            let busy = if on_into { &stable } else { &main };
+            let v = s.local_patch_sets(id, busy.id).unwrap().remove(0);
+            match in_flight {
+                "sending review" => {
+                    let r = s.create_pending_review(id, &review(&v)).unwrap();
+                    s.mark_pending_review_sending(id, r.id, &[PendingReviewState::Pending], "n")
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {
+                    let d = s
+                        .create_draft(id, busy.number, &psref(&v), &draft_input("x"), ts(T1))
+                        .unwrap();
+                    s.conn
+                        .execute(
+                            "UPDATE drafts SET reserved_by = ?2, posting_nonce = 'n'
+                             WHERE id = ?1",
+                            params![d.local_id.0, busy.id.0],
+                        )
+                        .unwrap();
+                }
+            }
+            let report = s
+                .reconcile_local(
+                    id,
+                    "p",
+                    &[LocalOp::Merge {
+                        from: seen(&main),
+                        into: seen(&stable),
+                    }],
+                    ts(T1),
+                )
+                .unwrap();
+            assert_eq!(
+                (report.stale, report.merged.len()),
+                (1, 0),
+                "{in_flight} {on_into}"
+            );
+            assert!(!report.is_settled());
+            assert_eq!(s.local_changes_of_project(id, "p").unwrap().len(), 2);
+        }
+    }
+}
