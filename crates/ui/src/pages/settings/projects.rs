@@ -104,6 +104,13 @@ impl SettingsPage {
         }
         if self.tab == super::SettingsTab::Projects {
             self.cursor = self.in_tab(self.cursor);
+            // A save leaves new entries unopened (the entity opens lazily),
+            // and this tab shows their status: check them now, or they would
+            // read "Checking…" until the tab is shown again. Entries already
+            // tried are left alone, so this does not loop.
+            if let Some(c) = &self.checkouts {
+                c.update(cx, |c, cx| c.open_all(cx));
+            }
         }
         cx.notify();
     }

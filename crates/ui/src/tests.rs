@@ -2653,6 +2653,24 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    fn an_added_checkout_is_checked_at_once(cx: &mut TestAppContext) {
+        let repo = tmp_dir("added");
+        git_init(&repo);
+        let f = projects_fixture(cx, Vec::new());
+        press(cx, &f, "a");
+        let path = repo.to_string_lossy().into_owned();
+        let path: &'static str = Box::leak(path.into_boxed_str());
+        fill_dialog(cx, &f, "demo/new", path);
+        press(cx, &f, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            statuses(cx, &f),
+            vec![("demo/new".to_owned(), "Git checkout".to_owned())]
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[gpui_kit::test]
     fn editing_a_checkout_replaces_it_in_place(cx: &mut TestAppContext) {
         let a = tmp_dir("edit-a");
         let b = tmp_dir("edit-b");
