@@ -684,6 +684,7 @@ pub(crate) mod threads {
             attempts: 0,
             last_error: None,
             version: 1,
+            pending_review: None,
         }
     }
 }

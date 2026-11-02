@@ -210,6 +210,7 @@ fn draft_from_row(r: &Row<'_>) -> rusqlite::Result<Draft> {
         attempts: u32::try_from(r.get::<_, i64>(21)?).unwrap_or(u32::MAX),
         last_error: r.get(22)?,
         version: u32::try_from(r.get::<_, i64>(23)?).unwrap_or(u32::MAX),
+        pending_review: None,
     })
 }
 

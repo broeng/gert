@@ -609,6 +609,7 @@ fn drafts_response_joins_the_published_threads() {
             attempts: 0,
             last_error: None,
             version: 0,
+            pending_review: None,
         })
         .collect();
     let threads = build_threads(&comments, &drafts);

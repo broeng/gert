@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ChangeNumber, Location, PatchSetNumber, RevisionId, Side, Timestamp};
+use crate::{ChangeNumber, Location, PatchSetNumber, PendingReviewId, RevisionId, Side, Timestamp};
 
 /// The id of a draft in the local database. Stable for the draft's whole
 /// life, unlike the server's draft id, which only exists once the draft was
@@ -124,6 +124,10 @@ pub struct Draft {
     /// that it can tell whether the draft was edited while it was in
     /// flight and must stay pending.
     pub version: u32,
+    /// Set on the message of a pending review (a patch-set-level draft):
+    /// such a draft is *sealed*, edited only through its review.
+    #[serde(default)]
+    pub pending_review: Option<PendingReviewId>,
 }
 
 impl Draft {
@@ -144,6 +148,17 @@ impl Draft {
     /// waiting for the server's confirmation.
     pub fn is_visible(&self) -> bool {
         self.sync != DraftSync::PendingDelete
+    }
+
+    /// Whether this is the message of a pending review.
+    pub fn is_sealed(&self) -> bool {
+        self.pending_review.is_some()
+    }
+
+    /// Whether it sits on a local change or a local patch set, so it is
+    /// never uploaded as it is.
+    pub fn is_local(&self) -> bool {
+        self.change.is_local() || self.patch_set.is_local()
     }
 }
 

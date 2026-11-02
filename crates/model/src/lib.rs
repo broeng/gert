@@ -16,6 +16,7 @@ mod ids;
 mod keys;
 mod line_map;
 mod local_approval;
+mod local_change;
 mod local_commit;
 mod message;
 mod prefs;
@@ -44,6 +45,10 @@ pub use ids::{AccountId, ChangeNumber, PatchSetNumber, RevisionId, ServerId};
 pub use keys::{DiffKey, FilesKey};
 pub use line_map::LineMap;
 pub use local_approval::LocalApproval;
+pub use local_change::{
+    LocalChange, LocalChangeId, LocalChangeState, LocalPatchSet, LocalPatchSetId, PendingReview,
+    PendingReviewId, PendingReviewState,
+};
 pub use local_commit::{BranchTargets, CommitInfo, LocalCommit, LocalScan, Signature, Upstream};
 pub use message::ChangeMessage;
 pub use prefs::{

@@ -69,6 +69,22 @@ impl ChangeNumber {
     pub fn is_local(self) -> bool {
         self.0 >= Self::LOCAL_BASE
     }
+
+    /// The synthetic number of the local change with row id `id` (the
+    /// store's `local_changes.id`): `LOCAL_BASE + id`. `None` for a
+    /// negative id, which the store never hands out.
+    pub fn local(id: i64) -> Option<Self> {
+        let id = u64::try_from(id).ok()?;
+        Self::LOCAL_BASE.checked_add(id).map(Self)
+    }
+
+    /// The row id of a local change's number, the inverse of
+    /// [`ChangeNumber::local`]; `None` for a server's change number.
+    pub fn local_id(self) -> Option<i64> {
+        self.0
+            .checked_sub(Self::LOCAL_BASE)
+            .and_then(|id| i64::try_from(id).ok())
+    }
 }
 
 impl PatchSetNumber {
@@ -81,6 +97,21 @@ impl PatchSetNumber {
     /// [`PatchSetNumber::LOCAL_BASE`]).
     pub fn is_local(self) -> bool {
         self.0 >= Self::LOCAL_BASE
+    }
+
+    /// The synthetic number of the local patch set with row id `id` (the
+    /// store's `local_patch_sets.id`): `LOCAL_BASE + id`. `None` for a
+    /// negative id or one too large for the range (above about four
+    /// billion), neither of which the store hands out.
+    pub fn local(id: i64) -> Option<Self> {
+        let id = u32::try_from(id).ok()?;
+        Self::LOCAL_BASE.checked_add(id).map(Self)
+    }
+
+    /// The row id of a local patch set's number, the inverse of
+    /// [`PatchSetNumber::local`]; `None` for a server's patch set number.
+    pub fn local_id(self) -> Option<i64> {
+        self.0.checked_sub(Self::LOCAL_BASE).map(i64::from)
     }
 }
 
@@ -136,6 +167,25 @@ mod tests {
         assert!(!PatchSetNumber(1).is_local());
         assert!(!PatchSetNumber(PatchSetNumber::LOCAL_BASE - 1).is_local());
         assert!(PatchSetNumber(PatchSetNumber::LOCAL_BASE).is_local());
+    }
+
+    #[test]
+    fn local_numbers_round_trip_their_row_ids() {
+        for id in [0, 1, 42, i64::from(i32::MAX)] {
+            let c = ChangeNumber::local(id).unwrap();
+            assert!(c.is_local());
+            assert_eq!(c.local_id(), Some(id));
+            let p = PatchSetNumber::local(id).unwrap();
+            assert!(p.is_local());
+            assert_eq!(p.local_id(), Some(id));
+        }
+        assert_eq!(ChangeNumber::local(-1), None);
+        assert_eq!(PatchSetNumber::local(-1), None);
+        let last = i64::from(u32::MAX - PatchSetNumber::LOCAL_BASE);
+        assert_eq!(PatchSetNumber::local(last), Some(PatchSetNumber(u32::MAX)));
+        assert_eq!(PatchSetNumber::local(last + 1), None);
+        assert_eq!(ChangeNumber(42).local_id(), None);
+        assert_eq!(PatchSetNumber(3).local_id(), None);
     }
 
     #[test]
