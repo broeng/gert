@@ -214,6 +214,17 @@ fn draft_from_row(r: &Row<'_>) -> rusqlite::Result<Draft> {
     })
 }
 
+/// An SQL condition on `drafts` that holds for drafts on a server change
+/// and patch set, and fails for drafts on local numbers (see
+/// [`ChangeNumber::LOCAL_BASE`] and [`PatchSetNumber::LOCAL_BASE`]).
+pub(crate) fn not_local() -> String {
+    format!(
+        "change_number < {} AND patch_set < {}",
+        ChangeNumber::LOCAL_BASE,
+        PatchSetNumber::LOCAL_BASE
+    )
+}
+
 /// `(start_line, start_character, end_line, end_character)` of a range.
 type RangeColumns = (Option<u32>, Option<u32>, Option<u32>, Option<u32>);
 
@@ -432,34 +443,46 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The drafts the server refused, oldest first.
+    /// The drafts the server refused, oldest first. Drafts on local numbers
+    /// are left out, like in [`Self::pending_drafts`].
     pub fn failed_drafts(&self, server: ServerId) -> Result<Vec<Draft>, Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM drafts WHERE server_id = ?1 AND state = 'failed' ORDER BY id"
+            "SELECT {COLUMNS} FROM drafts WHERE server_id = ?1 AND state = 'failed'
+               AND {NOT_LOCAL}
+             ORDER BY id",
+            NOT_LOCAL = not_local()
         ))?;
         let rows = stmt.query_map([server.0], draft_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Drafts the automatic upload works on (pending create, update or
-    /// delete), oldest first. `Failed` ones are not included.
+    /// delete), oldest first. `Failed` ones are not included, and neither
+    /// are drafts on a local change or a local patch set: they wait for
+    /// consolidation, and the retry loop, which stops at the first draft
+    /// that stays pending, must never see them.
     pub fn pending_drafts(&self, server: ServerId) -> Result<Vec<Draft>, Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM drafts WHERE server_id = ?1
                AND state IN ('pending_create', 'pending_update', 'pending_delete')
-             ORDER BY id"
+               AND {NOT_LOCAL}
+             ORDER BY id",
+            NOT_LOCAL = not_local()
         ))?;
         let rows = stmt.query_map([server.0], draft_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Counts the drafts of the server that are not on it, pending and
-    /// failed, over all changes.
+    /// failed, over all changes. Drafts on local numbers are not counted
+    /// (see [`Self::local_draft_count`]).
     pub fn draft_counts(&self, server: ServerId) -> Result<DraftCounts, Error> {
-        let mut stmt = self.conn.prepare_cached(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT state = 'failed', COUNT(*) FROM drafts
-             WHERE server_id = ?1 AND state != 'synced' GROUP BY state = 'failed'",
-        )?;
+             WHERE server_id = ?1 AND state != 'synced' AND {NOT_LOCAL}
+             GROUP BY state = 'failed'",
+            NOT_LOCAL = not_local()
+        ))?;
         let rows = stmt.query_map([server.0], |r| {
             Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?))
         })?;
@@ -474,6 +497,20 @@ impl Store {
             }
         }
         Ok(counts)
+    }
+
+    /// Counts the drafts of the server on a local change or a local patch
+    /// set, which wait for the change to reach Gerrit.
+    pub fn local_draft_count(&self, server: ServerId) -> Result<usize, Error> {
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM drafts WHERE server_id = ?1 AND NOT ({NOT_LOCAL})",
+                NOT_LOCAL = not_local()
+            ),
+            [server.0],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(0))
     }
 
     /// The drafts of a change that the server does not have in their

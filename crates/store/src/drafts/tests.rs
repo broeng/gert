@@ -834,3 +834,62 @@ fn failed_drafts_lists_only_the_refused_ones_oldest_first() {
     assert_eq!(ids, [a.local_id, c.local_id]);
     assert!(s.load_draft(id, b.local_id).unwrap().is_some());
 }
+
+#[test]
+fn upload_queries_and_counts_leave_out_drafts_on_local_numbers() {
+    let (mut s, id) = setup();
+    let local_change = ChangeNumber::local(1).unwrap();
+    let local_ps = PatchSetRef {
+        number: PatchSetNumber::local(1).unwrap(),
+        sha: "local1".into(),
+    };
+    let normal = s
+        .create_draft(id, CHANGE, &ps(2), &input("normal"), ts(T0))
+        .unwrap();
+    // On a local change, and on a local patch set of a Gerrit change.
+    let on_change = s
+        .create_draft(id, local_change, &local_ps, &input("lc"), ts(T1))
+        .unwrap();
+    let on_ps = s
+        .create_draft(id, CHANGE, &local_ps, &input("lps"), ts(T2))
+        .unwrap();
+    // Even a failed one stays out (a local draft is never sent, but the
+    // filter must not depend on that).
+    s.record_draft_failure(
+        id,
+        on_ps.local_id,
+        on_ps.version,
+        &DraftFailure::Rejected {
+            error: "no".into(),
+            retryable: true,
+        },
+        ts(T3),
+    )
+    .unwrap();
+
+    let pending: Vec<_> = s
+        .pending_drafts(id)
+        .unwrap()
+        .iter()
+        .map(|d| d.local_id)
+        .collect();
+    assert_eq!(pending, [normal.local_id]);
+    assert!(s.failed_drafts(id).unwrap().is_empty());
+    assert_eq!(
+        s.draft_counts(id).unwrap(),
+        DraftCounts {
+            pending: 1,
+            failed: 0
+        }
+    );
+    assert_eq!(s.local_draft_count(id).unwrap(), 2);
+    // They are still the change's drafts.
+    assert!(
+        s.load_draft(id, on_change.local_id)
+            .unwrap()
+            .unwrap()
+            .is_local()
+    );
+    assert_eq!(s.load_drafts(id, CHANGE).unwrap().len(), 2);
+    assert_eq!(s.load_drafts(id, local_change).unwrap().len(), 1);
+}
