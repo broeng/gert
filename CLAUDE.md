@@ -88,6 +88,7 @@ Claude writes most of the code and the user reviews it. So:
 | Config | TOML at `<config_dir>/gert/config.toml`, read with `toml` and written with `toml_edit` so the user's comments and formatting survive; cache DB in `<cache_dir>/gert/` (via `directories`) |
 | Syntax highlighting | `syntect` with `two-face`'s syntax set, versions and features equal to gpui-component's workspace |
 | File filters | `globset`, gitignore-style |
+| Local checkouts | the `git` CLI at runtime (spawned, read-only plumbing commands), diffed in Rust with `imara-diff` (histogram) |
 | Errors | `thiserror` in library crates, `anyhow` only in `app` |
 | Logging | `log` facade (as Zed/GPUI use it), `env_logger` in `app` |
 
@@ -139,6 +140,11 @@ crates/
                 reviews, change actions, reviewers, topic/hashtags). Private
                 tolerant wire structs, returns `model` types. A fake client
                 behind the `test-support` feature.
+  local-git/    reads file lists and diffs from a local checkout of a
+                project through the `git` CLI, computed to match Gerrit's
+                diffs (line splitting, whitespace modes, renames, intraline
+                edits). Read-only, never fetches; blocking, so callers use
+                a background executor.
   model/        domain types: non-Option where semantically required, real
                 timestamps, newtypes for ids (ChangeNumber, AccountId, ...).
                 No I/O.
@@ -154,8 +160,10 @@ crates/
   ui/           GPUI views on gpui-component: the shell and page navigation,
                 login, dashboard/search list, change page, diff page and diff
                 view, reply dialog, action menu, file filters, settings,
-                themes. `examples/review.rs` runs the whole UI against a fake
-                server; `examples/diff_viewer.rs` shows the diff view alone.
+                themes, project checkouts (`ui::checkouts`) and the local
+                diff source (`ui::local_source`). `examples/review.rs` runs
+                the whole UI against a fake server; `examples/diff_viewer.rs`
+                shows the diff view alone.
   gert/         (directory `crates/app`) binary: wiring, config, keyring,
                 HttpClient impl over gpui-pre-reqwest-client.
 dev/            local dev Gerrit: start, seed (`nix run .#dev-gerrit`)
@@ -164,10 +172,10 @@ tests/fixtures/ schema-generated JSON fixtures
 xtask/          fixture generation (`cargo xtask gen-fixtures`)
 ```
 
-Dependency direction: `app → ui → sync → store, gerrit-api → model` (`ui`
-also uses `store` and `gerrit-api` types directly). `model`, `gerrit-api`,
-`store` and `sync` must not depend on GPUI, so they are testable without a
-UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
+Dependency direction: `app → ui → sync → store, gerrit-api → model` and
+`ui → local-git → model` (`ui` also uses `store` and `gerrit-api` types
+directly). `model`, `gerrit-api`, `store`, `sync` and `local-git` must not
+depend on GPUI, so they are testable without a UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
 
 ### Data flow and caching
 
@@ -197,6 +205,17 @@ UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
   for `attention:self` counts shown in the switcher (`Ctrl+K`, `Ctrl+1..9`).
   There is no merged all-servers view. Removing a server purges its cache
   rows and keyring secret.
+- **Local checkouts.** A server's `[[servers.projects]]` entries (`name`,
+  `checkout`; edited on the settings page's Projects tab, or via the gear
+  next to the project on the change page) point at local git checkouts.
+  When a checkout has the exact commits, a diff missing from the store and
+  an uncached file list are computed from it (`ui::local_source`), so they
+  show at once and offline; anything else (merge commits, rebased patch
+  set comparisons, `/COMMIT_MSG`, missing commits, git errors, a resolve
+  slower than 5 s) falls through to Gerrit. Order: store, then checkout,
+  then Gerrit; Gerrit's file list still replaces a local one. Local results
+  are **never written to the store** and carry a "local" marker in the UI.
+  Git is only ever read (no fetch, no locks, no repo writes).
 
 ### Notifications
 
@@ -231,7 +250,9 @@ UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
 
 - Diffs come from the **server diff API**
   (`/changes/{id}/revisions/{rev}/files/{file}/diff` → `DiffInfo`, including
-  intraline edits), so comment anchors match what other reviewers see.
+  intraline edits), so comment anchors match what other reviewers see, or
+  from a configured local checkout (`local-git`), computed to be the same
+  diff (see "Local checkouts").
 - Side-by-side and unified views, with local context folding (the server
   sends whole files).
 - Long lines wrap when Gerrit's `line_wrapping` diff preference is on;
@@ -257,7 +278,7 @@ UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
   `ui::actions` or a module's own `actions`), and `ui::actions` gathers them,
   so the `?` help is built from the same table as the keymap.
 - The settings page edits `config.toml` (saved queries, startup page, file
-  filters, theme, review options); the user may also edit it by hand.
+  filters, theme, review options, project checkouts); the user may also edit it by hand.
 - Never do I/O or heavy work on the main thread. Use background tasks, and
   update entities when the work finishes.
 
@@ -276,9 +297,11 @@ opening a change from a web UI link (`g`, `gert <link>`, or a
 `gert://<host><path>` link from a browser, matched against all configured
 servers); multiple servers with a switcher; desktop
 notifications with configurable rules and an in-app inbox; a tabbed settings
-page.
+page; per-project local checkouts that serve file lists and diffs when they
+have the commits.
 
-Not built yet: Checks/CI results, local git integration, query autocompletion, a configurable keymap and command palette,
+Not built yet: Checks/CI results, further local git integration (fetching,
+checking out changes), query autocompletion, a configurable keymap and command palette,
 the general offline outbox, inline change edits, Gerrit's own
 dashboard sections, and packaging beyond cargo and Nix.
 
@@ -303,6 +326,9 @@ dashboard sections, and packaging beyond cargo and Nix.
   workaround (nixGL / nix-gl-host) belongs in the README (not written yet),
   rather than hacking the flake for one distro.
 - When adding a native dependency, add it to both the package and the devShell.
+  Runtime tools are different: the package's wrapper puts `gitMinimal` at the
+  end of `PATH` (the user's own git wins), and the devShell relies on the
+  host's git.
 
 ## Testing
 
@@ -316,9 +342,12 @@ dashboard sections, and packaging beyond cargo and Nix.
 - `store`: tests against in-memory SQLite, including migrations from every
   previous schema version.
 - `sync`: tests over the fake client and an in-memory store.
+- `local-git`: tests against temporary repos built with the git CLI (the
+  helpers are exported behind its `test-support` feature for `ui`'s tests).
 - `ui`: GPUI's `TestAppContext` for view logic.
-- **Opt-in, ignored by default:** `tests/dev_gerrit.rs` in `gerrit-api` and
-  `sync` (and a test in `app`) run against the dev Gerrit
+- **Opt-in, ignored by default:** `tests/dev_gerrit.rs` in `gerrit-api`,
+  `sync` and `local-git` (which compares its diffs with Gerrit's; see its
+  header for the setup), and a test in `app`, run against the dev Gerrit
   (`GERT_TEST_GERRIT=http://127.0.0.1:8080 cargo test -- --ignored`, refusing
   anything but localhost); `gerrit-api/tests/live.rs` reads a public server
   with `GERT_LIVE_TESTS=1`.
