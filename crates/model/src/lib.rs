@@ -14,6 +14,7 @@ mod event;
 mod file;
 mod ids;
 mod keys;
+mod local_commit;
 mod message;
 mod prefs;
 mod related;
@@ -39,6 +40,7 @@ pub use event::{COMMENT_SNIPPET_CHARS, Event, EventKind};
 pub use file::{COMMIT_MSG_PATH, FileEntry, FileStatus, MERGE_LIST_PATH, file_order};
 pub use ids::{AccountId, ChangeNumber, PatchSetNumber, RevisionId, ServerId};
 pub use keys::{DiffKey, FilesKey};
+pub use local_commit::{BranchTargets, CommitInfo, LocalCommit, Signature, Upstream};
 pub use message::ChangeMessage;
 pub use prefs::{
     DiffContext, DiffPreferences, DiffViewMode, ResolvedDiffPreferences, Whitespace,
