@@ -57,6 +57,33 @@ impl From<&str> for RevisionId {
     }
 }
 
+impl ChangeNumber {
+    /// The first number of the range reserved for changes that exist only
+    /// in a local checkout (`1 << 48`). Gerrit's change numbers are 32-bit
+    /// signed integers, so no server ever hands one of these out, and none
+    /// of them is ever sent to a server.
+    pub const LOCAL_BASE: u64 = 1 << 48;
+
+    /// Whether this is the number of a local change (see
+    /// [`ChangeNumber::LOCAL_BASE`]).
+    pub fn is_local(self) -> bool {
+        self.0 >= Self::LOCAL_BASE
+    }
+}
+
+impl PatchSetNumber {
+    /// The first number of the range reserved for patch sets that exist
+    /// only in a local checkout (`1 << 24`), far above any real patch set
+    /// count. None of them is ever sent to a server.
+    pub const LOCAL_BASE: u32 = 1 << 24;
+
+    /// Whether this is the number of a local patch set (see
+    /// [`PatchSetNumber::LOCAL_BASE`]).
+    pub fn is_local(self) -> bool {
+        self.0 >= Self::LOCAL_BASE
+    }
+}
+
 impl fmt::Display for PatchSetNumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
@@ -98,6 +125,17 @@ mod tests {
             serde_json::to_string(&RevisionId("abc".into())).unwrap(),
             "\"abc\""
         );
+    }
+
+    #[test]
+    fn local_numbers_start_at_their_bases() {
+        assert!(!ChangeNumber(i32::MAX as u64).is_local());
+        assert!(!ChangeNumber(ChangeNumber::LOCAL_BASE - 1).is_local());
+        assert!(ChangeNumber(ChangeNumber::LOCAL_BASE).is_local());
+        assert!(ChangeNumber(ChangeNumber::LOCAL_BASE + 7).is_local());
+        assert!(!PatchSetNumber(1).is_local());
+        assert!(!PatchSetNumber(PatchSetNumber::LOCAL_BASE - 1).is_local());
+        assert!(PatchSetNumber(PatchSetNumber::LOCAL_BASE).is_local());
     }
 
     #[test]
