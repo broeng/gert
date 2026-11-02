@@ -44,6 +44,8 @@ pub fn projects_to_ui(projects: &[ProjectConfig]) -> Vec<ProjectSettings> {
             name: p.name.clone(),
             checkout: p.checkout_path(),
             written: p.checkout.clone(),
+            local_changes: p.local_changes,
+            local_approval: p.local_approval,
         })
         .collect()
 }
@@ -59,6 +61,8 @@ fn projects_from_ui(projects: &[ProjectSettings]) -> Vec<ProjectConfig> {
             } else {
                 p.written.clone()
             },
+            local_changes: p.local_changes,
+            local_approval: p.local_approval,
         })
         .collect()
 }
@@ -435,6 +439,22 @@ mod tests {
         assert_ne!(tilde[0].checkout, PathBuf::from("~/src/a"));
         let cfg = Config::load(&b.config_file).unwrap().unwrap();
         assert_eq!(cfg.servers[0].projects[0].checkout, "~/src/a");
+
+        // The local changes options go to the file and come back.
+        let local = ProjectSettings {
+            local_changes: true,
+            local_approval: model::LocalApproval::ExactOrManual,
+            ..ProjectSettings::new("demo/a", "~/src/a")
+        };
+        let saved = server.save_projects(std::slice::from_ref(&local)).unwrap();
+        assert!(saved[0].local_changes);
+        assert_eq!(saved[0].local_approval, model::LocalApproval::ExactOrManual);
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert!(cfg.servers[0].projects[0].local_changes);
+        assert_eq!(
+            cfg.servers[0].projects[0].local_approval,
+            model::LocalApproval::ExactOrManual
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

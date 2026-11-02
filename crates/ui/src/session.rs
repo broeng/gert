@@ -32,18 +32,26 @@ pub struct ProjectSettings {
     /// The path as the user wrote it (`~/src/foo`): what the settings page
     /// shows and what is saved back, so the spelling in the file survives.
     pub written: String,
+    /// Show the user's own unpushed commits in the checkout as local
+    /// changes (`local_changes`).
+    pub local_changes: bool,
+    /// What happens to votes on a local change amended before it was
+    /// uploaded (`local_approval`).
+    pub local_approval: model::LocalApproval,
 }
 
 impl ProjectSettings {
-    /// A project from what the user typed. `~` is not expanded here (the
-    /// UI knows no home directory); the backend returns the saved list with
-    /// the path expanded.
+    /// A project from what the user typed, with the local changes option
+    /// off. `~` is not expanded here (the UI knows no home directory); the
+    /// backend returns the saved list with the path expanded.
     pub fn new(name: impl Into<String>, written: impl Into<String>) -> Self {
         let written = written.into();
         Self {
             name: name.into(),
             checkout: PathBuf::from(&written),
             written,
+            local_changes: false,
+            local_approval: model::LocalApproval::default(),
         }
     }
 }

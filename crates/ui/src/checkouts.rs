@@ -20,8 +20,9 @@
 //!
 //! After a settings save [`Checkouts::set_projects`] swaps the list: an entry
 //! with the same name and the same path keeps its result (or its open in
-//! flight); a changed path is opened again, at once if the old entry had been
-//! opened, else lazily like any other.
+//! flight), and takes the new options (local changes); a changed path is
+//! opened again, at once if the old entry had been opened, else lazily like
+//! any other.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -29,7 +30,7 @@ use futures::channel::oneshot;
 use gpui_kit::{AppContext as _, AsyncApp, Context, Entity, Task};
 use local_git::Repo;
 
-use model::FilesKey;
+use model::{FilesKey, LocalApproval};
 
 use crate::{local_source::LocalSource, session::ProjectSettings};
 
@@ -54,6 +55,11 @@ pub struct Checkout {
     /// The directory, with `~` expanded.
     pub path: PathBuf,
     pub state: CheckoutState,
+    /// Whether the user's unpushed commits here are shown as local
+    /// changes.
+    pub local_changes: bool,
+    /// What happens to votes on a local change amended before upload.
+    pub local_approval: LocalApproval,
 }
 
 impl Checkout {
@@ -88,6 +94,8 @@ impl Entry {
             project: self.project.name.clone(),
             path: self.project.checkout.clone(),
             state: self.state.clone().unwrap_or(CheckoutState::Opening),
+            local_changes: self.project.local_changes,
+            local_approval: self.project.local_approval,
         }
     }
 }
@@ -121,6 +129,12 @@ impl Checkouts {
     /// The configured projects, in config order.
     pub fn projects(&self) -> impl Iterator<Item = &ProjectSettings> {
         self.entries.iter().map(|e| &e.project)
+    }
+
+    /// The projects whose unpushed commits are shown as local changes, in
+    /// config order.
+    pub fn local_change_projects(&self) -> impl Iterator<Item = &ProjectSettings> {
+        self.projects().filter(|p| p.local_changes)
     }
 
     /// The checkout of Gerrit project `name`, or `None` when none is
@@ -431,6 +445,24 @@ mod tests {
                     .find(|e| e.project.name == "n")
                     .is_some_and(|e| e.state.is_none())
             );
+        });
+        // Turning local changes on keeps the open checkout.
+        let local = ProjectSettings {
+            local_changes: true,
+            local_approval: LocalApproval::Follow,
+            ..project("a", &a)
+        };
+        c.update(cx, |c, cx| {
+            c.set_projects(vec![local, project("b", &b2), project("n", &a)], cx)
+        });
+        let a_now = state(&c, "a", cx).expect("a");
+        assert!(a_now.repo().is_some());
+        assert!(a_now.local_changes);
+        assert_eq!(a_now.local_approval, LocalApproval::Follow);
+        assert!(!state(&c, "b", cx).expect("b").local_changes);
+        c.read_with(cx, |c, _| {
+            let names: Vec<_> = c.local_change_projects().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["a"]);
         });
         // A removed project is gone.
         c.update(cx, |c, cx| c.set_projects(vec![project("a", &a)], cx));
