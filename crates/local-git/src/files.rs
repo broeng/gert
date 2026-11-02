@@ -15,9 +15,9 @@ const NULL_OID_CHAR: u8 = b'0';
 impl Repo {
     /// The files that differ in `cmp`, sorted like Gerrit's list with the
     /// synthetic `/COMMIT_MSG` entry first. Renames are detected like
-    /// Gerrit does (60% similarity). Line counts of `/COMMIT_MSG` are
-    /// approximate: they are counted on a text built like Gerrit's header
-    /// plus message, not on Gerrit's exact one.
+    /// Gerrit does (60% similarity). `/COMMIT_MSG` is counted on a text
+    /// built like Gerrit's (header plus message), which gives its counts
+    /// and size.
     pub fn file_list(&self, cmp: &Comparison) -> Result<Local<Vec<FileEntry>>, Error> {
         let out = self.git.run(
             &[
@@ -100,22 +100,27 @@ fn is_null_oid(oid: &str) -> bool {
 
 /// One changed file as `diff-tree --raw --numstat` reports it.
 #[derive(Debug)]
-struct RawChange {
-    old_oid: String,
-    new_oid: String,
-    status: FileStatus,
-    path: String,
-    old_path: Option<String>,
+pub(crate) struct RawChange {
+    pub old_oid: String,
+    pub new_oid: String,
+    /// File modes as git prints them (`100644`), `000000` for an absent side.
+    pub old_mode: String,
+    pub new_mode: String,
+    pub status: FileStatus,
+    /// The similarity of a rename, in percent.
+    pub score: Option<u32>,
+    pub path: String,
+    pub old_path: Option<String>,
     /// `None` for binary files (numstat prints `-`).
-    inserted: Option<u32>,
-    deleted: Option<u32>,
+    pub inserted: Option<u32>,
+    pub deleted: Option<u32>,
 }
 
 /// Parses `diff-tree -z --raw --numstat`: first every raw record
 /// (`:mode mode oid oid status NUL path NUL [path NUL]`), then every numstat
 /// record (`added TAB deleted TAB path NUL`, or with an empty path and the
 /// old and new paths as two further NUL-separated fields for a rename).
-fn parse_diff_tree(out: &[u8]) -> Result<Vec<RawChange>, Error> {
+pub(crate) fn parse_diff_tree(out: &[u8]) -> Result<Vec<RawChange>, Error> {
     let bad = |detail: String| Error::Parse {
         command: "diff-tree",
         detail,
@@ -125,7 +130,7 @@ fn parse_diff_tree(out: &[u8]) -> Result<Vec<RawChange>, Error> {
     let mut changes: Vec<RawChange> = Vec::new();
     while let Some(meta) = fields.next_if(|f| f.starts_with(':')) {
         let parts: Vec<&str> = meta[1..].split(' ').collect();
-        let [_, _, old_oid, new_oid, status] = parts.as_slice() else {
+        let [old_mode, new_mode, old_oid, new_oid, status] = parts.as_slice() else {
             return Err(bad(format!("bad raw record {meta:?}")));
         };
         let letter = status.chars().next().unwrap_or('?');
@@ -141,6 +146,7 @@ fn parse_diff_tree(out: &[u8]) -> Result<Vec<RawChange>, Error> {
         } else {
             (first, None)
         };
+        let score = status.get(1..).and_then(|s| s.parse().ok());
         let status = match letter {
             'A' => FileStatus::Added,
             'D' => FileStatus::Deleted,
@@ -152,6 +158,9 @@ fn parse_diff_tree(out: &[u8]) -> Result<Vec<RawChange>, Error> {
         changes.push(RawChange {
             old_oid: (*old_oid).to_owned(),
             new_oid: (*new_oid).to_owned(),
+            old_mode: (*old_mode).to_owned(),
+            new_mode: (*new_mode).to_owned(),
+            score,
             status,
             path,
             old_path,
@@ -187,15 +196,17 @@ fn parse_diff_tree(out: &[u8]) -> Result<Vec<RawChange>, Error> {
 /// The `/COMMIT_MSG` entry: the synthetic file against nothing (a parent
 /// comparison) or against the base patch set's synthetic file.
 fn commit_msg_entry(cmp: &Comparison) -> FileEntry {
-    let new = synthetic_commit_file(&cmp.target);
+    let new = synthetic_commit_file(&cmp.target, &cmp.parent_subject);
     let old = match (cmp.base_kind, &cmp.base_commit) {
-        (BaseKind::PatchSet, Some(base)) => synthetic_commit_file(base),
+        (BaseKind::PatchSet, Some(base)) => synthetic_commit_file(base, &cmp.parent_subject),
         _ => String::new(),
     };
     let (inserted, deleted) = crate::diff::count_changed_lines(&old, &new);
     let size = new.len() as u64;
     FileEntry {
         path: COMMIT_MSG_PATH.to_owned(),
+        // Against the parent it is a new file; between patch sets it is
+        // listed as modified (Gerrit prints no status) even if equal.
         status: if old.is_empty() {
             FileStatus::Added
         } else {
@@ -211,19 +222,26 @@ fn commit_msg_entry(cmp: &Comparison) -> FileEntry {
     }
 }
 
-/// Text shaped like Gerrit's `/COMMIT_MSG` file: a header of parent,
-/// author and committer lines, a blank line and the message.
-fn synthetic_commit_file(c: &CommitData) -> String {
+/// The text of Gerrit's `/COMMIT_MSG` file (verified against 3.14, line
+/// counts and size match): a header of the parent (8 hex digits and its
+/// subject), author, author date, committer and commit date, a blank line
+/// and the message as stored.
+fn synthetic_commit_file(c: &CommitData, parent_subject: &str) -> String {
     let mut s = String::new();
     if let Some(parent) = c.parents.first() {
-        s.push_str(&format!("Parent:     {}\n", &parent[..parent.len().min(7)]));
+        s.push_str(&format!(
+            "Parent:     {} ({parent_subject})\n",
+            &parent[..parent.len().min(8)]
+        ));
     }
     s.push_str(&format!("Author:     {}\n", person(&c.author)));
     s.push_str(&format!("AuthorDate: {}\n", date(&c.author)));
     s.push_str(&format!("Commit:     {}\n", person(&c.committer)));
     s.push_str(&format!("CommitDate: {}\n\n", date(&c.committer)));
-    s.push_str(c.message.trim_end());
-    s.push('\n');
+    s.push_str(&c.message);
+    if !c.message.ends_with('\n') {
+        s.push('\n');
+    }
     s
 }
 

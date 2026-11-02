@@ -57,6 +57,8 @@ impl Git {
         cmd.env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_PAGER", "cat")
             .env("GIT_OPTIONAL_LOCKS", "0")
+            // Paths are paths, never patterns or `:(magic)`.
+            .env("GIT_LITERAL_PATHSPECS", "1")
             // Stable messages, since we recognise a few of them.
             .env("LC_ALL", "C");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());

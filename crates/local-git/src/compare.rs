@@ -27,6 +27,13 @@ pub struct CommitData {
     pub message: String,
 }
 
+impl CommitData {
+    /// The first line of the message.
+    pub fn subject(&self) -> &str {
+        self.message.lines().next().unwrap_or("")
+    }
+}
+
 /// Two sides to compare, both present in the checkout. Made by
 /// [`Repo::resolve`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +44,10 @@ pub struct Comparison {
     /// The base commit for [`BaseKind::PatchSet`].
     pub(crate) base_commit: Option<CommitData>,
     pub(crate) target: CommitData,
+    /// The subject of the target's first parent, which Gerrit prints in the
+    /// `Parent:` line of `/COMMIT_MSG`. Empty for a root commit or when the
+    /// parent is not in the checkout.
+    pub(crate) parent_subject: String,
 }
 
 impl Comparison {
@@ -78,17 +89,19 @@ impl Repo {
                         base_kind: BaseKind::Parent,
                         base_commit: None,
                         target,
+                        parent_subject: String::new(),
                     }))
                 }
                 [parent] => {
-                    if self.commit_data(parent)?.is_none() {
+                    let Some(parent_data) = self.commit_data(parent)? else {
                         return Ok(Local::NotLocal(NotLocal::MissingCommit(parent.clone())));
-                    }
+                    };
                     Ok(Local::Available(Comparison {
                         base: parent.clone(),
                         base_kind: BaseKind::Parent,
                         base_commit: None,
                         target,
+                        parent_subject: parent_data.subject().to_owned(),
                     }))
                 }
                 _ => Ok(Local::NotLocal(NotLocal::MergeCommit)),
@@ -102,11 +115,19 @@ impl Repo {
                 if base.parents != target.parents {
                     return Ok(Local::NotLocal(NotLocal::ParentsDiffer));
                 }
+                let parent_subject = match target.parents.first() {
+                    Some(p) => self
+                        .commit_data(p)?
+                        .map(|c| c.subject().to_owned())
+                        .unwrap_or_default(),
+                    None => String::new(),
+                };
                 Ok(Local::Available(Comparison {
                     base: base.sha.clone(),
                     base_kind: BaseKind::PatchSet,
                     base_commit: Some(base),
                     target,
+                    parent_subject,
                 }))
             }
         }
