@@ -44,6 +44,12 @@ pub enum Error {
     Conversion(#[from] ConversionError),
     #[error("invalid server URL: {0}")]
     InvalidUrl(String),
+    /// The request would carry the number of a change or patch set that
+    /// exists only locally (see `model::ChangeNumber::LOCAL_BASE`); the
+    /// text names it ("change 281474976710657"). No request is made. This
+    /// is a bug in the caller, which must keep local numbers to itself.
+    #[error("{0} exists only locally and is never sent to the server")]
+    LocalNumber(String),
 }
 
 impl Error {
@@ -155,6 +161,7 @@ mod tests {
                 message: "x".into(),
             },
             Error::InvalidUrl("x".into()),
+            Error::LocalNumber("change 1".into()),
         ] {
             assert!(!e.is_retryable(), "{e}");
         }

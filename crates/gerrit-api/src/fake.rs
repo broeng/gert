@@ -59,8 +59,22 @@ impl FakeHttpClient {
     }
 }
 
+/// Panics if `req` carries the number of a local change or patch set: the
+/// client refuses to build such a request, so getting here means a request
+/// slipped past its check (see `crate::reserved`).
+fn assert_no_local_number(req: &http::Request<Vec<u8>>) {
+    let target = req.uri().path_and_query().map_or("", |p| p.as_str());
+    if let Some(what) = crate::reserved::local_number_in(target) {
+        panic!(
+            "{what} exists only locally and must never be sent to a server: {} {target}",
+            req.method()
+        );
+    }
+}
+
 impl HttpClient for FakeHttpClient {
     fn send(&self, req: http::Request<Vec<u8>>) -> BoxFuture<'static, Reply> {
+        assert_no_local_number(&req);
         let mut state = self.lock();
         state.requests.push(req);
         let reply = state
@@ -150,6 +164,7 @@ impl RouteHttpClient {
 
 impl HttpClient for RouteHttpClient {
     fn send(&self, req: http::Request<Vec<u8>>) -> BoxFuture<'static, Reply> {
+        assert_no_local_number(&req);
         let target = req
             .uri()
             .path_and_query()
@@ -217,6 +232,47 @@ mod tests {
         );
         assert_eq!(get(&c, "/changes/2").0, 404);
         assert_eq!(c.requested().len(), 3);
+    }
+
+    fn local_request() -> http::Request<Vec<u8>> {
+        http::Request::builder()
+            .uri(format!(
+                "https://g.example.com/a/changes/{}/detail",
+                model::ChangeNumber::LOCAL_BASE + 1
+            ))
+            .body(Vec::new())
+            .expect("request")
+    }
+
+    #[test]
+    #[should_panic(expected = "exists only locally and must never be sent")]
+    fn the_fake_client_panics_on_a_local_change_number() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, "");
+        let _ = futures::executor::block_on(fake.send(local_request()));
+    }
+
+    #[test]
+    #[should_panic(expected = "patch set 16777216 exists only locally")]
+    fn the_route_client_panics_on_a_local_patch_set_number() {
+        let c = RouteHttpClient::new();
+        get(&c, "/changes/5/revisions/abc/files?base=16777216");
+    }
+
+    #[test]
+    fn the_fakes_pass_normal_numbers() {
+        let c = RouteHttpClient::new();
+        assert_eq!(
+            get(&c, "/changes/2147483647/revisions/abc/files?base=16777215").0,
+            404
+        );
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, "");
+        let req = http::Request::builder()
+            .uri("https://g.example.com/changes/?q=change%3A5")
+            .body(Vec::new())
+            .expect("request");
+        assert!(futures::executor::block_on(fake.send(req)).is_ok());
     }
 
     #[test]

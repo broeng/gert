@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::{
     Auth, ChangeOption, ChangeQuery, DiffParams, Error, HttpClient, convert,
-    query::encode_component, wire,
+    query::encode_component, reserved, wire,
 };
 
 /// One page of search results.
@@ -85,6 +85,12 @@ impl GerritClient {
         body: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, Error> {
         let url = self.url(path, query);
+        // Checked on what goes on the wire, after the base (whose own path
+        // is the user's business).
+        if let Some(what) = reserved::local_number_in(url.get(self.base.len()..).unwrap_or(&url)) {
+            log::warn!("refusing {method} {path}: {what} exists only locally");
+            return Err(Error::LocalNumber(what));
+        }
         let verb = method.clone();
         let mut builder = http::Request::builder()
             .method(method)
@@ -490,11 +496,13 @@ impl GerritClient {
         base: Option<&str>,
         options: model::RebaseOptions,
     ) -> Result<ChangeSummary, Error> {
+        let base = base.map(str::trim).filter(|b| !b.is_empty());
+        // The one request body that can name a change by number.
+        if let Some(what) = base.and_then(reserved::local_change) {
+            return Err(Error::LocalNumber(what));
+        }
         let body = wire::RebaseInput {
-            base: base
-                .map(str::trim)
-                .filter(|b| !b.is_empty())
-                .map(Into::into),
+            base: base.map(Into::into),
             allow_conflicts: options.allow_conflicts.then_some(true),
             on_behalf_of_uploader: options.on_behalf_of_uploader.then_some(true),
         };
@@ -2645,5 +2653,153 @@ mod tests {
             Err(Error::Unauthorized)
         ));
         assert!(anon_fake.requests().is_empty());
+    }
+
+    /// Every method that takes a change number refuses a local one: the
+    /// error, and no request.
+    #[test]
+    fn local_change_numbers_never_reach_the_server() {
+        let fake = FakeHttpClient::new();
+        let c = client(&fake, "https://h/r", basic());
+        let n = ChangeNumber(ChangeNumber::LOCAL_BASE + 3);
+        let rev = sha_rev();
+        let d = draft_input();
+        let refused = |r: Result<(), Error>, what: &str| match r {
+            Err(Error::LocalNumber(m)) => assert_eq!(m, format!("change {n}"), "{what}"),
+            other => panic!("{what}: {other:?}"),
+        };
+        fn unit<T>(r: Result<T, Error>) -> Result<(), Error> {
+            r.map(|_| ())
+        }
+        refused(unit(block_on(c.get_change(n))), "get_change");
+        refused(unit(block_on(c.get_files(n, &rev, None))), "get_files");
+        refused(
+            unit(block_on(c.get_reviewed_files(n, &rev))),
+            "get_reviewed_files",
+        );
+        refused(
+            unit(block_on(c.get_diff(n, &rev, "a", &DiffParams::default()))),
+            "get_diff",
+        );
+        refused(unit(block_on(c.get_related(n, &rev))), "get_related");
+        refused(unit(block_on(c.get_mergeable(n))), "get_mergeable");
+        refused(unit(block_on(c.get_comments(n))), "get_comments");
+        refused(unit(block_on(c.get_drafts(n))), "get_drafts");
+        refused(unit(block_on(c.get_robot_comments(n))), "robot comments");
+        refused(unit(block_on(c.create_draft(n, &rev, &d))), "create_draft");
+        refused(
+            unit(block_on(c.update_draft(n, &rev, "x", &d))),
+            "update_draft",
+        );
+        refused(block_on(c.delete_draft(n, &rev, "x")), "delete_draft");
+        refused(
+            unit(block_on(c.post_review(n, &rev, &ReviewInput::default()))),
+            "post_review",
+        );
+        refused(block_on(c.set_reviewed(n, &rev, "a", true)), "reviewed");
+        refused(block_on(c.set_reviewed(n, &rev, "a", false)), "unreviewed");
+        refused(unit(block_on(c.submit(n))), "submit");
+        refused(
+            unit(block_on(c.rebase(n, None, Default::default()))),
+            "rebase",
+        );
+        refused(unit(block_on(c.revert(n, None))), "revert");
+        refused(
+            unit(block_on(c.cherry_pick(n, &rev, "main", None))),
+            "cherry_pick",
+        );
+        refused(unit(block_on(c.abandon(n, None))), "abandon");
+        refused(unit(block_on(c.restore(n, None))), "restore");
+        refused(block_on(c.set_work_in_progress(n, true, None)), "wip");
+        refused(block_on(c.set_private(n, true)), "private");
+        refused(block_on(c.set_private(n, false)), "not private");
+        refused(
+            unit(block_on(c.suggest_reviewers(n, "b", 5))),
+            "suggest_reviewers",
+        );
+        refused(
+            unit(block_on(c.add_reviewer(
+                n,
+                "b",
+                ReviewerState::Reviewer,
+                false,
+            ))),
+            "add_reviewer",
+        );
+        refused(block_on(c.remove_reviewer(n, "b")), "remove_reviewer");
+        refused(
+            block_on(c.delete_vote(n, "b", "Code-Review")),
+            "delete_vote",
+        );
+        refused(block_on(c.set_topic(n, Some("t"))), "set topic");
+        refused(block_on(c.set_topic(n, None)), "clear topic");
+        refused(
+            unit(block_on(c.edit_hashtags(n, &["a".into()], &[]))),
+            "edit_hashtags",
+        );
+        // A rebase onto a local change, and a search for one.
+        refused(
+            unit(block_on(c.rebase(
+                ChangeNumber(5),
+                Some(&n.to_string()),
+                Default::default(),
+            ))),
+            "rebase base",
+        );
+        let q = ChangeQuery::new(format!("change:5 OR change:{n}"));
+        refused(unit(block_on(c.query_changes(&q))), "query");
+        assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+    }
+
+    #[test]
+    fn local_patch_set_numbers_never_reach_the_server() {
+        let fake = FakeHttpClient::new();
+        let c = client(&fake, "https://h", basic());
+        let ps = PatchSetNumber(PatchSetNumber::LOCAL_BASE + 2);
+        let want = format!("patch set {ps}");
+        assert!(matches!(
+            block_on(c.get_files(ChangeNumber(5), &sha_rev(), Some(ps))),
+            Err(Error::LocalNumber(m)) if m == want
+        ));
+        let params = DiffParams {
+            base: Some(ps),
+            ..DiffParams::default()
+        };
+        assert!(matches!(
+            block_on(c.get_diff(ChangeNumber(5), &sha_rev(), "a", &params)),
+            Err(Error::LocalNumber(m)) if m == want
+        ));
+        // A revision named by its patch set number.
+        let rev = RevisionId::from(ps.to_string());
+        assert!(matches!(
+            block_on(c.get_related(ChangeNumber(5), &rev)),
+            Err(Error::LocalNumber(m)) if m == want
+        ));
+        assert!(fake.requests().is_empty());
+    }
+
+    #[test]
+    fn the_largest_real_numbers_are_sent() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi("{}"));
+        fake.push_response(200, xssi("{}"));
+        fake.push_response(200, xssi("[]"));
+        let c = client(&fake, "https://h", basic());
+        let n = ChangeNumber(i32::MAX as u64);
+        let ps = PatchSetNumber(PatchSetNumber::LOCAL_BASE - 1);
+        block_on(c.get_files(n, &sha_rev(), Some(ps))).unwrap();
+        let rev = RevisionId::from(ps.to_string());
+        let params = DiffParams {
+            base: Some(ps),
+            ..DiffParams::default()
+        };
+        // An empty object is not a diff; what matters is that it was sent.
+        let _ = block_on(c.get_diff(n, &rev, "a", &params));
+        block_on(c.query_changes(&ChangeQuery::new(format!("change:{n}")))).unwrap();
+        assert_eq!(fake.requests().len(), 3);
+        assert_eq!(
+            fake.requests()[0].uri(),
+            "https://h/a/changes/2147483647/revisions/0123abcd/files?base=16777215"
+        );
     }
 }

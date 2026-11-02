@@ -12,6 +12,7 @@ mod error;
 pub mod fake;
 mod http_client;
 mod query;
+mod reserved;
 mod wire;
 
 #[cfg(test)]
