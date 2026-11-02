@@ -23,19 +23,25 @@
 //!   the only one when the branch is unknown) makes the commits local patch
 //!   sets of that change (`gerrit_number`). One of a merged or abandoned
 //!   change is skipped; an existing row with unsent data moves to
-//!   `Closed`, one without is deleted. Any other Change-Id is a local
+//!   `Closed`, with that change's number so its held data shows there and
+//!   is looked up, and one without is deleted. Any other Change-Id is a local
 //!   change of its own. New rows start as `Checking` either way, until a
 //!   lookup on Gerrit confirms them.
 //! * Every commit of a change that the row does not have yet becomes its
 //!   next local patch set (oldest first); known ones are kept. The row's
 //!   subject, author and time are those of its newest commit in the scan.
-//! * Vanishing is per change, never per version, and only on a complete
-//!   scan ([`LocalScan::is_complete`]): a change none of whose local
-//!   commits is on a named branch any more is deleted, unless it has unsent
-//!   data, then it becomes `Vanished` (the store re-checks unsent data when
-//!   it applies the plan, see [`LocalOp::Delete`]). A change whose only
-//!   commits left on the branches are Gerrit patch sets is deleted without
-//!   unsent data and otherwise left to consolidation.
+//! * Vanishing is per change, never per version, only on a complete scan
+//!   ([`LocalScan::is_complete`]) and never without emails. Whether a
+//!   row's commits are still there goes by the whole scan, not by the
+//!   filters: a row is there while any commit of the scan has its key or
+//!   is one of its versions, so commits that stop matching the emails do
+//!   not make it vanish. A change that is not there any more is deleted,
+//!   or becomes `Vanished` if it has unsent data (`SetState` when the
+//!   snapshot shows unsent data, so the scan settles at once; otherwise
+//!   `Delete` with `else_state`, which the store re-checks, see
+//!   [`LocalOp::Delete`]). A change whose only commits left are Gerrit
+//!   patch sets is deleted without unsent data and otherwise left to
+//!   consolidation.
 //! * A `Vanished` change whose commits are back goes back to `Checking`.
 //! * Consolidated rows are tombstones: their known commits never become
 //!   local again, under any key. They go when none of their commits, and
@@ -43,12 +49,15 @@
 //!   with a tombstone's key (the change amended after the push) is a new
 //!   local patch set of its Gerrit change, and the row goes back to
 //!   `Checking`.
-//! * A `Closed` row with unsent data stays as it is, wherever its commits
-//!   are, until consolidation or the user deals with its held data.
+//! * A `Closed` row (or a tombstone) with unsent data stays as it is,
+//!   wherever its commits are, until consolidation or the user deals with
+//!   its data. Without unsent data it goes with its commits.
 //! * On a complete scan, a row whose key the scan no longer produces but
 //!   whose Change-Id it does (the target branch changed) is the same
 //!   change: it is re-keyed, or merged ([`LocalOp::Merge`]) into the row
-//!   that already has the new key. Closed rows and tombstones are not.
+//!   that already has the new key. Closed rows and tombstones are not. A
+//!   truncated scan does neither, and gives a commit that a row of the
+//!   change already has no second row.
 //!
 //! Every op on a row names it with the state the plan saw ([`Seen`]), so a
 //! plan computed before a consolidation changed a row cannot undo it: the
@@ -193,8 +202,17 @@ pub fn plan_reconcile(
     let groups = groups(&commits, &scan.targets, |sha| {
         on_gerrit.contains_key(sha) || consolidated.contains(sha)
     });
-    let keys_all: HashSet<&Key> = groups.iter().map(|g| &g.key).collect();
-    let scan_shas: HashSet<&RevisionId> = scan.commits.iter().map(|c| &c.commit.sha).collect();
+    // Whether a row's commits are still there goes by the whole scan, not
+    // only the commits that pass the filters: a row must not vanish because
+    // its commits stopped matching the emails.
+    let key_for = |c: &LocalCommit| -> Option<Key> {
+        let change_id = c.commit.change_id.clone()?;
+        Some((
+            scan.targets.target_for(&c.branches).map(str::to_owned),
+            change_id,
+        ))
+    };
+    let scan_keys: HashSet<Key> = scan.commits.iter().filter_map(key_for).collect();
     let by_key: HashMap<Key, &LocalChangeEntry> = entries.iter().map(|e| (key_of(e), e)).collect();
 
     let mut ops = Vec::new();
@@ -222,20 +240,33 @@ pub fn plan_reconcile(
         if gerrit.is_some_and(|c| is_closed(&c.summary.status)) {
             let Some(e) = exact else { continue };
             handled.insert(e.change.id);
-            match e.change.state {
+            let c = &e.change;
+            let number = gerrit.map(|g| g.summary.number);
+            match c.state {
                 LocalChangeState::Consolidated => {}
-                LocalChangeState::Closed if e.has_unsent => {}
-                LocalChangeState::Closed => ops.push(LocalOp::Delete {
-                    seen: seen(e),
-                    else_state: None,
-                }),
-                _ if e.has_unsent => ops.push(LocalOp::SetState {
-                    seen: seen(e),
-                    state: LocalChangeState::Closed,
-                }),
+                // Closed, with the Gerrit change it belongs to, so its
+                // held data shows there and is looked up.
+                _ if e.has_unsent => {
+                    if c.state != LocalChangeState::Closed || c.gerrit_number != number {
+                        ops.push(LocalOp::Upsert(LocalChangeUpsert {
+                            seen: Some(seen(e)),
+                            branch: c.branch.clone(),
+                            change_id: c.change_id.clone(),
+                            gerrit_number: number,
+                            subject: c.subject.clone(),
+                            author_name: c.author_name.clone(),
+                            author_email: c.author_email.clone(),
+                            updated: c.updated,
+                            state: Some(LocalChangeState::Closed),
+                            patch_sets: Vec::new(),
+                        }));
+                    }
+                }
+                // If unsent data shows up before the plan is applied, the
+                // row is kept and the next scan closes it.
                 _ => ops.push(LocalOp::Delete {
                     seen: seen(e),
-                    else_state: Some(LocalChangeState::Closed),
+                    else_state: None,
                 }),
             }
             continue;
@@ -247,7 +278,7 @@ pub fn plan_reconcile(
                 .iter()
                 .filter(|e| {
                     e.change.change_id == g.key.1
-                        && !keys_all.contains(&key_of(e))
+                        && !scan_keys.contains(&key_of(e))
                         && !matches!(
                             e.change.state,
                             LocalChangeState::Consolidated | LocalChangeState::Closed
@@ -258,6 +289,22 @@ pub fn plan_reconcile(
         } else {
             Vec::new()
         };
+        if exact.is_none() && !complete {
+            // A truncated scan cannot tell a re-key from a second copy, so
+            // a commit that a row of the change already has gets no row of
+            // its own: it would show twice until the next complete scan
+            // merged them. A complete scan re-keys or merges.
+            let has_one = entries.iter().any(|e| {
+                e.change.change_id == g.key.1
+                    && e.change.state != LocalChangeState::Consolidated
+                    && e.patch_sets
+                        .iter()
+                        .any(|p| g.local.iter().any(|c| c.commit.sha == p.sha))
+            });
+            if has_one {
+                continue;
+            }
+        }
         let target = match exact {
             Some(e) => Some(e),
             None if orphans.is_empty() => None,
@@ -343,34 +390,58 @@ pub fn plan_reconcile(
         }
     }
 
-    if !complete {
+    // Without emails no commit is the user's, which says nothing about
+    // whether the rows' commits are still there.
+    if !complete || emails.is_empty() {
         return ops;
     }
     for e in entries.iter().filter(|e| !handled.contains(&e.change.id)) {
         let key = key_of(e);
-        let on_branches = keys_all.contains(&key);
+        // The scan's commits of this row: with its key, or one of its
+        // versions (under any key, by any author).
+        let shas: HashSet<&RevisionId> = e.patch_sets.iter().map(|p| &p.sha).collect();
+        let mut there = scan
+            .commits
+            .iter()
+            .filter(|c| shas.contains(&c.commit.sha) || key_for(c).as_ref() == Some(&key))
+            .peekable();
+        let present = there.peek().is_some();
+        let only_pushed = present && there.all(|c| on_gerrit.contains_key(&c.commit.sha));
         let delete = |else_state| LocalOp::Delete {
             seen: seen(e),
             else_state,
         };
         match e.change.state {
+            // Kept for their unsent data until consolidation decides (a
+            // tombstone with unsent data is one that a draft reached late).
+            LocalChangeState::Closed
+            | LocalChangeState::Vanished
+            | LocalChangeState::Consolidated
+                if e.has_unsent => {}
             LocalChangeState::Consolidated => {
-                let present =
-                    on_branches || e.patch_sets.iter().any(|p| scan_shas.contains(&p.sha));
                 if !present {
                     ops.push(delete(None));
                 }
             }
-            // Kept for their unsent data until consolidation decides.
-            LocalChangeState::Closed | LocalChangeState::Vanished if e.has_unsent => {}
-            // Only commits that are Gerrit patch sets are left: with unsent
-            // data that is for consolidation to send.
-            _ if on_branches => {
+            // Only commits that are Gerrit patch sets are left: without
+            // unsent data there is nothing local to it any more; with some,
+            // that is for consolidation to send.
+            _ if only_pushed => {
                 if !e.has_unsent {
                     ops.push(delete(None));
                 }
             }
+            // Still on a branch (also when its commits no longer pass the
+            // filters): nothing to do.
+            _ if present => {}
             LocalChangeState::Closed => ops.push(delete(None)),
+            // Vanished. A row known to have unsent data is marked so
+            // directly, so the scan settles at once; for the others the
+            // store re-checks when it applies the plan.
+            _ if e.has_unsent => ops.push(LocalOp::SetState {
+                seen: seen(e),
+                state: LocalChangeState::Vanished,
+            }),
             _ => ops.push(delete(Some(LocalChangeState::Vanished))),
         }
     }

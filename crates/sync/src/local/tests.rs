@@ -440,15 +440,31 @@ fn a_closed_change_id_is_skipped_unless_a_row_has_unsent_data() {
         h.add_draft("I1");
         h.gerrit(42, "I1", "main", status, Some(&["g1"]));
         let e = h.entry("I1");
-        assert_eq!(
-            h.plan(&sc),
-            [LocalOp::SetState {
-                seen: seen(&e),
-                state: LocalChangeState::Closed,
-            }]
-        );
+        let ops = h.plan(&sc);
+        assert!(matches!(
+            &ops[..],
+            [LocalOp::Upsert(u)] if u.seen == Some(seen(&e))
+                && u.state == Some(LocalChangeState::Closed)
+                && u.gerrit_number == Some(ChangeNumber(42))
+                && u.patch_sets.is_empty()
+        ));
         assert!(h.run(&sc).is_settled());
-        assert_eq!(h.rows(), s(&["main I1 closed [c1]"]));
+        // Closed with its Gerrit change, where its held data shows.
+        assert_eq!(h.rows(), s(&["main I1 closed g42 [c1]"]));
+        assert_eq!(
+            h.store
+                .local_changes_of_gerrit_change(h.server, ChangeNumber(42))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            h.store
+                .load_drafts(h.server, ChangeNumber(42))
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(h.plan(&sc), []);
         // Gone from the branches it stays too.
         assert_eq!(h.plan(&scan(vec![])), []);
@@ -527,10 +543,17 @@ fn a_vanished_change_with_unsent_data_stays_and_comes_back() {
     let sc = scan(vec![commit("c1", Some("I1"), &["topic"])]);
     h.run(&sc);
     h.add_draft("I1");
-    let report = h.run(&scan(vec![]));
-    // Kept for its draft, so the scan is not settled yet.
-    assert_eq!(report.kept, [h.entry("I1").change.id]);
-    assert!(!report.is_settled());
+    let e = h.entry("I1");
+    // Known to have unsent data: marked vanished at once, and settled.
+    let ops = h.plan(&scan(vec![]));
+    assert_eq!(
+        ops,
+        [LocalOp::SetState {
+            seen: seen(&e),
+            state: LocalChangeState::Vanished,
+        }]
+    );
+    assert!(h.apply(&ops).is_settled());
     assert_eq!(h.rows(), s(&["main I1 vanished [c1]"]));
     // The next scan of the same refs has nothing more to do.
     assert_eq!(h.plan(&scan(vec![])), []);
@@ -614,11 +637,11 @@ fn a_changed_target_branch_rekeys_the_change() {
     // `topic` now tracks stable.
     let mut sc = scan(vec![commit("c1", Some("I1"), &["topic"])]);
     sc.targets.upstreams.get_mut("topic").unwrap().branch = "stable".into();
-    // Not on a truncated scan: the old key may still be on a branch.
+    // Not on a truncated scan: the old key may still be on a branch, and
+    // the commit gets no second row either.
     let mut truncated = sc.clone();
     truncated.truncated = true;
-    let ops = h.plan(&truncated);
-    assert!(matches!(&ops[..], [LocalOp::Upsert(u)] if u.seen.is_none()));
+    assert_eq!(h.plan(&truncated), []);
 
     let ops = h.plan(&sc);
     assert!(
@@ -778,4 +801,77 @@ fn a_change_with_only_pushed_commits_left_waits_for_consolidation() {
     // Off the branches as well: vanished, for consolidation to decide.
     h.run(&scan(vec![]));
     assert_eq!(h.rows(), s(&["main I1 vanished [c1=ps1]"]));
+}
+
+#[test]
+fn commits_that_stop_passing_the_filters_are_still_there() {
+    let mut h = H::new();
+    h.run(&scan(vec![
+        commit("c2", Some("I2"), &["topic"]),
+        commit("c1", Some("I1"), &["topic"]),
+    ]));
+    h.add_draft("I1");
+    // The emails changed (or the account's is not loaded yet): the commits
+    // no longer count as mine, but they are still on the branches.
+    let mut other = commit("c1", Some("I1"), &["topic"]);
+    other.commit.author.email = "old@example.com".into();
+    let mut amended = commit("c2b", Some("I2"), &["topic"]);
+    amended.commit.author.email = "old@example.com".into();
+    let sc = scan(vec![amended, other]);
+    assert_eq!(h.plan(&sc), []);
+    // Without any email nothing vanishes, whatever the scan.
+    h.emails.clear();
+    assert_eq!(h.plan(&scan(vec![])), []);
+    h.emails = vec![" ".into()];
+    assert_eq!(h.plan(&scan(vec![])), []);
+    assert_eq!(
+        h.rows(),
+        s(&["main I1 checking [c1]", "main I2 checking [c2]"])
+    );
+}
+
+#[test]
+fn a_tombstone_with_unsent_data_is_left_alone() {
+    let mut h = H::new();
+    h.run(&scan(vec![commit("c1", Some("I1"), &["topic"])]));
+    h.set_state("I1", LocalChangeState::Consolidated);
+    // A draft reached it late.
+    h.add_draft("I1");
+    assert_eq!(h.plan(&scan(vec![])), []);
+}
+
+#[test]
+fn a_closed_row_without_unsent_data_goes_with_its_commits() {
+    let mut h = H::new();
+    let sc = scan(vec![commit("c1", Some("I1"), &["topic"])]);
+    h.run(&sc);
+    h.add_draft("I1");
+    h.gerrit(42, "I1", "main", ChangeStatus::Merged, None);
+    h.run(&sc);
+    assert_eq!(h.rows(), s(&["main I1 closed g42 [c1]"]));
+    // The user dropped the held draft and the change left the cache.
+    let e = h.entry("I1");
+    let drafts = h.store.load_drafts(h.server, ChangeNumber(42)).unwrap();
+    for d in drafts {
+        h.store.delete_draft(h.server, d.local_id).unwrap();
+    }
+    assert!(!h.entry("I1").has_unsent);
+    h.cached.clear();
+    let report = h.run(&scan(vec![]));
+    assert_eq!(report.deleted, [e.change.id]);
+}
+
+#[test]
+fn a_truncated_scan_does_not_copy_a_rekeyed_commit() {
+    let mut h = H::new();
+    h.run(&scan(vec![commit("c1", Some("I1"), &["topic"])]));
+    // `topic` now tracks stable, seen by a truncated scan.
+    let mut sc = scan(vec![commit("c1", Some("I1"), &["topic"])]);
+    sc.targets.upstreams.get_mut("topic").unwrap().branch = "stable".into();
+    sc.truncated = true;
+    assert_eq!(h.plan(&sc), []);
+    // The complete scan re-keys it.
+    sc.truncated = false;
+    h.run(&sc);
+    assert_eq!(h.rows(), s(&["stable I1 checking [c1]"]));
 }
