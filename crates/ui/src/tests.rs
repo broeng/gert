@@ -2473,6 +2473,29 @@ mod settings_page {
         assert_eq!(again.entity_id(), checkouts.entity_id());
     }
 
+    #[gpui_kit::test]
+    fn a_failed_projects_save_shows_a_hint_and_keeps_the_list(cx: &mut TestAppContext) {
+        use crate::session::{ProjectSettings, ServerKey};
+        let f = fixture(cx, true);
+        open_settings(cx, &f);
+        show_tab(cx, &f, SettingsTab::Projects);
+        let key = ServerKey::new("test");
+        let checkouts = f
+            .shell
+            .update(cx, |s, cx| s.checkouts(&key, cx))
+            .expect("server");
+        let list = vec![ProjectSettings::new("demo/a", "/nowhere/a")];
+        f.shell.update(cx, |s, cx| s.save_projects(list, cx));
+        cx.run_until_parked();
+        let page = cx.update(|cx| f.shell.read(cx).settings_page_for_test().expect("page"));
+        let hint = page.read_with(cx, |p, _| p.hint_for_test());
+        let (text, error) = hint.expect("a hint");
+        assert!(error);
+        assert!(text.contains("Could not save the projects"), "{text}");
+        assert!(text.contains("disk full"), "{text}");
+        assert!(checkouts.read_with(cx, |c, _| c.all().is_empty()));
+    }
+
     // ---- the Projects tab and the project dialog ----
 
     fn tmp_dir(name: &str) -> std::path::PathBuf {

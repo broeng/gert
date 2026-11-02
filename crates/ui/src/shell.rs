@@ -457,12 +457,27 @@ impl Shell {
                             }
                         }
                     }
-                    Err(e) => log::warn!("saving the projects: {e}"),
+                    Err(e) => {
+                        log::warn!("saving the projects: {e}");
+                        this.say_error(format!("Could not save the projects: {e}"), cx);
+                    }
                 }
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Tells the user of a failed background save on the page shown, the way
+    /// the settings tabs do for their own saves. Pages without a hint line
+    /// (the others) leave it to the log.
+    fn say_error(&mut self, text: String, cx: &mut Context<Self>) {
+        match &self.page {
+            Page::Settings(p) => p.update(cx, |p, cx| p.say_error(text, cx)),
+            Page::Change(p) => p.update(cx, |p, cx| p.say_error(text, cx)),
+            Page::Diff(p) => p.update(cx, |p, cx| p.say_error(text, cx)),
+            _ => {}
+        }
     }
 
     /// The outbox of the active server.

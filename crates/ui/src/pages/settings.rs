@@ -497,6 +497,12 @@ impl SettingsPage {
         self.show_tab(tab, cx);
     }
 
+    /// Shows a failure that happened elsewhere (the shell's background
+    /// saves) on the hint line.
+    pub(crate) fn say_error(&mut self, text: String, cx: &mut Context<Self>) {
+        self.hint.say(text, true, cx, |p| &mut p.hint);
+    }
+
     #[cfg(test)]
     pub(crate) fn hint_for_test(&self) -> Option<(String, bool)> {
         self.hint.current().map(|(t, e)| (t.to_owned(), e))
