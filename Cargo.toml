@@ -21,6 +21,7 @@ gerrit-api = { path = "crates/gerrit-api" }
 store = { path = "crates/store" }
 sync = { path = "crates/sync" }
 ui = { path = "crates/ui" }
+local-git = { path = "crates/local-git" }
 
 # GPUI comes only through gpui-kit's re-exports; see CLAUDE.md "GPUI pinning".
 gpui-kit = { git = "https://github.com/longbridge/gpui-component", rev = "1676826d9d49b90f4d7b6808b69924f58796f6f1" } # v0.8.0
