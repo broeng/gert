@@ -200,6 +200,7 @@ impl Backend for AppBackend {
                         color: s.color.clone(),
                         queries: prev.map(|p| p.queries.clone()).unwrap_or_default(),
                         bookmarks: prev.map(|p| p.bookmarks.clone()).unwrap_or_default(),
+                        projects: prev.map(|p| p.projects.clone()).unwrap_or_default(),
                     }
                 })
                 .collect();

@@ -19,6 +19,13 @@
 //! name = "My open"
 //! query = "is:open owner:self"
 //!
+//! # Optional: local checkouts, one per Gerrit project. `checkout` is a
+//! # directory of a git clone of that project; a leading `~` is the home
+//! # directory. Other keys are kept as they are.
+//! [[servers.projects]]
+//! name = "platform/foo"
+//! checkout = "~/src/foo"
+//!
 //! # Optional: file filters. Rules that hide, dim or highlight files of a
 //! # change by path glob. `projects` (exact names), `color`, `bold` and
 //! # `enabled` are optional; `enabled` defaults to true.
@@ -637,6 +644,75 @@ pub struct ServerConfig {
     pub queries: Vec<QueryConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bookmarks: Vec<QueryConfig>,
+    /// The local checkouts (`[[servers.projects]]`). An entry without a
+    /// name or a checkout is skipped, with a warning, when the file is read.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "usable_projects"
+    )]
+    pub projects: Vec<ProjectConfig>,
+}
+
+/// A `[[servers.projects]]` table: where the local clone of a Gerrit
+/// project lives. Further keys in the table are left alone on a rewrite.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectConfig {
+    /// The Gerrit project name, e.g. `demo/scheduler`.
+    pub name: String,
+    /// The directory, as the user wrote it (it may start with `~`).
+    pub checkout: String,
+}
+
+impl ProjectConfig {
+    /// The checkout directory with a leading `~` replaced by the home
+    /// directory. Without a known home directory the path stays as written.
+    pub fn checkout_path(&self) -> PathBuf {
+        expand_home(&self.checkout, home_dir().as_deref())
+    }
+
+    fn is_usable(&self) -> bool {
+        !self.name.trim().is_empty() && !self.checkout.trim().is_empty()
+    }
+}
+
+/// The home directory, from `directories`.
+fn home_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|d| d.home_dir().to_owned())
+}
+
+/// `path` with a leading `~` or `~/` replaced by `home`. Other forms
+/// (`~user`, no `~`) are returned as they are.
+fn expand_home(path: &str, home: Option<&Path>) -> PathBuf {
+    let rest = if path == "~" {
+        Some("")
+    } else {
+        path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
+    };
+    match (rest, home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(path),
+    }
+}
+
+/// Reads `[[servers.projects]]`, skipping entries that miss a name or a
+/// checkout so one bad entry never fails the file.
+fn usable_projects<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ProjectConfig>, D::Error> {
+    let all = Vec::<ProjectConfig>::deserialize(d)?;
+    Ok(all
+        .into_iter()
+        .filter(|p| {
+            let ok = p.is_usable();
+            if !ok {
+                log::warn!(
+                    "config: ignoring a [[servers.projects]] entry without a name or checkout ({:?})",
+                    p.name
+                );
+            }
+            ok
+        })
+        .collect())
 }
 
 impl ServerConfig {
@@ -662,6 +738,9 @@ impl ServerConfig {
             if table_queries(t, key) != *list {
                 apply_queries(key, list, t);
             }
+        }
+        if table_projects(t) != self.projects {
+            apply_projects(&self.projects, t);
         }
     }
 }
@@ -936,6 +1015,7 @@ impl Config {
                 color: None,
                 queries: default_queries(anonymous),
                 bookmarks: Vec::new(),
+                projects: Vec::new(),
             }),
         }
         self
@@ -1369,6 +1449,39 @@ fn apply_queries(key: &str, new: &[QueryConfig], root: &mut toml_edit::Table) {
     );
 }
 
+/// The usable projects of the array of tables `projects` in `t`.
+fn table_projects(t: &toml_edit::Table) -> Vec<ProjectConfig> {
+    match t.get("projects") {
+        Some(Item::ArrayOfTables(a)) => a.iter().filter_map(project_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn project_of(t: &toml_edit::Table) -> Option<ProjectConfig> {
+    let p = ProjectConfig {
+        name: t.get("name")?.as_str()?.to_owned(),
+        checkout: t.get("checkout")?.as_str()?.to_owned(),
+    };
+    p.is_usable().then_some(p)
+}
+
+/// Rewrites the `[[servers.projects]]` tables, see [`apply_array`]. An edit
+/// takes over the table in place with `set_str`, so other keys of the table
+/// and the spelling of an unchanged value stay.
+fn apply_projects(new: &[ProjectConfig], root: &mut toml_edit::Table) {
+    apply_array(
+        root,
+        "projects",
+        new,
+        |p| Some((p.name.clone(), p.checkout.clone())),
+        |t| project_of(t).map(|p| (p.name, p.checkout)),
+        |p, t| {
+            set_str(t, "name", &p.name);
+            set_str(t, "checkout", &p.checkout);
+        },
+    );
+}
+
 /// Rewrites the `[[filters]]` tables, see [`apply_array`]. Tables are
 /// matched on the rule they hold, not on how it is spelled: an explicit
 /// `enabled = true` is the same as none.
@@ -1760,6 +1873,165 @@ advance_after_vote = false
                 .len(),
             4
         );
+    }
+
+    fn proj(name: &str, checkout: &str) -> ProjectConfig {
+        ProjectConfig {
+            name: name.to_owned(),
+            checkout: checkout.to_owned(),
+        }
+    }
+
+    const WITH_PROJECTS: &str = r#"[[servers]]
+id = "g"
+name = "G"
+url = "https://g.example.com"
+
+# first checkout
+[[servers.projects]]
+name = "demo/a"
+checkout = "~/src/a" # home
+flavor = "keep me"
+
+# second checkout
+[[servers.projects]]
+name = "demo/b"
+checkout = "/srv/b"
+
+[[servers.queries]]
+name = "Q"
+query = "status:open"
+"#;
+
+    fn with_projects(name: &str) -> PathBuf {
+        let dir = tmp(name);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, WITH_PROJECTS).unwrap();
+        path
+    }
+
+    #[test]
+    fn parses_projects() {
+        let cfg = parse(WITH_PROJECTS);
+        assert_eq!(
+            cfg.servers[0].projects,
+            vec![proj("demo/a", "~/src/a"), proj("demo/b", "/srv/b")]
+        );
+        assert!(Config::default().servers.is_empty());
+    }
+
+    #[test]
+    fn projects_without_name_or_checkout_are_skipped() {
+        let cfg = parse(
+            r#"[[servers]]
+id = "g"
+name = "G"
+url = "https://g.example.com"
+
+[[servers.projects]]
+name = "demo/a"
+
+[[servers.projects]]
+checkout = "/x"
+
+[[servers.projects]]
+name = " "
+checkout = "/x"
+
+[[servers.projects]]
+name = "demo/ok"
+checkout = "/ok"
+"#,
+        );
+        assert_eq!(cfg.servers[0].projects, vec![proj("demo/ok", "/ok")]);
+    }
+
+    #[test]
+    fn home_is_expanded_when_read_only() {
+        let home = Path::new("/home/u");
+        assert_eq!(expand_home("~", Some(home)), PathBuf::from("/home/u"));
+        assert_eq!(
+            expand_home("~/a/b", Some(home)),
+            PathBuf::from("/home/u/a/b")
+        );
+        assert_eq!(expand_home("/a/~/b", Some(home)), PathBuf::from("/a/~/b"));
+        assert_eq!(expand_home("~x/a", Some(home)), PathBuf::from("~x/a"));
+        assert_eq!(expand_home("~/a", None), PathBuf::from("~/a"));
+        // The stored spelling is untouched.
+        let p = proj("n", "~/a");
+        let _ = p.checkout_path();
+        assert_eq!(p.checkout, "~/a");
+    }
+
+    #[test]
+    fn unchanged_projects_round_trip_byte_for_byte() {
+        let path = with_projects("proj-same");
+        Config::update(&path, |c| c.servers[0].queries[0].name = "Q2".into()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(&WITH_PROJECTS[..WITH_PROJECTS.find("[[servers.queries]]").unwrap()]),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn editing_a_project_keeps_comments_and_unknown_keys() {
+        let path = with_projects("proj-edit");
+        Config::update(&path, |c| {
+            c.servers[0].projects[0].checkout = "~/code/a".into()
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        for kept in [
+            "# first checkout",
+            "# second checkout",
+            "flavor = \"keep me\"",
+            "checkout = \"/srv/b\"",
+        ] {
+            assert!(text.contains(kept), "lost {kept}: {text}");
+        }
+        assert!(text.contains("checkout = \"~/code/a\""), "{text}");
+        let cfg = Config::load(&path).unwrap().unwrap();
+        assert_eq!(cfg.servers[0].projects[0], proj("demo/a", "~/code/a"));
+        assert_eq!(cfg.servers[0].queries.len(), 1);
+    }
+
+    #[test]
+    fn adding_and_removing_a_project() {
+        let path = with_projects("proj-addrm");
+        Config::update(&path, |c| c.servers[0].projects.push(proj("demo/c", "/c"))).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# first checkout") && text.contains("flavor"),
+            "{text}"
+        );
+        assert_eq!(
+            Config::load(&path).unwrap().unwrap().servers[0]
+                .projects
+                .len(),
+            3
+        );
+
+        Config::update(&path, |c| {
+            c.servers[0].projects.remove(1);
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# first checkout") && text.contains("flavor"),
+            "{text}"
+        );
+        assert!(!text.contains("demo/b"), "{text}");
+        assert!(text.contains("[[servers.queries]]"), "{text}");
+        assert_eq!(
+            Config::load(&path).unwrap().unwrap().servers[0].projects,
+            vec![proj("demo/a", "~/src/a"), proj("demo/c", "/c")]
+        );
+
+        Config::update(&path, |c| c.servers[0].projects.clear()).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("projects"), "{text}");
     }
 
     #[test]
