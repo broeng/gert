@@ -8,7 +8,12 @@ use serde::{Deserialize, Serialize};
 /// patch set on Gerrit is not the commit voted on (`local_approval` of a
 /// `[[servers.projects]]` entry). A vote on the exact commit that is
 /// uploaded is cast in every mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// The modes are ordered from the most to the least permissive, so the
+/// stricter of two is their `max`.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum LocalApproval {
     /// Cast the votes on what is uploaded.
@@ -64,5 +69,14 @@ mod tests {
         assert_eq!(LocalApproval::parse("strict"), None);
         assert_eq!(LocalApproval::parse(""), None);
         assert_eq!(LocalApproval::default(), LocalApproval::Exact);
+    }
+
+    #[test]
+    fn the_stricter_mode_is_the_max() {
+        use LocalApproval::*;
+        assert_eq!(Follow.max(Exact), Exact);
+        assert_eq!(ExactOrManual.max(Follow), ExactOrManual);
+        assert_eq!(Exact.max(ExactOrManual), Exact);
+        assert!(LocalApproval::ALL.is_sorted());
     }
 }
