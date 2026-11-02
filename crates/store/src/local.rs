@@ -100,6 +100,9 @@ pub struct LocalChangeUpsert {
     pub change_id: String,
     /// Set when `Some`; `None` keeps what the row has (NULL for a new one).
     /// A local number fails the reconcile with [`Error::LocalTarget`].
+    /// When a row gets its first Gerrit change, the drafts and pending
+    /// reviews on its synthetic number move onto that change (keeping
+    /// their local patch set numbers).
     pub gerrit_number: Option<ChangeNumber>,
     pub subject: String,
     pub author_name: String,
@@ -147,7 +150,8 @@ pub enum LocalOp {
     /// gives its drafts and reviews to `into`'s copy), the drafts on
     /// `from`'s synthetic number and its pending reviews follow, and `from`
     /// is deleted. `into` keeps its fields and state, and takes `from`'s
-    /// `gerrit_number` if it has none.
+    /// `gerrit_number` if it has none (moving its own drafts and reviews on
+    /// its synthetic number onto that change too).
     Merge {
         from: Seen,
         into: Seen,
@@ -412,6 +416,29 @@ fn add_patch_sets(
             ])?;
     }
     Ok(added)
+}
+
+/// Moves the drafts and pending reviews on local change `id`'s synthetic
+/// number onto Gerrit change `gerrit`, keeping their (local) patch set
+/// numbers: once a row has a Gerrit change, its local versions are local
+/// patch sets of that change, and their data belongs there. Inside the
+/// caller's transaction.
+fn move_to_gerrit_number(
+    conn: &Connection,
+    server: ServerId,
+    id: LocalChangeId,
+    gerrit: ChangeNumber,
+) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE drafts SET change_number = ?3 WHERE server_id = ?1 AND change_number = ?2",
+        params![server.0, synthetic(id), number(gerrit)],
+    )?;
+    conn.execute(
+        "UPDATE pending_reviews SET change_number = ?3
+         WHERE server_id = ?1 AND change_number = ?2",
+        params![server.0, synthetic(id), number(gerrit)],
+    )?;
+    Ok(())
 }
 
 /// The row an upsert without an id is about.
@@ -887,6 +914,11 @@ fn upsert(
                     ],
                 )?;
             }
+            if c.gerrit_number.is_none()
+                && let Some(g) = gerrit_number
+            {
+                move_to_gerrit_number(conn, server, c.id, g)?;
+            }
             let mut changed = !same;
             if let Some(state) = u.state
                 && state != c.state
@@ -1002,6 +1034,9 @@ fn merge(
             "UPDATE local_changes SET gerrit_number = ?3 WHERE server_id = ?1 AND id = ?2",
             params![server.0, into.id.0, gerrit_number.map(number)],
         )?;
+        if let Some(g) = gerrit_number {
+            move_to_gerrit_number(conn, server, into.id, g)?;
+        }
     }
     delete_change(conn, server, from.id)?;
     Ok(())

@@ -858,3 +858,67 @@ fn caching_a_change_detail_maps_the_local_versions_it_contains() {
     assert!(!s.is_local_sha(id, &"gerrit2".into()).unwrap());
     assert!(s.is_local_sha(id, &"v9".into()).unwrap());
 }
+
+#[test]
+fn a_row_that_gets_a_gerrit_change_takes_its_drafts_and_reviews_along() {
+    let (mut s, id) = setup();
+    let c = add(&mut s, id, upsert("I1", Some("main"), &["v1"]));
+    let v1 = s.local_patch_sets(id, c.id).unwrap().remove(0);
+    let d = s
+        .create_draft(id, c.number, &psref(&v1), &draft_input("x"), ts(T1))
+        .unwrap();
+    let r = s.create_pending_review(id, &review(&v1)).unwrap();
+    assert_eq!(r.change, c.number);
+
+    let mut u = upsert("I1", Some("main"), &[]);
+    u.seen = Some(seen(&c));
+    u.gerrit_number = Some(ChangeNumber(42));
+    s.reconcile_local(id, "p", &[LocalOp::Upsert(u)], ts(T1))
+        .unwrap();
+    // On the Gerrit change now, still on the local patch set.
+    let drafts = s.load_drafts(id, ChangeNumber(42)).unwrap();
+    let ids: Vec<_> = drafts.iter().map(|d| d.local_id).collect();
+    assert!(ids.contains(&d.local_id));
+    assert!(drafts.iter().all(|d| d.patch_set == v1.number));
+    assert!(s.load_drafts(id, c.number).unwrap().is_empty());
+    let reviews = s.pending_reviews(id, ChangeNumber(42)).unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!((reviews[0].id, reviews[0].patch_set), (r.id, v1.number));
+    assert!(s.has_unsent(id, c.id).unwrap());
+    // And they still go with the change.
+    s.delete_local_change(id, c.id).unwrap();
+    assert!(s.load_drafts(id, ChangeNumber(42)).unwrap().is_empty());
+    assert!(s.pending_reviews(id, ChangeNumber(42)).unwrap().is_empty());
+}
+
+#[test]
+fn a_merge_that_brings_a_gerrit_change_moves_the_survivors_data_too() {
+    let (mut s, id) = setup();
+    let into = add(&mut s, id, upsert("I1", Some("stable"), &["v2"]));
+    let mut from = upsert("I1", Some("main"), &["v1"]);
+    from.gerrit_number = Some(ChangeNumber(42));
+    let from = add(&mut s, id, from);
+    let v2 = s.local_patch_sets(id, into.id).unwrap().remove(0);
+    let d = s
+        .create_draft(id, into.number, &psref(&v2), &draft_input("x"), ts(T1))
+        .unwrap();
+    s.reconcile_local(
+        id,
+        "p",
+        &[LocalOp::Merge {
+            from: seen(&from),
+            into: seen(&into),
+        }],
+        ts(T1),
+    )
+    .unwrap();
+    assert_eq!(
+        s.local_change(id, into.id).unwrap().unwrap().gerrit_number,
+        Some(ChangeNumber(42))
+    );
+    let moved = s.load_draft(id, d.local_id).unwrap().unwrap();
+    assert_eq!(
+        (moved.change, moved.patch_set),
+        (ChangeNumber(42), v2.number)
+    );
+}
