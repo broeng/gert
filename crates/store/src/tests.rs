@@ -797,3 +797,135 @@ fn a_slug_follows_an_edited_url() {
     assert!(s.load_query(a, "q").unwrap().is_some());
     assert_eq!(s.server_id("https://new.example").unwrap(), a);
 }
+
+// ---- v11: local changes ----
+
+const INSERT_LOCAL_CHANGE: &str = "INSERT INTO local_changes (server_id, project, branch,
+        change_id, subject, author_name, author_email, updated_ms, state, first_seen_ms)
+    VALUES (?1, 'p', ?2, ?3, 's', 'A', 'a@x', 0, 'local', 0)";
+
+#[test]
+fn v11_adds_the_local_tables_from_every_older_version() {
+    for from in 1..MIGRATIONS.len() {
+        let mut conn = db_at_version(from);
+        conn.execute(
+            "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+            [],
+        )
+        .unwrap();
+        let had_drafts = from >= 4;
+        if had_drafts {
+            conn.execute(
+                "INSERT INTO drafts (server_id, change_number, patch_set, revision_sha, path,
+                     side, message, unresolved, updated_ms, state)
+                 VALUES (1, 5, 1, 'aaa', 'f', 'REVISION', 'm', 1, 0, 'synced')",
+                [],
+            )
+            .unwrap();
+        }
+        migrate(&mut conn, MIGRATIONS).unwrap();
+        assert_eq!(user_version(&conn).unwrap() as usize, MIGRATIONS.len());
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM servers"), 1, "from v{from}");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM drafts WHERE pending_review_id IS NULL"),
+            i64::from(had_drafts),
+            "from v{from}"
+        );
+        for t in ["local_changes", "local_patch_sets", "pending_reviews"] {
+            assert_eq!(count(&format!("SELECT COUNT(*) FROM {t}")), 0, "{t}");
+        }
+        // The existing draft is readable through the store.
+        let s = Store { conn };
+        if had_drafts {
+            let drafts = s.load_drafts(ServerId(1), ChangeNumber(5)).unwrap();
+            assert_eq!(drafts.len(), 1);
+            assert_eq!(drafts[0].pending_review, None);
+        }
+    }
+}
+
+#[test]
+fn v11_local_change_key_has_one_row_per_unknown_branch() {
+    let conn = db_at_version(MIGRATIONS.len());
+    conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x'), (2, 'https://y')",
+        [],
+    )
+    .unwrap();
+    let insert = |conn: &Connection, server: i64, branch: Option<&str>, change_id: &str| {
+        conn.execute(
+            INSERT_LOCAL_CHANGE,
+            rusqlite::params![server, branch, change_id],
+        )
+    };
+    insert(&conn, 1, None, "I1").unwrap();
+    // A second row without a branch for the same Change-Id is refused,
+    // although UNIQUE alone would let NULLs through.
+    assert!(insert(&conn, 1, None, "I1").is_err());
+    insert(&conn, 1, Some("main"), "I1").unwrap();
+    assert!(insert(&conn, 1, Some("main"), "I1").is_err());
+    insert(&conn, 1, Some("stable"), "I1").unwrap();
+    insert(&conn, 1, None, "I2").unwrap();
+    insert(&conn, 2, None, "I1").unwrap();
+    // Unknown servers are refused, and removing one removes its rows.
+    assert!(insert(&conn, 9, None, "I1").is_err());
+    conn.execute("DELETE FROM servers WHERE id = 1", [])
+        .unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM local_changes", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn v11_cascades_and_unseals() {
+    let conn = db_at_version(MIGRATIONS.len());
+    conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+    conn.execute(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x')",
+        [],
+    )
+    .unwrap();
+    conn.execute(INSERT_LOCAL_CHANGE, rusqlite::params![1, "main", "I1"])
+        .unwrap();
+    conn.execute_batch(
+        "INSERT INTO local_patch_sets (local_change_id, server_id, sha, seen_ms, ordinal)
+             VALUES (1, 1, 'aaa', 0, 1);
+         INSERT INTO pending_reviews (server_id, local_change_id, change_number, patch_set,
+                 given_on_sha, labels, strategy, state, created_ms)
+             VALUES (1, 1, 5, 6, 'aaa', '{}', 'exact', 'pending', 0),
+                    (1, NULL, 5, 6, 'aaa', '{}', 'exact', 'pending', 0);
+         INSERT INTO drafts (server_id, change_number, patch_set, revision_sha, path, side,
+                 message, unresolved, updated_ms, state, pending_review_id)
+             VALUES (1, 5, 6, 'aaa', '/PATCHSET_LEVEL', 'REVISION', 'm', 0, 0,
+                 'pending_create', 2);",
+    )
+    .unwrap();
+    // One message draft per review.
+    assert!(
+        conn.execute(
+            "INSERT INTO drafts (server_id, change_number, patch_set, revision_sha, path, side,
+                 message, unresolved, updated_ms, state, pending_review_id)
+             VALUES (1, 5, 6, 'aaa', '/PATCHSET_LEVEL', 'REVISION', 'm', 0, 0,
+                 'pending_create', 2)",
+            [],
+        )
+        .is_err()
+    );
+    let count =
+        |conn: &Connection, sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    conn.execute("DELETE FROM local_changes", []).unwrap();
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM local_patch_sets"), 0);
+    assert_eq!(count(&conn, "SELECT COUNT(*) FROM pending_reviews"), 1);
+    // Removing a review unseals its message draft rather than dangling.
+    conn.execute("DELETE FROM pending_reviews", []).unwrap();
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT COUNT(*) FROM drafts WHERE pending_review_id IS NULL"
+        ),
+        1
+    );
+}

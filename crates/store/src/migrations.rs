@@ -256,6 +256,82 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE inbox ADD COLUMN seen_ms INTEGER;
     ",
+    // v10 -> v11: local changes, the user's unpushed commits (`local.rs`).
+    //
+    // `local_changes` has one row per (server, project, target branch,
+    // Change-Id); `branch` is NULL when the target is unknown. UNIQUE treats
+    // NULLs as distinct, so the key is an expression index over
+    // `COALESCE(branch, '')` (git branch names are never empty). `state` is
+    // one of checking, local, ambiguous, vanished, closed, consolidated.
+    // `local_patch_sets` holds the versions (commits) of a change;
+    // `gerrit_patch_set` is the Gerrit patch set with the same commit, once
+    // there is one. `pending_reviews` are votes and a message given on a
+    // local patch set, waiting to be sent: `labels` is a JSON object of
+    // label → vote, `strategy` the project's `local_approval` at vote time,
+    // `state` one of pending, sending, held, sent, failed.
+    //
+    // Ids are AUTOINCREMENT so that they are never reused: the synthetic
+    // change and patch set numbers are derived from them. Times are Unix
+    // milliseconds. `drafts.pending_review_id` marks a pending review's
+    // message draft (sealed); a review has at most one.
+    "
+    CREATE TABLE local_changes (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id     INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        project       TEXT NOT NULL,
+        branch        TEXT,
+        change_id     TEXT NOT NULL,
+        gerrit_number INTEGER,
+        subject       TEXT NOT NULL,
+        author_name   TEXT NOT NULL,
+        author_email  TEXT NOT NULL,
+        updated_ms    INTEGER NOT NULL,
+        state         TEXT NOT NULL,
+        first_seen_ms INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX local_changes_key
+        ON local_changes (server_id, project, COALESCE(branch, ''), change_id);
+    CREATE INDEX local_changes_by_change_id ON local_changes (server_id, change_id);
+    CREATE INDEX local_changes_by_gerrit ON local_changes (server_id, gerrit_number)
+        WHERE gerrit_number IS NOT NULL;
+
+    CREATE TABLE local_patch_sets (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        local_change_id  INTEGER NOT NULL REFERENCES local_changes(id) ON DELETE CASCADE,
+        server_id        INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        sha              TEXT NOT NULL,
+        parent_sha       TEXT,
+        seen_ms          INTEGER NOT NULL,
+        ordinal          INTEGER NOT NULL,
+        gerrit_patch_set INTEGER,
+        UNIQUE (local_change_id, sha),
+        UNIQUE (local_change_id, ordinal)
+    );
+    CREATE INDEX local_patch_sets_by_sha ON local_patch_sets (server_id, sha);
+
+    CREATE TABLE pending_reviews (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id       INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        local_change_id INTEGER REFERENCES local_changes(id) ON DELETE CASCADE,
+        change_number   INTEGER NOT NULL,
+        patch_set       INTEGER NOT NULL,
+        given_on_sha    TEXT NOT NULL,
+        labels          TEXT NOT NULL,
+        strategy        TEXT NOT NULL,
+        state           TEXT NOT NULL,
+        error           TEXT,
+        held_reason     TEXT,
+        created_ms      INTEGER NOT NULL,
+        nonce           TEXT
+    );
+    CREATE INDEX pending_reviews_by_change ON pending_reviews (server_id, change_number);
+    CREATE INDEX pending_reviews_by_local ON pending_reviews (local_change_id);
+
+    ALTER TABLE drafts ADD COLUMN pending_review_id INTEGER
+        REFERENCES pending_reviews(id) ON DELETE SET NULL;
+    CREATE UNIQUE INDEX drafts_by_pending_review ON drafts (pending_review_id)
+        WHERE pending_review_id IS NOT NULL;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

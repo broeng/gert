@@ -46,7 +46,7 @@
 
 use model::{
     ChangeNumber, Comment, Draft, DraftInput, DraftOp, DraftSync, LocalDraftId, Location,
-    PatchSetNumber, PatchSetRef, RevisionId, Side, Timestamp,
+    PatchSetNumber, PatchSetRef, PendingReviewId, RevisionId, Side, Timestamp,
 };
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -118,7 +118,8 @@ impl MergeReport {
 
 const COLUMNS: &str = "id, change_number, patch_set, revision_sha, server_draft_id, path, side, \
      parent, line, start_line, start_character, end_line, end_character, in_reply_to, message, \
-     unresolved, updated_ms, state, failed_op, error, retryable, attempts, last_error, version";
+     unresolved, updated_ms, state, failed_op, error, retryable, attempts, last_error, version, \
+     pending_review_id";
 
 #[derive(Debug)]
 struct BadColumn(String);
@@ -210,7 +211,7 @@ fn draft_from_row(r: &Row<'_>) -> rusqlite::Result<Draft> {
         attempts: u32::try_from(r.get::<_, i64>(21)?).unwrap_or(u32::MAX),
         last_error: r.get(22)?,
         version: u32::try_from(r.get::<_, i64>(23)?).unwrap_or(u32::MAX),
-        pending_review: None,
+        pending_review: r.get::<_, Option<i64>>(24)?.map(PendingReviewId),
     })
 }
 
