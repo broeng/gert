@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use model::{COMMIT_MSG_PATH, FileEntry, FileStatus, file_order};
 
-use crate::compare::{BaseKind, CommitData, Comparison};
-use crate::{Error, Local, Repo};
+use crate::compare::{BaseKind, Comparison};
+use crate::{Error, Local, Repo, commit_msg};
 
 /// Gerrit's rename similarity threshold.
 const RENAME_SCORE: &str = "-M60%";
@@ -31,7 +31,7 @@ impl Repo {
                 "--raw",
                 "--numstat",
                 &cmp.base,
-                &cmp.target.sha,
+                cmp.target.sha.as_str(),
             ],
             None,
         )?;
@@ -196,9 +196,9 @@ pub(crate) fn parse_diff_tree(out: &[u8]) -> Result<Vec<RawChange>, Error> {
 /// The `/COMMIT_MSG` entry: the synthetic file against nothing (a parent
 /// comparison) or against the base patch set's synthetic file.
 fn commit_msg_entry(cmp: &Comparison) -> FileEntry {
-    let new = synthetic_commit_file(&cmp.target, &cmp.parent_subject);
+    let new = commit_msg::text(&cmp.target, &cmp.parent_subjects);
     let old = match (cmp.base_kind, &cmp.base_commit) {
-        (BaseKind::PatchSet, Some(base)) => synthetic_commit_file(base, &cmp.parent_subject),
+        (BaseKind::PatchSet, Some(base)) => commit_msg::text(base, &cmp.parent_subjects),
         _ => String::new(),
     };
     let (inserted, deleted) = crate::diff::count_changed_lines(&old, &new);
@@ -220,77 +220,4 @@ fn commit_msg_entry(cmp: &Comparison) -> FileEntry {
         size,
         binary: false,
     }
-}
-
-/// The text of Gerrit's `/COMMIT_MSG` file (verified against 3.14, line
-/// counts and size match): a header of the parent (8 hex digits and its
-/// subject), author, author date, committer and commit date, a blank line
-/// and the message as stored.
-fn synthetic_commit_file(c: &CommitData, parent_subject: &str) -> String {
-    let mut s = String::new();
-    if let Some(parent) = c.parents.first() {
-        s.push_str(&format!(
-            "Parent:     {} ({parent_subject})\n",
-            &parent[..parent.len().min(8)]
-        ));
-    }
-    s.push_str(&format!("Author:     {}\n", person(&c.author)));
-    s.push_str(&format!("AuthorDate: {}\n", date(&c.author)));
-    s.push_str(&format!("Commit:     {}\n", person(&c.committer)));
-    s.push_str(&format!("CommitDate: {}\n\n", date(&c.committer)));
-    s.push_str(&c.message);
-    if !c.message.ends_with('\n') {
-        s.push('\n');
-    }
-    s
-}
-
-/// `Name <email>` from a stored `Name <email> secs tz` ident.
-fn person(ident: &str) -> &str {
-    ident.rsplitn(3, ' ').nth(2).unwrap_or(ident)
-}
-
-/// `YYYY-MM-DD hh:mm:ss +hhmm` from a stored ident.
-fn date(ident: &str) -> String {
-    let mut it = ident.rsplitn(3, ' ');
-    let (Some(tz), Some(secs)) = (it.next(), it.next()) else {
-        return String::new();
-    };
-    let Ok(secs) = secs.parse::<i64>() else {
-        return String::new();
-    };
-    let offset = tz_offset_seconds(tz);
-    let local = secs + offset;
-    let days = local.div_euclid(86_400);
-    let rem = local.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02} {tz}",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
-}
-
-fn tz_offset_seconds(tz: &str) -> i64 {
-    let sign = if tz.starts_with('-') { -1 } else { 1 };
-    let digits = tz.trim_start_matches(['+', '-']);
-    let (h, m) = (digits.get(..2), digits.get(2..4));
-    let h: i64 = h.and_then(|h| h.parse().ok()).unwrap_or(0);
-    let m: i64 = m.and_then(|m| m.parse().ok()).unwrap_or(0);
-    sign * (h * 3600 + m * 60)
-}
-
-/// Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
 }

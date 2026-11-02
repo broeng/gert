@@ -1,7 +1,8 @@
 //! Resolving which two commits a Gerrit comparison means.
 
-use model::RevisionId;
+use model::{CommitInfo, RevisionId};
 
+use crate::commits::parse_commit;
 use crate::git::Object;
 use crate::{Error, Local, NotLocal, Repo, is_object_id};
 
@@ -15,25 +16,6 @@ pub enum BaseKind {
     PatchSet,
 }
 
-/// The parts of a commit the comparison needs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitData {
-    pub sha: String,
-    pub parents: Vec<String>,
-    /// `Name <email> <unix seconds> <+hhmm>` of the author, as stored.
-    pub author: String,
-    pub committer: String,
-    /// The full commit message, as stored.
-    pub message: String,
-}
-
-impl CommitData {
-    /// The first line of the message.
-    pub fn subject(&self) -> &str {
-        self.message.lines().next().unwrap_or("")
-    }
-}
-
 /// Two sides to compare, both present in the checkout. Made by
 /// [`Repo::resolve`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,12 +24,12 @@ pub struct Comparison {
     pub(crate) base: String,
     pub(crate) base_kind: BaseKind,
     /// The base commit for [`BaseKind::PatchSet`].
-    pub(crate) base_commit: Option<CommitData>,
-    pub(crate) target: CommitData,
-    /// The subject of the target's first parent, which Gerrit prints in the
-    /// `Parent:` line of `/COMMIT_MSG`. Empty for a root commit or when the
-    /// parent is not in the checkout.
-    pub(crate) parent_subject: String,
+    pub(crate) base_commit: Option<CommitInfo>,
+    pub(crate) target: CommitInfo,
+    /// The subjects of the target's parents (which are the base's too),
+    /// which Gerrit prints in the header of `/COMMIT_MSG`; see
+    /// [`Repo::parent_subjects`].
+    pub(crate) parent_subjects: Vec<String>,
 }
 
 impl Comparison {
@@ -56,7 +38,7 @@ impl Comparison {
     }
 
     /// The target commit.
-    pub fn target(&self) -> &CommitData {
+    pub fn target(&self) -> &CommitInfo {
         &self.target
     }
 }
@@ -89,19 +71,21 @@ impl Repo {
                         base_kind: BaseKind::Parent,
                         base_commit: None,
                         target,
-                        parent_subject: String::new(),
+                        parent_subjects: Vec::new(),
                     }))
                 }
                 [parent] => {
-                    let Some(parent_data) = self.commit_data(parent)? else {
-                        return Ok(Local::NotLocal(NotLocal::MissingCommit(parent.clone())));
+                    let Some(parent_data) = self.commit_data(parent.as_str())? else {
+                        return Ok(Local::NotLocal(NotLocal::MissingCommit(
+                            parent.as_str().to_owned(),
+                        )));
                     };
                     Ok(Local::Available(Comparison {
-                        base: parent.clone(),
+                        base: parent.as_str().to_owned(),
                         base_kind: BaseKind::Parent,
                         base_commit: None,
+                        parent_subjects: vec![parent_data.subject()],
                         target,
-                        parent_subject: parent_data.subject().to_owned(),
                     }))
                 }
                 _ => Ok(Local::NotLocal(NotLocal::MergeCommit)),
@@ -115,28 +99,38 @@ impl Repo {
                 if base.parents != target.parents {
                     return Ok(Local::NotLocal(NotLocal::ParentsDiffer));
                 }
-                let parent_subject = match target.parents.first() {
-                    Some(p) => self
-                        .commit_data(p)?
-                        .map(|c| c.subject().to_owned())
-                        .unwrap_or_default(),
-                    None => String::new(),
-                };
+                let parent_subjects = self.parent_subjects(&target)?;
                 Ok(Local::Available(Comparison {
-                    base: base.sha.clone(),
+                    base: base.sha.as_str().to_owned(),
                     base_kind: BaseKind::PatchSet,
                     base_commit: Some(base),
                     target,
-                    parent_subject,
+                    parent_subjects,
                 }))
             }
         }
     }
 
+    /// The subject of each of the commit's parents, as Gerrit shows it
+    /// ([`CommitInfo::subject`]), empty for a parent that is not in the
+    /// checkout.
+    pub(crate) fn parent_subjects(&self, commit: &CommitInfo) -> Result<Vec<String>, Error> {
+        commit
+            .parents
+            .iter()
+            .map(|p| {
+                Ok(self
+                    .commit_data(p.as_str())?
+                    .map(|c| c.subject())
+                    .unwrap_or_default())
+            })
+            .collect()
+    }
+
     /// The commit's parents and message, or `None` when it is not here.
     /// Read from the raw object, so shallow and graft files do not hide
     /// parents.
-    fn commit_data(&self, sha: &str) -> Result<Option<CommitData>, Error> {
+    pub(crate) fn commit_data(&self, sha: &str) -> Result<Option<CommitInfo>, Error> {
         if !is_object_id(sha) || !self.has_commit(&RevisionId(sha.to_owned()))? {
             return Ok(None);
         }
@@ -157,31 +151,5 @@ impl Repo {
             .git
             .run(&["hash-object", "-t", "tree", "--stdin"], Some(b""))?;
         Ok(String::from_utf8_lossy(&out).trim().to_owned())
-    }
-}
-
-fn parse_commit(sha: &str, raw: &[u8]) -> CommitData {
-    let text = String::from_utf8_lossy(raw);
-    let (headers, message) = match text.split_once("\n\n") {
-        Some((h, m)) => (h, m),
-        None => (&*text, ""),
-    };
-    let mut parents = Vec::new();
-    let (mut author, mut committer) = (String::new(), String::new());
-    for line in headers.lines() {
-        if let Some(p) = line.strip_prefix("parent ") {
-            parents.push(p.to_owned());
-        } else if let Some(a) = line.strip_prefix("author ") {
-            author = a.to_owned();
-        } else if let Some(c) = line.strip_prefix("committer ") {
-            committer = c.to_owned();
-        }
-    }
-    CommitData {
-        sha: sha.to_owned(),
-        parents,
-        author,
-        committer,
-        message: message.to_owned(),
     }
 }

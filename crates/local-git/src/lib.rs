@@ -15,6 +15,7 @@
 //! the synthetic `/COMMIT_MSG` file, ...) is not an error: it yields
 //! [`Local::NotLocal`] and the caller asks Gerrit instead.
 
+mod commit_msg;
 mod commits;
 mod compare;
 mod diff;
@@ -23,7 +24,7 @@ mod files;
 mod git;
 mod intraline;
 
-pub use compare::{BaseKind, CommitData, Comparison};
+pub use compare::{BaseKind, Comparison};
 pub use error::{Error, NotLocal};
 
 use std::path::Path;

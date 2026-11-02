@@ -323,7 +323,7 @@ fn branch_targets(records: &[RefRecord]) -> BranchTargets {
 ///
 /// The message is always read as UTF-8, lossily: honouring the `encoding`
 /// header (commits written in Latin-1 and the like) is out of scope.
-fn parse_commit(sha: &str, raw: &[u8]) -> CommitInfo {
+pub(crate) fn parse_commit(sha: &str, raw: &[u8]) -> CommitInfo {
     let text = String::from_utf8_lossy(raw);
     let (headers, message) = text.split_once("\n\n").unwrap_or((&text, ""));
     let mut parents = Vec::new();

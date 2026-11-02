@@ -61,7 +61,7 @@ impl Repo {
         }
         let names = [
             format!("{}:{old_name}", cmp.base),
-            format!("{}:{path}", cmp.target.sha),
+            format!("{}:{path}", cmp.target.sha.as_str()),
         ];
         let mut objects = self.git.read_objects(&names)?.into_iter();
         let (Some(old), Some(new)) = (objects.next(), objects.next()) else {
