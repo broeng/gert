@@ -8,12 +8,15 @@ use store::Store;
 use sync::notify::NotificationSettings;
 
 use ui::{
-    Backend, BackendError, ColorModes, SavedQuery, ServerBackend, ServerConfig as UiServerConfig,
-    ServerKey, StartupPage as UiStartupPage, ThemeName, filters::FileFilter, server_name_from_url,
+    Backend, BackendError, ColorModes, ProjectSettings, SavedQuery, ServerBackend,
+    ServerConfig as UiServerConfig, ServerKey, StartupPage as UiStartupPage, ThemeName,
+    filters::FileFilter, server_name_from_url,
 };
 
 use crate::{
-    config::{Config, FilterConfig, QueryConfig, ServerConfig, StartupConfig, StartupPage},
+    config::{
+        Config, FilterConfig, ProjectConfig, QueryConfig, ServerConfig, StartupConfig, StartupPage,
+    },
     secrets::SecretStore,
 };
 
@@ -30,6 +33,32 @@ pub fn queries_to_ui(queries: &[QueryConfig]) -> Vec<SavedQuery> {
         .map(|q| SavedQuery {
             name: q.name.clone(),
             query: q.query.clone(),
+        })
+        .collect()
+}
+
+pub fn projects_to_ui(projects: &[ProjectConfig]) -> Vec<ProjectSettings> {
+    projects
+        .iter()
+        .map(|p| ProjectSettings {
+            name: p.name.clone(),
+            checkout: p.checkout_path(),
+            written: p.checkout.clone(),
+        })
+        .collect()
+}
+
+/// The config form of the projects: the user's spelling is what is saved.
+fn projects_from_ui(projects: &[ProjectSettings]) -> Vec<ProjectConfig> {
+    projects
+        .iter()
+        .map(|p| ProjectConfig {
+            name: p.name.clone(),
+            checkout: if p.written.is_empty() {
+                p.checkout.to_string_lossy().into_owned()
+            } else {
+                p.written.clone()
+            },
         })
         .collect()
 }
@@ -139,6 +168,14 @@ impl ServerBackend for AppServerBackend {
     fn save_bookmarks(&self, bookmarks: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
         let s = self.update_server(|s| s.bookmarks = queries_from_ui(bookmarks))?;
         Ok(queries_to_ui(&s.bookmarks))
+    }
+
+    fn save_projects(
+        &self,
+        projects: &[ProjectSettings],
+    ) -> Result<Vec<ProjectSettings>, BackendError> {
+        let s = self.update_server(|s| s.projects = projects_from_ui(projects))?;
+        Ok(projects_to_ui(&s.projects))
     }
 }
 
@@ -372,6 +409,33 @@ mod tests {
             None
         );
         assert_eq!(dev_password_from("http://127.0.0.1:8099", None), None);
+    }
+
+    #[test]
+    fn saved_projects_keep_the_users_spelling_and_come_back_expanded() {
+        let dir = std::env::temp_dir().join(format!("backend-projects-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let b = AppBackend {
+            config_file: dir.join("config.toml"),
+            keyring: Arc::new(MemorySecrets::default()),
+            store: mem_store(),
+        };
+        let server = b.server("g");
+        server
+            .save_login("https://g.example.com", None, None)
+            .unwrap();
+        let saved = server
+            .save_projects(&[ProjectSettings::new("demo/a", "/srv/a")])
+            .unwrap();
+        assert_eq!(saved[0].checkout, PathBuf::from("/srv/a"));
+        let tilde = server
+            .save_projects(&[ProjectSettings::new("demo/a", "~/src/a")])
+            .unwrap();
+        assert_eq!(tilde[0].written, "~/src/a");
+        assert_ne!(tilde[0].checkout, PathBuf::from("~/src/a"));
+        let cfg = Config::load(&b.config_file).unwrap().unwrap();
+        assert_eq!(cfg.servers[0].projects[0].checkout, "~/src/a");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1795,7 +1795,11 @@ impl Shell {
             color: known.as_ref().and_then(|k| k.color.clone()),
             server: outcome.server,
             queries: outcome.queries.clone(),
-            bookmarks: known.map(|k| k.bookmarks).unwrap_or_default(),
+            bookmarks: known
+                .as_ref()
+                .map(|k| k.bookmarks.clone())
+                .unwrap_or_default(),
+            projects: known.map(|k| k.projects).unwrap_or_default(),
         };
         let auth = match (&outcome.username, &outcome.password) {
             (Some(username), Some(password)) => Auth::Basic {

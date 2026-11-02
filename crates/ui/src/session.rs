@@ -1,6 +1,9 @@
 //! What the pages share: the cache, the server and the network client.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use gerrit_api::{Auth, GerritClient, HttpClient};
 use store::{ServerId, Store};
@@ -16,6 +19,33 @@ use crate::{
 pub struct SavedQuery {
     pub name: String,
     pub query: String,
+}
+
+/// The local checkout of one Gerrit project (`[[servers.projects]]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSettings {
+    /// The Gerrit project name, e.g. `demo/scheduler`.
+    pub name: String,
+    /// The directory to open, with a leading `~` already expanded. This is
+    /// what the checkout registry opens and compares.
+    pub checkout: PathBuf,
+    /// The path as the user wrote it (`~/src/foo`): what the settings page
+    /// shows and what is saved back, so the spelling in the file survives.
+    pub written: String,
+}
+
+impl ProjectSettings {
+    /// A project from what the user typed. `~` is not expanded here (the
+    /// UI knows no home directory); the backend returns the saved list with
+    /// the path expanded.
+    pub fn new(name: impl Into<String>, written: impl Into<String>) -> Self {
+        let written = written.into();
+        Self {
+            name: name.into(),
+            checkout: PathBuf::from(&written),
+            written,
+        }
+    }
 }
 
 /// What opens on start.
@@ -105,6 +135,17 @@ pub trait ServerBackend: Send + Sync + 'static {
     /// accepting them without saving, for backends with no config file.
     fn save_bookmarks(&self, bookmarks: &[SavedQuery]) -> Result<Vec<SavedQuery>, BackendError> {
         Ok(bookmarks.to_vec())
+    }
+
+    /// Writes the project checkouts of this server to the config file,
+    /// keeping the rest of it as it is. Returns the list now in effect (with
+    /// `~` expanded). Defaults to accepting them without saving, for
+    /// backends with no config file.
+    fn save_projects(
+        &self,
+        projects: &[ProjectSettings],
+    ) -> Result<Vec<ProjectSettings>, BackendError> {
+        Ok(projects.to_vec())
     }
 }
 
@@ -215,6 +256,8 @@ pub struct ServerSetup {
     /// The bookmarks (`[[servers.bookmarks]]`): searches the dashboard has
     /// buttons for.
     pub bookmarks: Vec<SavedQuery>,
+    /// The local checkouts (`[[servers.projects]]`).
+    pub projects: Vec<ProjectSettings>,
 }
 
 /// The user's local diff settings from the config file.

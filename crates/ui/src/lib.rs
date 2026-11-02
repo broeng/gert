@@ -47,8 +47,8 @@ pub use login::{LoginError, LoginOutcome, LoginRequest};
 pub use notifier::{Clicked, Notifier};
 pub use servers::{ACTIVE_SERVER_STATE, Connection};
 pub use session::{
-    Backend, BackendError, Env, LocalDiff, SavedQuery, ServerBackend, ServerConfig, ServerKey,
-    ServerSetup, Startup, StartupPage, server_name_from_url,
+    Backend, BackendError, Env, LocalDiff, ProjectSettings, SavedQuery, ServerBackend,
+    ServerConfig, ServerKey, ServerSetup, Startup, StartupPage, server_name_from_url,
 };
 pub use shell::{Shell, init};
 pub use theme::{ColorMode, ColorModes, ThemeName, set as set_theme, set_color_modes};

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context as _;
 use gert::{
     APP_NAME,
-    backend::{AppBackend, queries_to_ui, startup_to_ui},
+    backend::{AppBackend, projects_to_ui, queries_to_ui, startup_to_ui},
     config::{Config, DiffConfig, Paths},
     http::GpuiHttpClient,
     notifier::DesktopNotifier,
@@ -53,6 +53,7 @@ fn startup() -> anyhow::Result<Prepared> {
             server: store.server_for_slug(&s.id, &s.url)?,
             queries: queries_to_ui(&s.queries),
             bookmarks: queries_to_ui(&s.bookmarks),
+            projects: projects_to_ui(&s.projects),
         });
     }
     // The server shown last time; the UI falls back to the first one if it

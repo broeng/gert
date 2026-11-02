@@ -1233,6 +1233,7 @@ fn main() {
                     query: "status:open".into(),
                 }],
                 bookmarks: Vec::new(),
+                projects: Vec::new(),
             }
         })
         .collect();

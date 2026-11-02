@@ -31,6 +31,7 @@ pub(crate) fn setup() -> ServerSetup {
         server: ServerId(1),
         queries: Vec::new(),
         bookmarks: Vec::new(),
+        projects: Vec::new(),
     }
 }
 
