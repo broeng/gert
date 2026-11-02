@@ -2847,6 +2847,39 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    fn a_click_that_turns_the_choice_off_moves_the_focus_to_the_box(cx: &mut TestAppContext) {
+        let f = projects_fixture_as(cx, Vec::new(), Some("u"));
+        press(cx, &f, "a");
+        fill_dialog(cx, &f, "demo/new", "/src/new");
+        for key in ["tab", "tab", "tab", "space", "tab"] {
+            press(cx, &f, key);
+        }
+        let dialog = project_dialog(cx, &f).expect("dialog");
+        let focus = |cx: &mut TestAppContext| {
+            cx.update_window(f.window, |_, window, cx| {
+                dialog.read(cx).approval_focused_for_test(window)
+            })
+            .expect("window")
+        };
+        assert_eq!(focus(cx), (true, false));
+        assert!(
+            cx.update(|cx| dialog.read(cx).footer_hint_for_test())
+                .contains("Space ticks")
+        );
+        cx.update_window(f.window, |_, window, cx| {
+            dialog.update(cx, |d, cx| d.toggle_local_for_test(window, cx))
+        })
+        .expect("window");
+        cx.run_until_parked();
+        assert_eq!(focus(cx), (false, true));
+        // So Tab goes on to Save, which Space presses.
+        press(cx, &f, "tab");
+        press(cx, &f, "space");
+        assert!(project_dialog(cx, &f).is_none());
+        assert_eq!(saved_projects(&f).len(), 1);
+    }
+
+    #[gpui_kit::test]
     fn the_local_options_cannot_be_changed_on_an_anonymous_server(cx: &mut TestAppContext) {
         use model::LocalApproval;
         let a = tmp_dir("anon-local");
@@ -2861,6 +2894,9 @@ mod settings_page {
         let (local, box_on, choice_on) = local_state(cx, &f);
         assert!(local.changes && !box_on && !choice_on);
         assert_eq!(local.approval, LocalApproval::ExactOrManual);
+        let dialog = project_dialog(cx, &f).expect("dialog");
+        let hint = cx.update(|cx| dialog.read(cx).footer_hint_for_test());
+        assert!(!hint.contains("Space") && !hint.contains("Up"), "{hint}");
         // Tab skips both: after Browse comes Save, and Space presses it.
         for key in ["tab", "tab", "tab", "space"] {
             press(cx, &f, key);

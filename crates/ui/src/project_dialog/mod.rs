@@ -240,6 +240,26 @@ impl ProjectDialog {
         (self.local, !self.anonymous, self.approval_enabled())
     }
 
+    /// A click on the local changes box.
+    #[cfg(test)]
+    pub(crate) fn toggle_local_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_local(window, cx);
+    }
+
+    /// Whether the vote choice has the keyboard focus.
+    #[cfg(test)]
+    pub(crate) fn approval_focused_for_test(&self, window: &Window) -> (bool, bool) {
+        (
+            self.approval_focus.is_focused(window),
+            self.local_focus.is_focused(window),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn footer_hint_for_test(&self) -> &'static str {
+        self.footer_hint()
+    }
+
     /// The list the form makes now, or why not.
     fn built(&self, cx: &App) -> Result<Vec<ProjectSettings>, &'static str> {
         with_project(
@@ -335,13 +355,29 @@ impl ProjectDialog {
 
     // ---- actions ----
 
-    /// Ticks or clears the local changes box.
-    fn toggle_local(&mut self, cx: &mut Context<Self>) {
+    /// Ticks or clears the local changes box. A click that turns the
+    /// vote choice off while it has the focus moves the focus to the box,
+    /// so that Tab goes on from there.
+    fn toggle_local(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.anonymous {
             return;
         }
         self.local.changes = !self.local.changes;
+        if !self.local.changes && self.approval_focus.is_focused(window) {
+            window.focus(&self.local_focus, cx);
+        }
         cx.notify();
+    }
+
+    /// The key hints of the footer: the box and the choice only take keys
+    /// on a signed-in server.
+    fn footer_hint(&self) -> &'static str {
+        if self.anonymous {
+            "Tab next \u{00b7} Enter saves \u{00b7} Esc discards"
+        } else {
+            "Tab next \u{00b7} Space ticks \u{00b7} Up / Down choose \u{00b7} \
+             Enter saves \u{00b7} Esc discards"
+        }
     }
 
     fn set_approval(&mut self, approval: LocalApproval, cx: &mut Context<Self>) {
@@ -462,7 +498,7 @@ impl ProjectDialog {
                             cx,
                         )
                         .self_start()
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_local(cx))),
+                        .on_click(cx.listener(|this, _, w, cx| this.toggle_local(w, cx))),
                     )
                     .child(
                         div()
@@ -570,10 +606,7 @@ impl Render for ProjectDialog {
                     .flex_1()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(
-                        "Tab next \u{00b7} Space ticks \u{00b7} Up / Down choose \u{00b7} \
-                         Enter saves \u{00b7} Esc discards",
-                    ),
+                    .child(self.footer_hint()),
             )
             .child(
                 chip(
