@@ -2700,6 +2700,55 @@ mod settings_page {
         let _ = std::fs::remove_dir_all(&a);
     }
 
+    fn gear(cx: &mut TestAppContext, f: &Fixture, project: &'static str) {
+        cx.update_window(f.window, |_, window, cx| {
+            f.shell.update(cx, |s, cx| {
+                s.open_project_settings_for_test(project, window, cx)
+            })
+        })
+        .expect("gear");
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn the_gear_opens_the_projects_tab_on_the_project(cx: &mut TestAppContext) {
+        let a = tmp_dir("gear");
+        let f = projects_fixture(cx, vec![project("one", &a), project("two", &a)]);
+        let first = tab_state(cx, &f).1;
+        press(cx, &f, "u");
+        cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Dashboard));
+        gear(cx, &f, "two");
+        cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Settings));
+        assert_eq!(tab_state(cx, &f), (SettingsTab::Projects, first + 1));
+        assert!(project_dialog(cx, &f).is_none());
+        let _ = std::fs::remove_dir_all(&a);
+    }
+
+    #[gpui_kit::test]
+    fn the_gear_for_an_unconfigured_project_opens_the_add_dialog(cx: &mut TestAppContext) {
+        let f = fixture(cx, false);
+        gear(cx, &f, "demo/none");
+        cx.update(|cx| assert_eq!(f.shell.read(cx).route(), &Route::Settings));
+        assert_eq!(tab_state(cx, &f).0, SettingsTab::Projects);
+        let dialog = project_dialog(cx, &f).expect("dialog");
+        assert!(!cx.update(|cx| dialog.read(cx).is_edit_for_test()));
+        let name = cx.update(|cx| dialog.read(cx).name_input_for_test());
+        assert_eq!(
+            name.read_with(cx, |s, _| s.value().to_string()),
+            "demo/none"
+        );
+        // Saving adds it.
+        fill_dialog(cx, &f, "demo/none", "/src/none");
+        press(cx, &f, "enter");
+        assert_eq!(
+            saved_projects(&f),
+            vec![vec![crate::session::ProjectSettings::new(
+                "demo/none",
+                "/src/none"
+            )]]
+        );
+    }
+
     #[gpui_kit::test]
     fn moving_a_query_saves_it_and_the_dashboard_follows(cx: &mut TestAppContext) {
         let f = fixture(cx, false);

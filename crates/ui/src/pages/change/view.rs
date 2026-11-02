@@ -4,7 +4,9 @@ use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
@@ -505,7 +507,18 @@ impl ChangePage {
             .child(field(
                 "Repo | Branch",
                 h_flex()
+                    .items_center()
                     .child(project_link)
+                    .child(
+                        Button::new("project-settings")
+                            .icon(IconName::Settings)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Project settings (P S)")
+                            .on_click(cx.listener(|this, _, w, cx| {
+                                this.project_checkout(&ProjectCheckout, w, cx)
+                            })),
+                    )
                     .child(format!(" | {}", c.branch))
                     .into_any_element(),
             ))
@@ -1556,6 +1569,7 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::quick_vote_action))
             .on_action(cx.listener(Self::toggle_filter))
             .on_action(cx.listener(Self::manage_filters))
+            .on_action(cx.listener(Self::project_checkout))
             .on_action(cx.listener(Self::open_in_browser))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))

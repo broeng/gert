@@ -1729,6 +1729,9 @@ impl Shell {
                     };
                     this.open_filters_dialog(context, window, cx)
                 }
+                ChangeEvent::ProjectSettings(project) => {
+                    this.open_project_settings(project, window, cx)
+                }
                 ChangeEvent::Search(q) => this.search(q.clone(), window, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 // Like stepping through files: Back leaves the walk.
@@ -2475,6 +2478,31 @@ impl Shell {
         cx.notify();
     }
 
+    /// The gear next to a change's project: the settings page on the
+    /// Projects tab with the project's checkout selected, or, when the
+    /// project has none, the dialog for a new one with the name filled in.
+    fn open_project_settings(
+        &mut self,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.servers.active() else {
+            return;
+        };
+        let configured = entry.setup.projects.iter().any(|p| p.name == project);
+        self.settings_tab = SettingsTab::Projects;
+        self.navigate(Route::Settings, window, cx);
+        let Page::Settings(page) = &self.page else {
+            return;
+        };
+        if configured {
+            page.update(cx, |p, cx| p.select_project(project, cx));
+        } else {
+            self.open_project_dialog(None, Some(project.to_owned()), window, cx);
+        }
+    }
+
     // ---- go to a change ----
 
     /// Opens the change a link from the web UI points at, like the browser
@@ -2764,6 +2792,16 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn rule_dialog_for_test(&self) -> Option<Entity<NotifyRuleDialog>> {
         self.rule_dialog.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_project_settings_for_test(
+        &mut self,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_project_settings(project, window, cx);
     }
 
     #[cfg(test)]

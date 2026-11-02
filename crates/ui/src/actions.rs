@@ -112,6 +112,9 @@ actions!(
         ToggleReviewed,
         /// `f m` on the change page: open the Manage filters dialog.
         ManageFilters,
+        /// `p s` on the change page: the local checkout settings of the
+        /// change's project.
+        ProjectCheckout,
         // Diff page.
         /// Show or hide the diff preferences panel.
         TogglePrefs,
@@ -459,6 +462,11 @@ pub fn change_entries() -> Vec<Entry> {
             "F M",
             KeyBinding::new("f m", ManageFilters, Some(k)),
             "Manage file filters",
+        ),
+        e(
+            "P S",
+            KeyBinding::new("p s", ProjectCheckout, Some(k)),
+            "Local checkout of the change's project (settings, or add one)",
         ),
         e(
             "Space / Shift-Space",

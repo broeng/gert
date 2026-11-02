@@ -68,7 +68,6 @@ impl SettingsPage {
 
     /// Puts the cursor on the checkout of project `name`, if there is one
     /// (the shell does this when the gear on the change page led here).
-    #[allow(dead_code)] // The gear on the change page uses it.
     pub(crate) fn select_project(&mut self, name: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.project_names.iter().position(|n| n == name) {
             self.cursor = self.projects_row() + i;

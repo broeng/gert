@@ -97,6 +97,9 @@ pub enum ChangeEvent {
     ManageFilters {
         project: String,
     },
+    /// `p s` or the gear next to the project: the settings of the local
+    /// checkout of this project.
+    ProjectSettings(String),
     /// A project or person was clicked: show the search for this query.
     Search(String),
 }
@@ -885,6 +888,12 @@ impl ChangePage {
             cx.emit(ChangeEvent::ManageFilters {
                 project: d.summary.project.clone(),
             });
+        }
+    }
+
+    fn project_checkout(&mut self, _: &ProjectCheckout, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(d) = &self.detail {
+            cx.emit(ChangeEvent::ProjectSettings(d.summary.project.clone()));
         }
     }
 

@@ -183,6 +183,7 @@ fn page_in(
                 ChangeEvent::Actions(_) => "actions".to_owned(),
                 ChangeEvent::SubmitChain(_) => "submit chain".to_owned(),
                 ChangeEvent::ManageFilters { project } => format!("manage filters {project}"),
+                ChangeEvent::ProjectSettings(project) => format!("project settings {project}"),
                 ChangeEvent::Search(q) => format!("search {q}"),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
@@ -1409,6 +1410,14 @@ fn manage_filters_emits_an_event_with_the_project(cx: &mut TestAppContext) {
     press(cx, &f, &["f", "m"]);
     let events = f.events.lock().expect("log").clone();
     assert_eq!(events, ["manage filters platform/foo".to_owned()]);
+}
+
+#[gpui_kit::test]
+fn p_s_emits_the_project_settings_event(cx: &mut TestAppContext) {
+    let f = page(cx, false, ChangeView::default());
+    press(cx, &f, &["p", "s"]);
+    let events = f.events.lock().expect("log").clone();
+    assert_eq!(events, ["project settings platform/foo".to_owned()]);
 }
 
 // --- syntax highlighting ahead -------------------------------------------
