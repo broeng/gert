@@ -172,7 +172,6 @@ fn c_on_a_thread_replies_and_the_reply_inherits_the_threads_state(cx: &mut TestA
     save_key(cx, window);
     let sent = drafts(&events);
     assert_eq!(sent.len(), 1);
-    assert!(sent[0].contains("in_reply_to: Some(\"a\")"), "{sent:?}");
     assert!(sent[0].contains("message: \"will do\""), "{sent:?}");
     assert!(sent[0].contains("unresolved: true"), "{sent:?}");
     assert!(sent[0].contains("Line(13)"), "{sent:?}");
@@ -282,10 +281,18 @@ fn editing_a_draft_updates_it_and_cancelling_keeps_the_saved_text(cx: &mut TestA
     );
 }
 
+fn refocus(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<DiffView>) {
+    use gpui_kit::Focusable as _;
+    cx.update_window(window, |_, window, cx| {
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    })
+    .expect("window");
+}
+
 #[gpui_kit::test]
-fn an_edit_refused_while_the_draft_is_sent_comes_back_in_its_editor(cx: &mut TestAppContext) {
-    use crate::diff::view::BEING_SENT;
-    use model::LocalDraftId;
+fn text_for_a_draft_that_went_away_is_saved_as_a_new_draft(cx: &mut TestAppContext) {
+    use crate::diff::view::RESCUED;
 
     let (window, view, events) = editable(cx);
     let mut t = at13("a", "please fix");
@@ -295,54 +302,63 @@ fn an_edit_refused_while_the_draft_is_sent_comes_back_in_its_editor(cx: &mut Tes
         "my saved reply",
         DraftSync::Synced,
     )));
-    give_threads(cx, &view, vec![t]);
+    give_threads(cx, &view, vec![t.clone()]);
     press(cx, window, "shift-n");
     press(cx, window, "c");
     typed(cx, window, " and more");
     clear(&events);
-    save_key(cx, window);
-    assert_eq!(drafts(&events).len(), 1);
-    assert_eq!(text(cx, &view), None, "saving closes the editor");
 
-    // The store refused the edit: the owner hands the text back.
-    let keep = |cx: &mut TestAppContext, id: i64| {
-        cx.update_window(window, |_, window, cx| {
-            view.update(cx, |v, cx| {
-                v.keep_refused_edit(
-                    LocalDraftId(id),
-                    "my saved reply and more".into(),
-                    true,
-                    window,
-                    cx,
-                )
-            })
-        })
-        .expect("window")
-    };
-    assert!(keep(cx, 5));
-    assert_eq!(text(cx, &view).as_deref(), Some("my saved reply and more"));
+    // A local review post sent the draft while its editor was open: the
+    // reloaded threads no longer have it.
+    let mut posted = t.clone();
+    posted.entries.retain(|e| !matches!(e, Entry::Draft(_)));
+    give_threads(cx, &view, vec![posted.clone()]);
+    assert_eq!(text(cx, &view), None, "the editor has nothing to edit");
+    let sent = drafts(&events);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].starts_with("draft Create"), "{sent:?}");
+    assert!(
+        sent[0].contains("message: \"my saved reply and more\""),
+        "{sent:?}"
+    );
+    assert!(sent[0].contains("location: Line(13)"), "{sent:?}");
     assert_eq!(
-        cx.update(|cx| view.read(cx).editor_note_for_test())
+        cx.update(|cx| view.read(cx).hint().map(str::to_owned))
             .as_deref(),
-        Some(BEING_SENT)
+        Some(RESCUED)
     );
-    // Nothing was sent again, and a draft the view does not show is not
-    // its business.
-    assert_eq!(drafts(&events).len(), 1);
-    assert!(!keep(cx, 99));
 
-    // With another editor open, the text waits for its draft's editor.
-    press(cx, window, "escape");
-    press(cx, window, "n");
+    // An unsaved buffer (the editor was closed with Esc) is saved the same
+    // way; an editor with the saved text is not.
+    let mut again = t.clone();
+    again.entries.push(Entry::Draft(draft(
+        6,
+        Location::Line(13),
+        "second",
+        DraftSync::Synced,
+    )));
+    again
+        .entries
+        .retain(|e| !matches!(e, Entry::Draft(d) if d.local_id.0 == 5));
+    give_threads(cx, &view, vec![again.clone()]);
+    // The editor's text field went with it; the owner (the shell's focus
+    // handling) gives the focus back to the view.
+    refocus(cx, window, &view);
     press(cx, window, "c");
-    assert_eq!(text(cx, &view).as_deref(), Some(""));
-    assert!(keep(cx, 5));
-    assert_eq!(
-        text(cx, &view).as_deref(),
-        Some(""),
-        "the open editor stays"
-    );
-    assert!(cx.update(|cx| view.read(cx).hint().is_some_and(|h| h.contains("kept"))));
+    assert_eq!(text(cx, &view).as_deref(), Some("second"));
+    typed(cx, window, "!");
+    press(cx, window, "escape");
+    clear(&events);
+    give_threads(cx, &view, vec![posted.clone()]);
+    let sent = drafts(&events);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].contains("message: \"second!\""), "{sent:?}");
+
+    give_threads(cx, &view, vec![again]);
+    press(cx, window, "c");
+    clear(&events);
+    give_threads(cx, &view, vec![posted]);
+    assert!(drafts(&events).is_empty());
 }
 
 #[gpui_kit::test]

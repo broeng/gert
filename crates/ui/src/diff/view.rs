@@ -48,9 +48,9 @@ pub enum DiffStatus {
     Error(SharedString),
 }
 
-#[cfg(test)]
-pub(crate) use editing::BEING_SENT;
 pub use editing::DraftRequest;
+#[cfg(test)]
+pub(crate) use editing::RESCUED;
 use editing::{DraftEditor, EditKey, UnsavedBuffers};
 
 pub enum DiffEvent {
@@ -451,8 +451,10 @@ impl DiffView {
         let unchanged = slots == self.slots && !reordered;
         self.shown = shown;
         self.slots = slots;
-        // An editor whose thread is gone (the draft was deleted
-        // elsewhere) has nothing to show in.
+        // Text written for a draft that is gone is saved as a new draft;
+        // an editor whose thread is not shown any more has nothing to show
+        // in.
+        self.rescue_vanished_drafts(&old_threads, cx);
         if self.editor.is_some() && self.editor_slot().is_none() {
             self.editor = None;
         }

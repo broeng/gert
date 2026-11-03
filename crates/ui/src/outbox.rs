@@ -20,7 +20,9 @@
 use std::collections::HashMap;
 
 use gpui_kit::*;
-use model::{ChangeDetail, ChangeNumber, LocalDraftId};
+use model::{
+    ChangeDetail, ChangeNumber, DraftInput, Entry, LocalDraftId, PatchSetNumber, PatchSetRef,
+};
 use sync::{DraftCounts, DraftSave};
 
 use crate::{
@@ -29,14 +31,14 @@ use crate::{
     session::{Session, is_unauthorized},
 };
 
-/// What a page says when an edit of a draft was refused because a local
-/// review post is sending it, and no view on the page could keep the text.
-pub const EDIT_BEING_SENT: &str =
-    "Not saved: this comment is being sent to Gerrit with your local review right now";
+/// What a page says when an edit of a draft was saved as a new draft
+/// because a local review post is sending the draft (or has sent it).
+pub const KEPT_AS_NEW: &str =
+    "Saved as a new draft: the comment you edited is being sent to Gerrit with your local review";
 
 /// What a page says when deleting such a draft was refused.
 pub const DELETE_BEING_SENT: &str = "This comment is being sent to Gerrit with your local \
-     review and cannot be deleted now";
+     review. Once it is there it is public and cannot be deleted here";
 
 pub enum OutboxEvent {
     /// The drafts of this change changed in the local database (a draft was
@@ -44,16 +46,11 @@ pub enum OutboxEvent {
     Changed(ChangeNumber),
     /// The server answered 401 to a draft request.
     Unauthorized,
-    /// An edit of a draft of `change` was refused because a local review
-    /// post is sending the draft right now (`store::Error::DraftBeingSent`):
-    /// nothing was saved. Carries what the user wrote, so that the page can
-    /// give it back to them.
-    EditBeingSent {
-        change: ChangeNumber,
-        draft: LocalDraftId,
-        message: String,
-        unresolved: bool,
-    },
+    /// An edit of a draft of `change` could not change it, because a
+    /// local review post is sending the draft (`DraftBeingSent`) or has
+    /// sent it (the draft is gone): the text was saved as a new ordinary
+    /// draft at the same place instead (see [`DraftOutbox::request`]).
+    KeptAsNew(ChangeNumber),
     /// A delete of a draft of `change` was refused for the same reason
     /// (`store::DeleteOutcome::BeingSent`).
     DeleteBeingSent(ChangeNumber),
@@ -68,6 +65,77 @@ pub struct DraftOutbox {
 }
 
 impl EventEmitter<OutboxEvent> for DraftOutbox {}
+
+/// What an edit falls back to when its draft cannot take it (see
+/// [`DraftOutbox::request`]).
+struct Fallback {
+    /// The change of the page that asked.
+    page: ChangeNumber,
+    id: LocalDraftId,
+    /// The new draft at the place the page showed the draft, if it did.
+    shown: Option<DraftSave>,
+    message: String,
+    unresolved: bool,
+}
+
+/// A new draft with `message` at `d`'s place: path, side, line or range,
+/// the comment it replies to.
+fn as_new(d: &model::Draft, message: &str, unresolved: bool) -> DraftSave {
+    DraftSave::Create {
+        change: d.change,
+        patch_set: PatchSetRef {
+            number: d.patch_set,
+            sha: d.revision.clone(),
+        },
+        input: DraftInput {
+            message: message.to_owned(),
+            unresolved,
+            ..d.input()
+        },
+    }
+}
+
+/// `save` with a new draft on a local version that is a Gerrit patch set
+/// by now (the version was pushed, and a consolidation run mapped it) moved
+/// onto that patch set of the Gerrit change: the local change is done
+/// there, and the draft is an ordinary one that uploads. Other saves stay
+/// as they are. Blocking (SQLite).
+fn on_gerrit(syncer: &sync::Syncer, save: DraftSave) -> Result<DraftSave, sync::Error> {
+    let DraftSave::Create {
+        change,
+        patch_set,
+        input,
+    } = save
+    else {
+        return Ok(save);
+    };
+    let moved = match syncer.local_patch_set(patch_set.number)? {
+        Some(v) => match v.gerrit_patch_set {
+            Some(gerrit_ps) => v
+                .local_change
+                .number()
+                .map(|n| syncer.local_change(n))
+                .transpose()?
+                .flatten()
+                .and_then(|(row, _)| row.gerrit_number)
+                .map(|gerrit| (gerrit, gerrit_ps, v.sha)),
+            None => None,
+        },
+        None => None,
+    };
+    Ok(match moved {
+        Some((gerrit, number, sha)) => DraftSave::Create {
+            change: gerrit,
+            patch_set: PatchSetRef { number, sha },
+            input,
+        },
+        None => DraftSave::Create {
+            change,
+            patch_set,
+            input,
+        },
+    })
+}
 
 impl DraftOutbox {
     pub fn new(session: Session) -> Self {
@@ -186,6 +254,11 @@ impl DraftOutbox {
                         },
                         cx,
                     ),
+                    // A local version the page's detail no longer lists
+                    // (it reached Gerrit meanwhile): the store knows it.
+                    None if patch_set.is_local() => {
+                        self.save_on_local_version(change, patch_set, input, cx)
+                    }
                     None => {
                         log::warn!("no patch set {patch_set} in change {change}: draft dropped")
                     }
@@ -195,15 +268,40 @@ impl DraftOutbox {
                 id,
                 message,
                 unresolved,
-            } => self.save_for(
-                Some(change),
-                DraftSave::Update {
+            } => {
+                // Where the draft is as the pages show it: a new draft goes
+                // there if this one cannot take the text any more.
+                let shown = self
+                    .comments
+                    .get(&change)
+                    .and_then(WeakEntity::upgrade)
+                    .and_then(|c| {
+                        c.read(cx)
+                            .threads()
+                            .iter()
+                            .flat_map(|t| &t.entries)
+                            .find_map(|e| match e {
+                                Entry::Draft(d) if d.local_id == id => Some(d.clone()),
+                                _ => None,
+                            })
+                    });
+                let fallback = Fallback {
+                    page: change,
                     id,
-                    message,
+                    shown: shown.map(|d| as_new(&d, &message, unresolved)),
+                    message: message.clone(),
                     unresolved,
-                },
-                cx,
-            ),
+                };
+                self.save_with(
+                    DraftSave::Update {
+                        id,
+                        message,
+                        unresolved,
+                    },
+                    Some(fallback),
+                    cx,
+                )
+            }
             DraftRequest::Delete(id) => self.delete(change, id, cx),
             DraftRequest::Retry(id) => self.retry(change, id, cx),
         }
@@ -244,50 +342,101 @@ impl DraftOutbox {
     /// password is still being fetched) the draft only waits; a later retry
     /// uploads it.
     pub fn save(&mut self, save: DraftSave, cx: &mut Context<Self>) {
-        self.save_for(None, save, cx);
+        self.save_with(save, None, cx);
     }
 
-    /// [`Self::save`] of a draft of `change`, if known: an edit refused
-    /// because the draft is being sent is reported as
-    /// [`OutboxEvent::EditBeingSent`] with the text, which is not lost.
-    fn save_for(&mut self, change: Option<ChangeNumber>, save: DraftSave, cx: &mut Context<Self>) {
+    /// A new draft on local version `patch_set`, whose commit is looked up
+    /// in the store.
+    fn save_on_local_version(
+        &mut self,
+        change: ChangeNumber,
+        patch_set: PatchSetNumber,
+        input: DraftInput,
+        cx: &mut Context<Self>,
+    ) {
+        let syncer = self.session.syncer().clone();
+        cx.spawn(async move |this, cx| {
+            let version = cx
+                .background_spawn(async move { syncer.local_patch_set(patch_set) })
+                .await;
+            this.update(cx, |this, cx| match version {
+                Ok(Some(v)) => this.save(
+                    DraftSave::Create {
+                        change,
+                        patch_set: PatchSetRef {
+                            number: patch_set,
+                            sha: v.sha,
+                        },
+                        input,
+                    },
+                    cx,
+                ),
+                Ok(None) => log::warn!("no local patch set {patch_set}: draft dropped"),
+                Err(e) => log::warn!("reading local patch set {patch_set}: {e}"),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// [`Self::save`]. A new draft on a local version that is a Gerrit
+    /// patch set by now goes onto that patch set of the Gerrit change
+    /// ([`on_gerrit`]). `fallback` is for an edit: if the draft cannot take
+    /// it, because a local review post is sending it (`DraftBeingSent`) or
+    /// has sent it (the draft is gone), its text is saved as this new
+    /// draft instead, and [`OutboxEvent::KeptAsNew`] names the page's
+    /// change (the first part). So no text the user saved is ever lost.
+    fn save_with(&mut self, save: DraftSave, fallback: Option<Fallback>, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
         let upload = self.session.can_upload();
-        let refused = match (&save, change) {
-            (
-                DraftSave::Update {
-                    id,
-                    message,
-                    unresolved,
-                },
-                Some(change),
-            ) => Some(OutboxEvent::EditBeingSent {
-                change,
-                draft: *id,
-                message: message.clone(),
-                unresolved: *unresolved,
-            }),
-            _ => None,
-        };
         cx.spawn(async move |this, cx| {
             let local = {
                 let syncer = syncer.clone();
-                cx.background_spawn(async move { syncer.save_draft_local(save) })
-                    .await
+                cx.background_spawn(async move {
+                    let save = on_gerrit(&syncer, save)?;
+                    let new = match (syncer.save_draft_local(save), fallback) {
+                        // Being sent: the store has the draft, at the place
+                        // it is sent to.
+                        (Err(sync::Error::Store(store::Error::DraftBeingSent)), Some(f)) => {
+                            let stored = syncer
+                                .cached_comments(f.page)?
+                                .drafts
+                                .into_iter()
+                                .find(|d| d.local_id == f.id);
+                            let new = stored
+                                .map(|d| as_new(&d, &f.message, f.unresolved))
+                                .or(f.shown);
+                            (new, f.page)
+                        }
+                        // Gone (sent meanwhile): where the page showed it.
+                        (Ok(None), Some(f)) => (f.shown, f.page),
+                        (result, _) => return Ok::<_, sync::Error>(result?.map(|d| (d, None))),
+                    };
+                    let (Some(new), page) = new else {
+                        log::warn!("an edit of a draft being sent could not be kept: no place");
+                        return Ok(None);
+                    };
+                    log::info!(
+                        "a draft edit came while the draft was being sent; saved as a new draft"
+                    );
+                    let new = on_gerrit(&syncer, new)?;
+                    Ok(syncer.save_draft_local(new)?.map(|d| (d, Some(page))))
+                })
+                .await
             };
-            let draft = match local {
-                Ok(Some(draft)) => draft,
+            let (draft, kept) = match local {
+                Ok(Some(saved)) => saved,
                 // Deleted meanwhile: nothing to save.
                 Ok(None) => return,
-                Err(sync::Error::Store(store::Error::DraftBeingSent)) => {
-                    log::info!("a draft edit came while the draft was being sent; not saved");
-                    if let Some(event) = refused {
-                        this.update(cx, |_, cx| cx.emit(event)).ok();
-                    }
-                    return;
-                }
                 Err(e) => return log::warn!("saving a draft: {e}"),
             };
+            if let Some(page) = kept {
+                this.update(cx, |this, cx| {
+                    this.announce(page, cx);
+                    cx.emit(OutboxEvent::KeptAsNew(page));
+                })
+                .ok();
+            }
             let (change, id) = (draft.change, draft.local_id);
             this.update(cx, |this, cx| this.announce(change, cx)).ok();
             if !upload {
@@ -430,7 +579,7 @@ impl DraftOutbox {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
 
     use gerrit_api::{Auth, fake::RouteHttpClient};
@@ -448,7 +597,7 @@ mod tests {
         tests::{URL, env_with, setup},
     };
 
-    const CHANGE: ChangeNumber = ChangeNumber(7);
+    pub(crate) const CHANGE: ChangeNumber = ChangeNumber(7);
 
     fn signed_in() -> Auth {
         Auth::Basic {
@@ -530,15 +679,9 @@ mod tests {
                     log.lock().expect("log").push(text);
                 }
                 OutboxEvent::Unauthorized => *count.lock().expect("count") += 1,
-                OutboxEvent::EditBeingSent {
-                    change,
-                    draft,
-                    message,
-                    unresolved,
-                } => refusals.lock().expect("log").push(format!(
-                    "edit {change} {} {message:?} {unresolved}",
-                    draft.0
-                )),
+                OutboxEvent::KeptAsNew(change) => {
+                    refusals.lock().expect("log").push(format!("kept {change}"))
+                }
                 OutboxEvent::DeleteBeingSent(change) => refusals
                     .lock()
                     .expect("log")
@@ -561,7 +704,10 @@ mod tests {
     /// A draft of change 7 that a consolidation post is sending: written
     /// on a local version of the change, moved onto patch set 1 (the same
     /// commit) and claimed.
-    fn claimed_draft(fx: &Fx) -> model::LocalDraftId {
+    pub(crate) fn claimed_draft(
+        store: &Mutex<Store>,
+        syncer: &sync::Syncer,
+    ) -> (model::LocalChangeId, model::LocalDraftId) {
         use store::{
             Claimant, ConsolidationRewrite, LocalChangeUpsert, LocalOp, NewLocalPatchSet,
             PatchSetMove,
@@ -570,7 +716,7 @@ mod tests {
         let now: model::Timestamp = "2024-06-15T10:00:00Z".parse().expect("time");
         let cid = "I0123456789abcdef0123456789abcdef01234567";
         let (row, version) = {
-            let mut s = fx.store.lock().expect("store");
+            let mut s = store.lock().expect("store");
             let upsert = LocalChangeUpsert {
                 seen: None,
                 branch: Some("main".into()),
@@ -599,9 +745,7 @@ mod tests {
                 .remove(0);
             (row, version)
         };
-        let draft = fx
-            .session
-            .syncer()
+        let draft = syncer
             .save_draft_local(DraftSave::Create {
                 change: CHANGE,
                 patch_set: PatchSetRef {
@@ -620,7 +764,7 @@ mod tests {
             })
             .expect("draft")
             .expect("saved");
-        let mut s = fx.store.lock().expect("store");
+        let mut s = store.lock().expect("store");
         let to = PatchSetRef {
             number: PatchSetNumber(1),
             sha: "sha1".into(),
@@ -652,52 +796,111 @@ mod tests {
         s.claim_local_post(server, row.id, None, PatchSetNumber(1), "n0", &by)
             .expect("claim")
             .expect("claimed");
-        draft.local_id
+        (row.id, draft.local_id)
+    }
+
+    /// The drafts of change 7 in the store, as (message, ordinary).
+    fn drafts_of(fx: &Fx) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = fx
+            .session
+            .syncer()
+            .cached_comments(CHANGE)
+            .expect("cache")
+            .drafts
+            .iter()
+            .map(|d| (d.message.clone(), d.is_ordinary()))
+            .collect();
+        out.sort();
+        out
     }
 
     #[gpui_kit::test]
-    fn a_draft_being_sent_refuses_edits_and_deletes_and_says_so(cx: &mut TestAppContext) {
+    fn an_edit_of_a_draft_being_sent_becomes_a_new_draft(cx: &mut TestAppContext) {
         use crate::diff::DraftRequest;
 
         let http = RouteHttpClient::new();
         let fx = fx(cx, &http);
-        let id = claimed_draft(&fx);
+        let (row, id) = claimed_draft(&fx.store, fx.session.syncer());
+        // The pages show the claimed draft.
+        cx.update(|cx| fx.outbox.update(cx, |o, cx| o.published(CHANGE, cx)));
+        cx.run_until_parked();
         let request = |cx: &mut TestAppContext, r: DraftRequest| {
             cx.update(|cx| fx.outbox.update(cx, |o, cx| o.request(CHANGE, r, None, cx)));
             cx.run_until_parked();
         };
-        request(
-            cx,
-            DraftRequest::Update {
-                id,
-                message: "edited".into(),
-                unresolved: false,
-            },
-        );
+        let edit = |message: &str| DraftRequest::Update {
+            id,
+            message: message.into(),
+            unresolved: false,
+        };
+        request(cx, edit("edited"));
         request(cx, DraftRequest::Delete(id));
         assert_eq!(
             *fx.refused.lock().expect("log"),
+            ["kept 7".to_owned(), "delete 7".to_owned()]
+        );
+        // The claimed draft is as it was; the text is a new ordinary draft
+        // at its place.
+        assert_eq!(
+            drafts_of(&fx),
             [
-                format!("edit 7 {} \"edited\" false", id.0),
-                "delete 7".to_owned()
+                ("as written".to_owned(), false),
+                ("edited".to_owned(), true)
             ]
         );
-        // Nothing changed, and nothing but the comments' own reads went to
-        // the server.
-        let draft = fx
+        let new = fx
+            .session
+            .syncer()
+            .cached_comments(CHANGE)
+            .expect("cache")
+            .drafts
+            .into_iter()
+            .find(|d| d.message == "edited")
+            .expect("new draft");
+        assert_eq!(
+            (
+                new.patch_set,
+                new.path.as_str(),
+                new.location,
+                new.unresolved
+            ),
+            (PatchSetNumber(1), "a.rs", Location::Line(3), false)
+        );
+
+        // The post ends and takes the claimed draft away; an edit sent
+        // before the pages heard of it is kept the same way.
+        let version = fx
             .store
             .lock()
             .expect("store")
             .load_draft(store::ServerId(1), id)
             .expect("load")
-            .expect("still there");
-        assert_eq!(draft.message, "as written");
-        let writes: Vec<_> = http
-            .sent()
-            .into_iter()
-            .filter(|r| r.method != "GET")
-            .collect();
-        assert!(writes.is_empty(), "{writes:?}");
+            .expect("draft")
+            .version;
+        fx.store
+            .lock()
+            .expect("store")
+            .finish_local_post(store::ServerId(1), row, "n0", &[(id, version)], &[])
+            .expect("finish")
+            .expect("finished");
+        request(cx, edit("edited again"));
+        assert_eq!(
+            drafts_of(&fx),
+            [
+                ("edited".to_owned(), true),
+                ("edited again".to_owned(), true)
+            ]
+        );
+        // And the threads, read again, show both.
+        let shown: Vec<String> = cx.update(|cx| {
+            fx.comments
+                .read(cx)
+                .threads()
+                .iter()
+                .flat_map(|t| t.draft().map(|d| d.message.clone()))
+                .collect()
+        });
+        assert_eq!(shown.len(), 2, "{shown:?}");
     }
 
     fn save(cx: &mut TestAppContext, fx: &Fx, message: &str) {

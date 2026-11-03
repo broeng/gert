@@ -705,3 +705,54 @@ fn the_note_names_the_worst_outcome_for_the_change_shown() {
     assert!(note(&closed, ChangeNumber(8)).is_some_and(|(t, _)| t.contains("closed on Gerrit")));
     assert_eq!(note(&closed, GERRIT), None);
 }
+
+#[gpui_kit::test]
+fn an_edit_of_a_draft_being_sent_is_kept_and_said_on_its_page_only(cx: &mut TestAppContext) {
+    use crate::{diff::DraftRequest, outbox, session::ServerKey};
+
+    let f = fixture();
+    let s = start(cx, &f, Some("u"));
+    let syncer = cx.update(|cx| {
+        s.shell
+            .read(cx)
+            .session_for_test("test")
+            .map(|s| s.syncer().clone())
+            .expect("session")
+    });
+    let (_, id) = outbox::tests::claimed_draft(&s.store, &syncer);
+    let change = outbox::tests::CHANGE;
+    s.open(cx, Route::Change(change));
+    let outbox = cx
+        .update(|cx| s.shell.read(cx).outbox_of_for_test(&ServerKey::new("test")))
+        .expect("outbox");
+    let edit = |cx: &mut TestAppContext, text: &str| {
+        let request = DraftRequest::Update {
+            id,
+            message: text.into(),
+            unresolved: true,
+        };
+        outbox.update(cx, |o, cx| o.request(change, request, None, cx));
+    };
+    edit(cx, "on the page");
+    cx.run_until_parked();
+    assert_eq!(
+        s.page_hint(cx),
+        Some((outbox::KEPT_AS_NEW.to_owned(), false))
+    );
+
+    // The user moves on before the store answers: the text is kept all
+    // the same, and nothing is said on the page they went to.
+    edit(cx, "after moving on");
+    s.open(cx, Route::Change(ChangeNumber(8)));
+    assert_eq!(s.page_hint(cx), None);
+    let mut kept: Vec<String> = syncer
+        .cached_comments(change)
+        .expect("cache")
+        .drafts
+        .iter()
+        .filter(|d| d.is_ordinary())
+        .map(|d| d.message.clone())
+        .collect();
+    kept.sort();
+    assert_eq!(kept, ["after moving on", "on the page"]);
+}

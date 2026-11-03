@@ -31,9 +31,7 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::{
-    ChangeDetail, DiffKey, DiffViewMode, FileEntry, FilesKey, LocalDraftId, ResolvedDiffPreferences,
-};
+use model::{ChangeDetail, DiffKey, DiffViewMode, FileEntry, FilesKey, ResolvedDiffPreferences};
 use sync::Syncer;
 
 use crate::{
@@ -845,27 +843,11 @@ impl DiffPage {
         self.hint.say(text, true, cx, |p| &mut p.hint);
     }
 
-    /// An edit of draft `id` was not saved because a local review post is
-    /// sending the draft: the diff view gets the text back
-    /// (`DiffView::keep_refused_edit`), or the hint line says that it was
-    /// not saved.
-    pub fn keep_refused_edit(
-        &mut self,
-        id: LocalDraftId,
-        text: String,
-        unresolved: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let kept = self.view.clone().is_some_and(|view| {
-            view.update(cx, |v, cx| {
-                v.keep_refused_edit(id, text, unresolved, window, cx)
-            })
-        });
-        if !kept {
-            self.hint
-                .say(outbox::EDIT_BEING_SENT, true, cx, |p| &mut p.hint);
-        }
+    /// An edit was saved as a new draft because its draft is being sent
+    /// with a local review: say so.
+    pub fn kept_as_new(&mut self, cx: &mut Context<Self>) {
+        self.hint
+            .say(outbox::KEPT_AS_NEW, false, cx, |p| &mut p.hint);
     }
 
     /// Deleting a draft was refused because a local review post is sending

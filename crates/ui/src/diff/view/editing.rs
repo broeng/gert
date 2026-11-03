@@ -73,16 +73,10 @@ pub enum DraftRequest {
     Retry(LocalDraftId),
 }
 
-/// What the editor of a draft says when its edit was refused because a
-/// local review post is sending the draft (see
-/// [`DiffView::keep_refused_edit`]).
-pub const BEING_SENT: &str = "This comment is being sent to Gerrit with your local review, so \
-     it cannot be changed now. Your text is kept here: copy it into a reply once the comment \
-     is on Gerrit.";
-
-/// The view's note when such an edit is kept while another editor is open.
-const BEING_SENT_KEPT: &str =
-    "A comment you edited is being sent to Gerrit; your text is kept in its editor";
+/// The view's note when the text of a draft that went away was saved as a
+/// new draft ([`DiffView::rescue_vanished_drafts`]).
+pub const RESCUED: &str = "A comment you were editing was sent or removed meanwhile; your text \
+     is saved as a new draft";
 
 /// What an editor edits. See the module documentation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -680,50 +674,73 @@ impl DiffView {
         cx.notify();
     }
 
-    /// Gives back the text of an edit of draft `id` that was not saved
-    /// because a local review post is sending the draft right now: the
-    /// draft's editor opens again with `text` and says why
-    /// ([`BEING_SENT`]). While another editor is open, the text waits as
-    /// the draft's unsaved buffer instead (it comes back when its editor
-    /// opens) and the view says so. False when none of this view's threads
-    /// shows the draft.
-    pub fn keep_refused_edit(
+    /// Text the user wrote for drafts that are gone from the threads now
+    /// (a local review post sent the draft while its editor was open, or
+    /// left as an unsaved buffer; or it was published or deleted
+    /// elsewhere) is not dropped: each becomes a request for a new draft
+    /// at the old one's place (path, side, line, reply, resolution), so
+    /// the text is in the store. Text equal to the saved message is
+    /// dropped, since nothing of it would be lost. Call it with the
+    /// threads from before the change.
+    pub(super) fn rescue_vanished_drafts(
         &mut self,
-        id: LocalDraftId,
-        text: String,
-        unresolved: bool,
-        window: &mut Window,
+        old_threads: &[Thread],
         cx: &mut Context<Self>,
-    ) -> bool {
-        let shown = self.shown.iter().any(|&i| {
-            self.threads.get(i).is_some_and(|t| {
-                t.entries
-                    .iter()
-                    .any(|e| matches!(e, Entry::Draft(d) if d.local_id == id))
+    ) {
+        let exists = |id: LocalDraftId, threads: &[Thread]| {
+            threads
+                .iter()
+                .any(|t| thread_has_key(t, &EditKey::Draft(id)))
+        };
+        let old_draft = |id: LocalDraftId| {
+            old_threads
+                .iter()
+                .flat_map(|t| &t.entries)
+                .find_map(|e| match e {
+                    Entry::Draft(d) if d.local_id == id => Some(d.clone()),
+                    _ => None,
+                })
+        };
+        let mut texts: Vec<(LocalDraftId, String, bool)> = Vec::new();
+        if let Some(ed) = &self.editor
+            && let EditKey::Draft(id) = ed.key
+            && !exists(id, &self.threads)
+        {
+            texts.push((id, ed.input.read(cx).value().to_string(), ed.resolved));
+            self.editor = None;
+        }
+        let buffered: Vec<LocalDraftId> = self
+            .unsaved
+            .keys()
+            .filter_map(|k| match k {
+                EditKey::Draft(id) if !exists(*id, &self.threads) => Some(*id),
+                _ => None,
             })
-        });
-        if !shown {
-            return false;
+            .collect();
+        for id in buffered {
+            if let Some(u) = self.unsaved.remove(&EditKey::Draft(id)) {
+                texts.push((id, u.text, u.resolved));
+            }
         }
-        let key = EditKey::Draft(id);
-        self.unsaved.insert(
-            key.clone(),
-            Unsaved {
-                text,
-                resolved: !unresolved,
-            },
-        );
-        if self.editor.as_ref().is_some_and(|e| e.key != key) {
-            self.hint = Some(BEING_SENT_KEPT.into());
-            cx.notify();
-            return true;
+        for (id, text, resolved) in texts {
+            let Some(d) = old_draft(id) else {
+                continue;
+            };
+            let text = text.trim();
+            if text.is_empty() || text == d.message.trim() {
+                continue;
+            }
+            let input = DraftInput {
+                message: text.to_owned(),
+                unresolved: !resolved,
+                ..d.input()
+            };
+            cx.emit(DiffEvent::Draft(DraftRequest::Create {
+                patch_set: d.patch_set,
+                input,
+            }));
+            self.hint = Some(RESCUED.into());
         }
-        self.open_editor(key, None, window, cx);
-        if let Some(ed) = self.editor.as_mut() {
-            ed.note = Some(BEING_SENT.into());
-        }
-        cx.notify();
-        true
     }
 
     pub(super) fn edit_draft_at(

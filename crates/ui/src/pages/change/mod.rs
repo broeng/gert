@@ -40,7 +40,7 @@ use gpui_kit::*;
 use jiff::Timestamp;
 use model::{
     ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, DiffKey, DiffPair, FileCommentCounts,
-    FileEntry, FilesKey, LocalApproval, LocalChange, LocalDraftId, PatchSetNumber, PendingReviewId,
+    FileEntry, FilesKey, LocalApproval, LocalChange, PatchSetNumber, PendingReviewId,
     RelatedChange, RevisionId, Thread, ThreadId,
 };
 use store::CachedFileList;
@@ -660,34 +660,11 @@ impl ChangePage {
         self.hint.say(text, true, cx, |p| &mut p.hint);
     }
 
-    /// An edit of draft `id` was not saved because a local review post is
-    /// sending the draft: the diff view that shows the draft gets the text
-    /// back (`DiffView::keep_refused_edit`); with none, the hint line says
-    /// that it was not saved.
-    pub fn keep_refused_edit(
-        &mut self,
-        id: LocalDraftId,
-        text: String,
-        unresolved: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let views: Vec<Entity<DiffView>> = self
-            .ps_view
-            .iter()
-            .cloned()
-            .chain(self.inline.values().filter_map(|i| i.view.clone()))
-            .collect();
-        for view in views {
-            let kept = view.update(cx, |v, cx| {
-                v.keep_refused_edit(id, text.clone(), unresolved, window, cx)
-            });
-            if kept {
-                return;
-            }
-        }
+    /// An edit was saved as a new draft because its draft is being sent
+    /// with a local review: say so.
+    pub fn kept_as_new(&mut self, cx: &mut Context<Self>) {
         self.hint
-            .say(outbox::EDIT_BEING_SENT, true, cx, |p| &mut p.hint);
+            .say(outbox::KEPT_AS_NEW, false, cx, |p| &mut p.hint);
     }
 
     /// Deleting a draft was refused because a local review post is sending
