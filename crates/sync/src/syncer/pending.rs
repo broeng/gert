@@ -63,17 +63,17 @@ impl Syncer {
         )?)
     }
 
-    /// Takes the user's vote on `label` back on local version `patch_set`
-    /// (see [`store::Store::withdraw_local_vote`]). Returns how many pending
-    /// reviews had it. Blocking (SQLite).
+    /// Takes the user's vote on `label` back on local versions
+    /// `patch_sets` (see [`store::Store::withdraw_local_vote`]). Returns
+    /// how many pending reviews had it. Blocking (SQLite).
     pub fn withdraw_local_vote(
         &self,
-        patch_set: PatchSetNumber,
+        patch_sets: &[PatchSetNumber],
         label: &str,
     ) -> Result<usize, Error> {
         Ok(self
             .store()
-            .withdraw_local_vote(self.server, patch_set, label)?)
+            .withdraw_local_vote(self.server, patch_sets, label)?)
     }
 
     /// Withdraws a pending review; its message stays as an ordinary draft.

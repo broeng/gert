@@ -621,7 +621,7 @@ fn a_withdrawn_local_vote_leaves_every_pending_review_of_the_version() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(s.withdraw_local_vote(id, v1, "Code-Review").unwrap(), 2);
+    assert_eq!(s.withdraw_local_vote(id, &[v1], "Code-Review").unwrap(), 2);
     let older = s.load_pending_review(id, older.id).unwrap().unwrap();
     assert_eq!(older.labels, BTreeMap::from([("Verified".to_owned(), 1)]));
     assert_eq!(older.message.as_deref(), Some("m"));
@@ -630,7 +630,13 @@ fn a_withdrawn_local_vote_leaves_every_pending_review_of_the_version() {
         let r = s.load_pending_review(id, kept).unwrap().unwrap();
         assert_eq!(r.labels, labels(2));
     }
-    assert_eq!(s.withdraw_local_vote(id, v1, "Code-Review").unwrap(), 0);
+    assert_eq!(s.withdraw_local_vote(id, &[v1], "Code-Review").unwrap(), 0);
+    // Several versions at once.
+    assert_eq!(
+        s.withdraw_local_vote(id, &[v1, v2], "Code-Review").unwrap(),
+        1
+    );
+    assert_eq!(s.load_pending_review(id, other.id).unwrap(), None);
 }
 
 #[test]

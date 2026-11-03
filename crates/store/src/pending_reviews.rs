@@ -766,28 +766,28 @@ impl Store {
         Ok(Some(review))
     }
 
-    /// Takes the user's vote on `label` back on local version `patch_set`
-    /// (the trash button of a local vote): removes the label from every
-    /// `Pending` review of the version, as [`Store::remove_review_label`]
-    /// does, so no older review brings the vote back. A review left with
-    /// neither votes nor a message is deleted. Reviews being sent, held or
-    /// failed are left alone. Returns how many reviews had the label.
+    /// Takes the user's vote on `label` back on local versions
+    /// `patch_sets` (the trash button of a local vote, which may come from
+    /// an older version): removes the label from every `Pending` review of
+    /// those versions, as [`Store::remove_review_label`] does, so no other
+    /// review brings the vote back. A review left with neither votes nor a
+    /// message is deleted. Reviews being sent, held or failed are left
+    /// alone. Returns how many reviews had the label.
     pub fn withdraw_local_vote(
         &mut self,
         server: ServerId,
-        patch_set: PatchSetNumber,
+        patch_sets: &[PatchSetNumber],
         label: &str,
     ) -> Result<usize, Error> {
         let tx = self.conn.transaction()?;
-        let reviews = query(
-            &tx,
-            "r.server_id = ?1 AND r.patch_set = ?2 AND r.state = ?3",
-            &[
-                &server.0,
-                &patch_set.0,
-                &PendingReviewState::Pending.as_str(),
-            ],
-        )?;
+        let mut reviews = Vec::new();
+        for ps in patch_sets {
+            reviews.extend(query(
+                &tx,
+                "r.server_id = ?1 AND r.patch_set = ?2 AND r.state = ?3",
+                &[&server.0, &ps.0, &PendingReviewState::Pending.as_str()],
+            )?);
+        }
         let mut changed = 0;
         for mut r in reviews {
             if r.labels.remove(label).is_none() {
