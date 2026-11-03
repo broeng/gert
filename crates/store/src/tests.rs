@@ -1067,6 +1067,7 @@ fn v12_rebuilds_pending_reviews_with_an_owner_and_keeps_the_counter() {
                 message: String::new(),
                 unresolved: false,
                 created: ts(T1),
+                replaces_draft: None,
             },
         )
         .unwrap();

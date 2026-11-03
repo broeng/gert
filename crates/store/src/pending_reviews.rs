@@ -60,6 +60,12 @@ pub struct NewPendingReview {
     pub unresolved: bool,
     /// Also the first `voted_at`.
     pub created: Timestamp,
+    /// An ordinary patch-set-level draft on the same local patch set that
+    /// held the message until now (the reply dialog's text, kept while the
+    /// dialog was closed): removed in the same transaction, since the
+    /// review's sealed message takes its place. A draft that is anything
+    /// else (sealed, a reply, on another patch set) is left alone.
+    pub replaces_draft: Option<LocalDraftId>,
 }
 
 /// What [`Store::update_pending_review`] replaces.
@@ -76,7 +82,7 @@ pub struct PendingReviewEdit {
 
 const COLUMNS: &str = "r.id, r.local_change_id, r.change_number, r.patch_set, r.revision_sha, \
      r.given_on_sha, r.labels, r.strategy, r.state, r.error, r.held_reason, r.created_ms, \
-     r.voted_at_ms, r.nonce, d.message, d.id";
+     r.voted_at_ms, r.nonce, d.message, d.id, d.unresolved";
 
 const FROM: &str = "pending_reviews r LEFT JOIN drafts d ON d.pending_review_id = r.id";
 
@@ -108,6 +114,7 @@ fn review_from_row(r: &Row<'_>) -> rusqlite::Result<PendingReview> {
         nonce: r.get(13)?,
         message: r.get(14)?,
         message_draft: r.get::<_, Option<i64>>(15)?.map(LocalDraftId),
+        unresolved: r.get::<_, Option<bool>>(16)?.unwrap_or(false),
     })
 }
 
@@ -289,6 +296,15 @@ impl Store {
             ],
         )?;
         let id = PendingReviewId(tx.last_insert_rowid());
+        if let Some(old) = input.replaces_draft {
+            tx.execute(
+                "DELETE FROM drafts
+                 WHERE server_id = ?1 AND id = ?2 AND patch_set = ?3 AND path = ?4
+                     AND in_reply_to IS NULL AND pending_review_id IS NULL
+                     AND reserved_by IS NULL AND held_reason IS NULL",
+                params![server.0, old.0, input.patch_set.0, PATCHSET_LEVEL_PATH],
+            )?;
+        }
         let review = load(&tx, server, id)?.ok_or_else(missing)?;
         write_message(
             &tx,

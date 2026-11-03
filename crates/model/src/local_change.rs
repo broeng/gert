@@ -239,6 +239,10 @@ pub struct PendingReview {
     /// joined in when the review is read. The sealed draft is the source of
     /// truth; change it through the pending review API.
     pub message: Option<String>,
+    /// Whether its message asks for something to be done (the message
+    /// draft's `unresolved`); false without a message.
+    #[serde(default)]
+    pub unresolved: bool,
     /// Its message draft, if it has one.
     pub message_draft: Option<crate::LocalDraftId>,
 }

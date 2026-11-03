@@ -72,6 +72,7 @@ fn new_review(patch_set: PatchSetNumber, message: &str) -> NewPendingReview {
         message: message.into(),
         unresolved: false,
         created: ts(T0),
+        replaces_draft: None,
     }
 }
 
@@ -327,6 +328,65 @@ fn cancelling_a_pending_review_keeps_inline_drafts_and_unseals_the_message() {
     )
     .unwrap();
     assert!(!s.cancel_pending_review(id, r2.id).unwrap());
+}
+
+#[test]
+fn a_review_takes_the_place_of_the_message_draft_it_replaces() {
+    let Fx {
+        mut s,
+        id,
+        change,
+        versions,
+        ..
+    } = fx();
+    let (v1, v2) = (&versions[0], &versions[1]);
+    let on = |v: &LocalPatchSet| model::PatchSetRef {
+        number: v.number,
+        sha: v.sha.clone(),
+    };
+    let input = |path: &str, reply: Option<&str>| DraftInput {
+        path: path.into(),
+        side: Side::Revision,
+        parent: None,
+        location: Location::File,
+        in_reply_to: reply.map(str::to_owned),
+        message: "kept text".into(),
+        unresolved: true,
+    };
+    let mut add = |v: &LocalPatchSet, path: &str, reply: Option<&str>| {
+        s.create_draft(id, change.number, &on(v), &input(path, reply), ts(T0))
+            .unwrap()
+            .local_id
+    };
+    let text = add(v1, PATCHSET_LEVEL_PATH, None);
+    let other_version = add(v2, PATCHSET_LEVEL_PATH, None);
+    let file = add(v1, "f", None);
+    let mut review = new_review(v1.number, "kept text, finished");
+    review.unresolved = true;
+    review.replaces_draft = Some(text);
+    let r = s.create_pending_review(id, &review).unwrap();
+    // The dialog's text is now the review's sealed message.
+    assert_eq!(s.load_draft(id, text).unwrap(), None);
+    assert_eq!(r.message.as_deref(), Some("kept text, finished"));
+    assert!(r.unresolved);
+    // Anything but a plain message draft of that patch set stays.
+    for other in [other_version, file] {
+        review.replaces_draft = Some(other);
+        s.create_pending_review(id, &review).unwrap();
+        assert!(s.load_draft(id, other).unwrap().is_some());
+    }
+    review.replaces_draft = r.message_draft;
+    s.create_pending_review(id, &review).unwrap();
+    assert!(
+        s.load_draft(id, r.message_draft.unwrap())
+            .unwrap()
+            .is_some()
+    );
+    // Without a message the review is not unresolved.
+    let quiet = s
+        .create_pending_review(id, &new_review(v1.number, ""))
+        .unwrap();
+    assert!(!quiet.unresolved);
 }
 
 #[test]

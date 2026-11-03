@@ -93,6 +93,7 @@ fn review(s: &mut Store, id: ServerId, p: &LocalPatchSet) -> PendingReview {
             message: "LGTM".into(),
             unresolved: false,
             created: ts(T1),
+            replaces_draft: None,
         },
     )
     .unwrap()

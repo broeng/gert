@@ -1027,6 +1027,7 @@ fn pending_review(f: &Fx, version: &model::LocalPatchSet) -> model::PendingRevie
                 message: "Ship it".into(),
                 unresolved: false,
                 created: Timestamp::now(),
+                replaces_draft: None,
             },
         )
         .unwrap()
