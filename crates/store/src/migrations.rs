@@ -409,6 +409,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE drafts ADD COLUMN posting_nonce TEXT;
     ",
+    // v13 -> v14: what the local change scanner reads on every round.
+    //
+    // `changes_by_change_id` lets the cached Gerrit changes with given
+    // Change-Ids be found without reading every cached summary
+    // (`Store::cached_changes_by_change_id`, `Store::cached_change_keys`
+    // use this very expression). `servers.account_email` is the signed-in
+    // account's email as last fetched, so that an offline start still
+    // knows which commits are the user's; NULL when not known (or the
+    // account has none).
+    "
+    CREATE INDEX changes_by_change_id ON changes (server_id, json_extract(json, '$.change_id'));
+    ALTER TABLE servers ADD COLUMN account_email TEXT;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

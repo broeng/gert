@@ -62,6 +62,22 @@ pub struct CachedGerritChange {
     pub current: Option<PatchSetNumber>,
 }
 
+/// What a cached Gerrit change contributes to the classification of local
+/// commits, read without deserialising the change (see
+/// [`Store::cached_change_keys`]). For comparing, not for display.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CachedChangeKey {
+    pub number: ChangeNumber,
+    pub change_id: String,
+    pub branch: String,
+    /// The status as the cache stores it (`"New"`, `"Merged"`, ...).
+    pub status: String,
+    /// `(number, sha)` of every patch set, when the detail is cached.
+    pub patch_sets: Option<Vec<(u32, String)>>,
+    /// The current patch set, from the cached detail.
+    pub current: Option<u32>,
+}
+
 /// A row as the reconcile plan saw it: its id and its state then. An op
 /// naming a row whose state has changed since is skipped as stale, so a
 /// plan computed from an old snapshot cannot undo what consolidation did
@@ -657,12 +673,13 @@ impl Store {
         if change_ids.is_empty() {
             return Ok(Vec::new());
         }
+        // The Change-Id test uses the index `changes_by_change_id`.
         let mut stmt = self.conn.prepare_cached(
             "SELECT c.json, d.json FROM changes c
              LEFT JOIN change_details d ON d.server_id = c.server_id AND d.number = c.number
              WHERE c.server_id = ?1
-               AND json_extract(c.json, '$.project') = ?2
                AND json_extract(c.json, '$.change_id') IN (SELECT value FROM json_each(?3))
+               AND json_extract(c.json, '$.project') = ?2
              ORDER BY c.number",
         )?;
         let rows = stmt.query_map(
@@ -680,6 +697,68 @@ impl Store {
                     .as_ref()
                     .map(|d| d.revisions.iter().map(|r| r.as_ref()).collect()),
                 current: detail.and_then(|d| d.current_patch_set),
+            });
+        }
+        Ok(out)
+    }
+
+    /// What [`Store::cached_changes_by_change_id`] finds, reduced to what
+    /// classifying local commits uses (number, Change-Id, branch, status,
+    /// patch sets and the current one), extracted in SQL: cheap enough to
+    /// run on every scanner round to see whether the cache moved.
+    pub fn cached_change_keys(
+        &self,
+        server: ServerId,
+        project: &str,
+        change_ids: &[String],
+    ) -> Result<Vec<CachedChangeKey>, Error> {
+        if change_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT c.number, json_extract(c.json, '$.change_id'),
+                    json_extract(c.json, '$.branch'), json_extract(c.json, '$.status'),
+                    d.number IS NOT NULL, json_extract(d.json, '$.current_patch_set'),
+                    (SELECT json_group_array(json_array(json_extract(r.value, '$.number'),
+                                                        json_extract(r.value, '$.sha')))
+                     FROM json_each(d.json, '$.revisions') r)
+             FROM changes c
+             LEFT JOIN change_details d ON d.server_id = c.server_id AND d.number = c.number
+             WHERE c.server_id = ?1
+               AND json_extract(c.json, '$.change_id') IN (SELECT value FROM json_each(?3))
+               AND json_extract(c.json, '$.project') = ?2
+             ORDER BY c.number",
+        )?;
+        let rows = stmt.query_map(
+            params![server.0, project, serde_json::to_string(change_ids)?],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, bool>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (number, change_id, branch, status, has_detail, current, patch_sets) = row?;
+            let patch_sets = match (has_detail, patch_sets) {
+                (true, Some(json)) => Some(serde_json::from_str::<Vec<(u32, String)>>(&json)?),
+                _ => None,
+            };
+            out.push(CachedChangeKey {
+                number: ChangeNumber(
+                    u64::try_from(number).map_err(|_| Error::from(bad(0, &number.to_string())))?,
+                ),
+                change_id,
+                branch: branch.unwrap_or_default(),
+                status: status.unwrap_or_default(),
+                patch_sets,
+                current: current.and_then(|c| u32::try_from(c).ok()),
             });
         }
         Ok(out)

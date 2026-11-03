@@ -39,8 +39,8 @@ pub use error::Error;
 pub use events::EVENT_RETENTION;
 pub use inbox::{INBOX_KEEP, INBOX_RETENTION, InboxId, InboxItem, NewInboxItem};
 pub use local::{
-    CachedGerritChange, LocalChangeEntry, LocalChangeUpsert, LocalOp, NewLocalPatchSet,
-    ReconcileReport, Seen,
+    CachedChangeKey, CachedGerritChange, LocalChangeEntry, LocalChangeUpsert, LocalOp,
+    NewLocalPatchSet, ReconcileReport, Seen,
 };
 pub use pending_reviews::{NewPendingReview, PendingReviewEdit};
 pub use review_cache::{
@@ -233,6 +233,35 @@ impl Store {
                 r.get(0)
             })
             .optional()?)
+    }
+
+    /// The signed-in account's email on the server, as last fetched
+    /// ([`Store::set_account_email`]); `None` when never fetched, when the
+    /// account has none, or for an unknown server.
+    pub fn account_email(&self, server: ServerId) -> Result<Option<String>, Error> {
+        let email: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT account_email FROM servers WHERE id = ?1",
+                [server.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(email.flatten())
+    }
+
+    /// Records the signed-in account's email on the server (`None`: it has
+    /// none, or the account changed). Unknown servers are ignored.
+    pub fn set_account_email(
+        &mut self,
+        server: ServerId,
+        email: Option<&str>,
+    ) -> Result<(), Error> {
+        self.conn.execute(
+            "UPDATE servers SET account_email = ?2 WHERE id = ?1",
+            params![server.0, email],
+        )?;
+        Ok(())
     }
 
     pub fn set_app_state(&mut self, key: &str, value: &str) -> Result<(), Error> {

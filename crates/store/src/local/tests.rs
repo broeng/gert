@@ -691,6 +691,109 @@ fn cached_gerrit_changes_are_found_by_change_id_within_a_project() {
 }
 
 #[test]
+fn cached_change_keys_match_the_cached_changes_and_use_the_index() {
+    let (mut s, id) = setup();
+    let mut merged = summary(2, "p", "IB");
+    merged.status = ChangeStatus::Merged;
+    let cached = [summary(1, "p", "IA"), merged, summary(3, "q", "IA")];
+    s.save_query_page(id, "q", &cached, false, ts(T0)).unwrap();
+    let ids = vec!["IA".to_owned(), "IB".to_owned()];
+    let keys = s.cached_change_keys(id, "p", &ids).unwrap();
+    assert_eq!(
+        keys,
+        [
+            CachedChangeKey {
+                number: ChangeNumber(1),
+                change_id: "IA".into(),
+                branch: "main".into(),
+                status: "New".into(),
+                patch_sets: None,
+                current: None,
+            },
+            CachedChangeKey {
+                number: ChangeNumber(2),
+                change_id: "IB".into(),
+                branch: "main".into(),
+                status: "Merged".into(),
+                patch_sets: None,
+                current: None,
+            },
+        ]
+    );
+    assert!(s.cached_change_keys(id, "p", &[]).unwrap().is_empty());
+    let mut detail = ChangeDetail {
+        summary: summary(1, "p", "IA"),
+        current_revision: Some("gerrit2".into()),
+        current_patch_set: Some(PatchSetNumber(2)),
+        commit_message: None,
+        reviewers: vec![],
+        cc: vec![],
+        revisions: vec![revision(1), revision(2)],
+        messages: vec![],
+        submit_requirements: vec![],
+        votes: Default::default(),
+        attention: vec![],
+        permitted_labels: Default::default(),
+        removable_reviewers: Default::default(),
+        label_values: Default::default(),
+        change_actions: Default::default(),
+        revision_actions: Default::default(),
+    };
+    s.save_change_detail(id, &detail, ts(T0)).unwrap();
+    let ia = s.cached_change_keys(id, "p", &ids).unwrap().remove(0);
+    assert_eq!(ia.current, Some(2));
+    assert_eq!(
+        ia.patch_sets,
+        Some(vec![(1, "gerrit1".to_owned()), (2, "gerrit2".to_owned())])
+    );
+    // A detail without revisions is still a cached detail.
+    detail.revisions.clear();
+    s.save_change_detail(id, &detail, ts(T0)).unwrap();
+    let ia = s.cached_change_keys(id, "p", &ids).unwrap().remove(0);
+    assert_eq!(ia.patch_sets, Some(vec![]));
+
+    // The lookup by Change-Id (the WHERE clause of both queries) goes
+    // through the index, not over every cached summary.
+    let sql = "EXPLAIN QUERY PLAN SELECT c.number FROM changes c
+         LEFT JOIN change_details d ON d.server_id = c.server_id AND d.number = c.number
+         WHERE c.server_id = ?1
+           AND json_extract(c.json, '$.change_id') IN (SELECT value FROM json_each(?3))
+           AND json_extract(c.json, '$.project') = ?2";
+    let plan: Vec<String> = s
+        .conn
+        .prepare(sql)
+        .unwrap()
+        .query_map(params![id.0, "p", "[\"IA\"]"], |r| r.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|l| l.contains("changes_by_change_id")),
+        "{plan:?}"
+    );
+    assert!(!plan.iter().any(|l| l.starts_with("SCAN c")), "{plan:?}");
+}
+
+#[test]
+fn the_account_email_is_kept_per_server() {
+    let (mut s, id) = setup();
+    let other = s.server_id("https://other.example").unwrap();
+    assert_eq!(s.account_email(id).unwrap(), None);
+    s.set_account_email(id, Some("me@example.com")).unwrap();
+    assert_eq!(
+        s.account_email(id).unwrap().as_deref(),
+        Some("me@example.com")
+    );
+    assert_eq!(s.account_email(other).unwrap(), None);
+    s.set_account_email(id, None).unwrap();
+    assert_eq!(s.account_email(id).unwrap(), None);
+    // Unknown servers read as unknown and are not written.
+    s.set_account_email(ServerId(99), Some("x@example.com"))
+        .unwrap();
+    assert_eq!(s.account_email(ServerId(99)).unwrap(), None);
+}
+
+#[test]
 fn a_rekey_onto_another_rows_key_is_a_conflict_that_a_merge_resolves() {
     let (mut s, id) = setup();
     // Commit v1 targets main; an amended copy v2 on a branch tracking
