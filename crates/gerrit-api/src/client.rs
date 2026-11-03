@@ -201,21 +201,43 @@ impl GerritClient {
     /// options ask for more than list rows (`ALL_REVISIONS`, say). Each
     /// detail is only as complete as the options make it, so do not cache
     /// it in place of [`GerritClient::get_change`]'s. The second value is
-    /// whether the server has more results.
+    /// whether the server has more results. A result that cannot be read
+    /// is left out (and logged), so one odd change does not hide the
+    /// others.
     pub async fn query_change_details(
         &self,
         query: &ChangeQuery,
     ) -> Result<(Vec<ChangeDetail>, bool), Error> {
-        let infos = self.query_infos(query).await?;
-        let more = infos.last().and_then(|c| c.more_changes).unwrap_or(false);
-        let details = infos
-            .iter()
-            .map(convert::change_detail)
-            .collect::<Result<_, _>>()?;
+        let items = self.query_items(query).await?;
+        let more = items
+            .last()
+            .and_then(|v| v.get("_more_changes"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut details = Vec::with_capacity(items.len());
+        for item in items {
+            let number = item.get("_number").cloned();
+            let read = serde_json::from_value::<wire::ChangeInfo>(item)
+                .map_err(Error::from)
+                .and_then(|info| Ok(convert::change_detail(&info)?));
+            match read {
+                Ok(d) => details.push(d),
+                Err(e) => log::warn!("leaving change {number:?} out of a query: {e}"),
+            }
+        }
         Ok((details, more))
     }
 
     async fn query_infos(&self, query: &ChangeQuery) -> Result<Vec<wire::ChangeInfo>, Error> {
+        Ok(self
+            .query_items(query)
+            .await?
+            .into_iter()
+            .map(serde_json::from_value::<wire::ChangeInfo>)
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    async fn query_items(&self, query: &ChangeQuery) -> Result<Vec<Value>, Error> {
         let mut params = vec![("q", query.query.clone())];
         if let Some(n) = query.limit {
             params.push(("n", n.to_string()));
@@ -230,10 +252,7 @@ impl GerritClient {
                 "<array of changes>",
             )));
         };
-        Ok(items
-            .into_iter()
-            .map(serde_json::from_value::<wire::ChangeInfo>)
-            .collect::<Result<Vec<_>, _>>()?)
+        Ok(items)
     }
 
     /// `GET /changes/{n}` with all patch sets and their commits, the change
@@ -1034,7 +1053,12 @@ mod tests {
                      "created": "2020-01-02 03:04:05.000000000",
                      "updated": "2020-01-03 03:04:05.000000000",
                      "current_revision": "b", "current_revision_number": 2,
-                     "revisions": {"a": {"_number": 1}, "b": {"_number": 2}},
+                     "revisions": {"a": {"_number": 1}, "b": {"_number": 2}}},
+                    {"_number": 6, "project": "p", "status": "NEW"},
+                    {"_number": 7, "project": "p", "branch": "main", "change_id": "I7",
+                     "subject": "s", "status": "NEW", "owner": {"_account_id": 1},
+                     "created": "2020-01-02 03:04:05.000000000",
+                     "updated": "2020-01-03 03:04:05.000000000",
                      "_more_changes": true}]"#,
             ),
         );
@@ -1043,7 +1067,10 @@ mod tests {
         q.options = vec![crate::ChangeOption::AllRevisions];
         let (details, more) = block_on(c.query_change_details(&q)).unwrap();
         assert!(more);
-        assert_eq!(details.len(), 1);
+        // Change 6 cannot be read (no owner, no times): left out, the
+        // others are not.
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[1].summary.number, ChangeNumber(7));
         assert_eq!(details[0].current_patch_set, Some(PatchSetNumber(2)));
         assert_eq!(details[0].revisions.len(), 2);
         assert_eq!(details[0].revisions[0].sha.as_str(), "a");
