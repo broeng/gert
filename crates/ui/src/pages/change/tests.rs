@@ -1931,7 +1931,7 @@ fn chain_row(
     this: bool,
     open: Option<super::ChainOpen>,
     status: Option<model::ChangeStatus>,
-) -> super::ChainRow {
+) -> super::chain::ChainRow {
     let related = status.map(|status| model::RelatedChange {
         project: "p".into(),
         change_id: None,
@@ -1943,7 +1943,7 @@ fn chain_row(
         work_in_progress: false,
         commit: None,
     });
-    super::ChainRow {
+    super::chain::ChainRow {
         label: String::new(),
         subject: String::new(),
         this,
