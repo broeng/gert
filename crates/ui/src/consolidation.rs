@@ -68,6 +68,7 @@ use sync::{
 
 use crate::{
     checkouts::Checkouts,
+    local_port::CheckoutPorts,
     nav::{ChangeView, DiffRoute, Route},
     session::Session,
 };
@@ -262,14 +263,19 @@ impl Consolidator {
 
 /// What a run takes from the checkouts: each configured project's
 /// `local_approval` (also of projects whose local changes option is off
-/// now: their rows with unsent data still consolidate). A project without
-/// an entry is left out, which `sync` takes as `exact`, the strictest.
+/// now: their rows with unsent data still consolidate), and the checkouts
+/// themselves for porting the comments of versions that never reached
+/// Gerrit ([`CheckoutPorts`]; one not opened yet is opened by the run, on
+/// the background executor). A project without an entry is left out,
+/// which `sync` takes as `exact`, the strictest, and has no checkout:
+/// nothing of it is ported.
 pub fn options(checkouts: &Checkouts) -> ConsolidateOptions {
     ConsolidateOptions {
         local_approval: checkouts
             .projects()
             .map(|p| (p.name.clone(), p.local_approval))
             .collect(),
+        port: Some(Arc::new(CheckoutPorts::new(checkouts.all()))),
         ..Default::default()
     }
 }
@@ -300,6 +306,7 @@ pub fn affected(report: &ConsolidateReport) -> Vec<ChangeNumber> {
         .chain(report.closed.iter().map(|c| c.0))
         .chain(report.reopened.iter().map(|c| c.0))
         .chain(report.consolidated.iter().map(|c| c.0))
+        .chain(report.ported.iter().map(|p| p.local_change))
         // Not every row looked up and not found: only those whose state
         // moved (checking became local, or ambiguous).
         .chain(report.state_changed.iter().copied());
@@ -321,8 +328,9 @@ pub fn rows_changed(report: &ConsolidateReport) -> bool {
 
 /// What the page of `change` (a Gerrit or a synthetic number) says about
 /// a run, and whether it is an error: a refusal or failed votes first,
-/// then held votes, then what was sent, then a change found closed or
-/// found at all. `None` when the run did nothing about the change.
+/// then held votes, then comments of a version amended before upload that
+/// were held, then what was sent, then a change found closed or found at
+/// all. `None` when the run did nothing about the change.
 pub fn note(report: &ConsolidateReport, change: ChangeNumber) -> Option<(String, bool)> {
     let gerrit = report
         .found
@@ -362,6 +370,29 @@ pub fn note(report: &ConsolidateReport, change: ChangeNumber) -> Option<(String,
             format!("Your local review was sent to Gerrit; some votes were held: {reason}"),
             false,
         ));
+    }
+    // Comments of a version that never reached Gerrit, not carried over.
+    let unported = report
+        .ported
+        .iter()
+        .filter(|p| concerns(p.local_change, p.change))
+        .find(|p| !p.held.is_empty() || p.held_reviews > 0);
+    if let Some(p) = unported {
+        let text = match (p.to, posts.is_empty()) {
+            (Some(ps), false) => format!(
+                "Your local review was sent to Gerrit; some comments did not fit PS {} and are \
+                 held",
+                ps.0
+            ),
+            (Some(ps), true) => format!(
+                "Some of your local comments did not fit PS {} and are held",
+                ps.0
+            ),
+            (None, _) => "No patch set of this change is in your checkout, so your local \
+                          review is held"
+                .to_owned(),
+        };
+        return Some((text, false));
     }
     if posts.iter().any(|p| p.review.is_some()) {
         return Some(("Your local review was sent to Gerrit".to_owned(), false));

@@ -22,7 +22,7 @@ use model::{
 };
 use serde_json::{Value, json};
 use store::{NewPendingReview, ServerId, Store};
-use sync::{ConsolidateReport, FoundChange, PostOutcome, PostReport};
+use sync::{ConsolidateReport, FoundChange, Ported, PostOutcome, PostReport};
 
 use super::{Consolidator, Request, affected, note, options};
 use crate::{
@@ -625,6 +625,7 @@ fn a_run_takes_each_projects_local_approval() {
         },
     ]);
     let options = options(&checkouts);
+    assert!(options.port.is_some());
     assert_eq!(
         options.local_approval,
         BTreeMap::from([
@@ -980,6 +981,61 @@ fn only_rows_whose_state_moved_count_as_affected() {
         ..looked_up
     };
     assert_eq!(affected(&moved), [number]);
+    // Ported (or held) comments: the Gerrit change and the row's pages.
+    let ported = ConsolidateReport {
+        ported: vec![ported(5, true)],
+        ..Default::default()
+    };
+    assert_eq!(affected(&ported), [GERRIT, number]);
+}
+
+/// Local version 1 of row `row` ported onto PS 2 of `GERRIT` with a draft
+/// held, or (`to` false) held whole.
+fn ported(row: i64, to: bool) -> Ported {
+    Ported {
+        local_change: LocalChangeId(row),
+        change: GERRIT,
+        from: PatchSetNumber(1 << 24 | 1),
+        to: to.then_some(PatchSetNumber(2)),
+        drafts: 1,
+        reviews: 0,
+        held: vec![(model::LocalDraftId(9), "Line 3 changed.".into())],
+        held_reviews: 0,
+    }
+}
+
+#[test]
+fn the_note_says_when_comments_did_not_fit() {
+    let mut report = ConsolidateReport {
+        ran: true,
+        ported: vec![ported(3, true)],
+        ..Default::default()
+    };
+    assert_eq!(
+        note(&report, GERRIT),
+        Some((
+            "Some of your local comments did not fit PS 2 and are held".to_owned(),
+            false
+        ))
+    );
+    report.posts.push(post(3, GERRIT, true, PostOutcome::Sent));
+    let (text, _) = note(&report, GERRIT).expect("note");
+    assert!(
+        text.starts_with("Your local review was sent to Gerrit; some comments"),
+        "{text}"
+    );
+    report.ported = vec![ported(3, false)];
+    let (text, _) = note(&report, GERRIT).expect("note");
+    assert!(
+        text.contains("No patch set of this change is in your checkout"),
+        "{text}"
+    );
+    // Nothing held: only what was sent.
+    report.ported[0].held.clear();
+    assert_eq!(
+        note(&report, GERRIT),
+        Some(("Your local review was sent to Gerrit".to_owned(), false))
+    );
 }
 
 #[gpui_kit::test]
@@ -1147,4 +1203,99 @@ fn the_note_stays_off_another_servers_page(cx: &mut TestAppContext) {
         cx.update(|cx| s.shell.read(cx).active_for_test().cloned()),
         Some(ServerKey::new("other"))
     );
+}
+
+#[gpui_kit::test]
+fn comments_on_a_version_amended_before_upload_are_ported_through_the_checkout(
+    cx: &mut TestAppContext,
+) {
+    use model::{DraftInput, Location, PatchSetRef, Side};
+    use sync::DraftSave;
+
+    let mut f = fixture();
+    // The user's commit has a file.
+    f.repo.write("a.txt", b"1\n2\n3\n4\n5\n");
+    f.repo.git(&["add", "-A"]);
+    f.repo.git(&["commit", "-q", "--amend", "--no-edit"]);
+    let s = start(cx, &f, Some("u"));
+    let (row, amended) = s.row();
+    let syncer = cx.update(|cx| {
+        s.shell
+            .read(cx)
+            .session_for_test("test")
+            .map(|s| s.syncer().clone())
+            .expect("session")
+    });
+    let draft = |line: u32, message: &str| {
+        syncer
+            .save_draft_local(DraftSave::Create {
+                change: row.number,
+                patch_set: PatchSetRef {
+                    number: amended.number,
+                    sha: amended.sha.clone(),
+                },
+                input: DraftInput {
+                    path: "a.txt".into(),
+                    side: Side::Revision,
+                    parent: None,
+                    location: Location::Line(line),
+                    in_reply_to: None,
+                    message: message.into(),
+                    unresolved: true,
+                },
+            })
+            .expect("store")
+            .expect("draft")
+    };
+    let kept = draft(4, "on an unchanged line");
+    let changed = draft(2, "on a line that changes");
+
+    // Amended again (a line on top, line 2 changed), seen by the scanner,
+    // and pushed.
+    f.repo.write("a.txt", b"0\n1\nTWO\n3\n4\n5\n");
+    f.repo.git(&["add", "-A"]);
+    f.repo.git(&["commit", "-q", "--amend", "--no-edit"]);
+    f.sha = f.repo.git(&["rev-parse", "HEAD"]);
+    let scanner = cx
+        .update(|cx| s.shell.read(cx).local_scan_for_test("test"))
+        .expect("a scanner");
+    let scanned = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
+    cx.run_until_parked();
+    scanned.now_or_never().expect("answered").expect("scanned");
+    f.pushed();
+    f.http.routes.route_json(
+        &format!("/revisions/{}/files", f.sha),
+        &json!({"/COMMIT_MSG": {"status": "A"}, "a.txt": {"lines_inserted": 2}}).to_string(),
+    );
+    s.trigger(cx);
+
+    let posts = f.http.posts();
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    let (target, body) = &posts[0];
+    assert!(
+        target.contains(&format!("/changes/42/revisions/{}/review", f.sha)),
+        "{target}"
+    );
+    assert_eq!(
+        body["comments"]["a.txt"],
+        json!([{"side": "REVISION", "line": 5, "message": "on an unchanged line",
+                "unresolved": true}])
+    );
+    let store = s.store.lock().expect("store");
+    assert_eq!(store.load_draft(SERVER, kept.local_id).expect("load"), None);
+    let held = store
+        .load_draft(SERVER, changed.local_id)
+        .expect("load")
+        .expect("held");
+    assert!(
+        held.held_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("Line 2 of a.txt changed in PS 1")),
+        "{held:?}"
+    );
+    drop(store);
+    assert_no_local_number_sent(&f);
+    for r in f.http.routes.requested() {
+        assert!(!r.contains(amended.sha.as_str()), "{r}");
+    }
 }
