@@ -563,9 +563,17 @@ fn the_preferences_panel_changes_session_settings_and_refetches(cx: &mut TestApp
 }
 
 fn shell_flow(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Shell>, RouteHttpClient) {
+    shell_flow_with(cx, seeded())
+}
+
+/// Like [`shell_flow`], over `store`.
+fn shell_flow_with(
+    cx: &mut TestAppContext,
+    store: Store,
+) -> (AnyWindowHandle, Entity<Shell>, RouteHttpClient) {
     let http = http();
     let startup = Startup {
-        env: env_with(seeded(), &http),
+        env: env_with(store, &http),
         diff: LocalDiff::default(),
         start_page: Default::default(),
         filters: Vec::new(),
@@ -650,6 +658,81 @@ fn back_from_a_diff_restores_the_change_page_cursor(cx: &mut TestAppContext) {
         let page = shell.read(cx).change_page_for_test().expect("change page");
         assert_eq!(page.read(cx).cursor_path(), Some("src/b.rs"));
     });
+}
+
+#[gpui_kit::test]
+fn a_chain_row_opens_a_change_at_a_patch_set_and_back_restores_the_page(cx: &mut TestAppContext) {
+    use crate::{nav::ChangeView, pages::change::ChangeEvent};
+    let mut store = seeded();
+    let server = store.server_id(URL).expect("server");
+    store
+        .save_change_detail(server, &detail(8, 3, 3), now())
+        .expect("detail");
+    let (window, shell, _http) = shell_flow_with(cx, store);
+    press(cx, window, &["j", "enter", "j", "j"]);
+    assert_eq!(current_route(cx, &shell), Route::Change(ChangeNumber(7)));
+    let index = |cx: &mut TestAppContext| cx.update(|cx| shell.read(cx).trail_for_test());
+    let (_, before) = index(cx);
+    let at = |n: u32| ChangeView {
+        target: Some(PatchSetNumber(n)),
+        ..ChangeView::default()
+    };
+    let emit = |cx: &mut TestAppContext, ev: ChangeEvent| {
+        let page = cx.update(|cx| shell.read(cx).change_page_for_test().expect("change page"));
+        page.update(cx, |_, cx| cx.emit(ev));
+        cx.run_until_parked();
+    };
+    let selection = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let page = shell.read(cx).change_page_for_test().expect("change page");
+            page.read(cx).selection_for_test()
+        })
+    };
+
+    // A new entry, on the patch set asked for.
+    emit(cx, ChangeEvent::OpenChangeAt(ChangeNumber(8), at(2)));
+    assert_eq!(current_route(cx, &shell), Route::Change(ChangeNumber(8)));
+    assert_eq!(selection(cx), (None, Some(PatchSetNumber(2))));
+    assert_eq!(index(cx).1, before + 1);
+
+    // Back: change 7 as it was left.
+    press(cx, window, &["alt-left"]);
+    assert_eq!(current_route(cx, &shell), Route::Change(ChangeNumber(7)));
+    cx.update(|cx| {
+        let page = shell.read(cx).change_page_for_test().expect("change page");
+        assert_eq!(page.read(cx).cursor_path(), Some("src/b.rs"));
+    });
+
+    // Replacing does not stack an entry.
+    emit(cx, ChangeEvent::ReplaceChangeAt(ChangeNumber(8), at(1)));
+    assert_eq!(current_route(cx, &shell), Route::Change(ChangeNumber(8)));
+    assert_eq!(selection(cx), (None, Some(PatchSetNumber(1))));
+    let (trail, position) = index(cx);
+    assert_eq!((trail.len(), position), (before + 1, before));
+}
+
+#[gpui_kit::test]
+fn compare_with_the_parent_adds_a_history_entry(cx: &mut TestAppContext) {
+    let (window, shell, _http) = shell_flow(cx);
+    press(cx, window, &["j", "enter", "j", "j", "enter"]);
+    assert_eq!(current_route(cx, &shell), Route::Diff(route("src/b.rs")));
+    let before = cx.update(|cx| shell.read(cx).trail_for_test().1);
+    let other = DiffRoute {
+        base: Some(PatchSetNumber(1)),
+        ..route("src/b.rs")
+    };
+    let page = cx.update(|cx| shell.read(cx).diff_page_for_test().expect("diff page"));
+    page.update(cx, |_, cx| {
+        cx.emit(super::DiffPageEvent::Compare(other.clone()))
+    });
+    cx.run_until_parked();
+    assert_eq!(current_route(cx, &shell), Route::Diff(other));
+    assert_eq!(
+        cx.update(|cx| shell.read(cx).trail_for_test().1),
+        before + 1
+    );
+    press(cx, window, &["alt-left"]);
+    assert_eq!(current_route(cx, &shell), Route::Diff(route("src/b.rs")));
 }
 
 #[gpui_kit::test]
