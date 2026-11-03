@@ -460,6 +460,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE pending_reviews ADD COLUMN drop_only TEXT;
     ALTER TABLE local_changes ADD COLUMN checked_ms INTEGER;
     ",
+    // v16 -> v17: whether a local version was on a named branch in the
+    // last complete scan of its project. Consolidation ports the comments
+    // of a version that is not (it was amended away, or the branch was
+    // reset), since it will never reach Gerrit. Existing versions count as
+    // on a branch until the next complete scan says otherwise.
+    "
+    ALTER TABLE local_patch_sets ADD COLUMN on_branch INTEGER NOT NULL DEFAULT 1;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

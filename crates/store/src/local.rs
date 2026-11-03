@@ -224,7 +224,7 @@ const CHANGE_COLUMNS: &str = "id, project, branch, change_id, gerrit_number, sub
      author_name, author_email, updated_ms, state, first_seen_ms";
 
 const PATCH_SET_COLUMNS: &str =
-    "id, local_change_id, sha, parent_sha, seen_ms, ordinal, gerrit_patch_set";
+    "id, local_change_id, sha, parent_sha, seen_ms, ordinal, gerrit_patch_set, on_branch";
 
 fn ts_at(r: &Row<'_>, col: usize) -> rusqlite::Result<Timestamp> {
     let ms: i64 = r.get(col)?;
@@ -269,6 +269,7 @@ fn patch_set_from_row(r: &Row<'_>) -> rusqlite::Result<LocalPatchSet> {
             .map(|n| u32::try_from(n).map(PatchSetNumber))
             .transpose()
             .map_err(|_| bad(6, "patch set number"))?,
+        on_branch: r.get(7)?,
     })
 }
 
@@ -576,6 +577,29 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Records which versions of `project`'s local changes are on a named
+    /// branch: those whose commit is one of `on_branch`, the commits of a
+    /// complete scan ([`model::LocalScan::is_complete`]; never call it
+    /// with an incomplete one, whose missing commits may still be there).
+    /// Returns how many versions changed.
+    pub fn mark_local_versions_on_branch(
+        &mut self,
+        server: ServerId,
+        project: &str,
+        on_branch: &[RevisionId],
+    ) -> Result<usize, Error> {
+        let shas: Vec<&str> = on_branch.iter().map(RevisionId::as_str).collect();
+        Ok(self.conn.execute(
+            "UPDATE local_patch_sets
+             SET on_branch = (sha IN (SELECT value FROM json_each(?3)))
+             WHERE server_id = ?1
+               AND local_change_id IN
+                   (SELECT id FROM local_changes WHERE server_id = ?1 AND project = ?2)
+               AND on_branch IS NOT (sha IN (SELECT value FROM json_each(?3)))",
+            params![server.0, project, serde_json::to_string(&shas)?],
+        )?)
     }
 
     /// The versions of a local change in the order they were first seen.

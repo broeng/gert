@@ -154,8 +154,18 @@ pub struct LocalPatchSet {
     pub seen_at: Timestamp,
     /// 1 for the first version seen of the change, then counting up.
     pub ordinal: u32,
+    /// Whether the commit was on a named local branch in the last complete
+    /// scan of the checkout (true until a scan says otherwise). A version
+    /// that is not was amended away or dropped: it will never reach Gerrit
+    /// as it is.
+    #[serde(default = "on_branch_default")]
+    pub on_branch: bool,
     /// The Gerrit patch set with this very commit, once there is one.
     pub gerrit_patch_set: Option<PatchSetNumber>,
+}
+
+fn on_branch_default() -> bool {
+    true
 }
 
 /// Where a pending review stands.

@@ -1182,3 +1182,26 @@ fn v16_from_every_older_version_starts_without_leases_or_claims() {
         .unwrap();
     }
 }
+
+// ---- v17: versions on a named branch ----
+
+#[test]
+fn v17_counts_existing_versions_as_on_a_branch() {
+    let mut conn = db_at_version(16);
+    conn.execute_batch(
+        "INSERT INTO servers (id, base_url) VALUES (1, 'https://x');
+         INSERT INTO local_changes (id, server_id, project, branch, change_id, subject,
+             author_name, author_email, updated_ms, state, first_seen_ms)
+         VALUES (1, 1, 'p', 'main', 'I1', 's', 'a', 'a@x', 0, 'local', 0);
+         INSERT INTO local_patch_sets (local_change_id, server_id, sha, seen_ms, ordinal)
+         VALUES (1, 1, 'abc', 0, 1);",
+    )
+    .unwrap();
+    migrate(&mut conn, MIGRATIONS).unwrap();
+    let s = Store { conn };
+    let versions = s
+        .local_patch_sets(ServerId(1), model::LocalChangeId(1))
+        .unwrap();
+    assert_eq!(versions.len(), 1);
+    assert!(versions[0].on_branch);
+}

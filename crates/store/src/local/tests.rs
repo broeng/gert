@@ -1103,3 +1103,44 @@ fn rows_with_a_post_in_flight_are_not_merged() {
         }
     }
 }
+
+#[test]
+fn versions_off_every_named_branch_are_marked_by_a_complete_scan() {
+    let (mut s, server) = setup();
+    let row = add(&mut s, server, upsert("Ia", Some("main"), &["a1", "a2"]));
+    // Another project's version with the same commit is not touched.
+    s.reconcile_local(
+        server,
+        "q",
+        &[LocalOp::Upsert(upsert("Ib", Some("main"), &["a1"]))],
+        ts(T1),
+    )
+    .unwrap();
+    let on = |s: &Store, project: &str| -> Vec<bool> {
+        let row = s
+            .local_changes_of_project(server, project)
+            .unwrap()
+            .remove(0);
+        row.patch_sets.iter().map(|p| p.on_branch).collect()
+    };
+    // New versions are on a branch.
+    assert_eq!(on(&s, "p"), [true, true]);
+    // a1 was amended away.
+    assert_eq!(
+        s.mark_local_versions_on_branch(server, "p", &["a2".into()])
+            .unwrap(),
+        1
+    );
+    assert_eq!(on(&s, "p"), [false, true]);
+    assert_eq!(on(&s, "q"), [true]);
+    // Marking the same again changes nothing; a1 back on a branch does.
+    assert_eq!(
+        s.mark_local_versions_on_branch(server, "p", &["a2".into()])
+            .unwrap(),
+        0
+    );
+    s.mark_local_versions_on_branch(server, "p", &["a1".into(), "a2".into()])
+        .unwrap();
+    assert_eq!(on(&s, "p"), [true, true]);
+    let _ = row;
+}
