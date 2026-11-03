@@ -202,9 +202,11 @@ fn an_open_change_lends_before_a_newer_closed_one() {
     }
     let b = s.labels_to_borrow(id, "p", Some("main")).unwrap().unwrap();
     assert_eq!(b.permitted["Code-Review"], [-2, -1, 0, 1, 2]);
-    // Only closed ones: the newest of them still lends.
+    assert!(b.open);
+    // Only closed ones: the newest of them still lends, and says so.
     let (mut s, id) = store();
     s.save_change_detail(id, &merged, ts(T1)).unwrap();
     let b = s.labels_to_borrow(id, "p", Some("main")).unwrap().unwrap();
     assert_eq!(b.permitted["Code-Review"], [-1, 0, 1]);
+    assert!(!b.open);
 }

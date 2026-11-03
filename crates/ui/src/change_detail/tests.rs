@@ -131,6 +131,7 @@ fn labels_are_borrowed_or_default_to_code_review() {
     let borrowed = BorrowedLabels {
         permitted: [("Verified".to_owned(), vec![0, 1])].into(),
         values: [("Verified".to_owned(), vec![value(-1), value(0), value(1)])].into(),
+        open: true,
     };
     let (permitted, values) = labels_of(Some(borrowed.clone()));
     assert_eq!(permitted["Verified"], [0, 1]);

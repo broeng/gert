@@ -24,6 +24,10 @@ pub struct BorrowedLabels {
     pub permitted: BTreeMap<String, Vec<i32>>,
     /// What each value of a label means (`label_values`).
     pub values: BTreeMap<String, Vec<LabelValue>>,
+    /// Whether the lending change is open. A closed one permits only what
+    /// may still be given after submit (often just the maximum), so
+    /// `permitted` says little about an open change's range.
+    pub open: bool,
 }
 
 /// How many cached change details are read, newest first.
@@ -105,11 +109,12 @@ impl Store {
         project: &str,
         branch: Option<&str>,
     ) -> Result<Option<BorrowedLabels>, Error> {
-        let row: Option<(Option<String>, String)> = self
+        let row: Option<(Option<String>, String, bool)> = self
             .conn
             .prepare_cached(
                 "SELECT json_extract(d.json, '$.permitted_labels'),
-                        json_extract(d.json, '$.label_values')
+                        json_extract(d.json, '$.label_values'),
+                        json_extract(c.json, '$.status') = 'New'
                  FROM change_details d
                  JOIN changes c ON c.server_id = d.server_id AND c.number = d.number
                  WHERE d.server_id = ?1
@@ -121,10 +126,10 @@ impl Store {
                  LIMIT 1",
             )?
             .query_row(params![server.0, project, branch], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .optional()?;
-        let Some((permitted, values)) = row else {
+        let Some((permitted, values, open)) = row else {
             return Ok(None);
         };
         Ok(Some(BorrowedLabels {
@@ -133,6 +138,7 @@ impl Store {
                 .transpose()?
                 .unwrap_or_default(),
             values: serde_json::from_str(&values)?,
+            open,
         }))
     }
 }

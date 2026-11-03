@@ -422,6 +422,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX changes_by_change_id ON changes (server_id, json_extract(json, '$.change_id'));
     ALTER TABLE servers ADD COLUMN account_email TEXT;
     ",
+    // v14 -> v15: the rest of the signed-in account next to its email, so
+    // that a local change's owner is that account on every page, also
+    // offline and before the account is fetched in this run. NULL when
+    // not known.
+    "
+    ALTER TABLE servers ADD COLUMN account_id INTEGER;
+    ALTER TABLE servers ADD COLUMN account_username TEXT;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

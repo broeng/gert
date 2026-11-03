@@ -794,6 +794,31 @@ fn the_account_email_is_kept_per_server() {
 }
 
 #[test]
+fn the_account_is_kept_per_server() {
+    let (mut s, id) = setup();
+    let other = s.server_id("https://other.example").unwrap();
+    assert_eq!(s.account(id).unwrap(), None);
+    s.set_account(id, AccountId(5), Some("u"), Some(" me@example.com "))
+        .unwrap();
+    assert_eq!(
+        s.account(id).unwrap(),
+        Some((AccountId(5), Some("u".into())))
+    );
+    assert_eq!(
+        s.account_email(id).unwrap().as_deref(),
+        Some("me@example.com")
+    );
+    assert_eq!(s.account(other).unwrap(), None);
+    // Another account: everything follows, empty values are none.
+    s.set_account(id, AccountId(6), Some(""), None).unwrap();
+    assert_eq!(s.account(id).unwrap(), Some((AccountId(6), None)));
+    assert_eq!(s.account_email(id).unwrap(), None);
+    s.set_account(ServerId(99), AccountId(1), None, None)
+        .unwrap();
+    assert_eq!(s.account(ServerId(99)).unwrap(), None);
+}
+
+#[test]
 fn a_rekey_onto_another_rows_key_is_a_conflict_that_a_merge_resolves() {
     let (mut s, id) = setup();
     // Commit v1 targets main; an amended copy v2 on a branch tracking

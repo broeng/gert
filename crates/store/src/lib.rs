@@ -27,7 +27,7 @@ mod review_cache;
 use std::{borrow::Cow, path::Path, time::Duration};
 
 pub use model::ServerId;
-use model::{ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
+use model::{AccountId, ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub use consolidation::{
@@ -261,6 +261,50 @@ impl Store {
         self.conn.execute(
             "UPDATE servers SET account_email = ?2 WHERE id = ?1",
             params![server.0, email],
+        )?;
+        Ok(())
+    }
+
+    /// The signed-in account on the server as last fetched
+    /// ([`Store::set_account`]): its id and username (email: see
+    /// [`Store::account_email`]). `None` when never fetched, or for an
+    /// unknown server.
+    pub fn account(&self, server: ServerId) -> Result<Option<(AccountId, Option<String>)>, Error> {
+        let row: Option<(Option<i64>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT account_id, account_username FROM servers WHERE id = ?1",
+                [server.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.and_then(|(id, username)| {
+            let id = u64::try_from(id?).ok()?;
+            Some((AccountId(id), username))
+        }))
+    }
+
+    /// Records the signed-in account on the server: its id, username and
+    /// email (empty ones as `None`). Unknown servers are ignored.
+    pub fn set_account(
+        &mut self,
+        server: ServerId,
+        id: AccountId,
+        username: Option<&str>,
+        email: Option<&str>,
+    ) -> Result<(), Error> {
+        fn clean(s: Option<&str>) -> Option<&str> {
+            s.map(str::trim).filter(|s| !s.is_empty())
+        }
+        self.conn.execute(
+            "UPDATE servers SET account_id = ?2, account_username = ?3, account_email = ?4
+             WHERE id = ?1",
+            params![
+                server.0,
+                i64::try_from(id.0).ok(),
+                clean(username),
+                clean(email)
+            ],
         )?;
         Ok(())
     }
