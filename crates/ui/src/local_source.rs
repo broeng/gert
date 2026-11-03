@@ -20,7 +20,7 @@ use futures::{
 use gpui_kit::component::{ActiveTheme as _, tooltip::Tooltip};
 use gpui_kit::*;
 use local_git::{Comparison, Local, Repo};
-use model::{Diff, DiffKey, FileEntry, FilesKey, RevisionId};
+use model::{COMMIT_MSG_PATH, Diff, DiffKey, FileEntry, FilesKey, RevisionId};
 
 use crate::checkouts::{CheckoutState, Checkouts};
 
@@ -29,6 +29,9 @@ struct Core {
     comparison: Comparison,
     target: RevisionId,
     base: Option<RevisionId>,
+    /// The comparison involves a local version (see [`FilesKey::is_local`]):
+    /// Gerrit does not have it, so the checkout serves `/COMMIT_MSG` too.
+    local: bool,
 }
 
 /// See the module comment.
@@ -66,6 +69,7 @@ impl LocalSource {
                     comparison,
                     target: files.target.sha.clone(),
                     base: base.cloned(),
+                    local: files.is_local(),
                 }),
                 renames: None,
             }),
@@ -111,11 +115,15 @@ impl LocalSource {
     /// A path the list does not have is left to Gerrit rather than guessed
     /// at: it could be the new name of a rename we cannot see. (Nor is the
     /// diff of a file without a list tried, for the same reason.) The
-    /// synthetic `/COMMIT_MSG` and `/MERGE_LIST` are Gerrit's.
+    /// synthetic `/COMMIT_MSG` is Gerrit's unless the comparison involves a
+    /// local version, which Gerrit does not have (git builds it like
+    /// Gerrit); `/MERGE_LIST` is always Gerrit's.
     pub fn serves(&self, key: &DiffKey) -> bool {
+        let synthetic_ok =
+            !key.path.starts_with('/') || (self.core.local && key.path == COMMIT_MSG_PATH);
         key.target.sha == self.core.target
             && key.base.as_ref().map(|b| &b.sha) == self.core.base.as_ref()
-            && !key.path.starts_with('/')
+            && synthetic_ok
             && self
                 .renames
                 .as_ref()

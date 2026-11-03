@@ -239,6 +239,58 @@ fn a_rename_is_diffed_against_the_old_path(_cx: &mut TestAppContext) {
     );
 }
 
+/// The comparison of [`files_key`] with `target` as a local version of
+/// change 7, so only the checkout has it.
+fn local_files_key(sha: &str) -> FilesKey {
+    FilesKey {
+        target: PatchSetRef {
+            number: PatchSetNumber(PatchSetNumber::LOCAL_BASE + 1),
+            sha: sha.into(),
+        },
+        ..files_key(sha)
+    }
+}
+
+#[gpui_kit::test]
+fn a_local_version_has_its_commit_message_from_the_checkout(_cx: &mut TestAppContext) {
+    let f = fixture();
+    let repo = local_git::Repo::open(f.repo.path()).expect("open");
+    let files = local_files_key(&f.target);
+    let local = LocalSource::resolve(repo, &files)
+        .expect("resolves")
+        .with_files(&paths());
+    let key = |path: &str| DiffKey {
+        change: files.change,
+        base: None,
+        target: files.target.clone(),
+        path: path.into(),
+        whitespace: Whitespace::IgnoreNone,
+    };
+    assert!(local.serves(&key("/COMMIT_MSG")));
+    // Neither is a diff the checkout makes, nor listed.
+    assert!(!local.serves(&key("/MERGE_LIST")));
+    assert!(!local.serves(&key(model::PATCHSET_LEVEL_PATH)));
+
+    let http = RouteHttpClient::new();
+    let s = session(fresh_store(), &http, true);
+    let lazy = LocalLazy::ready(Some(local), renames_of(&paths()));
+    let (diff, from) = run(load_diff(
+        s.syncer().clone(),
+        key("/COMMIT_MSG"),
+        true,
+        lazy.clone(),
+    ))
+    .expect("diff");
+    assert_eq!(from, DiffSource::Local);
+    assert!(format!("{:?}", diff.chunks).contains("second"), "{diff:?}");
+    // Gerrit has no diff of the patch set level comments, and none of a
+    // local version: nothing is asked.
+    for path in [model::PATCHSET_LEVEL_PATH, "/MERGE_LIST"] {
+        assert!(run(load_diff(s.syncer().clone(), key(path), true, lazy.clone())).is_err());
+    }
+    assert!(http.requested().is_empty(), "{:?}", http.requested());
+}
+
 #[gpui_kit::test]
 fn a_stored_diff_does_not_wait_for_the_resolve(cx: &mut TestAppContext) {
     use futures::FutureExt as _;

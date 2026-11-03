@@ -2,7 +2,7 @@
 //! get a diff: cache first, the network only for a miss. Diffs are always
 //! whole files; folding unchanged lines is the view's business.
 
-use model::{Diff, DiffContext, DiffKey};
+use model::{Diff, DiffContext, DiffKey, PATCHSET_LEVEL_PATH};
 use sync::Syncer;
 
 use crate::{local_source::LocalLazy, session::is_unauthorized};
@@ -60,6 +60,12 @@ pub async fn load_diff(
     can_sync: bool,
     local: LocalLazy,
 ) -> Result<(Diff, DiffSource), LoadError> {
+    if key.path == PATCHSET_LEVEL_PATH {
+        // Where patch set level comments live; not a file.
+        return Err(LoadError::Failed(
+            "patch set level comments have no diff".into(),
+        ));
+    }
     match syncer.cached_diff(&key) {
         Ok(Some(cached)) => return Ok((cached.diff, DiffSource::Cache)),
         Ok(None) => {}
