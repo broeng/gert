@@ -383,6 +383,14 @@ fn stopped(p: Problem) -> Error {
 /// "On local 2, src/a.rs line 40: text": where comment `d`, on `version`,
 /// was, then its text.
 pub(super) fn quote(version: &str, d: &Draft) -> String {
+    format!("On {}: {}", held_place(version, d), d.message)
+}
+
+/// Where held comment `d` was, on `version` ("local 2", "PS 3"): "local 2,
+/// src/a.rs line 40", "local 2, the commit message", or just "local 2"
+/// for a patch-set-level comment. What a published held comment quotes,
+/// and what the held card shows.
+pub fn held_place(version: &str, d: &Draft) -> String {
     let file = match d.path.as_str() {
         PATCHSET_LEVEL_PATH => None,
         COMMIT_MSG_PATH => Some("the commit message".to_owned()),
@@ -390,7 +398,7 @@ pub(super) fn quote(version: &str, d: &Draft) -> String {
         path => Some(path.to_owned()),
     };
     let Some(mut place) = file else {
-        return format!("On {version}: {}", d.message);
+        return version.to_owned();
     };
     match (d.side, d.parent) {
         (Side::Parent, Some(n)) => place.push_str(&format!(" (parent {n})")),
@@ -405,5 +413,5 @@ pub(super) fn quote(version: &str, d: &Draft) -> String {
         }
         Location::Range(r) => place.push_str(&format!(" lines {}-{}", r.start_line, r.end_line)),
     }
-    format!("On {version}, {place}: {}", d.message)
+    format!("{version}, {place}")
 }

@@ -1311,6 +1311,9 @@ fn a_commit_gerrit_has_in_the_chain_shows_once(cx: &mut TestAppContext) {
     f.assert_nothing_local_sent(&[&s.first, &s.second]);
 }
 
+/// The held card: what consolidation held, published or dropped item by
+/// item.
+mod held;
 /// Reviews on local versions: drafts, the reply dialog's pending reviews,
 /// quick votes and the list of pending reviews.
 mod review;

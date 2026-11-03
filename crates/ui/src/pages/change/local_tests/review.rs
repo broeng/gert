@@ -21,7 +21,7 @@ impl Fixture {
     }
 
     /// Presses the keys of a chord (`"l e"`) one after the other.
-    fn chord(&self, cx: &mut TestAppContext, keys: &str) {
+    pub(super) fn chord(&self, cx: &mut TestAppContext, keys: &str) {
         for k in keys.split(' ') {
             self.press(cx, k);
         }
@@ -309,7 +309,9 @@ fn seed_reviews(store: &mut Store, version: PatchSetNumber, states: &[model::Pen
 }
 
 #[gpui_kit::test]
-fn the_local_reviews_card_lists_states_and_its_keys_edit_cancel_and_drop(cx: &mut TestAppContext) {
+fn the_local_reviews_card_lists_waiting_reviews_and_its_keys_edit_and_cancel(
+    cx: &mut TestAppContext,
+) {
     use model::PendingReviewState as S;
     let ck = checkout();
     let mut store = store_with(
@@ -334,37 +336,27 @@ fn the_local_reviews_card_lists_states_and_its_keys_edit_cancel_and_drop(cx: &mu
     seed_reviews(&mut store, version, &[S::Pending, S::Held, S::Failed]);
     let number = row.number;
     let f = page(cx, store, number, &ck, |_| {});
+    // The waiting review here; the held and failed ones in the held card.
     cx.update(|cx| {
         let p = f.page.read(cx);
-        assert_eq!(p.blocks_for_test()[1], Block::PendingReviews);
-        assert_eq!(p.listed_reviews_for_test().len(), 3);
+        assert_eq!(
+            &p.blocks_for_test()[1..3],
+            [Block::PendingReviews, Block::Held]
+        );
+        assert_eq!(p.listed_reviews_for_test().len(), 1);
     });
     let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
     visual.run_until_parked();
-    for state in [
-        "pending-review-0: pending",
-        "pending-review-1: held: amended before upload",
-        "pending-review-2: failed: 403 not allowed",
-    ] {
-        assert!(visual.debug_bounds(state).is_some(), "{state}");
-    }
+    assert!(visual.debug_bounds("pending-review-0: pending").is_some());
+    assert!(visual.debug_bounds("pending-review-1: held").is_none());
 
-    // The newest (failed) is selected: it cannot be edited or cancelled.
-    f.chord(cx, "l e");
-    assert!(f.hint(cx).is_some_and(|h| h.starts_with("Only a pending")));
-    f.chord(cx, "l c");
-    assert!(f.hint(cx).is_some_and(|h| h.contains("drop it instead")));
-    // Up to the pending one: edit opens the dialog on it, cancel unseals.
-    f.chord(cx, "l p");
-    f.chord(cx, "l p");
+    // Edit opens the dialog on it, cancel unseals its message.
     f.chord(cx, "l e");
     let first = f.reviews(number)[0].clone();
     assert_eq!(
         f.events.lock().expect("log").last().cloned(),
         Some(format!("reply edit {}", first.id.0))
     );
-    f.chord(cx, "l d");
-    assert!(f.hint(cx).is_some_and(|h| h.contains("cancel it instead")));
     f.chord(cx, "l c");
     assert_eq!(
         f.hint(cx).as_deref(),
@@ -378,45 +370,12 @@ fn the_local_reviews_card_lists_states_and_its_keys_edit_cancel_and_drop(cx: &mu
         .find(|d| Some(d.local_id) == first.message_draft)
         .expect("the message");
     assert!(!kept.is_sealed() && kept.is_local());
-    cx.update(|cx| assert_eq!(f.page.read(cx).listed_reviews_for_test().len(), 2));
-
-    // The question expires: a late second `l d` asks again.
-    f.chord(cx, "l d");
-    cx.executor()
-        .advance_clock(std::time::Duration::from_secs(6));
-    cx.run_until_parked();
-    f.chord(cx, "l d");
-    assert!(
-        f.hint(cx)
-            .is_some_and(|h| h.starts_with("Drop this review"))
-    );
-    assert_eq!(f.reviews(number).len(), 2);
-    cx.executor()
-        .advance_clock(std::time::Duration::from_secs(6));
-    cx.run_until_parked();
-    // Dropping asks once; the newest (failed) goes with its message.
-    f.chord(cx, "l d");
-    assert!(
-        f.hint(cx)
-            .is_some_and(|h| h.starts_with("Drop this review"))
-    );
-    assert_eq!(f.reviews(number).len(), 2);
-    f.chord(cx, "l d");
-    assert_eq!(f.hint(cx).as_deref(), Some("Review dropped"));
-    let left = f.reviews(number);
-    assert_eq!(left.len(), 1);
-    assert_eq!(left[0].state, S::Held);
-    f.chord(cx, "l d");
-    f.chord(cx, "l d");
-    assert!(f.reviews(number).is_empty());
-    // Nothing waits: no card, and the keys say so.
+    // Nothing waits: no card, and the keys say so; the held card stays.
     cx.update(|cx| {
-        assert!(
-            !f.page
-                .read(cx)
-                .blocks_for_test()
-                .contains(&Block::PendingReviews)
-        )
+        let p = f.page.read(cx);
+        assert_eq!(p.listed_reviews_for_test().len(), 0);
+        assert!(!p.blocks_for_test().contains(&Block::PendingReviews));
+        assert!(p.blocks_for_test().contains(&Block::Held));
     });
     f.chord(cx, "l e");
     assert_eq!(f.hint(cx).as_deref(), Some("No local reviews waiting here"));

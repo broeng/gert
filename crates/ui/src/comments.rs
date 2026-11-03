@@ -52,6 +52,9 @@ pub struct ChangeComments {
     /// order (sent ones included). Local data: read with the threads, never
     /// fetched.
     reviews: Arc<Vec<PendingReview>>,
+    /// The comments held from local reviews on the change (those that did
+    /// not port), for its held card. Local data, read with the threads.
+    held: Arc<Vec<Draft>>,
     refreshing: bool,
     /// Another refresh was asked for while one was running.
     again: bool,
@@ -71,6 +74,7 @@ impl ChangeComments {
             change,
             threads: Arc::default(),
             reviews: Arc::default(),
+            held: Arc::default(),
             refreshing: false,
             again: false,
             task: None,
@@ -99,9 +103,9 @@ impl ChangeComments {
         self.reload_task = Some(cx.spawn(async move |this, cx| {
             let cached = cx.background_spawn(read_cache(syncer, change)).await;
             this.update(cx, |this, cx| match cached {
-                Ok((threads, reviews)) => {
+                Ok((threads, reviews, held)) => {
                     this.apply(threads, cx);
-                    this.apply_reviews(reviews, cx);
+                    this.apply_reviews(reviews, held, cx);
                 }
                 Err(e) => log::warn!("reading cached comments of change {change}: {e}"),
             })
@@ -123,6 +127,12 @@ impl ChangeComments {
     /// order, sent ones included.
     pub fn reviews(&self) -> Arc<Vec<PendingReview>> {
         self.reviews.clone()
+    }
+
+    /// The comments held from local reviews on the change, in creation
+    /// order (see `sync::Syncer::held_items`).
+    pub fn held_drafts(&self) -> Arc<Vec<Draft>> {
+        self.held.clone()
     }
 
     /// Fetches the comments again (a refresh already running is followed by
@@ -173,9 +183,9 @@ impl ChangeComments {
             let cached = cx.background_spawn(read_cache(syncer, change)).await;
             this.update(cx, |this, cx| {
                 match cached {
-                    Ok((threads, reviews)) => {
+                    Ok((threads, reviews, held)) => {
                         this.apply(threads, cx);
-                        this.apply_reviews(reviews, cx);
+                        this.apply_reviews(reviews, held, cx);
                     }
                     Err(e) => log::warn!("reading cached comments of change {change}: {e}"),
                 }
@@ -195,23 +205,30 @@ impl ChangeComments {
         }
     }
 
-    fn apply_reviews(&mut self, reviews: Vec<PendingReview>, cx: &mut Context<Self>) {
-        if *self.reviews != reviews {
+    fn apply_reviews(
+        &mut self,
+        reviews: Vec<PendingReview>,
+        held: Vec<Draft>,
+        cx: &mut Context<Self>,
+    ) {
+        if *self.reviews != reviews || *self.held != held {
             self.reviews = Arc::new(reviews);
+            self.held = Arc::new(held);
             cx.emit(CommentsEvent::Changed);
             cx.notify();
         }
     }
 }
 
-/// The cached threads and the pending reviews of `change`. Blocking
-/// (SQLite): for the background executor.
+/// The cached threads, the pending reviews and the held comments of
+/// `change`. Blocking (SQLite): for the background executor.
 async fn read_cache(
     syncer: sync::Syncer,
     change: ChangeNumber,
-) -> Result<(Vec<Thread>, Vec<PendingReview>), sync::Error> {
+) -> Result<(Vec<Thread>, Vec<PendingReview>, Vec<Draft>), sync::Error> {
     let threads = syncer.cached_comments(change)?.threads();
-    Ok((threads, syncer.pending_reviews(change)?))
+    let held = syncer.held_items(change)?.drafts;
+    Ok((threads, syncer.pending_reviews(change)?, held))
 }
 
 #[cfg(test)]

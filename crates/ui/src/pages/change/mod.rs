@@ -18,6 +18,7 @@
 //! scrolling inside beyond that). Clicking into an inline diff focuses it,
 //! and its own keys apply until `Esc` leaves the page.
 
+mod held;
 #[cfg(test)]
 mod local_tests;
 mod pending;
@@ -331,12 +332,19 @@ pub struct ChangePage {
     reviews: Arc<Vec<model::PendingReview>>,
     /// The review the local reviews card has selected; `None` is the newest.
     review_cursor: Option<model::PendingReviewId>,
-    /// The review a first "drop" asked about.
-    confirm_drop: Option<model::PendingReviewId>,
-    /// Ends the drop question after a while.
-    drop_timer: Option<Task<()>>,
-    /// A cancel or drop on its way to the store.
+    /// A cancel on its way to the store.
     reviews_task: Option<Task<()>>,
+    /// The comments held from local reviews, as last read from `comments`
+    /// (see [`held`]).
+    held_drafts: Arc<Vec<model::Draft>>,
+    /// The item the held card has selected; `None` is the first.
+    held_cursor: Option<sync::HeldItem>,
+    /// The held item a first "drop" asked about.
+    confirm_held: Option<sync::HeldItem>,
+    /// Ends the drop question after a while.
+    held_timer: Option<Task<()>>,
+    /// A publish or drop of a held item on its way.
+    held_task: Option<Task<()>>,
     /// The filter the user picked; `None` is the default for the threads.
     thread_filter: Option<ThreadFilter>,
     /// Indexes into `threads` of those the list shows.
@@ -440,9 +448,12 @@ impl ChangePage {
             threads: Arc::default(),
             reviews: Arc::default(),
             review_cursor: None,
-            confirm_drop: None,
-            drop_timer: None,
             reviews_task: None,
+            held_drafts: Arc::default(),
+            held_cursor: None,
+            confirm_held: None,
+            held_timer: None,
+            held_task: None,
             thread_filter: None,
             listed: Vec::new(),
             thread_cursor: None,
@@ -1691,6 +1702,7 @@ impl ChangePage {
         Content {
             loaded: d.is_some(),
             reviews: self.listed_reviews().len(),
+            held: self.held_rows().len(),
             files: self.visible.len(),
             threads: self.listed.len(),
             messages: d.map_or(0, |d| d.messages.len()),

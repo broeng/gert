@@ -48,13 +48,10 @@ impl ChangePage {
     pub(super) fn read_threads(&mut self, cx: &mut Context<Self>) {
         self.threads = self.comments.read(cx).threads();
         self.reviews = self.comments.read(cx).reviews();
-        if self
-            .confirm_drop
-            .is_some_and(|id| !self.reviews.iter().any(|r| r.id == id))
-        {
-            self.confirm_drop = None;
-        }
+        self.held_drafts = self.comments.read(cx).held_drafts();
+        self.held_changed();
         self.remeasure(Block::PendingReviews);
+        self.remeasure(Block::Held);
         self.listed = threads::listed(&self.threads, self.filter());
         if let Some(id) = &self.thread_cursor
             && !self.listed.iter().any(|&i| &self.threads[i].id == id)

@@ -40,6 +40,7 @@ use crate::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Reviews,
+    Held,
     Files,
     Comments,
     Log,
@@ -50,6 +51,7 @@ impl Section {
         match b {
             Block::Header => None,
             Block::PendingReviews => Some(Self::Reviews),
+            Block::Held => Some(Self::Held),
             Block::PatchSets | Block::FilterBar | Block::FilesNotice | Block::File(_) => {
                 Some(Self::Files)
             }
@@ -135,6 +137,7 @@ impl ChangePage {
         let inner = match block {
             Block::Header => self.header(window, cx),
             Block::PendingReviews => self.pending_reviews_card(cx),
+            Block::Held => self.held_card(cx),
             Block::PatchSets => self.patch_sets(cx),
             Block::FilterBar => self.filter_bar(cx),
             Block::FilesNotice => self.files_notice(cx),
@@ -1759,7 +1762,11 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::prev_review))
             .on_action(cx.listener(Self::edit_review_action))
             .on_action(cx.listener(Self::cancel_review_action))
-            .on_action(cx.listener(Self::drop_review_action))
+            .on_action(cx.listener(Self::next_held_action))
+            .on_action(cx.listener(Self::prev_held_action))
+            .on_action(cx.listener(Self::publish_held_action))
+            .on_action(cx.listener(Self::drop_held_action))
+            .on_action(cx.listener(Self::copy_held_action))
             .on_action(cx.listener(Self::open_actions))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::page_up))

@@ -146,8 +146,10 @@ pub enum Block {
     /// The header bar and the three columns under it: change info, commit
     /// message and relation chain.
     Header,
-    /// The pending reviews of local versions, while there are unsent ones.
+    /// The pending reviews of local versions, while some wait to be sent.
     PendingReviews,
+    /// What consolidation held from local reviews, while there is any.
+    Held,
     /// Patch set selector and the "Files" heading.
     PatchSets,
     /// The file filter buttons, and the table header under them.
@@ -171,8 +173,10 @@ pub enum Block {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Content {
     pub loaded: bool,
-    /// Pending reviews not sent yet.
+    /// Pending reviews waiting to be sent.
     pub reviews: usize,
+    /// Rows of the held card.
+    pub held: usize,
     /// Files the filters leave visible.
     pub files: usize,
     /// Threads the list shows (after the filter).
@@ -187,6 +191,9 @@ pub fn blocks(c: Content) -> Vec<Block> {
     }
     if c.reviews > 0 {
         v.push(Block::PendingReviews);
+    }
+    if c.held > 0 {
+        v.push(Block::Held);
     }
     v.push(Block::PatchSets);
     v.push(Block::FilterBar);
@@ -458,6 +465,7 @@ mod tests {
         let b = blocks(Content {
             loaded: true,
             reviews: 0,
+            held: 0,
             files: 2,
             threads: 1,
             messages: 2,
@@ -504,6 +512,22 @@ mod tests {
         assert_eq!(
             &b[..3],
             [Block::Header, Block::PendingReviews, Block::PatchSets]
+        );
+        // Held items: their card under those.
+        let b = blocks(Content {
+            loaded: true,
+            reviews: 1,
+            held: 3,
+            ..Default::default()
+        });
+        assert_eq!(
+            &b[..4],
+            [
+                Block::Header,
+                Block::PendingReviews,
+                Block::Held,
+                Block::PatchSets
+            ]
         );
     }
 

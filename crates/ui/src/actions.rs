@@ -124,8 +124,19 @@ actions!(
         /// `l c`: cancel the selected pending review (its message stays as a
         /// draft).
         CancelPendingReview,
-        /// `l d`: drop the selected held or failed review (asks once).
-        DropPendingReview,
+        /// `w n` / `w p` on the change page: select the next / previous
+        /// item of the held card (votes, messages and comments that a local
+        /// review's consolidation held; `w` for "withheld", since `h` and
+        /// `l` scroll an inline diff).
+        NextHeldItem,
+        PrevHeldItem,
+        /// `w s`: send the selected held item: a vote or message onto the
+        /// current patch set, a comment as a patch-set comment.
+        PublishHeldItem,
+        /// `w d`: drop the selected held item (asks once).
+        DropHeldItem,
+        /// `w y`: copy the selected held comment's text.
+        CopyHeldItem,
         // Diff page.
         /// Show or hide the diff preferences panel.
         TogglePrefs,
@@ -496,10 +507,28 @@ pub fn change_entries() -> Vec<Entry> {
             KeyBinding::new("l c", CancelPendingReview, Some(k)),
             "Cancel the selected local review; its message stays as a draft",
         ),
+        // `w` for "withheld": the held card. Not `h`, which (like `l`)
+        // scrolls an inline diff that has the focus.
         e(
-            "L D",
-            KeyBinding::new("l d", DropPendingReview, Some(k)),
-            "Drop the selected held or failed local review (press twice)",
+            "W N / W P",
+            KeyBinding::new("w n", NextHeldItem, Some(k)),
+            "Next / previous item held from your local review",
+        ),
+        e("", KeyBinding::new("w p", PrevHeldItem, Some(k)), ""),
+        e(
+            "W S",
+            KeyBinding::new("w s", PublishHeldItem, Some(k)),
+            "Send the selected held item: a vote or message onto the current patch set, a comment as a patch-set comment",
+        ),
+        e(
+            "W D",
+            KeyBinding::new("w d", DropHeldItem, Some(k)),
+            "Drop the selected held item (press twice)",
+        ),
+        e(
+            "W Y",
+            KeyBinding::new("w y", CopyHeldItem, Some(k)),
+            "Copy the text of the selected held comment",
         ),
         e(
             "Space / Shift-Space",

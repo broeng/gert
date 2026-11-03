@@ -3,19 +3,18 @@
 //! are not on Gerrit yet, for a local change and for a Gerrit change with
 //! local patch sets.
 //!
-//! One compact card under the header, only while there is a review that
-//! is not sent. Each row names the version, the votes, the start of the
-//! message and the state (pending, sending, held or failed with the
-//! reason), with the actions the state allows: edit (reopens the reply
-//! dialog on it) and cancel for a pending review, drop for a held or
-//! failed one. Dropping discards the message too, so it asks once: the
-//! first press arms it, the second drops.
+//! One compact card under the header, only while there is a review waiting
+//! to be sent. Each row names the version, the votes, the start of the
+//! message and the state (pending or sending), with the actions a pending
+//! review allows: edit (reopens the reply dialog on it) and cancel. A
+//! review that consolidation held, or whose votes failed, is in the held
+//! card instead (`held`), item by item.
 //!
 //! Keys: `l n` / `l p` move the selection (shown when there are several),
-//! `l e` edits, `l c` cancels and `l d` drops the selected review. The
-//! list is the shared [`crate::comments::ChangeComments`]' reviews, read
-//! from the store with the threads and reloaded whenever the outbox says
-//! the change moved, so it is there at once and follows every write.
+//! `l e` edits and `l c` cancels the selected review. The list is the
+//! shared [`crate::comments::ChangeComments`]' reviews, read from the store
+//! with the threads and reloaded whenever the outbox says the change moved,
+//! so it is there at once and follows every write.
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -28,9 +27,6 @@ use super::{
     view::{pill, section_title},
 };
 use crate::{actions::*, change_detail::patch_set_label, reply};
-
-/// How long a first "drop" waits for the second.
-const DROP_ASK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `Code-Review +2, Verified +1`, or "no votes".
 pub fn votes_text(r: &PendingReview) -> String {
@@ -69,9 +65,18 @@ fn message_start(r: &PendingReview) -> Option<String> {
 }
 
 impl ChangePage {
-    /// The reviews the card lists: those not sent yet, oldest first.
+    /// The reviews the card lists: those waiting to be sent, oldest first.
+    /// Held and failed ones are the held card's.
     pub(super) fn listed_reviews(&self) -> Vec<&PendingReview> {
-        self.reviews.iter().filter(|r| r.is_unsent()).collect()
+        self.reviews
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.state,
+                    PendingReviewState::Pending | PendingReviewState::Sending
+                )
+            })
+            .collect()
     }
 
     /// The selected review: the one under the selection, else the newest.
@@ -98,7 +103,6 @@ impl ChangePage {
             (at + ids.len() - 1) % ids.len()
         };
         self.review_cursor = Some(ids[next]);
-        self.disarm_drop(cx);
         self.remeasure(super::state::Block::PendingReviews);
         cx.notify();
     }
@@ -150,18 +154,6 @@ impl ChangePage {
         }
     }
 
-    pub(super) fn drop_review_action(
-        &mut self,
-        _: &DropPendingReview,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match self.selected_review() {
-            Some(r) => self.drop_review(&r, cx),
-            None => self.no_reviews(cx),
-        }
-    }
-
     /// Reopens the reply dialog on `r`, if it can still change.
     fn edit_review(&mut self, r: &PendingReview, cx: &mut Context<Self>) {
         if r.state != PendingReviewState::Pending {
@@ -176,7 +168,7 @@ impl ChangePage {
         if r.state != PendingReviewState::Pending {
             let why = match r.state {
                 PendingReviewState::Held | PendingReviewState::Failed => {
-                    "This review is held; drop it instead (l d)"
+                    "This review is held; see the held card (w d drops an item)"
                 }
                 _ => "This review is being sent and can no longer be cancelled",
             };
@@ -193,58 +185,6 @@ impl ChangePage {
             },
             cx,
         );
-    }
-
-    /// Drops held or failed review `r` with its message, on the second ask.
-    fn drop_review(&mut self, r: &PendingReview, cx: &mut Context<Self>) {
-        if !matches!(
-            r.state,
-            PendingReviewState::Held | PendingReviewState::Failed
-        ) {
-            let why = match r.state {
-                PendingReviewState::Pending => {
-                    "This review is still pending; cancel it instead (l c)"
-                }
-                _ => "This review is being sent and can no longer be dropped",
-            };
-            return self.hint.say(why, false, cx, |p| &mut p.hint);
-        }
-        if self.confirm_drop != Some(r.id) {
-            self.arm_drop(r.id, cx);
-            let ask = "Drop this review and its message? Press l d (or Drop) again";
-            return self.hint.say(ask, false, cx, |p| &mut p.hint);
-        }
-        self.disarm_drop(cx);
-        let (syncer, id) = (self.session.syncer().clone(), r.id);
-        self.review_write(
-            async move { syncer.drop_pending_review(id) },
-            "Review dropped",
-            cx,
-        );
-    }
-
-    /// Asks about dropping review `id`; the question expires after
-    /// [`DROP_ASK`], so a later `l d` asks again.
-    fn arm_drop(&mut self, id: PendingReviewId, cx: &mut Context<Self>) {
-        self.confirm_drop = Some(id);
-        self.remeasure(super::state::Block::PendingReviews);
-        self.drop_timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(DROP_ASK).await;
-            this.update(cx, |this, cx| {
-                if this.confirm_drop == Some(id) {
-                    this.disarm_drop(cx);
-                }
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn disarm_drop(&mut self, cx: &mut Context<Self>) {
-        self.confirm_drop = None;
-        self.drop_timer = None;
-        self.remeasure(super::state::Block::PendingReviews);
-        cx.notify();
     }
 
     /// Runs a pending review write on the background executor, then says
@@ -295,15 +235,12 @@ impl ChangePage {
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let (state_color, can_edit, can_drop) = match r.state {
-                    PendingReviewState::Pending => (theme.primary, true, false),
-                    PendingReviewState::Held => (theme.warning, false, true),
-                    PendingReviewState::Failed => (theme.danger, false, true),
-                    _ => (muted, false, false),
+                let (state_color, can_edit) = match r.state {
+                    PendingReviewState::Pending => (theme.primary, true),
+                    _ => (muted, false),
                 };
                 let state = state_text(r);
                 let id = r.id;
-                let arm = self.confirm_drop == Some(id);
                 h_flex()
                     .id(("pending-review", i))
                     .debug_selector(move || format!("pending-review-{i}: {state}"))
@@ -360,25 +297,13 @@ impl ChangePage {
                                 })),
                         )
                     })
-                    .when(can_drop, |d| {
-                        d.child(
-                            Button::new(("pending-drop", i))
-                                .label(if arm { "Drop?" } else { "Drop" })
-                                .xsmall()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(r) = this.review_by_id(id) {
-                                        this.drop_review(&r, cx);
-                                    }
-                                })),
-                        )
-                    })
                     .into_any_element()
             })
             .collect();
         let keys = if listed.len() > 1 {
-            "l n / l p select \u{b7} l e edit \u{b7} l c cancel \u{b7} l d drop"
+            "l n / l p select \u{b7} l e edit \u{b7} l c cancel"
         } else {
-            "l e edit \u{b7} l c cancel \u{b7} l d drop"
+            "l e edit \u{b7} l c cancel"
         };
         v_flex()
             .child(

@@ -172,7 +172,7 @@ use crate::{Error, HasCheckout, PortCommit, PortError, PortMaps, PortSource};
 mod held;
 mod port;
 
-pub use held::{HeldItem, HeldPublished};
+pub use held::{HeldItem, HeldPublished, held_place};
 
 /// Votes as label and value, sorted by label.
 type Votes = Vec<(String, i32)>;
