@@ -365,6 +365,25 @@ fn a_401_on_the_mark_puts_it_back_and_goes_to_the_login_flow(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn a_list_that_arrives_while_a_mark_is_sent_keeps_the_mark(cx: &mut TestAppContext) {
+    let http = RouteHttpClient::new();
+    http.route(PUT_A, 204, "");
+    let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
+    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
+    cx.update(|cx| {
+        s.list
+            .update(cx, |l, cx| l.set_reviewed("src/a.rs", true, cx))
+    });
+    // A poll brings a list made before the mark.
+    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
+    assert!(s.files(cx).is_reviewed("src/a.rs"));
+    cx.run_until_parked();
+    // Once the request is done, a list is taken as it is.
+    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
+    assert!(!s.files(cx).is_reviewed("src/a.rs"));
+}
+
+#[gpui_kit::test]
 fn the_request_ends_also_when_the_list_is_gone(cx: &mut TestAppContext) {
     let http = RouteHttpClient::new();
     http.route(PUT_A, 204, "");

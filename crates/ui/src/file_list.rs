@@ -13,13 +13,15 @@
 //! It also resolves the comparison in the checkout as soon as it has a key
 //! and a project ([`LocalState`]), for the diffs and the syntax worker, and
 //! owns the reviewed marks: `r` flips one at once and sends it, and a
-//! failed request puts it back.
+//! failed request puts it back. A list that arrives while a mark is on its
+//! way (a poll, Gerrit's answer to a miss) keeps the mark as sent, since
+//! the list was made before it.
 //!
 //! Pages read a [`Files`] snapshot, which they copy when an event says it
 //! changed (the change page reads the list in many places without a `cx`).
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -165,6 +167,9 @@ pub struct FileList {
     /// Making the list in the checkout.
     listing_task: Option<Task<()>>,
     fetch_task: Option<Task<()>>,
+    /// The marks on their way for the key: the value last sent per path,
+    /// and how many requests for it are open.
+    sending: HashMap<String, (bool, u32)>,
 }
 
 impl EventEmitter<FileListEvent> for FileList {}
@@ -182,6 +187,7 @@ impl FileList {
             local_task: None,
             listing_task: None,
             fetch_task: None,
+            sending: HashMap::new(),
         }
     }
 
@@ -229,6 +235,7 @@ impl FileList {
             self.local_task = None;
             self.listing_task = None;
             self.fetch_task = None;
+            self.sending.clear();
         }
         let Some(key) = key else {
             return restart;
@@ -397,6 +404,14 @@ impl FileList {
         self.files.renames = renames_of(&files);
         self.files.list = Arc::new(files);
         self.files.reviewed = Arc::new(reviewed);
+        let sending: Vec<_> = self
+            .sending
+            .iter()
+            .map(|(p, (r, _))| (p.clone(), *r))
+            .collect();
+        for (path, reviewed) in sending {
+            self.mark(&path, reviewed);
+        }
         self.files.loaded = true;
         self.files.checkout = checkout;
         self.files.error = None;
@@ -450,6 +465,8 @@ impl FileList {
             return;
         };
         self.mark(path, reviewed);
+        let open = self.sending.entry(path.to_owned()).or_insert((reviewed, 0));
+        *open = (reviewed, open.1 + 1);
         cx.emit(FileListEvent::MarksChanged);
         let syncer = self.session.syncer().clone();
         let (change, sha, path) = (key.change, key.target.sha.clone(), path.to_owned());
@@ -481,6 +498,14 @@ impl FileList {
         outcome: reviewed::Outcome,
         cx: &mut Context<Self>,
     ) {
+        if self.files.key.as_ref() == Some(key)
+            && let Some(open) = self.sending.get_mut(path)
+        {
+            open.1 -= 1;
+            if open.1 == 0 {
+                self.sending.remove(path);
+            }
+        }
         let (error, login) = match outcome {
             reviewed::Outcome::Done => return,
             reviewed::Outcome::Unauthorized => (None, true),
