@@ -38,6 +38,7 @@ pub use drafts::{CachedComments, DeleteOutcome, DraftCounts, DraftFailure, Merge
 pub use error::Error;
 pub use events::EVENT_RETENTION;
 pub use inbox::{INBOX_KEEP, INBOX_RETENTION, InboxId, InboxItem, NewInboxItem};
+pub use labels::BorrowedLabels;
 pub use local::{
     CachedChangeKey, CachedGerritChange, LocalChangeEntry, LocalChangeUpsert, LocalOp,
     NewLocalPatchSet, ReconcileReport, Seen,

@@ -11,9 +11,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{params_from_iter, types::Value};
+use model::LabelValue;
+use rusqlite::{OptionalExtension as _, params, params_from_iter, types::Value};
 
 use crate::{Error, ServerId, Store};
+
+/// The vote labels of one cached change, lent to a local change (which
+/// has none of its own) for its reply dialog.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BorrowedLabels {
+    /// The values the user may give per label (`permitted_labels`).
+    pub permitted: BTreeMap<String, Vec<i32>>,
+    /// What each value of a label means (`label_values`).
+    pub values: BTreeMap<String, Vec<LabelValue>>,
+}
 
 /// How many cached change details are read, newest first.
 const DETAILS_READ: usize = 500;
@@ -81,6 +92,48 @@ impl Store {
             out.entry(name?).or_default();
         }
         Ok(out)
+    }
+
+    /// The labels of the newest cached change detail of `project` (and of
+    /// `branch`, when given) that defines labels: open changes first,
+    /// since a closed change may only permit post-submit votes, then by
+    /// `updated`. `None` when no cached detail of the project has labels.
+    /// Local changes are never cached, so they never lend labels.
+    pub fn labels_to_borrow(
+        &self,
+        server: ServerId,
+        project: &str,
+        branch: Option<&str>,
+    ) -> Result<Option<BorrowedLabels>, Error> {
+        let row: Option<(Option<String>, String)> = self
+            .conn
+            .prepare_cached(
+                "SELECT json_extract(d.json, '$.permitted_labels'),
+                        json_extract(d.json, '$.label_values')
+                 FROM change_details d
+                 JOIN changes c ON c.server_id = d.server_id AND c.number = d.number
+                 WHERE d.server_id = ?1
+                   AND json_extract(c.json, '$.project') = ?2
+                   AND (?3 IS NULL OR json_extract(c.json, '$.branch') = ?3)
+                   AND json_type(d.json, '$.label_values') = 'object'
+                   AND json_extract(d.json, '$.label_values') != '{}'
+                 ORDER BY json_extract(c.json, '$.status') = 'New' DESC, c.updated DESC
+                 LIMIT 1",
+            )?
+            .query_row(params![server.0, project, branch], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        let Some((permitted, values)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(BorrowedLabels {
+            permitted: permitted
+                .map(|p| serde_json::from_str(&p))
+                .transpose()?
+                .unwrap_or_default(),
+            values: serde_json::from_str(&values)?,
+        }))
     }
 }
 

@@ -146,3 +146,65 @@ fn only_the_asked_servers_are_read() {
     let both = s.label_values(&[a, b]).unwrap();
     assert_eq!(both.len(), 2);
 }
+
+/// Change `n` of project `project`, branch `branch`, updated at `updated`,
+/// with Code-Review values up to `max`.
+fn labelled(n: u64, project: &str, branch: &str, updated: &str, max: i32) -> ChangeDetail {
+    let mut d = detail(n);
+    d.summary.project = project.into();
+    d.summary.branch = branch.into();
+    d.summary.updated = ts(updated);
+    d.permitted_labels = [("Code-Review".to_owned(), (-max..=max).collect())].into();
+    d.label_values = [("Code-Review".to_owned(), (-max..=max).map(value).collect())].into();
+    d
+}
+
+#[test]
+fn labels_are_borrowed_from_the_newest_change_of_the_branch_else_the_project() {
+    let (mut s, id) = store();
+    assert_eq!(s.labels_to_borrow(id, "p", Some("main")).unwrap(), None);
+    let old = labelled(1, "p", "main", "2024-01-01T00:00:00Z", 1);
+    let new = labelled(2, "p", "main", "2024-03-01T00:00:00Z", 2);
+    let other_branch = labelled(3, "p", "stable", "2024-05-01T00:00:00Z", 3);
+    let other_project = labelled(4, "q", "main", "2024-06-01T00:00:00Z", 4);
+    // Defines no labels at all (an anonymous fetch): never lends.
+    let mut bare = detail(5);
+    bare.summary.project = "p".into();
+    bare.summary.updated = ts("2024-07-01T00:00:00Z");
+    for d in [&old, &new, &other_branch, &other_project, &bare] {
+        s.save_change_detail(id, d, ts(T1)).unwrap();
+    }
+    let max = |b: Option<BorrowedLabels>| {
+        let b = b.expect("borrowed");
+        assert_eq!(
+            b.values["Code-Review"].len(),
+            b.permitted["Code-Review"].len()
+        );
+        *b.permitted["Code-Review"].last().unwrap()
+    };
+    assert_eq!(max(s.labels_to_borrow(id, "p", Some("main")).unwrap()), 2);
+    assert_eq!(max(s.labels_to_borrow(id, "p", Some("stable")).unwrap()), 3);
+    // An unknown or uncached branch: the newest of the project.
+    assert_eq!(max(s.labels_to_borrow(id, "p", None).unwrap()), 3);
+    assert_eq!(s.labels_to_borrow(id, "p", Some("dev")).unwrap(), None);
+    assert_eq!(max(s.labels_to_borrow(id, "q", None).unwrap()), 4);
+    assert_eq!(s.labels_to_borrow(id, "r", None).unwrap(), None);
+}
+
+#[test]
+fn an_open_change_lends_before_a_newer_closed_one() {
+    let (mut s, id) = store();
+    let open = labelled(1, "p", "main", "2024-01-01T00:00:00Z", 2);
+    let mut merged = labelled(2, "p", "main", "2024-03-01T00:00:00Z", 1);
+    merged.summary.status = ChangeStatus::Merged;
+    for d in [&open, &merged] {
+        s.save_change_detail(id, d, ts(T1)).unwrap();
+    }
+    let b = s.labels_to_borrow(id, "p", Some("main")).unwrap().unwrap();
+    assert_eq!(b.permitted["Code-Review"], [-2, -1, 0, 1, 2]);
+    // Only closed ones: the newest of them still lends.
+    let (mut s, id) = store();
+    s.save_change_detail(id, &merged, ts(T1)).unwrap();
+    let b = s.labels_to_borrow(id, "p", Some("main")).unwrap().unwrap();
+    assert_eq!(b.permitted["Code-Review"], [-1, 0, 1]);
+}
