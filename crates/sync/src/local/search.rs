@@ -11,20 +11,30 @@
 //! * `is:open` and `status:open`: every local change is open.
 //! * `owner:self`: every local change is the user's own (discovery takes
 //!   only the user's commits).
+//!
+//!   Both hold only for rows in the `Local` state, the only ones that
+//!   match at all: a `Checking` row may turn out to be on Gerrit (a merged
+//!   cherry-pick, say), a `Vanished` one may have been pushed and merged,
+//!   and an `Ambiguous` one is on Gerrit.
 //! * `change:I…`, a full Change-Id.
 //! * Plain words, matched against the subject only, case-insensitively and
 //!   by whole words: fewer hits than Gerrit's default field, which looks
 //!   at more than the subject, but never ones it would not give. A quoted
 //!   phrase is its words in a row; a word like `foo-bar` is the words
-//!   `foo` and `bar` in a row, as Gerrit splits it.
-//! * Implicit AND, and an explicit `AND`.
+//!   `foo` and `bar` in a row, as Gerrit splits it (`'` and `,` between
+//!   letters or digits stay in the word: `foo's`, `1,000`).
+//! * Implicit AND, and an explicit `AND` / `and` between two terms.
 //!
-//! Anything else (another operator or value, `OR`, `NOT`, `-` negation,
-//! parentheses, braces, regular expressions, a quote that does not close,
-//! a backslash) makes the whole query unsupported: no local results,
-//! rather than wrong ones.
+//! Anything else makes the whole query unsupported: no local results,
+//! rather than wrong ones. That is another operator or value, `OR` /
+//! `or`, `NOT` / `not`, `-` or `!` negation, parentheses, braces, regular
+//! expressions, a quote that does not close, a backslash, a dangling
+//! `AND`, and the characters Gerrit refuses outside quotes (`' , + ; = ?
+//! [ ] $ % &`). So is a word that Gerrit's default field takes for a
+//! change (a number, a Change-Id prefix like `ifdef`, a triplet) or for a
+//! ref (`refs/…`): Gerrit searches those as such, never as text.
 
-use model::LocalChange;
+use model::{LocalChange, LocalChangeState};
 
 /// A query in the supported subset. See the module comment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,26 +60,44 @@ impl LocalQuery {
     /// is empty).
     pub fn parse(query: &str) -> Option<Self> {
         let mut terms = Vec::new();
+        // The last token was an `AND`: a term has to follow.
+        let mut and = false;
         for token in tokens(query)? {
             match token {
-                Token::Bare(word) if word == "AND" => {}
-                Token::Bare(word) if word == "OR" || word == "NOT" => return None,
-                Token::Bare(word) | Token::Quoted(word) => terms.push(words(&word)?),
+                Token::Bare(word) if word == "AND" || word == "and" => {
+                    if terms.is_empty() || and {
+                        return None;
+                    }
+                    and = true;
+                    continue;
+                }
+                Token::Bare(word) if matches!(word.as_str(), "OR" | "or" | "NOT" | "not") => {
+                    return None;
+                }
+                Token::Bare(word) | Token::Quoted(word) => {
+                    if is_change_like(&word) || word.starts_with("refs/") {
+                        return None;
+                    }
+                    terms.push(words(&word)?);
+                }
                 Token::Operator(op, value) => terms.push(operator(&op, &value)?),
             }
+            and = false;
         }
-        (!terms.is_empty()).then_some(Self { terms })
+        (!terms.is_empty() && !and).then_some(Self { terms })
     }
 
-    /// Whether `change` fits every term.
+    /// Whether `change` fits every term; never for a row that is not in
+    /// the `Local` state (see the module comment).
     pub fn matches(&self, change: &LocalChange) -> bool {
-        self.terms.iter().all(|t| match t {
-            Term::Project(p) => change.project == *p,
-            Term::Branch(b) => change.branch.as_deref() == Some(b.as_str()),
-            Term::Open | Term::OwnerSelf => true,
-            Term::ChangeId(id) => change.change_id == *id,
-            Term::Words(w) => has_run(&split_words(&change.subject), w),
-        })
+        change.state == LocalChangeState::Local
+            && self.terms.iter().all(|t| match t {
+                Term::Project(p) => change.project == *p,
+                Term::Branch(b) => change.branch.as_deref() == Some(b.as_str()),
+                Term::Open | Term::OwnerSelf => true,
+                Term::ChangeId(id) => change.change_id == *id,
+                Term::Words(w) => has_run(&split_words(&change.subject), w),
+            })
     }
 }
 
@@ -90,6 +118,9 @@ enum Token {
     /// `op:value`, the value without quotes.
     Operator(String, String),
 }
+
+/// What Gerrit's query lexer refuses outside quotes.
+const REFUSED: [char; 11] = ['\'', ',', '+', ';', '=', '?', '[', ']', '$', '%', '&'];
 
 /// The query split at whitespace outside quotes; `None` for syntax the
 /// subset does not handle.
@@ -116,6 +147,8 @@ fn tokens(query: &str) -> Option<Vec<Token>> {
             }
             if c == '"' {
                 quoted = !quoted;
+            } else if !quoted && REFUSED.contains(&c) {
+                return None;
             }
             raw.push(c);
             chars.next();
@@ -177,12 +210,50 @@ fn words(text: &str) -> Option<Term> {
     (!w.is_empty()).then_some(Term::Words(w))
 }
 
-/// Lowercase runs of letters and digits.
+/// Whether Gerrit's default field takes `term` for a change rather than
+/// text: `^(?:[1-9][0-9]*|(?:[^~]+~[^~]+~)?[iI][0-9a-f]{4,}.*)$`.
+fn is_change_like(term: &str) -> bool {
+    let number = term.starts_with(|c: char| ('1'..='9').contains(&c))
+        && term.bytes().all(|b| b.is_ascii_digit());
+    let id_prefix = |s: &str| {
+        let b = s.as_bytes();
+        b.len() >= 5
+            && (b[0] == b'i' || b[0] == b'I')
+            && b[1..5]
+                .iter()
+                .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    let triplet = || {
+        let mut parts = term.splitn(3, '~');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(p), Some(b), Some(rest)) => !p.is_empty() && !b.is_empty() && id_prefix(rest),
+            _ => false,
+        }
+    };
+    number || id_prefix(term) || triplet()
+}
+
+/// Lowercase runs of letters and digits; a `'` or `,` between two of them
+/// stays in the word, as in Gerrit's tokenizer.
 fn split_words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect()
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        let inner = (c == '\'' || c == ',')
+            && i > 0
+            && chars[i - 1].is_alphanumeric()
+            && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric());
+        if c.is_alphanumeric() || inner {
+            word.extend(c.to_lowercase());
+        } else if !word.is_empty() {
+            out.push(std::mem::take(&mut word));
+        }
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
 }
 
 /// Whether `run` occurs in `words` as consecutive words.
@@ -252,6 +323,8 @@ mod tests {
             // Implicit and explicit AND.
             ("project:tools/gert branch:main fix", true, false),
             ("project:tools/gert AND is:open", true, true),
+            ("project:tools/gert and is:open", true, true),
+            ("fix and scroll", true, true),
             ("project:tools/gert unrelated", false, false),
         ];
         for (query, want, want_no_branch) in table {
@@ -299,10 +372,81 @@ mod tests {
             "fix\\ it",
             "---",
             "http://example.com",
+            // Lowercase operators.
+            "fix or it",
+            "not fix",
+            // A dangling AND is a parse error on Gerrit.
+            "AND",
+            "and fix",
+            "fix AND",
+            "fix AND AND it",
+            "fix and AND it",
+            // What Gerrit's default field takes for a change or a ref.
+            "timeout 300",
+            "300",
+            "ifdef",
+            "iface",
+            "Ifdef cleanup",
+            "\"ifdef cleanup\"",
+            "I0123abcd",
+            "p~main~I0123",
+            "\"p~main~Iabcd\"",
+            "refs/heads/main",
+            "\"refs/for/main\"",
+            // Characters Gerrit refuses outside quotes.
+            "foo's",
+            "1,000",
+            "a+b",
+            "a;b",
+            "a=b",
+            "why?",
+            "[fix]",
+            "$fix",
+            "50%",
+            "a&b",
         ] {
             assert_eq!(LocalQuery::parse(query), None, "{query:?}");
             assert!(matching(query, vec![c.clone()]).is_empty(), "{query:?}");
         }
+    }
+
+    #[test]
+    fn words_keep_inner_apostrophes_and_commas_and_numbers_stay_text_when_not_change_like() {
+        let c = change("p", Some("main"), "Fix foo's limit of 1,000 and 0815");
+        for (query, want) in [
+            ("\"foo's\"", true),
+            ("foo", false),
+            ("\"1,000\"", true),
+            ("\"of 1,000\"", true),
+            // A leading zero is no change number: text.
+            ("0815", true),
+            // Not a change: fewer than four hex digits after the `i`.
+            ("ifa", false),
+        ] {
+            let q = LocalQuery::parse(query).unwrap_or_else(|| panic!("{query:?} is supported"));
+            assert_eq!(q.matches(&c), want, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn only_rows_in_the_local_state_match() {
+        let mut c = change("p", Some("main"), "Fix it");
+        for state in [
+            LocalChangeState::Checking,
+            LocalChangeState::Ambiguous,
+            LocalChangeState::Vanished,
+            LocalChangeState::Closed,
+            LocalChangeState::Consolidated,
+        ] {
+            c.state = state;
+            assert!(matching("fix", vec![c.clone()]).is_empty(), "{state:?}");
+            assert!(
+                matching("is:open owner:self", vec![c.clone()]).is_empty(),
+                "{state:?}"
+            );
+        }
+        c.state = LocalChangeState::Local;
+        assert_eq!(matching("fix", vec![c.clone()]), vec![c]);
     }
 
     #[test]

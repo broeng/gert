@@ -794,8 +794,8 @@ fn search_page(
 }
 
 /// A store with the cached results of `query` (change 1) and local rows:
-/// purely local ones on `main`, on `stable` and on an unknown branch, and a
-/// local version of Gerrit change 7.
+/// purely local ones on `main`, on `stable` and on an unknown branch (still
+/// checking), a vanished one, and a local version of Gerrit change 7.
 fn search_store(query: &str) -> Store {
     let mut store = Store::open_in_memory().expect("store");
     let server = store.server_id(URL).expect("server id");
@@ -825,6 +825,12 @@ fn search_store(query: &str) -> Store {
             LocalChangeState::Local,
         ),
         upsert("I3", "Fix somewhere", None, LocalChangeState::Checking),
+        upsert(
+            "I5",
+            "Fix the vanished",
+            Some("main"),
+            LocalChangeState::Vanished,
+        ),
         version,
     ];
     store
@@ -878,7 +884,8 @@ fn a_search_outside_the_subset_lists_no_local_changes(cx: &mut TestAppContext) {
             "{query:?}"
         );
     }
-    // A plain word fits the three purely local changes.
+    // A plain word fits the purely local changes in the Local state: not
+    // the one still being checked, nor the vanished one.
     let (_, page) = search_page(cx, search_store("fix"), "fix");
     let mut subjects = cx.update(|cx| {
         page.read(cx)
@@ -888,8 +895,5 @@ fn a_search_outside_the_subset_lists_no_local_changes(cx: &mut TestAppContext) {
             .collect::<Vec<_>>()
     });
     subjects.sort();
-    assert_eq!(
-        subjects,
-        ["Fix somewhere", "Fix the scroll", "Fix the stable scroll"]
-    );
+    assert_eq!(subjects, ["Fix the scroll", "Fix the stable scroll"]);
 }
