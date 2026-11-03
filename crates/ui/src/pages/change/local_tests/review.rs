@@ -311,10 +311,13 @@ fn a_quick_vote_on_a_local_patch_set_of_a_gerrit_change_stays_local(cx: &mut Tes
     f.assert_nothing_local_sent(&[&ck.local]);
 }
 
-#[gpui_kit::test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-fn a_vote_on_an_older_local_version_carries_over_to_the_newer_one(cx: &mut TestAppContext) {
-    let ck = checkout();
+/// Local change I1 amended once, on a page with the project in mode
+/// `approval`, and a way to save a pending review (Follow) on a version.
+fn amended(
+    cx: &mut TestAppContext,
+    ck: &Checkout,
+    approval: model::LocalApproval,
+) -> (Fixture, ChangeNumber, String) {
     ck.repo
         .git(&["commit", "-q", "--amend", "-m", "Amended\n\nChange-Id: I1"]);
     let amended = ck.repo.git(&["rev-parse", "HEAD"]);
@@ -332,10 +335,24 @@ fn a_vote_on_an_older_local_version_carries_over_to_the_newer_one(cx: &mut TestA
         .local_changes_by_change_id(SERVER, "I1")
         .expect("rows")[0]
         .number;
-    let f = page(cx, store, number, &ck, |_| {});
-    let (v1, v2) = (f.local_patch_set(cx, 1), f.local_patch_set(cx, 2));
-    let save = |version, labels: &[(&str, i32)]| {
-        f.store
+    let project = ProjectSettings {
+        local_approval: approval,
+        ..ck.project()
+    };
+    (page_in(cx, store, number, project, |_| {}), number, amended)
+}
+
+impl Fixture {
+    /// Saves a pending review (mode `follow`) with `labels` on `version`
+    /// and lets the page read it.
+    fn save_review(
+        &self,
+        cx: &mut TestAppContext,
+        number: ChangeNumber,
+        version: PatchSetNumber,
+        labels: &[(&str, i32)],
+    ) {
+        self.store
             .lock()
             .expect("store")
             .create_pending_review(
@@ -352,12 +369,20 @@ fn a_vote_on_an_older_local_version_carries_over_to_the_newer_one(cx: &mut TestA
                 },
             )
             .expect("review");
-    };
-    save(v1, &[("Code-Review", 2), ("Verified", 1)]);
-    f.page.update(cx, |p, cx| {
-        p.outbox.update(cx, |o, cx| o.published(number, cx))
-    });
-    cx.run_until_parked();
+        self.page.update(cx, |p, cx| {
+            p.outbox.update(cx, |o, cx| o.published(number, cx))
+        });
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
+fn a_vote_on_an_older_local_version_carries_over_to_the_newer_one(cx: &mut TestAppContext) {
+    let ck = checkout();
+    let (f, number, amended) = amended(cx, &ck, model::LocalApproval::Exact);
+    let (v1, v2) = (f.local_patch_set(cx, 1), f.local_patch_set(cx, 2));
+    f.save_review(cx, number, v1, &[("Code-Review", 2), ("Verified", 1)]);
     let boxes = |cx: &mut TestAppContext| cx.update(|cx| f.page.read(cx).local_votes_for_test());
     let vote = |label: &str, value, version| (label.to_owned(), value, version);
     // Local 2, the newest, is shown: local 1's votes carry over.
@@ -365,13 +390,15 @@ fn a_vote_on_an_older_local_version_carries_over_to_the_newer_one(cx: &mut TestA
         boxes(cx),
         [vote("Code-Review", 2, v1), vote("Verified", 1, v1)]
     );
+    // The project holds votes of an amended commit (`exact`, stricter
+    // than the review's `follow`): the +2 button is still to press.
+    let buttons =
+        |cx: &mut TestAppContext| cx.update(|cx| f.page.read(cx).quick_buttons_for_test(cx));
+    assert_eq!(buttons(cx)[0].text(), "Code-Review +2");
+    assert!(!buttons(cx)[0].applied);
     // A vote on local 2 wins over the carried one, and does not go back
     // to local 1.
-    save(v2, &[("Code-Review", 1)]);
-    f.page.update(cx, |p, cx| {
-        p.outbox.update(cx, |o, cx| o.published(number, cx))
-    });
-    cx.run_until_parked();
+    f.save_review(cx, number, v2, &[("Code-Review", 1)]);
     assert_eq!(
         boxes(cx),
         [vote("Code-Review", 1, v2), vote("Verified", 1, v1)]
@@ -390,6 +417,26 @@ fn a_vote_on_an_older_local_version_carries_over_to_the_newer_one(cx: &mut TestA
     assert_eq!(boxes(cx), [vote("Verified", 1, v1)]);
     let left: Vec<_> = f.reviews(number).into_iter().map(|r| r.labels).collect();
     assert_eq!(left, [[("Verified".to_owned(), 1)].into()]);
+    f.assert_nothing_local_sent(&[&ck.local, &amended]);
+}
+
+#[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
+fn a_carried_vote_that_follows_the_amended_commit_counts_as_given(cx: &mut TestAppContext) {
+    let ck = checkout();
+    let (f, number, amended) = amended(cx, &ck, model::LocalApproval::Follow);
+    let v1 = f.local_patch_set(cx, 1);
+    f.save_review(cx, number, v1, &[("Code-Review", 2)]);
+    let buttons =
+        |cx: &mut TestAppContext| cx.update(|cx| f.page.read(cx).quick_buttons_for_test(cx));
+    assert_eq!(buttons(cx)[0].text(), "Code-Review +2");
+    assert!(buttons(cx)[0].applied);
+    f.press(cx, "shift-v");
+    assert_eq!(
+        f.hint(cx).as_deref(),
+        Some("You already voted Code-Review +2")
+    );
+    assert_eq!(f.reviews(number).len(), 1, "no new review");
     f.assert_nothing_local_sent(&[&ck.local, &amended]);
 }
 

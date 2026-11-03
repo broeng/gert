@@ -248,6 +248,31 @@ impl ChangePage {
         votes
     }
 
+    /// Whether carried vote `v` goes to Gerrit with the amended commit (see
+    /// [`follows`]), under the stricter of its review's mode and the
+    /// project's now, as consolidation judges it.
+    fn carried_follows(&self, v: &LocalVote, cx: &App) -> bool {
+        follows(
+            v.strategy.max(self.local_approval(cx)),
+            !self.number.is_local(),
+        )
+    }
+
+    /// The votes carried from older local versions that go to Gerrit with
+    /// the amended commit: for the quick-vote buttons, these count as
+    /// given, while a carried vote that would be held does not (voting
+    /// again on the shown version is what gets it sent).
+    pub(super) fn following_carried_votes(&self, cx: &App) -> BTreeMap<String, i32> {
+        let Some(target) = self.local_target() else {
+            return BTreeMap::new();
+        };
+        self.local_votes()
+            .into_iter()
+            .filter(|(_, v)| v.patch_set != target.number && self.carried_follows(v, cx))
+            .map(|(label, v)| (label, v.value))
+            .collect()
+    }
+
     /// The local vote boxes: label, value and the version each was given on.
     #[cfg(test)]
     pub(crate) fn local_votes_for_test(&self) -> Vec<(String, i32, PatchSetNumber)> {
@@ -384,10 +409,7 @@ impl ChangePage {
         let status = if v.sending {
             "Being sent to Gerrit now".to_owned()
         } else if v.patch_set != target {
-            // The stricter of the review's mode and the project's now, as
-            // consolidation judges it.
-            let strategy = v.strategy.max(self.local_approval(cx));
-            carried_status(&version, strategy, !d.summary.number.is_local())
+            carried_status(&version, self.carried_follows(v, cx))
         } else {
             format!("Sent when {version} is on Gerrit")
         };
@@ -565,14 +587,20 @@ fn vote_card(
         .into_any_element()
 }
 
-/// What a local vote given on `version`, an older version than the one
-/// shown, becomes: the review is ported to the version that reaches
-/// Gerrit, and its votes follow only when the mode in force (`strategy`)
-/// is `follow` on a local change (`gerrit_change`: a local version of a
-/// Gerrit change, which holds them by the strict rule). Kept short; the
-/// held card says the rest.
-fn carried_status(version: &str, strategy: LocalApproval, gerrit_change: bool) -> String {
-    if strategy == LocalApproval::Follow && !gerrit_change {
+/// Whether a vote carried from an older local version is sent for the
+/// version that reaches Gerrit: its review is ported there, and its votes
+/// follow only when the mode in force (`strategy`) is `follow` on a local
+/// change (`gerrit_change`: a local version of a Gerrit change, which
+/// holds them by the strict rule). Otherwise they are held.
+fn follows(strategy: LocalApproval, gerrit_change: bool) -> bool {
+    strategy == LocalApproval::Follow && !gerrit_change
+}
+
+/// The card's line on a vote given on `version`, an older version than
+/// the one shown (see [`follows`]). Kept short; the held card says the
+/// rest.
+fn carried_status(version: &str, follows: bool) -> String {
+    if follows {
         format!("Given on {version}; follows the amended commit to Gerrit")
     } else {
         format!("Given on {version}; held for you to decide when the change is on Gerrit")
@@ -695,21 +723,24 @@ mod tests {
 
     use model::{ExpressionResult, LocalApproval, SubmitRequirement, SubmitRequirementStatus};
 
-    use super::{carried_status, ordered, requirement_labels};
+    use super::{carried_status, follows, ordered, requirement_labels};
 
     #[test]
-    fn a_carried_vote_says_whether_it_follows_the_amended_commit() {
-        let follows = "Given on local 1; follows the amended commit to Gerrit";
-        let held = "Given on local 1; held for you to decide when the change is on Gerrit";
-        assert_eq!(
-            carried_status("local 1", LocalApproval::Follow, false),
-            follows
-        );
+    fn a_carried_vote_follows_only_under_follow_on_a_local_change() {
+        assert!(follows(LocalApproval::Follow, false));
         for strategy in [LocalApproval::ExactOrManual, LocalApproval::Exact] {
-            assert_eq!(carried_status("local 1", strategy, false), held);
+            assert!(!follows(strategy, false));
         }
         // A local version of a Gerrit change: the strict rule.
-        assert_eq!(carried_status("local 1", LocalApproval::Follow, true), held);
+        assert!(!follows(LocalApproval::Follow, true));
+        assert_eq!(
+            carried_status("local 1", true),
+            "Given on local 1; follows the amended commit to Gerrit"
+        );
+        assert_eq!(
+            carried_status("local 1", false),
+            "Given on local 1; held for you to decide when the change is on Gerrit"
+        );
     }
 
     fn requirement(name: &str, expression: &str) -> SubmitRequirement {

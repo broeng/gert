@@ -9,8 +9,11 @@
 //! vote and keeping the rest, or into a new pending review with only that
 //! vote when there is none. So pressing `Shift-V` twice does not make two
 //! reviews, and a vote added after a reply joins it, as it would on
-//! Gerrit. The buttons show the votes of that review as the user's, and
-//! a saved vote moves on along the relation chain as a cast one does.
+//! Gerrit. The buttons show the votes of that review as the user's, with
+//! those carried from an older local version that follow the amended
+//! commit to Gerrit (by the configured `local_approval`; a carried vote
+//! that would be held is not given yet), and a saved vote moves on along
+//! the relation chain as a cast one does.
 
 use gpui_kit::*;
 use model::{
@@ -41,10 +44,15 @@ impl ChangePage {
         let me = self.session.username.as_deref();
         match self.local_target() {
             Some(target) => {
-                let own = self
+                let mut own = self
                     .newest_pending(&target, cx)
                     .map(|r| r.labels)
                     .unwrap_or_default();
+                // A vote from an older version that follows the amended
+                // commit is given already; one that would be held is not.
+                for (label, value) in self.following_carried_votes(cx) {
+                    own.entry(label).or_insert(value);
+                }
                 plan::local_quick_votes(d, me, objections, &own)
             }
             None => plan::quick_votes(d, me, objections),
