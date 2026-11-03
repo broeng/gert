@@ -28,6 +28,16 @@
 //! session only changes the syncer of the *next* run), and requests while
 //! it runs collapse into one more run after it.
 //!
+//! # Redirects
+//!
+//! Once a local change is on Gerrit, its synthetic number leads to the
+//! Gerrit change, and a local version that became a Gerrit patch set
+//! leads to that patch set ([`redirect`]). The shell checks the page on
+//! screen after every run that touched something, and every change or diff
+//! page it opens whose route names a local number, so history entries
+//! follow when they are visited. The entry is rewritten in place
+//! (`NavState::redirect`): Back and Forward stay as they were.
+//!
 //! # Failures
 //!
 //! A run that ended early ([`ConsolidateReport::stopped`]: offline, the
@@ -40,10 +50,14 @@
 use std::{sync::Arc, time::Instant};
 
 use gpui_kit::{AppContext as _, Context, Entity, EventEmitter, Task};
-use model::{ChangeNumber, LocalChangeId};
+use model::{ChangeNumber, LocalChangeId, PatchSetNumber};
 use sync::{ConsolidateOptions, ConsolidateReport, PollPolicy, PollState, PostOutcome, Syncer};
 
-use crate::{checkouts::Checkouts, session::Session};
+use crate::{
+    checkouts::Checkouts,
+    nav::{ChangeView, DiffRoute, Route},
+    session::Session,
+};
 
 /// What a [`Consolidator`] tells the shell.
 #[derive(Clone)]
@@ -284,6 +298,113 @@ pub fn note(report: &ConsolidateReport, change: ChangeNumber) -> Option<(String,
         return Some(("This change is on Gerrit now".to_owned(), false));
     }
     None
+}
+
+/// Where a change or diff page leads now, with the change page state to
+/// open it with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Redirect {
+    pub route: Route,
+    pub view: Option<ChangeView>,
+}
+
+/// Whether `route` (with the change page state `view`) names a local
+/// change or version: only those can lead elsewhere.
+pub fn names_local(route: &Route, view: Option<&ChangeView>) -> bool {
+    let in_view = view.is_some_and(|v| {
+        v.base.is_some_and(PatchSetNumber::is_local)
+            || v.target.is_some_and(PatchSetNumber::is_local)
+    });
+    match route {
+        Route::Change(n) => n.is_local() || in_view,
+        Route::Diff(d) => {
+            d.change.is_local()
+                || d.target.is_local()
+                || d.base.is_some_and(PatchSetNumber::is_local)
+        }
+        _ => false,
+    }
+}
+
+/// Where `route` leads now that Gerrit has some of what it names (see the
+/// module comment): a local change found on Gerrit leads to the Gerrit
+/// change, and each local version that is a Gerrit patch set by now to
+/// that patch set; a version that is not stays (the Gerrit change lists it
+/// among its local patch sets). `view` is the change page state of a
+/// change route. `None` when nothing changed. Blocking (SQLite): call it
+/// from the background executor.
+pub fn redirect(
+    syncer: &Syncer,
+    route: &Route,
+    view: Option<&ChangeView>,
+) -> Result<Option<Redirect>, sync::Error> {
+    if !names_local(route, view) {
+        return Ok(None);
+    }
+    let change = match route {
+        Route::Change(n) => *n,
+        Route::Diff(d) => d.change,
+        _ => return Ok(None),
+    };
+    let change = if change.is_local() {
+        match syncer
+            .local_change(change)?
+            .and_then(|(row, _)| row.gerrit_number)
+        {
+            Some(gerrit) => gerrit,
+            // Not on Gerrit (yet), or the row is gone: the page stays.
+            None => return Ok(None),
+        }
+    } else {
+        change
+    };
+    let map = |n: PatchSetNumber| -> Result<PatchSetNumber, sync::Error> {
+        if !n.is_local() {
+            return Ok(n);
+        }
+        Ok(syncer
+            .local_patch_set(n)?
+            .and_then(|v| v.gerrit_patch_set)
+            .unwrap_or(n))
+    };
+    let map_opt = |n: Option<PatchSetNumber>| n.map(map).transpose();
+    let to = match route {
+        Route::Change(_) => {
+            let view = match view {
+                Some(v) => Some(ChangeView {
+                    base: map_opt(v.base)?,
+                    target: map_opt(v.target)?,
+                    file: v.file.clone(),
+                }),
+                None => None,
+            };
+            Redirect {
+                route: Route::Change(change),
+                view,
+            }
+        }
+        Route::Diff(d) => {
+            let target = map(d.target)?;
+            let base = map_opt(d.base)?.filter(|b| *b != target);
+            Redirect {
+                route: Route::Diff(DiffRoute {
+                    change,
+                    base,
+                    target,
+                    path: d.path.clone(),
+                    thread: d.thread.clone(),
+                }),
+                view: None,
+            }
+        }
+        _ => return Ok(None),
+    };
+    let same = to.route == *route
+        && match &to.route {
+            Route::Change(_) => to.view.as_ref() == view,
+            _ => true,
+        };
+    Ok((!same).then_some(to))
 }
 
 #[cfg(test)]

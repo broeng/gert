@@ -109,7 +109,7 @@ impl NavState {
             .collect()
     }
 
-    #[cfg(test)]
+    /// The index of the current entry.
     pub fn position(&self) -> usize {
         self.index
     }
@@ -214,6 +214,15 @@ impl NavState {
             selected: None,
             change_view: None,
         };
+    }
+
+    /// Rewrites the current entry in place: a page whose local change or
+    /// version reached Gerrit leads there now. Unlike [`Self::replace`]
+    /// the forward history stays, since the user is where they were.
+    pub fn redirect(&mut self, route: Route, change_view: Option<ChangeView>) {
+        let entry = &mut self.entries[self.index];
+        entry.route = route;
+        entry.change_view = change_view;
     }
 
     /// Like [`Self::replace`], and the page belongs to `server` from now on
@@ -327,6 +336,24 @@ mod tests {
         assert!(nav.forward());
         assert_eq!(nav.current(), &c(1));
         assert!(!nav.forward());
+    }
+
+    #[test]
+    fn a_redirect_keeps_both_ways_of_the_history() {
+        let mut nav = NavState::new(Route::Dashboard);
+        nav.push(c(1));
+        nav.push(s("a"));
+        nav.back();
+        let view = ChangeView {
+            target: Some(PatchSetNumber(2)),
+            ..Default::default()
+        };
+        nav.redirect(c(42), Some(view.clone()));
+        assert_eq!(nav.current(), &c(42));
+        assert_eq!(nav.change_view(), Some(view));
+        assert!(nav.can_go_forward() && nav.can_go_back());
+        nav.forward();
+        assert_eq!(nav.current(), &s("a"));
     }
 
     #[test]

@@ -27,7 +27,7 @@ use sync::{ConsolidateReport, FoundChange, PostOutcome, PostReport};
 use super::{Consolidator, note, options};
 use crate::{
     checkouts::Checkouts,
-    nav::Route,
+    nav::{ChangeView, DiffRoute, Route},
     servers::Connection,
     session::{ProjectSettings, SavedQuery, ServerSetup, Startup},
     shell::Shell,
@@ -355,19 +355,163 @@ fn a_pushed_local_change_has_its_review_sent_under_the_app_name(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
-fn the_page_of_the_change_says_its_review_was_sent(cx: &mut TestAppContext) {
+fn the_open_page_follows_the_change_to_gerrit_and_says_what_was_sent(cx: &mut TestAppContext) {
     let f = fixture();
     let s = start(cx, &f, Some("u"));
-    let (row, _) = s.row();
+    let (row, version) = s.row();
     s.review();
     s.open(cx, Route::Change(row.number));
+    cx.update_window(s.window, |_, window, cx| {
+        s.shell.update(cx, |s, cx| {
+            s.nav_for_test().set_change_view(Some(ChangeView {
+                target: Some(version.number),
+                ..Default::default()
+            }));
+            s.show_for_test(window, cx);
+        })
+    })
+    .expect("window");
+    cx.run_until_parked();
+    let (trail, position) = cx.update(|cx| s.shell.read(cx).trail_for_test());
+
     f.pushed();
     s.trigger(cx);
+    // The same history entry, now on the Gerrit change at the patch set the
+    // version became; nothing was added or dropped.
+    assert_eq!(
+        cx.update(|cx| s.shell.read(cx).route().clone()),
+        Route::Change(GERRIT)
+    );
+    let (now, at) = cx.update(|cx| s.shell.read(cx).trail_for_test());
+    assert_eq!((now.len(), at), (trail.len(), position));
+    let page = cx
+        .update(|cx| s.shell.read(cx).change_page_for_test())
+        .expect("change page");
+    assert_eq!(
+        cx.update(|cx| page.read(cx).view_state().target),
+        Some(PatchSetNumber(1))
+    );
     assert_eq!(
         s.page_hint(cx),
         Some(("Your local review was sent to Gerrit".to_owned(), false))
     );
     assert_no_local_number_sent(&f);
+}
+
+#[gpui_kit::test]
+fn history_entries_of_the_local_change_lead_to_gerrit_when_visited(cx: &mut TestAppContext) {
+    let f = fixture();
+    let s = start(cx, &f, Some("u"));
+    let (row, version) = s.row();
+    s.review();
+    let diff = |change, target| DiffRoute {
+        change,
+        base: None,
+        target,
+        path: "a.txt".into(),
+        thread: None,
+    };
+    s.open(cx, Route::Change(row.number));
+    s.open(cx, Route::Diff(diff(row.number, version.number)));
+    s.open(cx, Route::Search("status:open".into()));
+    f.pushed();
+    s.trigger(cx);
+    let back = |cx: &mut TestAppContext| {
+        cx.update_window(s.window, |_, window, cx| {
+            s.shell.update(cx, |s, cx| s.back_for_test(window, cx))
+        })
+        .expect("window");
+        cx.run_until_parked();
+        cx.update(|cx| s.shell.read(cx).route().clone())
+    };
+    assert_eq!(back(cx), Route::Diff(diff(GERRIT, PatchSetNumber(1))));
+    assert_eq!(back(cx), Route::Change(GERRIT));
+    // Forward still leads the way it did.
+    let (trail, position) = cx.update(|cx| s.shell.read(cx).trail_for_test());
+    let routes: Vec<Route> = trail.into_iter().map(|(_, r)| r).collect();
+    assert_eq!(
+        &routes[position..],
+        [
+            Route::Change(GERRIT),
+            Route::Diff(diff(GERRIT, PatchSetNumber(1))),
+            Route::Search("status:open".into()),
+        ]
+    );
+    assert_no_local_number_sent(&f);
+}
+
+#[test]
+fn a_local_version_of_a_gerrit_change_leads_to_the_patch_set_it_became() {
+    use store::{LocalChangeUpsert, LocalOp, NewLocalPatchSet};
+
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server");
+    let now: Timestamp = "2024-06-15T10:00:00Z".parse().expect("time");
+    let upsert = LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: ID_A.into(),
+        gerrit_number: Some(GERRIT),
+        subject: "s".into(),
+        author_name: "Me".into(),
+        author_email: TEST_EMAIL.into(),
+        updated: now,
+        state: None,
+        patch_sets: vec![NewLocalPatchSet {
+            sha: "l2".into(),
+            parent_sha: None,
+            seen_at: now,
+        }],
+    };
+    store
+        .reconcile_local(server, "p", &[LocalOp::Upsert(upsert)], now)
+        .expect("reconcile");
+    let row = store
+        .local_changes_by_change_id(server, ID_A)
+        .expect("rows")
+        .remove(0);
+    let version = store
+        .local_patch_sets(server, row.id)
+        .expect("versions")
+        .remove(0);
+    let env = env_with(store, &RouteHttpClient::new());
+    let session = crate::session::Session::new(&env, &setup(), None).expect("session");
+    let syncer = session.syncer();
+    let at = |target| ChangeView {
+        target: Some(target),
+        file: Some("a.txt".into()),
+        ..Default::default()
+    };
+    let route = Route::Change(GERRIT);
+
+    // Not a Gerrit patch set yet: the page stays.
+    assert_eq!(
+        super::redirect(syncer, &route, Some(&at(version.number))).expect("redirect"),
+        None
+    );
+    // Uploaded as patch set 2: the selection follows.
+    let mut d = crate::testing::detail(GERRIT.0, 2, 2);
+    d.summary.project = "p".into();
+    d.summary.change_id = Some(ID_A.into());
+    d.revisions[1].sha = "l2".into();
+    d.current_revision = Some("l2".into());
+    env.store
+        .lock()
+        .expect("store")
+        .save_change_detail(server, &d, now)
+        .expect("save");
+    assert_eq!(
+        super::redirect(syncer, &route, Some(&at(version.number))).expect("redirect"),
+        Some(super::Redirect {
+            route: route.clone(),
+            view: Some(at(PatchSetNumber(2))),
+        })
+    );
+    // A route without local numbers is never looked at.
+    assert_eq!(
+        super::redirect(syncer, &route, Some(&at(PatchSetNumber(1)))).expect("redirect"),
+        None
+    );
 }
 
 #[gpui_kit::test]

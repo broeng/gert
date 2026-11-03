@@ -574,9 +574,75 @@ impl Shell {
             }
             _ => {}
         }
-        if let Some((note, error)) = shown.and_then(|n| consolidation::note(report, n)) {
-            self.say_on_page(note, error, cx);
-        }
+        let note = shown.and_then(|n| consolidation::note(report, n));
+        self.follow_redirect(note, window, cx);
+    }
+
+    /// Sends the change or diff page on screen to where its local numbers
+    /// lead now (see `consolidation::redirect`), rewriting its history
+    /// entry in place, then says `note` on the page shown. Reads the store
+    /// on the background executor; if the user moved on meanwhile, nothing
+    /// happens.
+    fn follow_redirect(
+        &mut self,
+        note: Option<(String, bool)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let route = self.nav.current().clone();
+        let server = self.nav.current_server().cloned();
+        let view = match &self.page {
+            Page::Change(p) => {
+                let mut view = p.read(cx).view_state();
+                if view.file.is_none() {
+                    view.file = self.nav.change_view().and_then(|v| v.file);
+                }
+                Some(view)
+            }
+            _ => None,
+        };
+        let syncer = server
+            .as_ref()
+            .and_then(|k| self.servers.get(k))
+            .and_then(|e| e.session.as_ref())
+            .map(|s| s.syncer().clone())
+            .filter(|_| consolidation::names_local(&route, view.as_ref()));
+        let Some(syncer) = syncer else {
+            if let Some((note, error)) = note {
+                self.say_on_page(note, error, cx);
+            }
+            return;
+        };
+        let position = self.nav.position();
+        cx.spawn_in(window, async move |this, cx| {
+            let asked = route.clone();
+            let found = cx
+                .background_spawn(
+                    async move { consolidation::redirect(&syncer, &asked, view.as_ref()) },
+                )
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let here = this.nav.position() == position
+                    && this.nav.current() == &route
+                    && this.nav.current_server() == server.as_ref();
+                if !here {
+                    return;
+                }
+                match found {
+                    Ok(Some(to)) => {
+                        this.nav.redirect(to.route, to.view);
+                        this.show(window, cx);
+                    }
+                    Ok(None) => {}
+                    Err(e) => log::warn!("looking up where {route:?} leads now: {e}"),
+                }
+                if let Some((note, error)) = note {
+                    this.say_on_page(note, error, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A note on the change or diff page on screen (red when `error`).
@@ -1571,6 +1637,16 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn nav_for_test(&mut self) -> &mut NavState {
+        &mut self.nav
+    }
+
+    #[cfg(test)]
+    pub(crate) fn show_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(window, cx);
+    }
+
+    #[cfg(test)]
     pub(crate) fn consolidation_for_test(&self, key: &str) -> Option<Entity<Consolidator>> {
         self.servers
             .get(&ServerKey::new(key))?
@@ -1744,6 +1820,11 @@ impl Shell {
         window.focus(&handle, cx);
         // The shown server may have changed.
         self.sync_attention_polls(window, cx);
+        // A local change or version in the route may be on Gerrit by now
+        // (a history entry from before).
+        if matches!(self.page, Page::Change(_) | Page::Diff(_)) {
+            self.follow_redirect(None, window, cx);
+        }
         cx.notify();
     }
 

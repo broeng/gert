@@ -156,6 +156,14 @@ impl Syncer {
         Ok(Some((change, versions)))
     }
 
+    /// The local patch set with synthetic number `number`, in any state
+    /// (`gerrit_patch_set` tells which Gerrit patch set it became); `None`
+    /// for a Gerrit patch set number or one this server does not have.
+    /// Blocking (SQLite).
+    pub fn local_patch_set(&self, number: PatchSetNumber) -> Result<Option<LocalPatchSet>, Error> {
+        Ok(self.store().local_patch_set(self.server, number)?)
+    }
+
     /// The versions of Gerrit change `number` that exist only in the
     /// checkout: the local patch sets of its local change rows that are not
     /// (yet) a Gerrit patch set, in the order they were first seen. Rows
