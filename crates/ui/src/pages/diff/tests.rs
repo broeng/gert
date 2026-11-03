@@ -1943,6 +1943,19 @@ fn the_diff_is_fetched_although_the_files_request_fails(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn a_401_on_the_list_goes_to_the_login_flow(cx: &mut TestAppContext) {
+    let http = http();
+    http.route("/files", 401, "");
+    let p = miss_page(cx, unlisted_store(), http, Some(signed_in()));
+    cx.run_until_parked();
+    assert!(
+        opened(&p).contains(&"unauthorized".to_owned()),
+        "{:?}",
+        opened(&p)
+    );
+}
+
+#[gpui_kit::test]
 fn r_waits_when_the_list_could_not_be_had(cx: &mut TestAppContext) {
     // No /files route: the list request fails, so there is nothing to
     // mark against.
@@ -1993,9 +2006,8 @@ fn r_waits_for_gerrits_list(cx: &mut TestAppContext) {
     cx.run_until_parked();
     // The window between the page knowing the comparison and the list
     // arriving cannot be held open with a synchronous fake: put it back.
-    p.page.update(cx, |p, _| {
-        p.files.loaded = false;
-        p.files.settled = false;
+    p.page.update(cx, |p, cx| {
+        p.file_list.update(cx, |f, _| f.unload_for_test());
     });
     press(cx, p.window, &["r"]);
     let hint = p.page.read_with(cx, |p, _| p.hint_for_test());

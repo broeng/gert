@@ -55,6 +55,20 @@ pub enum Seed {
     Miss,
 }
 
+/// What a store read of the list says for [`FileList::load`]. A read that
+/// fails counts as a miss (logged): the checkout and Gerrit can still list
+/// the files.
+pub fn seed_of(read: Result<Option<CachedFileList>, sync::Error>) -> Seed {
+    match read {
+        Ok(Some(list)) => Seed::Hit(list),
+        Ok(None) => Seed::Miss,
+        Err(e) => {
+            log::warn!("reading cached files: {e}");
+            Seed::Miss
+        }
+    }
+}
+
 /// When Gerrit is asked for the list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {
@@ -70,8 +84,7 @@ pub enum FileListEvent {
     /// A list arrived for the key (from the store, the checkout or Gerrit).
     Listed,
     /// No new list, but what the page shows about it may differ: a request
-    /// ended without one (an error, or nothing left to ask), or the
-    /// comparison turned out to have different parents.
+    /// ended without one (an error, or nothing left that could bring one).
     Changed,
     /// Only the reviewed marks changed.
     MarksChanged,
@@ -167,9 +180,19 @@ pub struct FileList {
     /// Making the list in the checkout.
     listing_task: Option<Task<()>>,
     fetch_task: Option<Task<()>>,
-    /// The marks on their way for the key: the value last sent per path,
-    /// and how many requests for it are open.
-    sending: HashMap<String, (bool, u32)>,
+    /// The marks on their way for the key, per path.
+    sending: HashMap<String, Sending>,
+    /// Counts the restarts, so that a request sent for an earlier visit of
+    /// the same key does not close one sent since.
+    generation: u64,
+}
+
+/// A reviewed mark on its way.
+struct Sending {
+    /// The value last sent.
+    reviewed: bool,
+    /// How many requests for the path are open.
+    open: u32,
 }
 
 impl EventEmitter<FileListEvent> for FileList {}
@@ -188,6 +211,7 @@ impl FileList {
             listing_task: None,
             fetch_task: None,
             sending: HashMap::new(),
+            generation: 0,
         }
     }
 
@@ -203,6 +227,14 @@ impl FileList {
             settled: self.settled(),
             ..self.files.clone()
         }
+    }
+
+    /// Back to the moment before the list arrived, with Gerrit still
+    /// asked: a synchronous fake cannot hold that window open.
+    #[cfg(test)]
+    pub(crate) fn unload_for_test(&mut self) {
+        self.files.loaded = false;
+        self.fetching = true;
     }
 
     fn settled(&self) -> bool {
@@ -236,6 +268,7 @@ impl FileList {
             self.listing_task = None;
             self.fetch_task = None;
             self.sending.clear();
+            self.generation += 1;
         }
         let Some(key) = key else {
             return restart;
@@ -263,16 +296,12 @@ impl FileList {
             };
             this.update(cx, |this, cx| {
                 this.reading = false;
-                let miss = match cached {
-                    Ok(Some(list)) => {
+                let miss = match seed_of(cached) {
+                    Seed::Hit(list) => {
                         this.apply_stored(&key, list, cx);
                         false
                     }
-                    Ok(None) => true,
-                    Err(e) => {
-                        log::warn!("reading cached files: {e}");
-                        true
-                    }
+                    Seed::Unread | Seed::Miss => true,
                 };
                 this.stored(key, miss, ask, cx);
             })
@@ -366,16 +395,15 @@ impl FileList {
                 this.fetching = false;
                 match fetched {
                     Ok(list) => this.apply_stored(&key, list, cx),
-                    Err(e) if is_unauthorized(&e) => {
-                        cx.emit(FileListEvent::Unauthorized);
-                        cx.emit(FileListEvent::Changed);
-                    }
+                    // The login flow takes over; no point in more requests.
+                    Err(e) if is_unauthorized(&e) => cx.emit(FileListEvent::Unauthorized),
                     Err(e) => {
                         log::warn!("fetching files of change {}: {e}", key.change);
+                        // With a list on show (a poll) nothing changes.
                         if this.files.key.as_ref() == Some(&key) && !this.files.loaded {
                             this.files.error = Some(e.to_string());
+                            cx.emit(FileListEvent::Changed);
                         }
-                        cx.emit(FileListEvent::Changed);
                     }
                 }
             })
@@ -403,15 +431,11 @@ impl FileList {
         }
         self.files.renames = renames_of(&files);
         self.files.list = Arc::new(files);
-        self.files.reviewed = Arc::new(reviewed);
-        let sending: Vec<_> = self
-            .sending
-            .iter()
-            .map(|(p, (r, _))| (p.clone(), *r))
-            .collect();
-        for (path, reviewed) in sending {
-            self.mark(&path, reviewed);
+        let mut reviewed = reviewed;
+        for (path, s) in &self.sending {
+            set_mark(&mut reviewed, path, s.reviewed);
         }
+        self.files.reviewed = Arc::new(reviewed);
         self.files.loaded = true;
         self.files.checkout = checkout;
         self.files.error = None;
@@ -454,55 +478,61 @@ impl FileList {
         cx.emit(FileListEvent::LocalResolved);
     }
 
-    /// Sets (or clears) the reviewed mark of `path` at once and sends it.
-    /// The caller has checked that marks can be set (see
-    /// [`crate::local_rules`] and [`reviewed::unavailable`]) and that the
-    /// list is Gerrit's. The request is detached, so it ends also when the
-    /// page goes (the diff page is made anew for each file); a failure puts
-    /// the mark back.
-    pub fn set_reviewed(&mut self, path: &str, reviewed: bool, cx: &mut Context<Self>) {
+    /// `r` on `path`: flips its reviewed mark at once and sends it, or says
+    /// why not now ([`Files::marks_wait`]). The caller has checked the
+    /// local rules and the session ([`crate::local_rules::refusal`]). The
+    /// request is detached, so it ends also when the page goes (the diff
+    /// page is made anew for each file); a failure puts the mark back.
+    pub fn toggle_reviewed(
+        &mut self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
         let Some(key) = self.files.key.clone() else {
-            return;
+            return Ok(());
         };
-        self.mark(path, reviewed);
-        let open = self.sending.entry(path.to_owned()).or_insert((reviewed, 0));
-        *open = (reviewed, open.1 + 1);
+        if self.files.marks_wait() {
+            return Err(reviewed::WAITS);
+        }
+        let reviewed = !self.files.is_reviewed(path);
+        set_mark(Arc::make_mut(&mut self.files.reviewed), path, reviewed);
+        let sending = self
+            .sending
+            .entry(path.to_owned())
+            .or_insert(Sending { reviewed, open: 0 });
+        sending.reviewed = reviewed;
+        sending.open += 1;
         cx.emit(FileListEvent::MarksChanged);
         let syncer = self.session.syncer().clone();
         let (change, sha, path) = (key.change, key.target.sha.clone(), path.to_owned());
-        let sent = path.clone();
+        let (sent, generation) = (path.clone(), self.generation);
         cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_spawn(reviewed::send(syncer, change, sha, sent, reviewed))
                 .await;
-            this.update(cx, |this, cx| this.sent(&key, &path, reviewed, outcome, cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                this.sent(&key, generation, &path, reviewed, outcome, cx)
+            })
+            .ok();
         })
         .detach();
-    }
-
-    fn mark(&mut self, path: &str, reviewed: bool) {
-        let marks = Arc::make_mut(&mut self.files.reviewed);
-        if reviewed {
-            marks.insert(path.to_owned());
-        } else {
-            marks.remove(path);
-        }
+        Ok(())
     }
 
     fn sent(
         &mut self,
         key: &FilesKey,
+        generation: u64,
         path: &str,
         reviewed: bool,
         outcome: reviewed::Outcome,
         cx: &mut Context<Self>,
     ) {
-        if self.files.key.as_ref() == Some(key)
-            && let Some(open) = self.sending.get_mut(path)
+        if generation == self.generation
+            && let Some(sending) = self.sending.get_mut(path)
         {
-            open.1 -= 1;
-            if open.1 == 0 {
+            sending.open -= 1;
+            if sending.open == 0 {
                 self.sending.remove(path);
             }
         }
@@ -511,8 +541,9 @@ impl FileList {
             reviewed::Outcome::Unauthorized => (None, true),
             reviewed::Outcome::Failed(e) => (Some(e), false),
         };
+        // Back to what the server has, unless another pair is shown now.
         if self.files.key.as_ref() == Some(key) && self.files.is_reviewed(path) == reviewed {
-            self.mark(path, !reviewed);
+            set_mark(Arc::make_mut(&mut self.files.reviewed), path, !reviewed);
             cx.emit(FileListEvent::MarksChanged);
         }
         if let Some(e) = error {
@@ -522,6 +553,14 @@ impl FileList {
         if login {
             cx.emit(FileListEvent::Unauthorized);
         }
+    }
+}
+
+fn set_mark(marks: &mut HashSet<String>, path: &str, reviewed: bool) {
+    if reviewed {
+        marks.insert(path.to_owned());
+    } else {
+        marks.remove(path);
     }
 }
 

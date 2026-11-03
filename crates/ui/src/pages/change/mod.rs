@@ -404,7 +404,7 @@ impl ChangePage {
                 base: view.base,
                 target: view.target,
             },
-            files: Files::default(),
+            files: file_list.read(cx).files(),
             related: None,
             panel_shown: false,
             related_scroll: ScrollHandle::new(),
@@ -2429,17 +2429,20 @@ impl ChangePage {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
-        if self.files.marks_wait() {
-            // Gerrit's list, computed before the mark, would replace it.
-            self.hint.say(reviewed::WAITS, false, cx, |p| &mut p.hint);
-            return;
-        }
         let Some(path) = self.cursor_path().map(str::to_owned) else {
+            // No list yet, so no file under the cursor: say why.
+            if self.files.marks_wait() {
+                self.hint.say(reviewed::WAITS, false, cx, |p| &mut p.hint);
+            }
             return;
         };
-        let reviewed = !self.files.is_reviewed(&path);
-        self.file_list
-            .update(cx, |f, cx| f.set_reviewed(&path, reviewed, cx));
+        if let Err(why) = self
+            .file_list
+            .update(cx, |f, cx| f.toggle_reviewed(&path, cx))
+        {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
         self.files = self.file_list.read(cx).files();
         cx.notify();
     }

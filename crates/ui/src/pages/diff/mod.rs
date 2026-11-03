@@ -43,14 +43,14 @@ use crate::{
         actions::{NextFile, PrevFile},
     },
     diff_load::{DiffSource, LoadError, context_label, load_diff},
-    file_list::{Ask, FileList, FileListEvent, Files, Seed},
+    file_list::{Ask, FileList, FileListEvent, Files, Seed, seed_of},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
     local_rules::{self, Op, Target},
     local_source::{LocalSource, local_marker},
     nav::DiffRoute,
     outbox::{self, DraftOutbox},
-    reply, reviewed,
+    reply,
     servers::ServerBadge,
     session::{Session, is_unauthorized},
     settings::{DiffSettings, FileFilters},
@@ -178,7 +178,7 @@ impl DiffPage {
             route,
             detail: None,
             file_list: file_list.clone(),
-            files: Files::default(),
+            files: file_list.read(cx).files(),
             stored_probe: None,
             checkouts: None,
             source: None,
@@ -908,18 +908,14 @@ impl DiffPage {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
-        if self.files.key.is_none() {
-            return;
-        }
-        if self.files.marks_wait() {
-            // Gerrit's list, computed before the mark, would replace it.
-            self.hint.say(reviewed::WAITS, false, cx, |p| &mut p.hint);
-            return;
-        }
         let path = self.route.path.clone();
-        let reviewed = !self.files.is_reviewed(&path);
-        self.file_list
-            .update(cx, |f, cx| f.set_reviewed(&path, reviewed, cx));
+        if let Err(why) = self
+            .file_list
+            .update(cx, |f, cx| f.toggle_reviewed(&path, cx))
+        {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
         self.files = self.file_list.read(cx).files();
         cx.notify();
     }
@@ -1473,14 +1469,7 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
     // Read here, with the detail, so that the first diff fetch has the
     // list's renames. A miss is the file list's to fill: from the checkout,
     // and from Gerrit.
-    let seed = match syncer.cached_files(&files_key) {
-        Ok(Some(c)) => Seed::Hit(c),
-        Ok(None) => Seed::Miss,
-        Err(e) => {
-            log::warn!("reading cached files: {e}");
-            Seed::Miss
-        }
-    };
+    let seed = seed_of(syncer.cached_files(&files_key));
     Loaded {
         detail: Some(d),
         files_key: Some(files_key),

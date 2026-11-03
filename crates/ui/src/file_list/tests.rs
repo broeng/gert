@@ -8,13 +8,14 @@ use gpui_kit::{AppContext as _, Entity, TestAppContext};
 use model::{ChangeNumber, FileEntry, FileStatus, FilesKey, PatchSetNumber, PatchSetRef};
 use store::{CachedFileList, Store};
 
-use super::{Ask, FileList, FileListEvent, Files, LOCAL_FILES_UNAVAILABLE, Seed};
+use super::{Ask, FileList, FileListEvent, Files, LOCAL_FILES_UNAVAILABLE, Seed, seed_of};
 use crate::{
     checkouts::Checkouts,
     local_source::{
         LocalState,
         tests::{self as lt, Fixture},
     },
+    reviewed,
     session::{ProjectSettings, Session},
     testing::file,
     tests::{URL, env_with, setup},
@@ -256,6 +257,30 @@ fn a_stored_list_is_refreshed_from_gerrit_only_when_asked_always(cx: &mut TestAp
     assert_eq!(s.requests("/files"), 1);
 }
 
+#[test]
+fn a_store_read_that_fails_is_a_miss() {
+    let failed = Err(sync::Error::LeaseLost);
+    assert!(matches!(seed_of(failed), Seed::Miss));
+    assert!(matches!(seed_of(Ok(None)), Seed::Miss));
+    assert!(matches!(
+        seed_of(Ok(Some(cached(&["a"], &[])))),
+        Seed::Hit(_)
+    ));
+}
+
+#[gpui_kit::test]
+fn another_key_drops_a_gerrit_answer_for_the_old_one(cx: &mut TestAppContext) {
+    let http = RouteHttpClient::new();
+    http.route("/files", 200, gerrit_files(&["old"]));
+    let s = setup_plain(cx, empty_store(), http);
+    s.load(cx, key(), Seed::Miss, Ask::OnMiss);
+    let mut other = key();
+    other.target.sha = "sha2".into();
+    s.load(cx, other, Seed::Hit(cached(&["new"], &[])), Ask::Never);
+    cx.run_until_parked();
+    assert_eq!(s.paths(cx), ["new"]);
+}
+
 #[gpui_kit::test]
 fn a_miss_asks_gerrit(cx: &mut TestAppContext) {
     let http = RouteHttpClient::new();
@@ -289,7 +314,7 @@ fn a_401_on_the_list_goes_to_the_login_flow(cx: &mut TestAppContext) {
     let s = setup_plain(cx, empty_store(), http);
     s.load(cx, key(), Seed::Miss, Ask::OnMiss);
     cx.run_until_parked();
-    assert_eq!(s.events(), ["unauthorized", "changed"]);
+    assert_eq!(s.events(), ["unauthorized"]);
 }
 
 #[gpui_kit::test]
@@ -320,8 +345,9 @@ fn the_mark_is_set_at_once_and_stays_when_the_server_takes_it(cx: &mut TestAppCo
     let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
     s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
     cx.update(|cx| {
-        s.list
-            .update(cx, |l, cx| l.set_reviewed("src/a.rs", true, cx))
+        s.list.update(cx, |l, cx| {
+            l.toggle_reviewed("src/a.rs", cx).expect("toggled")
+        })
     });
     assert!(s.files(cx).is_reviewed("src/a.rs"));
     cx.run_until_parked();
@@ -337,8 +363,9 @@ fn a_refused_mark_goes_back_with_a_note(cx: &mut TestAppContext) {
     let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
     s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
     cx.update(|cx| {
-        s.list
-            .update(cx, |l, cx| l.set_reviewed("src/a.rs", true, cx))
+        s.list.update(cx, |l, cx| {
+            l.toggle_reviewed("src/a.rs", cx).expect("toggled")
+        })
     });
     cx.run_until_parked();
     assert!(!s.files(cx).is_reviewed("src/a.rs"));
@@ -356,8 +383,9 @@ fn a_401_on_the_mark_puts_it_back_and_goes_to_the_login_flow(cx: &mut TestAppCon
     let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
     s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
     cx.update(|cx| {
-        s.list
-            .update(cx, |l, cx| l.set_reviewed("src/a.rs", true, cx))
+        s.list.update(cx, |l, cx| {
+            l.toggle_reviewed("src/a.rs", cx).expect("toggled")
+        })
     });
     cx.run_until_parked();
     assert!(!s.files(cx).is_reviewed("src/a.rs"));
@@ -371,8 +399,9 @@ fn a_list_that_arrives_while_a_mark_is_sent_keeps_the_mark(cx: &mut TestAppConte
     let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
     s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
     cx.update(|cx| {
-        s.list
-            .update(cx, |l, cx| l.set_reviewed("src/a.rs", true, cx))
+        s.list.update(cx, |l, cx| {
+            l.toggle_reviewed("src/a.rs", cx).expect("toggled")
+        })
     });
     // A poll brings a list made before the mark.
     s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
@@ -384,14 +413,61 @@ fn a_list_that_arrives_while_a_mark_is_sent_keeps_the_mark(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn a_mark_waits_for_gerrits_list(cx: &mut TestAppContext) {
+    let s = setup_with(
+        cx,
+        empty_store(),
+        RouteHttpClient::new(),
+        Some(signed_in()),
+        None,
+    );
+    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
+    cx.update(|cx| s.list.update(cx, |l, _| l.unload_for_test()));
+    let toggled = cx.update(|cx| s.list.update(cx, |l, cx| l.toggle_reviewed("src/a.rs", cx)));
+    assert_eq!(toggled, Err(reviewed::WAITS));
+    cx.run_until_parked();
+    assert!(s.http.requested().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_failed_first_toggle_does_not_undo_the_second(cx: &mut TestAppContext) {
+    let http = RouteHttpClient::new();
+    http.route(PUT_A, 403, "not allowed");
+    http.route(
+        "DELETE /changes/7/revisions/sha1/files/src%2Fa.rs/reviewed",
+        204,
+        "",
+    );
+    let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
+    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
+    // On, then off again before the first answer.
+    for _ in 0..2 {
+        cx.update(|cx| {
+            s.list.update(cx, |l, cx| {
+                l.toggle_reviewed("src/a.rs", cx).expect("toggled")
+            })
+        });
+    }
+    cx.run_until_parked();
+    assert!(!s.files(cx).is_reviewed("src/a.rs"));
+    let failed = s
+        .events()
+        .iter()
+        .filter(|e| e.starts_with("failed: "))
+        .count();
+    assert_eq!(failed, 1);
+}
+
+#[gpui_kit::test]
 fn the_request_ends_also_when_the_list_is_gone(cx: &mut TestAppContext) {
     let http = RouteHttpClient::new();
     http.route(PUT_A, 204, "");
     let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
     s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
     cx.update(|cx| {
-        s.list
-            .update(cx, |l, cx| l.set_reviewed("src/a.rs", true, cx))
+        s.list.update(cx, |l, cx| {
+            l.toggle_reviewed("src/a.rs", cx).expect("toggled")
+        })
     });
     let Setup { list, http, .. } = s;
     drop(list);
@@ -430,7 +506,9 @@ fn a_miss_lists_in_the_checkout_when_gerrit_fails(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-fn gerrits_list_wins_over_the_checkouts_whichever_comes_first(cx: &mut TestAppContext) {
+fn a_late_checkout_list_does_not_replace_gerrits(cx: &mut TestAppContext) {
+    // The fake answers at once, so Gerrit's list comes first; the page
+    // tests race the other order.
     let f = lt::fixture();
     let http = RouteHttpClient::new();
     http.route(
