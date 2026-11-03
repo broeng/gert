@@ -812,8 +812,8 @@ fn a_new_vote_keeps_offline_only_when_the_earlier_votes_were_proven() {
         .unwrap()
         .unwrap();
     assert!(!r.offline);
-    // Proven by a lookup after it (T1): the next offline vote counts.
-    s.mark_local_change_not_found(id, change.id, ts(T1))
+    // Proven by a lookup after it: the next offline vote counts.
+    s.mark_local_change_not_found(id, change.id, ts("2024-03-01T11:30:00Z"))
         .unwrap();
     let r = s
         .update_pending_review(

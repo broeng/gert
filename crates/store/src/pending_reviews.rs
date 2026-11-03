@@ -153,10 +153,8 @@ fn revote(
     offline: bool,
     now: Timestamp,
 ) -> Result<(), Error> {
-    // Purely local so far: given offline, or before a lookup that did not
-    // find the change. Then the new votes decide on their own.
-    let proven = !review.known_on_gerrit
-        && (review.offline || review.not_found_at.is_some_and(|t| review.voted_at <= t));
+    // Purely local so far: then the new votes decide on their own.
+    let proven = review.purely_local();
     conn.execute(
         "UPDATE pending_reviews SET labels = ?3, strategy = ?4, voted_at_ms = ?5,
              known_on_gerrit = known_on_gerrit OR EXISTS (

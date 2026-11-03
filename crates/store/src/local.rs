@@ -688,7 +688,7 @@ impl Store {
     /// succeeded, the Change-Id is one Gerrit can be asked about, the
     /// result was not cut off). The latest such time is kept, as
     /// [`PendingReview::not_found_at`](model::PendingReview::not_found_at)
-    /// of its reviews: votes saved no later were given before the change
+    /// of its reviews: votes saved before it were given before the change
     /// was on Gerrit. Not for a change that has a Gerrit change.
     pub fn mark_local_change_not_found(
         &mut self,

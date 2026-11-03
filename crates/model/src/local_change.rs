@@ -286,13 +286,26 @@ pub struct PendingReview {
     /// When a lookup last found the review's local change not on Gerrit
     /// (a complete, well-formed answer; the time the lookup started, by
     /// the local clock). Joined in from the local change when the review
-    /// is read. Votes saved no later than this were given before the
-    /// change was on Gerrit.
+    /// is read. Votes saved before this were given before the change was
+    /// on Gerrit.
     #[serde(default)]
     pub not_found_at: Option<Timestamp>,
 }
 
 impl PendingReview {
+    /// Whether its votes are "purely local": when they were given, the
+    /// change was not on Gerrit, or Gerrit could not be reached. No vote
+    /// was saved while the change was on Gerrit (`known_on_gerrit`), and
+    /// the votes were saved offline or before a lookup that did not find
+    /// the change started (`voted_at < not_found_at`, both by the local
+    /// clock: an order of two local events, not a time window; a vote in
+    /// the lookup's own millisecond is not proven). Otherwise the strict
+    /// rule applies to them.
+    pub fn purely_local(&self) -> bool {
+        !self.known_on_gerrit
+            && (self.offline || self.not_found_at.is_some_and(|t| self.voted_at < t))
+    }
+
     /// Whether it still has to reach the server (anything but `Sent`).
     pub fn is_unsent(&self) -> bool {
         self.state != PendingReviewState::Sent
@@ -323,5 +336,60 @@ mod tests {
         let p = LocalPatchSetId(4).number().unwrap();
         assert!(p.is_local());
         assert_eq!(p.local_id(), Some(4));
+    }
+
+    #[test]
+    fn purely_local_votes_need_no_gerrit_change_and_offline_or_a_later_lookup() {
+        let t = |s: &str| -> Timestamp { s.parse().unwrap() };
+        let review = PendingReview {
+            id: PendingReviewId(1),
+            local_change: LocalChangeId(1),
+            change: ChangeNumber(1),
+            patch_set: PatchSetNumber(1),
+            revision: RevisionId::from("a"),
+            given_on_sha: RevisionId::from("a"),
+            labels: BTreeMap::new(),
+            strategy: LocalApproval::Follow,
+            state: PendingReviewState::Pending,
+            error: None,
+            held_reason: None,
+            drop_only: BTreeSet::new(),
+            created: t("2024-01-01T10:00:00Z"),
+            voted_at: t("2024-01-01T10:00:00Z"),
+            nonce: None,
+            message: None,
+            unresolved: false,
+            message_draft: None,
+            author: None,
+            author_name: None,
+            known_on_gerrit: false,
+            offline: false,
+            not_found_at: None,
+        };
+        // Reachable, nothing looked up: not proven.
+        assert!(!review.purely_local());
+        let looked = |at: &str| PendingReview {
+            not_found_at: Some(t(at)),
+            ..review.clone()
+        };
+        assert!(!looked("2024-01-01T09:59:59Z").purely_local());
+        // The same millisecond cannot be ordered.
+        assert!(!looked("2024-01-01T10:00:00Z").purely_local());
+        assert!(looked("2024-01-01T10:00:00.001Z").purely_local());
+        let offline = PendingReview {
+            offline: true,
+            ..review.clone()
+        };
+        assert!(offline.purely_local());
+        let known = PendingReview {
+            known_on_gerrit: true,
+            ..looked("2024-01-01T11:00:00Z")
+        };
+        assert!(!known.purely_local());
+        let known_offline = PendingReview {
+            known_on_gerrit: true,
+            ..offline
+        };
+        assert!(!known_offline.purely_local());
     }
 }
