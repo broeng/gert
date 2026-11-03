@@ -10,7 +10,8 @@
 //! on Gerrit yet are boxes too, each with a `local` pill: on a local
 //! change, whose labels (borrowed, see [`crate::change_detail`]) are all
 //! in the votes section, and on a local patch set of a Gerrit change next
-//! to Gerrit's votes.
+//! to Gerrit's votes. Their trash button takes the vote back out of the
+//! version's pending reviews.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -290,14 +291,14 @@ impl ChangePage {
     }
 
     /// The box of the user's local vote `v` on `label`, with a `local`
-    /// pill; its card says when it goes to Gerrit. Nothing for a 0, which
-    /// takes a vote back.
+    /// pill; its card says when it goes to Gerrit and, until it is being
+    /// sent, has a trash button. Nothing for a 0, which takes a vote back.
     fn local_vote_chip(
         &self,
         group: usize,
         label: &str,
         v: &LocalVote,
-        cx: &App,
+        cx: &Context<Self>,
     ) -> Option<AnyElement> {
         if v.value == 0 {
             return None;
@@ -336,13 +337,70 @@ impl ChangePage {
         } else {
             format!("Sent when {version} is on Gerrit")
         };
+        let removable = !v.sending;
+        let page = cx.weak_entity();
+        let label = label.to_owned();
         Some(
             HoverCard::new(id.clone())
                 .open_delay(Duration::from_millis(250))
                 .trigger(chip.debug_selector(move || selector.clone()))
-                .content(move |_, _, cx| local_vote_card(&text, color, &when, &status, cx))
+                .content(move |_, _, cx| {
+                    let trash = removable.then(|| {
+                        let page = page.clone();
+                        let label = label.clone();
+                        Button::new(SharedString::from(format!("{id}-remove")))
+                            .icon(gpui_kit::assets::IconName::Trash)
+                            .ghost()
+                            .small()
+                            .tooltip("Remove this vote")
+                            .on_click(move |_, _, cx| {
+                                page.update(cx, |p, cx| p.withdraw_local_vote(label.clone(), cx))
+                                    .ok();
+                            })
+                    });
+                    local_vote_card(&text, color, &when, &status, trash, cx)
+                })
                 .into_any_element(),
         )
+    }
+
+    /// Takes the user's local vote on `label` back on the local version
+    /// shown: no review of it sends that label (see
+    /// `Store::withdraw_local_vote`). Store writes only.
+    pub(super) fn withdraw_local_vote(&mut self, label: String, cx: &mut Context<Self>) {
+        if self.voting() {
+            return;
+        }
+        let Some(target) = self.local_target() else {
+            return;
+        };
+        let syncer = self.session.syncer().clone();
+        self.voting = Some(cx.spawn(async move |this, cx| {
+            let what = label.clone();
+            let result = cx
+                .background_spawn(async move { syncer.withdraw_local_vote(target.number, &what) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.voting = None;
+                match result {
+                    Ok(_) => {
+                        let change = this.number;
+                        this.outbox.update(cx, |o, cx| o.published(change, cx));
+                        this.hint
+                            .say(format!("Removed your local {label} vote"), false, cx, |p| {
+                                &mut p.hint
+                            });
+                    }
+                    Err(e) => {
+                        let text = format!("Could not remove your local {label} vote: {e}");
+                        this.hint.say(text, true, cx, |p| &mut p.hint);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Removes `who`'s vote on `label`.
@@ -452,26 +510,41 @@ fn vote_card(
 }
 
 /// The content of a local vote's hover card.
-fn local_vote_card(text: &str, color: Hsla, when: &str, status: &str, cx: &mut App) -> AnyElement {
+fn local_vote_card(
+    text: &str,
+    color: Hsla,
+    when: &str,
+    status: &str,
+    trash: Option<Button>,
+    cx: &mut App,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    v_flex()
+    h_flex()
         .min_w(px(200.))
+        .gap_3()
+        .items_center()
         .text_sm()
         .child(
-            h_flex()
-                .gap_1()
-                .child(div().font_semibold().child("Your local vote"))
-                .child(local_chip(cx)),
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(div().font_semibold().child("Your local vote"))
+                        .child(local_chip(cx)),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(div().text_color(color).child(text.to_owned()))
+                        .child(format!("\u{b7} {when}")),
+                )
+                .child(div().text_xs().text_color(muted).child(status.to_owned())),
         )
-        .child(
-            h_flex()
-                .gap_1()
-                .text_xs()
-                .text_color(muted)
-                .child(div().text_color(color).child(text.to_owned()))
-                .child(format!("\u{b7} {when}")),
-        )
-        .child(div().text_xs().text_color(muted).child(status.to_owned()))
+        .children(trash)
         .into_any_element()
 }
 

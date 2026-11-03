@@ -243,6 +243,23 @@ fn a_quick_vote_on_a_local_version_goes_into_its_pending_review(cx: &mut TestApp
         (reviews[0].message.as_deref(), reviews[0].unresolved),
         (Some("Nearly"), true)
     );
+
+    // The box's trash button takes the vote back; the message stays.
+    f.page
+        .update(cx, |p, cx| p.withdraw_local_vote("Code-Review".into(), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        f.hint(cx).as_deref(),
+        Some("Removed your local Code-Review vote")
+    );
+    let reviews = f.reviews(number);
+    assert_eq!(reviews.len(), 1);
+    assert!(reviews[0].labels.is_empty());
+    assert_eq!(reviews[0].message.as_deref(), Some("Nearly"));
+    assert!(!buttons(cx)[0].applied);
+    let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("local-vote-Code-Review").is_none());
     assert!(f.http.requested().is_empty(), "{:?}", f.http.requested());
 }
 
