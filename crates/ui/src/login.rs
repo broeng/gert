@@ -318,9 +318,11 @@ pub(crate) mod tests {
     }
 
     fn env(http: &FakeHttpClient, backend: Arc<FakeBackend>) -> Env {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         Env {
             http: Arc::new(http.clone()),
-            store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+            reader: store.clone(),
+            store,
             backend,
             app_name: "test-app".into(),
             marks: Default::default(),

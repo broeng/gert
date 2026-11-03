@@ -82,7 +82,7 @@ Claude writes most of the code and the user reviews it. So:
 | Theming | our own themes in `ui::theme` (CWC, Solarized), each with a light and dark variant picked by the system appearance; the theme is chosen in the settings page |
 | Gerrit wire types | hand-written tolerant serde structs in `gerrit-api`, checked against the vendored OpenAPI spec |
 | HTTP | our own async client over an `HttpClient` trait; the production impl in `app` adapts `gpui-pre-reqwest-client` (Zed's reqwest client, which manages its own tokio runtime) |
-| Storage | SQLite via `rusqlite` (bundled), called from GPUI's background executor |
+| Storage | SQLite via `rusqlite` (bundled), called from GPUI's background executor; one writer connection behind a mutex, plus a read-only one (`Store::open_reader`) for the syncers' `cached_*` lookups |
 | Secrets | `keyring` |
 | Desktop notifications | `notify-rust` in `app` only, pure-Rust zbus backend on Linux (no libdbus) |
 | Config | TOML at `<config_dir>/gert/config.toml`, read with `toml` and written with `toml_edit` so the user's comments and formatting survive; cache DB in `<cache_dir>/gert/` (via `directories`) |

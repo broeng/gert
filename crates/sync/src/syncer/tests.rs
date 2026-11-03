@@ -443,6 +443,31 @@ fn refresh_diff_round_trip_and_request() {
 }
 
 #[test]
+fn cached_lookups_do_not_wait_for_the_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.db");
+    let mut writer = Store::open(&path).unwrap();
+    let server = writer.server_id(BASE).unwrap();
+    let writer = Arc::new(Mutex::new(writer));
+    let reader = Arc::new(Mutex::new(Store::open_reader(&path).unwrap()));
+    let http = FakeHttpClient::new();
+    let client = GerritClient::new(Arc::new(http.clone()), BASE, Auth::Anonymous).unwrap();
+    let syncer = Syncer::new(client, writer.clone(), server).with_reader(reader);
+    let key = diff_key("a.rs");
+    http.push_response(200, diff_body("new"));
+    let diff = block_on(syncer.refresh_diff(&key)).unwrap();
+
+    // A long write holds the store; the lookup still answers.
+    let _writing = writer.lock().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(syncer.cached_diff(&key).unwrap()).ok());
+    let cached = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("cached_diff waited for the writer");
+    assert_eq!(cached.unwrap().diff, diff);
+}
+
+#[test]
 fn failed_diff_refresh_keeps_the_cached_diff() {
     let f = fixture();
     let key = diff_key("a.rs");

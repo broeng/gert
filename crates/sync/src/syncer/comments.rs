@@ -179,7 +179,8 @@ impl Syncer {
 
     /// The cached published comments and the local drafts of a change.
     pub fn cached_comments(&self, change: ChangeNumber) -> Result<CommentsView, Error> {
-        (self.comments_view())(&self.store(), change)
+        let view = self.comments_view();
+        self.reader().read(|s| view(s, change))
     }
 
     /// Fetches the published comments and the user's drafts, caches them,

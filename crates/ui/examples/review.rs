@@ -1237,10 +1237,12 @@ fn main() {
             }
         })
         .collect();
+    let store = Arc::new(Mutex::new(store));
     let startup = Startup {
         env: Env {
             http: Arc::new(http),
-            store: Arc::new(Mutex::new(store)),
+            reader: store.clone(),
+            store,
             backend: Arc::new(Demo),
             app_name: "review-demo".into(),
             marks: Default::default(),

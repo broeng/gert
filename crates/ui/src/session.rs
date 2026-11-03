@@ -240,6 +240,10 @@ pub trait Backend: Send + Sync + 'static {
 pub struct Env {
     pub http: Arc<dyn HttpClient>,
     pub store: Arc<Mutex<Store>>,
+    /// A read-only connection to the same database for the syncers'
+    /// `cached_*` lookups (see `Syncer::with_reader`); `store` itself
+    /// where there is no second connection (an in-memory store).
+    pub reader: Arc<Mutex<Store>>,
     /// The global backend; a server's own is `Session::backend`.
     pub backend: Arc<dyn Backend>,
     /// The application's name (`app`'s `APP_NAME`): every server's syncer
@@ -337,6 +341,7 @@ impl Session {
             base_url: setup.base_url.trim_end_matches('/').to_owned(),
             username: setup.username.clone(),
             syncer: Syncer::new(client, env.store.clone(), setup.server)
+                .with_reader(env.reader.clone())
                 .with_app_name(&env.app_name)
                 .with_marks(&env.marks),
             can_sync,

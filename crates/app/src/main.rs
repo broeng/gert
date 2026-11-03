@@ -69,9 +69,15 @@ fn startup() -> anyhow::Result<Prepared> {
     let color_modes = config.color_modes();
     let notifications = config.notification_settings();
     let store = Arc::new(Mutex::new(store));
+    // Opened after the writer has migrated the database. Pages read the
+    // cache through it, so they do not wait for a refresh that is writing.
+    let reader = Arc::new(Mutex::new(
+        Store::open_reader(&db).with_context(|| format!("opening {} to read", db.display()))?,
+    ));
     let startup = Startup {
         env: Env {
             http: Arc::new(http),
+            reader,
             store: store.clone(),
             backend: Arc::new(AppBackend {
                 config_file: paths.config_file,

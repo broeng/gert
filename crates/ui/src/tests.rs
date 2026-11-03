@@ -41,9 +41,11 @@ pub(crate) fn env_with(
     store: Store,
     http: &(impl gerrit_api::HttpClient + Clone + 'static),
 ) -> Env {
+    let store = Arc::new(Mutex::new(store));
     Env {
         http: Arc::new(http.clone()),
-        store: Arc::new(Mutex::new(store)),
+        reader: store.clone(),
+        store,
         backend: Arc::new(FakeBackend::default()),
         app_name: APP.into(),
         marks: Default::default(),

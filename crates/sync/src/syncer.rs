@@ -49,6 +49,10 @@ const DEFAULT_APP_NAME: &str = "client";
 pub struct Syncer {
     client: GerritClient,
     store: Arc<Mutex<Store>>,
+    /// Where the `cached_*` lookups read: a second connection given with
+    /// [`Syncer::with_reader`], so that pages need not wait for a writer,
+    /// else `store`.
+    reader: Arc<Mutex<Store>>,
     server: ServerId,
     /// Serializes everything that talks to the server about drafts
     /// (uploads, publishing, refreshing the draft list), so that a refresh
@@ -70,6 +74,7 @@ impl Syncer {
     pub fn new(client: GerritClient, store: Arc<Mutex<Store>>, server: ServerId) -> Self {
         Self {
             client,
+            reader: store.clone(),
             store,
             server,
             drafts_lock: Arc::default(),
@@ -86,6 +91,12 @@ impl Syncer {
         self.store.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The connection the `cached_*` lookups read from (see
+    /// [`Syncer::with_reader`]). Never held together with [`Syncer::store`].
+    fn reader(&self) -> MutexGuard<'_, Store> {
+        self.reader.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The mark ledger. Taken before the store when both are needed.
     fn marks(&self) -> MutexGuard<'_, marks::MarkLedger> {
         marks::lock(&self.marks)
@@ -95,6 +106,14 @@ impl Syncer {
     /// other syncers made from `ledgers` (the next login's).
     pub fn with_marks(mut self, ledgers: &MarkLedgers) -> Self {
         self.marks = ledgers.for_server(self.server);
+        self
+    }
+
+    /// Reads the `cached_*` lookups from `reader`, a read-only connection
+    /// to the same database ([`Store::open_reader`]), so that they do not
+    /// queue behind the writes on the shared store.
+    pub fn with_reader(mut self, reader: Arc<Mutex<Store>>) -> Self {
+        self.reader = reader;
         self
     }
 
@@ -113,12 +132,12 @@ impl Syncer {
 
     /// The cached result of `query`, for instant start.
     pub fn cached_query(&self, query: &str) -> Result<Option<CachedQuery>, Error> {
-        Ok(self.store().load_query(self.server, query)?)
+        Ok(self.reader().read(|s| s.load_query(self.server, query))?)
     }
 
     /// The cached detail of a change.
     pub fn cached_change(&self, number: ChangeNumber) -> Result<Option<CachedChange>, Error> {
-        Ok(self.store().load_change_detail(self.server, number)?)
+        Ok(self.reader().load_change_detail(self.server, number)?)
     }
 
     /// Fetches the changes `numbers` with their detailed labels and
@@ -258,7 +277,7 @@ impl Syncer {
 
     /// The cached file list of a comparison.
     pub fn cached_files(&self, key: &FilesKey) -> Result<Option<CachedFileList>, Error> {
-        Ok(self.store().load_file_list(self.server, key)?)
+        Ok(self.reader().load_file_list(self.server, key)?)
     }
 
     /// Fetches the file list of `key` (and, for signed-in users, which
@@ -327,7 +346,7 @@ impl Syncer {
 
     /// The cached diff of a file.
     pub fn cached_diff(&self, key: &DiffKey) -> Result<Option<CachedDiff>, Error> {
-        Ok(self.store().load_diff(self.server, key)?)
+        Ok(self.reader().load_diff(self.server, key)?)
     }
 
     /// Fetches the diff of one file and caches it. Afterwards stale cache
@@ -387,7 +406,7 @@ impl Syncer {
         change: ChangeNumber,
         revision: &RevisionId,
     ) -> Result<Option<CachedRelated>, Error> {
-        Ok(self.store().load_related(self.server, change, revision)?)
+        Ok(self.reader().load_related(self.server, change, revision)?)
     }
 
     /// Fetches the changes related to a revision and caches them.
@@ -406,7 +425,7 @@ impl Syncer {
 
     /// The cached diff preferences of the signed-in user.
     pub fn cached_diff_preferences(&self) -> Result<Option<CachedDiffPreferences>, Error> {
-        Ok(self.store().load_diff_preferences(self.server)?)
+        Ok(self.reader().load_diff_preferences(self.server)?)
     }
 
     /// Fetches the user's diff preferences from the server and caches
