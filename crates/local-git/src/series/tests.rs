@@ -108,11 +108,43 @@ fn both_sides_are_capped() {
         shas(&s.ancestors),
         [commits[3].as_str(), commits[2].as_str()]
     );
-    // The two nearest the tip: rev-list starts there.
+    // The two nearest the commit, so nothing is missing right above it.
     assert_eq!(
         shas(&s.descendants),
-        [commits[6].as_str(), commits[5].as_str()]
+        [commits[5].as_str(), commits[4].as_str()]
     );
+    assert!(s.more_ancestors && s.more_descendants);
+    // Exactly the limit is not more.
+    let s = series(&r, &commits[3], 4);
+    assert_eq!(s.ancestors.len(), 4);
+    assert_eq!(s.descendants.len(), 3);
+    assert!(!s.more_ancestors && !s.more_descendants);
+}
+
+#[test]
+fn upstream_history_merged_into_the_branch_is_not_built_on_the_commit() {
+    let (_remote, r, base) = pushed();
+    // origin/main moves on.
+    r.git(&["checkout", "-q", "-b", "up", &base]);
+    r.commit("Upstream one");
+    r.commit("Upstream two");
+    r.git(&["push", "-q", "origin", "up:main"]);
+    r.git(&["checkout", "-q", "main"]);
+    let c1 = r.commit("One");
+    r.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "Merge upstream",
+        "origin/main",
+    ]);
+    let merge = r.git(&["rev-parse", "HEAD"]);
+    let c2 = r.commit("Two");
+    let s = series(&r, &c1, 10);
+    assert_eq!(shas(&s.descendants), [c2.as_str(), merge.as_str()]);
+    assert!(!s.more_descendants);
+    assert_eq!(shas(&s.ancestors), [c1.as_str()]);
 }
 
 #[test]

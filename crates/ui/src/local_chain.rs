@@ -58,6 +58,7 @@ pub async fn read(
         let Series {
             descendants,
             ancestors,
+            ..
         } = series;
         let commits: Vec<CommitInfo> = descendants.into_iter().chain(ancestors).collect();
         let kinds = match syncer.classify_chain(&project, &commits) {
