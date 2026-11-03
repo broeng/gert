@@ -315,6 +315,8 @@ pub struct ChangePage {
     review_cursor: Option<model::PendingReviewId>,
     /// The review a first "drop" asked about.
     confirm_drop: Option<model::PendingReviewId>,
+    /// Ends the drop question after a while.
+    drop_timer: Option<Task<()>>,
     /// A cancel or drop on its way to the store.
     reviews_task: Option<Task<()>>,
     /// The filter the user picked; `None` is the default for the threads.
@@ -419,6 +421,7 @@ impl ChangePage {
             reviews: Arc::default(),
             review_cursor: None,
             confirm_drop: None,
+            drop_timer: None,
             reviews_task: None,
             thread_filter: None,
             listed: Vec::new(),

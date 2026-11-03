@@ -29,6 +29,9 @@ use super::{
 };
 use crate::{actions::*, change_detail::patch_set_label, reply};
 
+/// How long a first "drop" waits for the second.
+const DROP_ASK: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// `Code-Review +2, Verified +1`, or "no votes".
 pub fn votes_text(r: &PendingReview) -> String {
     if r.labels.is_empty() {
@@ -95,7 +98,7 @@ impl ChangePage {
             (at + ids.len() - 1) % ids.len()
         };
         self.review_cursor = Some(ids[next]);
-        self.confirm_drop = None;
+        self.disarm_drop(cx);
         self.remeasure(super::state::Block::PendingReviews);
         cx.notify();
     }
@@ -207,12 +210,11 @@ impl ChangePage {
             return self.hint.say(why, false, cx, |p| &mut p.hint);
         }
         if self.confirm_drop != Some(r.id) {
-            self.confirm_drop = Some(r.id);
-            self.remeasure(super::state::Block::PendingReviews);
+            self.arm_drop(r.id, cx);
             let ask = "Drop this review and its message? Press l d (or Drop) again";
             return self.hint.say(ask, false, cx, |p| &mut p.hint);
         }
-        self.confirm_drop = None;
+        self.disarm_drop(cx);
         let (syncer, id) = (self.session.syncer().clone(), r.id);
         self.review_write(
             async move { syncer.drop_pending_review(id) },
@@ -221,15 +223,43 @@ impl ChangePage {
         );
     }
 
+    /// Asks about dropping review `id`; the question expires after
+    /// [`DROP_ASK`], so a later `l d` asks again.
+    fn arm_drop(&mut self, id: PendingReviewId, cx: &mut Context<Self>) {
+        self.confirm_drop = Some(id);
+        self.remeasure(super::state::Block::PendingReviews);
+        self.drop_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DROP_ASK).await;
+            this.update(cx, |this, cx| {
+                if this.confirm_drop == Some(id) {
+                    this.disarm_drop(cx);
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn disarm_drop(&mut self, cx: &mut Context<Self>) {
+        self.confirm_drop = None;
+        self.drop_timer = None;
+        self.remeasure(super::state::Block::PendingReviews);
+        cx.notify();
+    }
+
     /// Runs a pending review write on the background executor, then says
     /// `done` (or why nothing changed) and has the shared comments read the
-    /// list again.
+    /// list again. A write asked for while one runs is ignored, like a
+    /// second quick vote: replacing the task would cancel the first.
     fn review_write(
         &mut self,
         write: impl std::future::Future<Output = Result<bool, sync::Error>> + Send + 'static,
         done: &'static str,
         cx: &mut Context<Self>,
     ) {
+        if self.reviews_task.is_some() {
+            return;
+        }
         self.reviews_task = Some(cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(write).await;
             this.update(cx, |this, cx| {

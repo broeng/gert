@@ -88,9 +88,14 @@ impl ChangePage {
         };
     }
 
-    /// Hands the threads to the patch-set level view, making it first.
+    /// Hands the threads to the patch-set level view, making it first. A
+    /// new patch-set level comment (`c`) goes to the current patch set, or
+    /// to the local version shown: there it is a local draft, like the
+    /// local review's text, instead of a Gerrit draft that the next reply
+    /// to Gerrit would take for its message.
     fn sync_ps_view(&mut self, cx: &mut Context<Self>) {
-        let Some(current) = self.detail.as_ref().and_then(|d| d.current_patch_set) else {
+        let local = self.local_target().map(|t| t.number);
+        let Some(current) = local.or_else(|| self.detail.as_ref()?.current_patch_set) else {
             return;
         };
         let can_comment = self.session.can_comment();

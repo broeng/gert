@@ -380,6 +380,20 @@ fn the_local_reviews_card_lists_states_and_its_keys_edit_cancel_and_drop(cx: &mu
     assert!(!kept.is_sealed() && kept.is_local());
     cx.update(|cx| assert_eq!(f.page.read(cx).listed_reviews_for_test().len(), 2));
 
+    // The question expires: a late second `l d` asks again.
+    f.chord(cx, "l d");
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(6));
+    cx.run_until_parked();
+    f.chord(cx, "l d");
+    assert!(
+        f.hint(cx)
+            .is_some_and(|h| h.starts_with("Drop this review"))
+    );
+    assert_eq!(f.reviews(number).len(), 2);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(6));
+    cx.run_until_parked();
     // Dropping asks once; the newest (failed) goes with its message.
     f.chord(cx, "l d");
     assert!(
@@ -509,5 +523,40 @@ fn a_vote_on_gerrit_does_not_count_as_the_vote_on_a_local_version(cx: &mut TestA
     assert_eq!(reviews.len(), 1, "{:?}", f.hint(cx));
     assert_eq!(reviews[0].labels, [("Code-Review".to_owned(), 1)].into());
     assert!(buttons(cx)[0].applied);
+    f.assert_nothing_local_sent(&[&ck.local]);
+}
+
+#[gpui_kit::test]
+fn c_on_a_local_version_of_a_gerrit_change_writes_a_local_draft(cx: &mut TestAppContext) {
+    let ck = checkout();
+    let store = store_with(
+        &[row(
+            "I7",
+            Some(ChangeNumber(7)),
+            LocalChangeState::Local,
+            &[&ck.local],
+            &ck.base,
+        )],
+        seed_gerrit_change,
+    );
+    let f = page(cx, store, ChangeNumber(7), &ck, |_| {});
+    let local = f.local_patch_set(cx, 1);
+    f.pick(cx, |s, d| s.set_target(d, local));
+    f.press(cx, "c");
+    f.type_text(cx, "about local 1");
+    f.press(cx, SAVE);
+    let drafts = f.stored_drafts(ChangeNumber(7));
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(
+        (drafts[0].patch_set, drafts[0].path.as_str()),
+        (local, PATCHSET_LEVEL_PATH)
+    );
+    assert!(drafts[0].is_local());
+    // Not a Gerrit draft: nothing is uploaded.
+    assert!(
+        !f.http.requested().iter().any(|r| r.contains("/revisions/")),
+        "{:?}",
+        f.http.requested()
+    );
     f.assert_nothing_local_sent(&[&ck.local]);
 }
