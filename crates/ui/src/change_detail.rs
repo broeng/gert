@@ -128,8 +128,10 @@ pub fn shown_locals(shown: Option<&ChangeDetail>, number: ChangeNumber) -> Vec<R
 
 /// Gerrit change `number` fetched now (`Syncer::refresh_change` stores
 /// it) with its local patch sets from the store. When the store cannot
-/// be read, `shown` (the local revisions of the detail on screen, from
-/// [`shown_locals`]) are carried over instead, as in [`carry_local`].
+/// be read, `shown` (the local revisions of the detail the caller has, on
+/// screen or stored, from [`shown_locals`]) are carried over instead, as
+/// in [`carry_local`]; a local version that arrived meanwhile comes back
+/// with the next refresh.
 /// Blocking (network, SQLite): call from the background executor.
 pub async fn refreshed(
     syncer: &Syncer,

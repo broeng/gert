@@ -63,6 +63,7 @@ pub fn refusal(op: Op, target: &Target, session: &Session) -> Option<&'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::{URL, env_with, setup};
 
     fn target(change: ChangeNumber, target: u32, base: Option<u32>) -> Target {
         Target {
@@ -100,6 +101,30 @@ mod tests {
         for op in [Op::Actions, Op::Reply, Op::Reviewed] {
             assert!(t.is_local_for(op), "{op:?}");
         }
+    }
+
+    #[test]
+    fn a_local_target_is_refused_before_the_session_is_asked() {
+        let mut store = store::Store::open_in_memory().expect("store");
+        store.server_id(URL).expect("server");
+        let http = gerrit_api::fake::RouteHttpClient::new();
+        let signed_out = Session::new(&env_with(store, &http), &setup(), None).expect("session");
+        let local = PatchSetNumber::LOCAL_BASE + 1;
+        let t = target(ChangeNumber(7), local, None);
+        assert_eq!(
+            refusal(Op::Reviewed, &t, &signed_out),
+            Some(reviewed::LOCAL)
+        );
+        // A reply on it is a local review: only the session can refuse it.
+        assert_eq!(
+            refusal(Op::Reply, &t, &signed_out),
+            reply::unavailable(&signed_out)
+        );
+        assert!(refusal(Op::Actions, &t, &signed_out).is_some());
+        assert_ne!(
+            refusal(Op::Actions, &t, &signed_out),
+            Some(action_menu::LOCAL)
+        );
     }
 
     #[test]

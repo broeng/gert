@@ -27,6 +27,7 @@ use super::{ChangeEvent, ChangePage};
 use crate::{
     actions::QuickVote,
     change_detail::patch_set_label,
+    local_rules::{self, Op},
     reply::{
         self,
         plan::{self, QuickButton},
@@ -99,7 +100,7 @@ impl ChangePage {
         if self.voting() {
             return;
         }
-        if let Some(why) = reply::unavailable(&self.session) {
+        if let Some(why) = local_rules::refusal(Op::Reply, &self.rule_target(), &self.session) {
             self.hint
                 .say(why.replace("reply", "vote"), false, cx, |p| &mut p.hint);
             return;

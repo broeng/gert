@@ -126,12 +126,11 @@ pub enum ChangeEvent {
     LocalReviewSaved,
 }
 
-/// The file list of the current patch set pair.
-/// Why `r` waits for Gerrit's file list.
 /// The files notice of a local version the checkout cannot list.
 const LOCAL_FILES_UNAVAILABLE: &str =
     "the project's checkout does not have this version (the files of local versions come from it)";
 
+/// The file list of the current patch set pair.
 #[derive(Default)]
 struct Files {
     key: Option<FilesKey>,
@@ -2447,7 +2446,7 @@ impl ChangePage {
     /// Asks the shell for the reply dialog, editing pending review `edit`
     /// if given.
     pub(super) fn open_reply(&mut self, edit: Option<PendingReviewId>, cx: &mut Context<Self>) {
-        if let Some(why) = reply::unavailable(&self.session) {
+        if let Some(why) = local_rules::refusal(Op::Reply, &self.rule_target(), &self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }

@@ -875,7 +875,7 @@ impl DiffPage {
     /// `a`: asks the shell for the reply dialog: a reply to Gerrit, or for
     /// a local version shown a local review of it (see [`reply`]).
     fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(why) = reply::unavailable(&self.session) {
+        if let Some(why) = local_rules::refusal(Op::Reply, &self.rule_target(), &self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }

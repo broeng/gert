@@ -504,6 +504,12 @@ fn a_gerrit_change_lists_its_local_version_and_shows_its_files_from_the_checkout
     assert_eq!(quick(cx), 1);
     f.press(cx, "a");
     assert!(f.events.lock().expect("log").contains(&"reply".to_owned()));
+    // The menu is about the change, which Gerrit has; a reviewed mark is
+    // about the comparison, which it does not.
+    f.press(cx, "m");
+    assert_ne!(f.hint(cx).as_deref(), Some(crate::action_menu::LOCAL));
+    f.press(cx, "r");
+    assert_eq!(f.hint(cx).as_deref(), Some(crate::reviewed::LOCAL));
     cx.update(|cx| {
         let p = f.page.read(cx);
         assert_eq!(p.selection_for_test(), (None, Some(local)));
