@@ -345,6 +345,88 @@ fn file_database_uses_wal_and_reopens() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A file database in its own directory, removed on drop.
+struct TempDb(std::path::PathBuf);
+
+impl TempDb {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("store-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.0.join("cache.db")
+    }
+}
+
+impl Drop for TempDb {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+#[test]
+fn reader_reads_while_the_writer_is_in_a_transaction() {
+    let db = TempDb::new("reader-tx");
+    let mut writer = Store::open(db.path()).unwrap();
+    let id = writer.server_id("https://g.example").unwrap();
+    writer
+        .save_query_page(id, "q", &[change(1, T1)], false, ts(T1))
+        .unwrap();
+    let reader = Store::open_reader(db.path()).unwrap();
+
+    writer.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writer
+        .conn
+        .execute("DELETE FROM query_results WHERE query = 'q'", [])
+        .unwrap();
+    let start = std::time::Instant::now();
+    let seen = reader.read(|r| r.load_query(id, "q")).unwrap();
+    assert!(
+        start.elapsed() < BUSY_TIMEOUT / 2,
+        "the reader waited for the writer"
+    );
+    assert_eq!(
+        seen.unwrap().changes.len(),
+        1,
+        "only committed data is read"
+    );
+
+    writer.conn.execute_batch("COMMIT").unwrap();
+    assert!(reader.read(|r| r.load_query(id, "q")).unwrap().is_none());
+}
+
+#[test]
+fn reader_refuses_writes() {
+    let db = TempDb::new("reader-ro");
+    Store::open(db.path()).unwrap();
+    let mut reader = Store::open_reader(db.path()).unwrap();
+    assert!(reader.server_id("https://g.example").is_err());
+}
+
+#[test]
+fn reader_refuses_an_unmigrated_database() {
+    let db = TempDb::new("reader-schema");
+    Connection::open(db.path()).unwrap();
+    match Store::open_reader(db.path()) {
+        Err(Error::ReaderSchema { found, expected }) => {
+            assert_eq!(found, 0);
+            assert_eq!(expected as usize, MIGRATIONS.len());
+        }
+        other => panic!("expected ReaderSchema, got {:?}", other.map(|_| ())),
+    }
+}
+
+#[test]
+fn read_inside_a_transaction_just_runs() {
+    let mut s = Store::open_in_memory().unwrap();
+    let id = s.server_id("https://g.example").unwrap();
+    s.conn.execute_batch("BEGIN").unwrap();
+    assert!(s.read(|s| s.load_query(id, "q")).unwrap().is_none());
+    s.conn.execute_batch("COMMIT").unwrap();
+}
+
 #[test]
 fn v4_adds_comments_and_drafts_and_keeps_existing_data() {
     let mut conn = db_at_version(3);

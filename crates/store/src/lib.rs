@@ -2,7 +2,8 @@
 //!
 //! Calls block on disk I/O, so callers run them off the UI thread (GPUI's
 //! background executor). [`Store`] is `Send`; share it between threads
-//! behind a mutex.
+//! behind a mutex. A second [`Store::open_reader`] connection lets lookups
+//! run beside the writes.
 //!
 //! Every row is keyed by [`ServerId`], so several servers can live in one
 //! database. Schema changes are ordered steps tracked with
@@ -81,6 +82,40 @@ impl Store {
 
     pub fn open_in_memory() -> Result<Self, Error> {
         Self::init(Connection::open_in_memory()?, false)
+    }
+
+    /// Opens a second, read-only connection to the database at `path`,
+    /// which [`Store::open`] has opened (and migrated) already. Its reads
+    /// run beside the first connection's writes (WAL), so a caller that
+    /// only reads need not queue behind a writer; it never migrates, and
+    /// refuses a schema other than this build's.
+    pub fn open_reader(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let expected = u32::try_from(migrations::MIGRATIONS.len()).unwrap_or(u32::MAX);
+        let found = migrations::user_version(&conn)?;
+        if found != expected {
+            return Err(Error::ReaderSchema { found, expected });
+        }
+        // `query_only` rather than a read-only open: that one needs the
+        // WAL's shared-memory file to exist already.
+        conn.execute_batch("PRAGMA query_only = ON")?;
+        Ok(Self { conn })
+    }
+
+    /// Runs `f` in one read transaction, so that the several statements of
+    /// a lookup see one state of the database even when another
+    /// connection writes meanwhile. Inside a transaction already (a store
+    /// shared by readers and writers), `f` just runs. `f` may fail with
+    /// its caller's error type.
+    pub fn read<T, E: From<Error>>(&self, f: impl FnOnce(&Self) -> Result<T, E>) -> Result<T, E> {
+        if !self.conn.is_autocommit() {
+            return f(self);
+        }
+        let tx = self.conn.unchecked_transaction().map_err(Error::from)?;
+        let out = f(self)?;
+        tx.commit().map_err(Error::from)?;
+        Ok(out)
     }
 
     fn init(mut conn: Connection, file_backed: bool) -> Result<Self, Error> {

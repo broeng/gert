@@ -11,6 +11,11 @@ pub enum Error {
         "cache database has schema version {found}, but this build only knows up to {supported}"
     )]
     SchemaTooNew { found: u32, supported: u32 },
+    /// A reader connection found another schema than this build's: the
+    /// database was not opened (and migrated) with [`crate::Store::open`]
+    /// first.
+    #[error("cache database has schema version {found}, expected {expected} for reading")]
+    ReaderSchema { found: u32, expected: u32 },
     /// Another server row already has this URL.
     #[error("another server already uses the URL {0}")]
     ServerUrlTaken(String),
