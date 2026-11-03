@@ -24,6 +24,10 @@ pub enum Error {
     /// given up. Whether it arrived is checked by the next run.
     #[error("Gerrit did not answer in time")]
     PostTimedOut,
+    /// A consolidation run was asked to stop (`StopFlag`): the user signed
+    /// out or another account signed in. It stopped before its next post.
+    #[error("the consolidation run was stopped")]
+    Stopped,
 }
 
 impl Error {

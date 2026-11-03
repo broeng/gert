@@ -25,5 +25,5 @@ pub use syncer::{
     CLAIM_STALE, ChainCommit, CommentsView, ConsolidateOptions, ConsolidateReport,
     ConsolidationTiming, DraftCounts, DraftSave, FoundChange, NewChange, POST_DEADLINE,
     PostOutcome, PostReport, PublishOutcome, QueryUpdate, RefreshSource, RetryReport,
-    ReviewerAdded, SLOW_RECHECK, Syncer, WatchOptions,
+    ReviewerAdded, SLOW_RECHECK, StopFlag, Syncer, WatchOptions,
 };

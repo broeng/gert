@@ -191,6 +191,7 @@ pub fn options(checkouts: &Checkouts) -> ConsolidateOptions {
             .projects()
             .map(|p| (p.name.clone(), p.local_approval))
             .collect(),
+        ..Default::default()
     }
 }
 

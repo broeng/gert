@@ -470,6 +470,8 @@ fn not_found_makes_checking_local_and_leaves_vanished_alone() {
     assert_eq!(report.not_found.len(), 2);
     assert_eq!(f.row(&checking).state, LocalChangeState::Local);
     assert_eq!(f.row(&vanished).state, LocalChangeState::Vanished);
+    // Only the row that was checking changed state.
+    assert_eq!(report.state_changed, [checking.id]);
     // One query for both, by triplet, in the project.
     let sent = f.http.routes.requested();
     assert_eq!(sent.len(), 1, "{sent:?}");
@@ -482,6 +484,10 @@ fn not_found_makes_checking_local_and_leaves_vanished_alone() {
     assert!(q.contains(&format!("change:\"p~main~{other}\"")), "{q}");
     assert!(q.contains(" OR ") && q.contains("project:\"p\""), "{q}");
     f.assert_nothing_local(&["l1", "l2"]);
+    // Looked up again: nothing changes state this time.
+    let again = f.run();
+    assert_eq!(again.not_found.len(), 2);
+    assert!(again.state_changed.is_empty(), "{again:?}");
 }
 
 #[test]
@@ -509,6 +515,7 @@ fn several_hits_without_a_branch_are_ambiguous() {
     f.query_finds(&[(7, "main", "NEW"), (8, "stable", "NEW")]);
     let report = f.run();
     assert_eq!(report.ambiguous, [row.id]);
+    assert_eq!(report.state_changed, [row.id]);
     let row = f.row(&row);
     assert_eq!(
         (row.state, row.gerrit_number),
@@ -829,6 +836,7 @@ fn a_purely_local_approval_may_be_published_under_exact_or_manual() {
     f.gerrit("NEW", &["s1", "s2"], json!([]));
     let options = ConsolidateOptions {
         local_approval: BTreeMap::from([("p".to_owned(), LocalApproval::ExactOrManual)]),
+        ..Default::default()
     };
     let report = f.run_with(&options);
     // Nothing to post: no comments, the vote held.
@@ -927,6 +935,48 @@ fn a_newer_review_supersedes_an_older_ones_vote() {
     }
     assert_eq!(report.posts.len(), 2);
     assert_eq!(f.row(&row).state, LocalChangeState::Consolidated);
+}
+
+#[test]
+fn a_stopped_run_ends_before_its_next_post() {
+    let f = fx();
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let first = f.review(&v[0], &[("Code-Review", 1)], "first");
+    let second = f.review(&v[0], &[], "second");
+    f.gerrit("NEW", &["s1"], json!([]));
+    let options = ConsolidateOptions::default();
+    // The first post is answered, and the run is asked to stop meanwhile
+    // (the user signed out while it was in flight).
+    let stop = options.stop.clone();
+    f.http.respond("/review", move |_| {
+        stop.stop();
+        json!({"labels": {"Code-Review": 1}, "change_info": {"current_revision_number": 1}})
+    });
+    let report = f.run_with(&options);
+    assert!(matches!(report.stopped, Some(Error::Stopped)), "{report:?}");
+    assert_eq!(f.http.posts().len(), 1, "the post in flight completes");
+    assert_eq!(f.reloaded(&first).state, PendingReviewState::Sent);
+    assert_eq!(f.reloaded(&second).state, PendingReviewState::Pending);
+    assert_ne!(f.row(&row).state, LocalChangeState::Consolidated);
+
+    // A run with a flag set from the start posts nothing; the next one
+    // goes on.
+    let stopped = ConsolidateOptions::default();
+    stopped.stop.stop();
+    let report = f.run_with(&stopped);
+    assert!(matches!(report.stopped, Some(Error::Stopped)), "{report:?}");
+    assert_eq!(f.http.posts().len(), 1);
+    let report = f.run();
+    assert!(report.stopped.is_none(), "{report:?}");
+    assert_eq!(f.http.posts().len(), 2);
+    assert_eq!(f.reloaded(&second).state, PendingReviewState::Sent);
+}
+
+#[test]
+fn stop_flags_are_equal_only_to_their_clones() {
+    let a = StopFlag::default();
+    assert_eq!(a, a.clone());
+    assert_ne!(a, StopFlag::default());
 }
 
 #[test]

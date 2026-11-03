@@ -433,7 +433,7 @@ pub use actions::NewChange;
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
 pub use consolidate::{
     CLAIM_STALE, ConsolidateOptions, ConsolidateReport, ConsolidationTiming, FoundChange,
-    POST_DEADLINE, PostOutcome, PostReport, SLOW_RECHECK,
+    POST_DEADLINE, PostOutcome, PostReport, SLOW_RECHECK, StopFlag,
 };
 pub use edits::ReviewerAdded;
 pub use local::ChainCommit;

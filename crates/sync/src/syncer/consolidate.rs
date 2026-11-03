@@ -203,12 +203,40 @@ impl Drop for Running {
     }
 }
 
+/// Asks a consolidation run to stop: set from another thread (the user
+/// signed out or another account signed in), checked before every post.
+/// A post already sent is completed; the run ends before the next one with
+/// [`Error::Stopped`]. Clones share the flag; two flags are equal when they
+/// are the same flag.
+#[derive(Clone, Debug, Default)]
+pub struct StopFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl StopFlag {
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl PartialEq for StopFlag {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for StopFlag {}
+
 /// What [`Syncer::consolidate`] takes besides the store.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConsolidateOptions {
     /// The `local_approval` setting of each project as it is now. A
     /// project that is not listed counts as `exact`, the strictest.
     pub local_approval: BTreeMap<String, LocalApproval>,
+    /// Stops the run before its next post (see [`StopFlag`]).
+    pub stop: StopFlag,
     // LC5b adds the `PortSource` here: what ports the comments of versions
     // that never reached Gerrit onto a Gerrit patch set (see
     // `Syncer::exact_moves`, where those versions are skipped now).
@@ -281,6 +309,11 @@ pub struct ConsolidateReport {
     pub not_found: Vec<LocalChangeId>,
     /// Several Gerrit changes match, and the target branch is unknown.
     pub ambiguous: Vec<LocalChangeId>,
+    /// Rows of `not_found` and `ambiguous` (or with a Change-Id Gerrit
+    /// cannot be asked about) whose state this run changed: `Checking`
+    /// became `Local`, or a row became `Ambiguous`. The others were looked
+    /// up as before and nothing about them moved.
+    pub state_changed: Vec<LocalChangeId>,
     pub posts: Vec<PostReport>,
     /// Local changes with nothing unsent left, all of whose versions are
     /// Gerrit patch sets: tombstones now.
@@ -331,7 +364,7 @@ impl From<Error> for Problem {
     fn from(e: Error) -> Self {
         let ends_run = match &e {
             Error::Api(a) => a.is_retryable() || a.is_unauthorized(),
-            Error::Store(_) | Error::LeaseLost | Error::PostTimedOut => true,
+            Error::Store(_) | Error::LeaseLost | Error::PostTimedOut | Error::Stopped => true,
             Error::DraftsNotUploaded(_) | Error::Local(_) => false,
         };
         if ends_run {
@@ -358,6 +391,15 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// [`Error::Stopped`] once the run was asked to stop.
+    fn go_on(&self) -> Result<(), Error> {
+        if self.options.stop.is_stopped() {
+            Err(Error::Stopped)
+        } else {
+            Ok(())
+        }
+    }
+
     fn claimant(&self) -> Claimant<'_> {
         Claimant {
             owner: &self.owner,
@@ -609,11 +651,13 @@ impl Syncer {
                 Lookup::Found(n) => found.push((row, n)),
                 Lookup::NotFound => {
                     run.report.not_found.push(row.id);
-                    self.set_state_if(
+                    if self.set_state_if(
                         &row,
                         &[LocalChangeState::Checking],
                         LocalChangeState::Local,
-                    )?;
+                    )? {
+                        run.report.state_changed.push(row.id);
+                    }
                 }
                 Lookup::Malformed => {
                     log::info!(
@@ -622,19 +666,23 @@ impl Syncer {
                         row.id.0,
                         row.change_id
                     );
-                    self.set_state_if(
+                    if self.set_state_if(
                         &row,
                         &[LocalChangeState::Checking],
                         LocalChangeState::Local,
-                    )?;
+                    )? {
+                        run.report.state_changed.push(row.id);
+                    }
                 }
                 Lookup::Ambiguous => {
                     run.report.ambiguous.push(row.id);
-                    self.set_state_if(
+                    if self.set_state_if(
                         &row,
                         &[LocalChangeState::Checking, LocalChangeState::Local],
                         LocalChangeState::Ambiguous,
-                    )?;
+                    )? {
+                        run.report.state_changed.push(row.id);
+                    }
                 }
                 Lookup::Unknown => {}
             }
@@ -695,21 +743,23 @@ impl Syncer {
     }
 
     /// Sets `to` if the row is still in one of the states `from` and has
-    /// no Gerrit change. Read and written under one store lock.
+    /// no Gerrit change. Read and written under one store lock. True when
+    /// the state changed.
     fn set_state_if(
         &self,
         row: &LocalChange,
         from: &[LocalChangeState],
         to: LocalChangeState,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let mut store = self.store();
         let Some(now) = store.local_change(self.server, row.id)? else {
-            return Ok(());
+            return Ok(false);
         };
-        if now.gerrit_number.is_none() && from.contains(&now.state) {
+        if now.gerrit_number.is_none() && from.contains(&now.state) && now.state != to {
             store.set_local_change_state(self.server, row.id, to)?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     // ---- lookup ----
@@ -1391,6 +1441,7 @@ impl Syncer {
         };
         let checked = self
             .ensure_on_server(&rev.sha)
+            .and_then(|()| run.go_on())
             .and_then(|()| self.renew_lease(&run.owner));
         if let Err(e) = checked {
             self.give_up(row, &post, nonce, PendingReviewState::Pending, None, None)?;
