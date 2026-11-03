@@ -119,6 +119,9 @@ impl Sent {
     }
 }
 
+/// Why the reply dialog does not open on a local change yet.
+pub const LOCAL_LATER: &str = "Replying to local changes comes in a later version";
+
 /// Why the reply dialog cannot open now, as a note for the user.
 pub fn unavailable(session: &Session) -> Option<&'static str> {
     if !session.can_comment() {

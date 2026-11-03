@@ -20,6 +20,10 @@ use crate::{
 impl ChangePage {
     /// The buttons of the header bar.
     pub(super) fn quick_buttons(&self, cx: &App) -> Vec<QuickButton> {
+        // Votes on a local change wait for local reviews (later).
+        if self.number.is_local() {
+            return Vec::new();
+        }
         let objections = plan::drafts_object(&self.comments.read(cx).threads());
         self.detail.as_ref().map_or_else(Vec::new, |d| {
             plan::quick_votes(d, self.session.username.as_deref(), objections)

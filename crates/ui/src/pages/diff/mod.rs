@@ -838,6 +838,11 @@ impl DiffPage {
 
     /// `a`: asks the shell for the reply dialog.
     fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
+        if self.route.change.is_local() {
+            self.hint
+                .say(reply::LOCAL_LATER, false, cx, |p| &mut p.hint);
+            return;
+        }
         if let Some(why) = reply::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
@@ -879,6 +884,11 @@ impl DiffPage {
     /// `shift-a`: asks the shell for the change action menu (`m` is the
     /// unified / side-by-side toggle in the diff).
     fn open_actions(&mut self, _: &ChangeMenu, _: &mut Window, cx: &mut Context<Self>) {
+        if self.route.change.is_local() {
+            self.hint
+                .say(action_menu::LOCAL, false, cx, |p| &mut p.hint);
+            return;
+        }
         if let Some(why) = action_menu::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;

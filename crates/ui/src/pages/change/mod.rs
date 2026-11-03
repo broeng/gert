@@ -18,6 +18,8 @@
 //! scrolling inside beyond that). Clicking into an inline diff focuses it,
 //! and its own keys apply until `Esc` leaves the page.
 
+#[cfg(test)]
+mod local_tests;
 mod quick_vote;
 mod requirements;
 mod state;
@@ -1887,6 +1889,11 @@ impl ChangePage {
 
     /// `a`: asks the shell for the reply dialog.
     fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
+        if self.number.is_local() {
+            self.hint
+                .say(reply::LOCAL_LATER, false, cx, |p| &mut p.hint);
+            return;
+        }
         if let Some(why) = reply::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
@@ -1930,6 +1937,12 @@ impl ChangePage {
 
     /// `m`: asks the shell for the change action menu.
     fn open_actions(&mut self, _: &ChangeMenu, _: &mut Window, cx: &mut Context<Self>) {
+        if self.number.is_local() {
+            // Every action of the menu is a request to Gerrit.
+            self.hint
+                .say(action_menu::LOCAL, false, cx, |p| &mut p.hint);
+            return;
+        }
         if let Some(why) = action_menu::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;

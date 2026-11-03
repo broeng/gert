@@ -112,6 +112,10 @@ struct Args {
     destination: Option<String>,
 }
 
+/// Why the menu does not open on a local change: every action is a
+/// request to Gerrit, which does not have it.
+pub const LOCAL: &str = "A local change has no actions until it is on Gerrit";
+
 /// Why the menu cannot open now, as a note for the user.
 pub fn unavailable(session: &Session) -> Option<&'static str> {
     if !session.can_comment() {

@@ -26,7 +26,7 @@ use crate::{
     filters::{FileStyle, FilterAction},
     local_source::{local_chip, local_marker},
     pages::list::Status,
-    row::{browser_url, chips, has_merge_conflict},
+    row::{browser_url, chips, has_merge_conflict, local_state_note},
     search_link::{account_query, person_query, project_query, search_link},
     theme::chip_colors,
     time_fmt::{clock, relative},
@@ -229,9 +229,12 @@ impl ChangePage {
     fn header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         if self.detail.is_none() && self.number.is_local() {
-            // A local change (its number is synthetic and never shown).
-            // Its own page comes in a later version; until then nothing is
-            // fetched for it (see `tick`).
+            // A local change: its number is synthetic and never shown.
+            let text = if self.loaded {
+                "This local change is no longer known; it may have been pushed or dropped."
+            } else {
+                "Loading\u{2026}"
+            };
             return v_flex()
                 .gap_1()
                 .child(
@@ -242,11 +245,7 @@ impl ChangePage {
                         .child(local_chip(cx))
                         .children(self.server_badge.as_ref().map(|b| b.pill(cx))),
                 )
-                .child(
-                    div()
-                        .text_color(muted)
-                        .child("Opening local changes comes in a later version."),
-                )
+                .child(div().text_color(muted).child(text))
                 .into_any_element();
         }
         if self.detail.is_none() {
@@ -372,6 +371,13 @@ impl ChangePage {
                     .bg(cx.theme().primary)
                     .on_click(cx.listener(|this, _, _, cx| this.submit_chain(cx)))
             });
+        let local = c.number.is_local();
+        // Where a local change stands with Gerrit, as on its dashboard row.
+        let local_note = self
+            .local_row
+            .as_ref()
+            .filter(|_| local)
+            .and_then(|r| local_state_note(r.state).map(|n| (r.state, n)));
         let bar = h_flex()
             .w_full()
             .gap_2()
@@ -383,10 +389,13 @@ impl ChangePage {
             .border_1()
             .border_color(theme.border)
             .bg(theme.secondary)
-            .child(if unknown {
-                pill(c.status.to_string(), muted)
-            } else {
-                pill(status_text, status_color)
+            // A local change has no Gerrit status; the chip says what it is.
+            .when(!local, |d| {
+                d.child(if unknown {
+                    pill(c.status.to_string(), muted)
+                } else {
+                    pill(status_text, status_color)
+                })
             })
             .when(has_merge_conflict(c), |d| d.child(conflict_pill(cx)))
             .child(
@@ -426,6 +435,13 @@ impl ChangePage {
                     .font_semibold()
                     .child(c.subject.clone()),
             )
+            .children(local_note.map(|(state, note)| {
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(note)
+                    .debug_selector(move || format!("local-note-{}", state.as_str()))
+            }))
             .child(div().flex_1())
             .children(submit_chain)
             .children(quick)
@@ -522,16 +538,29 @@ impl ChangePage {
                 cx.listener(move |_, _, _, cx| cx.emit(ChangeEvent::Search(query.clone()))),
             )
         };
+        // A local change has no owner, reviewers or CC on Gerrit: its
+        // author (from the row until git has the commit) says whose it is.
+        let local = c.number.is_local();
+        let branch = if c.branch.is_empty() {
+            "unknown branch".to_owned()
+        } else {
+            c.branch.clone()
+        };
         let fields = v_flex()
             .gap_0p5()
-            .child(accounts(
-                "Owner",
-                "owner",
-                std::slice::from_ref(&c.owner),
-                cx,
-            ))
-            .child(accounts("Reviewers", "reviewer", &d.reviewers, cx))
-            .child(accounts("CC", "cc", &d.cc, cx))
+            .when(!local, |f| {
+                f.child(accounts(
+                    "Owner",
+                    "owner",
+                    std::slice::from_ref(&c.owner),
+                    cx,
+                ))
+                .child(accounts("Reviewers", "reviewer", &d.reviewers, cx))
+                .child(accounts("CC", "cc", &d.cc, cx))
+            })
+            .when(local && author.is_none(), |f| {
+                f.child(field("Author", text(c.owner.display())))
+            })
             .child(field(
                 "Repo | Branch",
                 h_flex()
@@ -547,7 +576,7 @@ impl ChangePage {
                                 this.project_checkout(&ProjectCheckout, w, cx)
                             })),
                     )
-                    .child(format!(" | {}", c.branch))
+                    .child(format!(" | {branch}"))
                     .into_any_element(),
             ))
             .when_some(author, |d, who| {
@@ -574,8 +603,9 @@ impl ChangePage {
         let has_requirements = !d.submit_requirements.is_empty();
         let requirements = has_requirements.then(|| self.requirements(cx));
         let votes = self.votes(cx);
-        // Not for anonymous sessions, which cannot reply.
-        let reply = self.session.can_comment().then(|| {
+        // Not for anonymous sessions, which cannot reply, nor yet for local
+        // changes.
+        let reply = (self.session.can_comment() && !local).then(|| {
             h_flex().child(
                 Button::new("reply")
                     .label("Reply  (A)")
