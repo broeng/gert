@@ -196,6 +196,16 @@ impl DiffView {
         }
     }
 
+    /// Whether an editor is open with text that is not saved: not empty,
+    /// and for a draft, not its saved message.
+    pub fn has_written_text(&self, cx: &App) -> bool {
+        self.editor.as_ref().is_some_and(|ed| {
+            let text = ed.input.read(cx).value().to_string();
+            let text = text.trim();
+            !text.is_empty() && text != self.initial_text(&ed.key).0.trim()
+        })
+    }
+
     /// The text in the editor.
     pub fn editor_text(&self, cx: &App) -> Option<String> {
         self.editor

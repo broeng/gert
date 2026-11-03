@@ -756,3 +756,181 @@ fn an_edit_of_a_draft_being_sent_is_kept_and_said_on_its_page_only(cx: &mut Test
     kept.sort();
     assert_eq!(kept, ["after moving on", "on the page"]);
 }
+
+#[test]
+fn a_local_change_without_a_patch_set_keeps_its_newest_version() {
+    use store::{ConsolidationRewrite, LocalChangeUpsert, LocalOp, NewLocalPatchSet, PatchSetMove};
+
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server");
+    let now: Timestamp = "2024-06-15T10:00:00Z".parse().expect("time");
+    let version = |sha: &str| NewLocalPatchSet {
+        sha: sha.into(),
+        parent_sha: None,
+        seen_at: now,
+    };
+    let upsert = LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: ID_A.into(),
+        gerrit_number: None,
+        subject: "s".into(),
+        author_name: "Me".into(),
+        author_email: TEST_EMAIL.into(),
+        updated: now,
+        state: None,
+        patch_sets: vec![version("l1"), version("l2")],
+    };
+    store
+        .reconcile_local(server, "p", &[LocalOp::Upsert(upsert)], now)
+        .expect("reconcile");
+    let row = store
+        .local_changes_by_change_id(server, ID_A)
+        .expect("rows")
+        .remove(0);
+    let versions = store.local_patch_sets(server, row.id).expect("versions");
+    // `l1` was pushed and found as patch set 1 of change 42; `l2` is the
+    // amended commit, not pushed yet.
+    store
+        .rewrite_local_change(
+            server,
+            &ConsolidationRewrite {
+                local_change: row.id,
+                gerrit_number: GERRIT,
+                moves: vec![PatchSetMove {
+                    from: versions[0].number,
+                    to: model::PatchSetRef {
+                        number: PatchSetNumber(1),
+                        sha: "l1".into(),
+                    },
+                    exact: true,
+                    drafts: Vec::new(),
+                    reviews: Vec::new(),
+                }],
+                keep: Vec::new(),
+                review_states: Vec::new(),
+                state: None,
+                else_state: None,
+            },
+        )
+        .expect("rewrite")
+        .expect("rewritten");
+    let env = env_with(store, &RouteHttpClient::new());
+    let session = crate::session::Session::new(&env, &setup(), None).expect("session");
+    let at = |target| {
+        Some(ChangeView {
+            target: Some(target),
+            ..Default::default()
+        })
+    };
+    // No patch set on the local change is its newest version: it stays
+    // the target on the Gerrit change, not Gerrit's current patch set.
+    assert_eq!(
+        super::redirect(session.syncer(), &Route::Change(row.number), None).expect("redirect"),
+        Some(super::Redirect {
+            route: Route::Change(GERRIT),
+            view: at(versions[1].number),
+        })
+    );
+    // The pushed version, named, leads to its patch set.
+    assert_eq!(
+        super::redirect(
+            session.syncer(),
+            &Route::Change(row.number),
+            at(versions[0].number).as_ref()
+        )
+        .expect("redirect")
+        .and_then(|r| r.view),
+        at(PatchSetNumber(1))
+    );
+}
+
+/// The open page of the local change, with the change pushed and its
+/// local review waiting.
+fn on_the_local_page(cx: &mut TestAppContext) -> (Fixture, Started, LocalChange) {
+    let f = fixture();
+    let s = start(cx, &f, Some("u"));
+    let (row, _) = s.row();
+    s.review();
+    s.open(cx, Route::Change(row.number));
+    f.pushed();
+    (f, s, row)
+}
+
+impl Started {
+    fn press(&self, cx: &mut TestAppContext, key: &str) {
+        use gpui_kit::test::TestWindowExt as _;
+        cx.update_window(self.window, |_, window, cx| window.press(key, cx))
+            .expect("press");
+        cx.run_until_parked();
+    }
+
+    fn input(&self, cx: &mut TestAppContext, text: &str) {
+        use gpui_kit::test::TestWindowExt as _;
+        cx.update_window(self.window, |_, window, cx| window.input(text, cx))
+            .expect("input");
+        cx.run_until_parked();
+    }
+
+    fn route(&self, cx: &mut TestAppContext) -> Route {
+        cx.update(|cx| self.shell.read(cx).route().clone())
+    }
+}
+
+#[gpui_kit::test]
+fn the_page_waits_for_an_open_editor_before_it_follows(cx: &mut TestAppContext) {
+    let (f, s, row) = on_the_local_page(cx);
+    // `c`: a comment on the local version, being written.
+    s.press(cx, "c");
+    s.input(cx, "half a thought");
+    let editor_text = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let page = s.shell.read(cx).change_page_for_test()?;
+            let view = page.read(cx).ps_view_for_test()?;
+            view.read(cx).editor_text(cx)
+        })
+    };
+    assert_eq!(editor_text(cx).as_deref(), Some("half a thought"));
+    s.trigger(cx);
+    assert_eq!(f.http.posts().len(), 1, "the review was sent");
+    // The page stays, with the editor and its text.
+    assert_eq!(s.route(cx), Route::Change(row.number));
+    assert_eq!(editor_text(cx).as_deref(), Some("half a thought"));
+
+    // Once the editor is closed, the next run (or refresh) moves on.
+    s.press(cx, "escape");
+    s.trigger(cx);
+    assert_eq!(s.route(cx), Route::Change(GERRIT));
+}
+
+#[gpui_kit::test]
+fn the_page_waits_for_the_reply_dialog_before_it_follows(cx: &mut TestAppContext) {
+    let (f, s, row) = on_the_local_page(cx);
+    s.press(cx, "a");
+    assert!(cx.update(|cx| s.shell.read(cx).reply_for_test().is_some()));
+    s.trigger(cx);
+    assert_eq!(f.http.posts().len(), 1);
+    assert_eq!(s.route(cx), Route::Change(row.number));
+    assert!(
+        cx.update(|cx| s.shell.read(cx).reply_for_test().is_some()),
+        "the dialog stays open"
+    );
+    // Closing the dialog lets the page follow.
+    s.press(cx, "escape");
+    assert!(cx.update(|cx| s.shell.read(cx).reply_for_test().is_none()));
+    assert_eq!(s.route(cx), Route::Change(GERRIT));
+}
+
+#[gpui_kit::test]
+fn the_note_stays_off_other_pages(cx: &mut TestAppContext) {
+    let f = fixture();
+    let s = start(cx, &f, Some("u"));
+    s.review();
+    // Another change's page.
+    s.open(cx, Route::Change(ChangeNumber(8)));
+    f.pushed();
+    s.trigger(cx);
+    assert_eq!(f.http.posts().len(), 1);
+    assert_eq!(s.page_hint(cx), None);
+    assert_eq!(s.route(cx), Route::Change(ChangeNumber(8)));
+}

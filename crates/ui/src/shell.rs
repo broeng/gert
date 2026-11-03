@@ -180,6 +180,10 @@ pub struct Shell {
     /// order on the background executor (`inbox_busy` while it runs).
     inbox_queue: Vec<InboxOp>,
     inbox_busy: bool,
+    /// The page on screen should follow its local change to Gerrit, but
+    /// the user was writing (an open editor with text, or a dialog): it
+    /// is looked up again once they are done (see `follow_redirect`).
+    redirect_pending: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -290,6 +294,7 @@ impl Shell {
             inbox_unread: HashMap::new(),
             inbox_queue: Vec::new(),
             inbox_busy: false,
+            redirect_pending: false,
             _subs: subs,
         };
         this.start(window, cx);
@@ -553,6 +558,9 @@ impl Shell {
         if !report.ran {
             return;
         }
+        if self.nav.current_server() == Some(key) {
+            self.retry_redirect(window, cx);
+        }
         let affected = consolidation::affected(report);
         if affected.is_empty() {
             return;
@@ -629,6 +637,9 @@ impl Shell {
                     return;
                 }
                 match found {
+                    // A new page would take the open editor or dialog
+                    // with it: later.
+                    Ok(Some(_)) if this.busy_writing(cx) => this.redirect_pending = true,
                     Ok(Some(to)) => {
                         this.nav.redirect(to.route, to.view);
                         this.show(window, cx);
@@ -643,6 +654,32 @@ impl Shell {
             .ok();
         })
         .detach();
+    }
+
+    /// Whether the user is writing something a new page would drop: a
+    /// dialog is open, or a draft editor on the page holds text.
+    fn busy_writing(&self, cx: &App) -> bool {
+        let dialog = self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
+            || self.goto.is_some()
+            || self.switcher.is_some();
+        dialog
+            || match &self.page {
+                Page::Change(p) => p.read(cx).is_writing(cx),
+                Page::Diff(p) => p.read(cx).is_writing(cx),
+                _ => false,
+            }
+    }
+
+    /// Looks again where the page on screen leads, if a redirect waited
+    /// for the user (a dialog closed, a refresh or a run came).
+    fn retry_redirect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.redirect_pending) {
+            self.follow_redirect(None, window, cx);
+        }
     }
 
     /// A note on the change or diff page on screen (red when `error`).
@@ -1322,6 +1359,9 @@ impl Shell {
         }
         self.fetch_account(key, window, cx);
         self.consolidate(key, cx);
+        if self.nav.current_server() == Some(key) {
+            self.retry_redirect(window, cx);
+        }
     }
 
     /// Fetches the signed-in account of server `key` (`me`) unless it is
@@ -1783,6 +1823,7 @@ impl Shell {
         self.sync_attention_polls(window, cx);
         // A local change or version in the route may be on Gerrit by now
         // (a history entry from before).
+        self.redirect_pending = false;
         if matches!(self.page, Page::Change(_) | Page::Diff(_)) {
             self.follow_redirect(None, window, cx);
         }
@@ -2604,6 +2645,7 @@ impl Shell {
         self.reply = None;
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
+        self.retry_redirect(window, cx);
         cx.notify();
     }
 
@@ -2709,6 +2751,7 @@ impl Shell {
         self.drop_menu();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
+        self.retry_redirect(window, cx);
         cx.notify();
     }
 
@@ -2800,6 +2843,7 @@ impl Shell {
         self.drop_filters_dialog();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
+        self.retry_redirect(window, cx);
         cx.notify();
     }
 
@@ -2863,6 +2907,7 @@ impl Shell {
         self.drop_rule_dialog();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
+        self.retry_redirect(window, cx);
         cx.notify();
     }
 
@@ -2920,6 +2965,7 @@ impl Shell {
         self.drop_project_dialog();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
+        self.retry_redirect(window, cx);
         cx.notify();
     }
 
@@ -3057,6 +3103,7 @@ impl Shell {
         self.drop_goto();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
+        self.retry_redirect(window, cx);
         cx.notify();
     }
 
@@ -3150,6 +3197,7 @@ impl Shell {
         self.drop_switcher();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
+        self.retry_redirect(window, cx);
         cx.notify();
     }
 

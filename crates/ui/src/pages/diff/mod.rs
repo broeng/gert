@@ -843,6 +843,13 @@ impl DiffPage {
         self.hint.say(text, true, cx, |p| &mut p.hint);
     }
 
+    /// Whether the diff's draft editor holds text the user wrote.
+    pub fn is_writing(&self, cx: &App) -> bool {
+        self.view
+            .as_ref()
+            .is_some_and(|v| v.read(cx).has_written_text(cx))
+    }
+
     /// An edit was saved as a new draft because its draft is being sent
     /// with a local review: say so.
     pub fn kept_as_new(&mut self, cx: &mut Context<Self>) {

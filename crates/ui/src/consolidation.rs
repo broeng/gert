@@ -347,17 +347,21 @@ pub fn redirect(
         Route::Diff(d) => d.change,
         _ => return Ok(None),
     };
-    let change = if change.is_local() {
-        match syncer
-            .local_change(change)?
-            .and_then(|(row, _)| row.gerrit_number)
-        {
-            Some(gerrit) => gerrit,
-            // Not on Gerrit (yet), or the row is gone: the page stays.
+    // On a local change, no patch set means its newest version; on the
+    // Gerrit change it would mean Gerrit's current patch set, which may be
+    // another commit (the change was amended after the push).
+    let (change, newest) = if change.is_local() {
+        match syncer.local_change(change)? {
+            Some((row, versions)) => match row.gerrit_number {
+                Some(gerrit) => (gerrit, versions.last().map(|v| v.number)),
+                // Not on Gerrit (yet): the page stays.
+                None => return Ok(None),
+            },
+            // The row is gone: the page stays.
             None => return Ok(None),
         }
     } else {
-        change
+        (change, None)
     };
     let map = |n: PatchSetNumber| -> Result<PatchSetNumber, sync::Error> {
         if !n.is_local() {
@@ -371,10 +375,11 @@ pub fn redirect(
     let map_opt = |n: Option<PatchSetNumber>| n.map(map).transpose();
     let to = match route {
         Route::Change(_) => {
-            let view = match view {
+            let implied = ChangeView::default();
+            let view = match view.or(newest.map(|_| &implied)) {
                 Some(v) => Some(ChangeView {
                     base: map_opt(v.base)?,
-                    target: map_opt(v.target)?,
+                    target: map_opt(v.target.or(newest))?,
                     file: v.file.clone(),
                 }),
                 None => None,
