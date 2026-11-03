@@ -1850,16 +1850,6 @@ fn a_stored_list_wins_without_git(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-fn a_missing_commit_gives_no_local_list(cx: &mut TestAppContext) {
-    let repo = lt::fixture();
-    let missing = "0123456789012345678901234567890123456789";
-    let f = unlisted_page(cx, unlisted_store(missing), &repo, None, |_| {});
-    assert!(list_of(cx, &f).is_empty());
-    cx.update(|cx| assert_eq!(f.page.read(cx).files_local_for_test(), None));
-}
-
-#[gpui_kit::test]
-#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_late_local_list_does_not_replace_gerrits(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     // No checkout settling first: the page is up with no list, git not run.

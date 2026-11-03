@@ -1784,24 +1784,6 @@ mod local {
     }
 
     #[gpui_kit::test]
-    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-    fn a_missing_commit_gives_no_local_list(cx: &mut TestAppContext) {
-        let f = lt::fixture();
-        let missing = "0123456789012345678901234567890123456789";
-        let p = open_local(
-            cx,
-            &f,
-            unlisted_store_for(missing),
-            RouteHttpClient::new(),
-            gerrit_api::Auth::Anonymous,
-            "src/a.rs",
-        );
-        assert!(list_of(cx, &p).is_empty());
-        p.page
-            .read_with(cx, |p, _| assert_eq!(p.files_local_for_test(), None));
-    }
-
-    #[gpui_kit::test]
     fn a_commit_the_checkout_lacks_goes_to_the_server(cx: &mut TestAppContext) {
         let f = lt::fixture();
         let missing = "0123456789012345678901234567890123456789";

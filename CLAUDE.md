@@ -165,7 +165,8 @@ crates/
                 the `sync::PortSource` trait).
   ui/           GPUI views on gpui-component: the shell and page navigation,
                 login, dashboard/search list, change page, diff page and diff
-                view, reply dialog, action menu, file filters, settings,
+                view, the file list both pages load (`ui::file_list`), reply
+                dialog, action menu, file filters, settings,
                 themes, project checkouts (`ui::checkouts`), the local
                 diff source (`ui::local_source`) and local changes
                 (`ui::local_scan`, `ui::consolidation`, ...).
