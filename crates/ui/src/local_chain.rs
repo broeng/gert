@@ -104,7 +104,10 @@ pub async fn read(
 #[derive(Clone, Debug, Default)]
 pub struct Stack {
     /// The local changes and local versions of Gerrit changes among the
-    /// commits built on the patch set, newest first.
+    /// commits built on the patch set, newest first and never a parent
+    /// before its children. Where those commits fork onto several
+    /// branches the list keeps each line together (git's topological
+    /// order); it cannot show the tree.
     pub entries: Vec<ChainEntry>,
     /// The Gerrit changes whose patch sets are among those commits: the
     /// local ones go above them.

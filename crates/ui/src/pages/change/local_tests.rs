@@ -1264,6 +1264,53 @@ fn local_commits_make_a_chain_of_a_change_gerrit_has_none_for(cx: &mut TestAppCo
     f.assert_nothing_local_sent(&[&s.first, &s.second]);
 }
 
+#[gpui_kit::test]
+fn a_commit_gerrit_has_in_the_chain_shows_once(cx: &mut TestAppContext) {
+    // `first` was just pushed as change 8: Gerrit's chain has it, but 8
+    // is not cached, so the store still takes it for a local change.
+    let s = stacked();
+    let mut store = s.store();
+    let related = |n: u64, sha: Option<&str>, subject: &str| model::RelatedChange {
+        project: "p".into(),
+        change_id: None,
+        number: ChangeNumber(n),
+        patch_set: PatchSetNumber(1),
+        current_patch_set: Some(PatchSetNumber(1)),
+        status: Some(model::ChangeStatus::New),
+        submittable: None,
+        work_in_progress: false,
+        commit: Some(model::Commit {
+            sha: sha.map(Into::into),
+            parents: Vec::new(),
+            author: None,
+            committer: None,
+            subject: subject.into(),
+            message: None,
+        }),
+    };
+    let chain = [
+        related(8, Some(&s.first), "First local"),
+        related(7, Some(&s.ps3), "On Gerrit"),
+        related(6, None, "Below"),
+    ];
+    store
+        .save_related(
+            SERVER,
+            ChangeNumber(7),
+            &s.ps3.clone().into(),
+            &chain,
+            Timestamp::now(),
+        )
+        .expect("related");
+    let f = page_in(cx, store, ChangeNumber(7), s.project(true), |_| {});
+    let chain = chain_of(cx, &f, 4);
+    let labels: Vec<&str> = chain.iter().map(|r| r.0.as_str()).collect();
+    // The version of 9 goes above 8, which it is built on; `first` is 8's
+    // row only.
+    assert_eq!(labels, ["#9 local 1", "#8", "#7", "#6"], "{chain:?}");
+    f.assert_nothing_local_sent(&[&s.first, &s.second]);
+}
+
 /// Reviews on local versions: drafts, the reply dialog's pending reviews,
 /// quick votes and the list of pending reviews.
 mod review;

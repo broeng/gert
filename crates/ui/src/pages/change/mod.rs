@@ -1213,6 +1213,12 @@ impl ChangePage {
     /// [`ChangePage::load_stack`]) above it, or above the highest change
     /// of the chain that they are built on. Without a chain from Gerrit
     /// but with local commits, the chain is them and this change.
+    ///
+    /// A list cannot show a tree: when what was built on the patch set
+    /// forks (one branch with a pushed change, another with a local one),
+    /// the local commits are one block, in git's topological order (each
+    /// line together, newest first), above the highest change they are
+    /// built on.
     fn gerrit_chain_rows(&self, sha: &RevisionId, changes: &[RelatedChange]) -> Vec<ChainRow> {
         let mut rows: Vec<ChainRow> = changes
             .iter()
@@ -1224,13 +1230,31 @@ impl ChangePage {
                 related: Some(c.clone()),
             })
             .collect();
-        let Some((_, stack)) = self
-            .local_stack
-            .as_ref()
-            .filter(|(at, s)| at == sha && !s.entries.is_empty())
-        else {
+        let Some((_, stack)) = self.local_stack.as_ref().filter(|(at, _)| at == sha) else {
             return rows;
         };
+        // A commit Gerrit's chain has is Gerrit's row, though the store did
+        // not know it yet (just pushed, its change not cached): not shown
+        // twice, and the local commits built on it go above that row.
+        let in_chain: HashMap<&RevisionId, ChangeNumber> = changes
+            .iter()
+            .filter_map(|c| Some((c.commit.as_ref()?.sha.as_ref()?, c.number)))
+            .collect();
+        let mut below = stack.on_gerrit.clone();
+        let entries: Vec<&local_chain::ChainEntry> = stack
+            .entries
+            .iter()
+            .filter(|e| match in_chain.get(&e.commit.sha) {
+                Some(n) => {
+                    below.push(*n);
+                    false
+                }
+                None => true,
+            })
+            .collect();
+        if entries.is_empty() {
+            return rows;
+        }
         if rows.is_empty() {
             rows.push(ChainRow {
                 label: change_detail::change_label(self.number),
@@ -1250,7 +1274,7 @@ impl ChangePage {
                 r.this
                     || r.related
                         .as_ref()
-                        .is_some_and(|c| stack.on_gerrit.contains(&c.number))
+                        .is_some_and(|c| below.contains(&c.number))
             })
             .unwrap_or(0);
         let mut ignored = HashMap::new();
@@ -1259,9 +1283,8 @@ impl ChangePage {
             .then(more_row)
             .into_iter()
             .chain(
-                stack
-                    .entries
-                    .iter()
+                entries
+                    .into_iter()
                     .map(|e| self.git_chain_row(sha, e, &mut ignored)),
             )
             .collect();
