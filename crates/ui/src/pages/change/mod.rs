@@ -59,7 +59,7 @@ use crate::{
     reply, reviewed,
     row::browser_url,
     servers::ServerBadge,
-    session::{Session, is_unauthorized},
+    session::{ServerKey, Session, is_unauthorized},
     settings::{DiffSettings, FileFilters, PageLayout},
     syntax_cache::{SyntaxCache, ahead_paths, diff_key},
     tracker::Tracker,
@@ -112,11 +112,25 @@ struct Files {
     error: Option<String>,
 }
 
+#[derive(Clone)]
 struct Related {
     sha: RevisionId,
     changes: Vec<RelatedChange>,
     /// Labels of the open changes in the chain, once fetched.
     summaries: HashMap<ChangeNumber, ChangeSummary>,
+    /// Taken over from the page of another change in the chain, and shown
+    /// until this change's own list arrives.
+    adopted: bool,
+}
+
+/// The relation chain as a change page hands it to the page of another
+/// change in that chain (Shift-J / Shift-K, a click on a row, Back), so
+/// that the chain stays on screen, scrolled where it was, while the new
+/// page reads its own.
+pub struct ChainHandover {
+    related: Related,
+    scroll: ScrollHandle,
+    drawn: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +170,11 @@ pub struct ChangePage {
     panel_shown: bool,
     /// Scroll position of the relation chain box or panel.
     related_scroll: ScrollHandle,
+    /// How the chain was last drawn: as the panel (`true`) or the box. The
+    /// row bounds in `related_scroll` are from that frame.
+    related_drawn: Option<bool>,
+    /// Bring the current change into view the next time the chain is drawn.
+    reveal_related: bool,
     /// The file filter rules and which are on, shared by all pages.
     filters: Entity<FileFilters>,
     /// The syntax worker's cache, shared by all pages.
@@ -265,6 +284,8 @@ impl ChangePage {
             related: None,
             panel_shown: false,
             related_scroll: ScrollHandle::new(),
+            related_drawn: None,
+            reveal_related: false,
             cursor: 0,
             want_file: view.file,
             jump: true,
@@ -355,6 +376,11 @@ impl ChangePage {
     #[cfg(test)]
     pub(crate) fn panel_shown_for_test(&self) -> bool {
         self.panel_shown
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chain_len_for_test(&self) -> usize {
+        self.related.as_ref().map_or(0, |r| r.changes.len())
     }
 
     #[cfg(test)]
@@ -589,7 +615,12 @@ impl ChangePage {
             self.cursor = 0;
             self.jump = true;
         }
-        if self.related.as_ref().map(|r| &r.sha) != sha.as_ref() {
+        // An adopted chain stays until this change's own list replaces it.
+        if self
+            .related
+            .as_ref()
+            .is_some_and(|r| !r.adopted && Some(&r.sha) != sha.as_ref())
+        {
             self.related = None;
         }
         self.read_threads(cx);
@@ -710,8 +741,29 @@ impl ChangePage {
         if current.as_ref() != Some(sha) {
             return;
         }
+        // Rows that come and go move the current one; a refresh of the
+        // same rows leaves the chain where the user scrolled it.
+        let moved = self.related.as_ref().is_none_or(|r| {
+            !r.changes
+                .iter()
+                .map(|c| c.number)
+                .eq(changes.iter().map(|c| c.number))
+        });
         let summaries = match self.related.take() {
-            Some(r) if &r.sha == sha => r.summaries,
+            Some(r) if &r.sha == sha && !r.adopted => r.summaries,
+            // The previous page's votes stay for the changes still at the
+            // same patch set, until this chain's own arrive.
+            Some(r) if r.adopted => {
+                let newest = |list: &[RelatedChange]| -> HashMap<_, _> {
+                    list.iter()
+                        .map(|c| (c.number, c.current_patch_set.unwrap_or(c.patch_set)))
+                        .collect()
+                };
+                let (old, new) = (newest(&r.changes), newest(&changes));
+                let mut kept = r.summaries;
+                kept.retain(|n, _| old.get(n).is_some_and(|ps| new.get(n) == Some(ps)));
+                kept
+            }
             _ => HashMap::new(),
         };
         let open: Vec<_> = changes
@@ -723,8 +775,11 @@ impl ChangePage {
             sha: sha.clone(),
             changes,
             summaries,
+            adopted: false,
         });
-        self.reveal_current_related();
+        if moved {
+            self.reveal_current_related();
+        }
         self.rebuild_blocks();
         cx.notify();
         if self.session.can_sync() {
@@ -1355,15 +1410,66 @@ impl ChangePage {
         cx.notify();
     }
 
-    /// Scrolls the relation chain (box or panel) to this change.
-    fn reveal_current_related(&self) {
-        let at = self
-            .related
-            .as_ref()
-            .and_then(|r| r.changes.iter().position(|c| c.number == self.number));
-        if let Some(ix) = at {
-            self.related_scroll.scroll_to_item(ix);
+    /// Scrolls the relation chain to this change the next time it is drawn.
+    fn reveal_current_related(&mut self) {
+        self.reveal_related = true;
+    }
+
+    /// Called as the chain is drawn: brings this change into view if
+    /// asked to, scrolling just far enough. The row bounds are from the last frame that drew the chain,
+    /// so when that frame drew it the other way or with other rows, this
+    /// waits for the next frame.
+    fn settle_related_scroll(&mut self, panel: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let drawn = self.related_drawn.replace(panel);
+        if !self.reveal_related {
+            return;
         }
+        let Some(r) = &self.related else {
+            return;
+        };
+        let Some(ix) = r.changes.iter().position(|c| c.number == self.number) else {
+            self.reveal_related = false;
+            return;
+        };
+        let scroll = &self.related_scroll;
+        let item = scroll
+            .bounds_for_item(ix)
+            .filter(|_| drawn == Some(panel) && scroll.children_count() == r.changes.len());
+        match item {
+            Some(item) => {
+                let offset = scroll.offset();
+                let y = view::reveal_offset(offset.y, scroll.bounds(), item, scroll.max_offset().y);
+                scroll.set_offset(point(offset.x, y));
+                self.reveal_related = false;
+            }
+            None => cx.on_next_frame(window, |_, _, cx| cx.notify()),
+        }
+    }
+
+    /// The chain to hand to the page of `number` on `server`, if that
+    /// change is in it.
+    pub fn chain_for(&self, server: &ServerKey, number: ChangeNumber) -> Option<ChainHandover> {
+        let r = self.related.as_ref()?;
+        (self.session.key == *server && r.changes.iter().any(|c| c.number == number)).then(|| {
+            ChainHandover {
+                related: r.clone(),
+                scroll: self.related_scroll.clone(),
+                drawn: self.related_drawn,
+            }
+        })
+    }
+
+    /// Shows the chain the previous page handed over until this change's
+    /// own list arrives, scrolled as it was.
+    pub fn adopt_chain(&mut self, chain: ChainHandover, cx: &mut Context<Self>) {
+        self.related = Some(Related {
+            adopted: true,
+            ..chain.related
+        });
+        self.related_scroll = chain.scroll;
+        self.related_drawn = chain.drawn;
+        self.reveal_current_related();
+        cx.notify();
     }
 
     /// Opens the change `delta` rows further down the relation chain (the

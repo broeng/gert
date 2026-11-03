@@ -29,7 +29,7 @@ use crate::{
     notify_rule_dialog::{NotifyRuleContext, NotifyRuleDialog, NotifyRuleEvent},
     outbox::{DraftOutbox, OutboxEvent},
     pages::{
-        change::{ChangeEvent, ChangePage},
+        change::{ChainHandover, ChangeEvent, ChangePage},
         diff::{DiffPage, DiffPageEvent},
         inbox::{InboxEvent, InboxPage, InboxServer},
         list::{ChangeListPage, ListEvent, ListKind},
@@ -1304,7 +1304,13 @@ impl Shell {
             (Route::Diff(route), Some(session)) => self.diff_page(session, route, window, cx),
             (Route::Change(n), Some(session)) => {
                 let view = self.nav.change_view().unwrap_or_default();
-                self.change_page(session, n, view, active, window, cx)
+                // Within a relation chain the new page takes the chain over,
+                // so that it does not blink or jump back to the top.
+                let chain = match &self.page {
+                    Page::Change(p) => p.read(cx).chain_for(&session.key, n),
+                    _ => None,
+                };
+                self.change_page(session, n, view, chain, active, window, cx)
             }
             _ => {
                 let prefill = self.prefill.take().unwrap_or_default();
@@ -1600,11 +1606,13 @@ impl Shell {
         Page::Settings(page)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn change_page(
         &mut self,
         session: Session,
         number: ChangeNumber,
         view: ChangeView,
+        chain: Option<ChainHandover>,
         active: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1621,6 +1629,9 @@ impl Shell {
                 session, settings, layout, filters, syntax, number, view, active, outbox, cx,
             );
             page.set_server_badge(badge, cx);
+            if let Some(chain) = chain {
+                page.adopt_chain(chain, cx);
+            }
             page
         });
         self.page_subs.push(cx.subscribe_in(
