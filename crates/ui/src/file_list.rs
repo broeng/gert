@@ -142,6 +142,14 @@ impl Files {
         self.checkout.as_deref()
     }
 
+    /// Whether `r` has to wait: there is no list yet, or the one on show is
+    /// the checkout's, which Gerrit's (computed before a mark) replaces.
+    /// Also when every request failed: a mark against a list we do not
+    /// have would be a guess.
+    pub fn marks_wait(&self) -> bool {
+        !self.loaded || self.checkout.is_some()
+    }
+
     pub fn is_reviewed(&self, path: &str) -> bool {
         self.reviewed.contains(path)
     }

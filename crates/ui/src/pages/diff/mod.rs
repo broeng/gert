@@ -911,7 +911,7 @@ impl DiffPage {
         if self.files.key.is_none() {
             return;
         }
-        if !self.files.settled || self.files.checkout.is_some() {
+        if self.files.marks_wait() {
             // Gerrit's list, computed before the mark, would replace it.
             self.hint.say(reviewed::WAITS, false, cx, |p| &mut p.hint);
             return;

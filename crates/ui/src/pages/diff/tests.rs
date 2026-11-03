@@ -1960,6 +1960,18 @@ fn the_diff_is_fetched_although_the_files_request_fails(cx: &mut TestAppContext)
     });
 }
 
+#[gpui_kit::test]
+fn r_waits_when_the_list_could_not_be_had(cx: &mut TestAppContext) {
+    // No /files route: the list request fails, so there is nothing to
+    // mark against.
+    let p = miss_page(cx, unlisted_store(), http(), Some(signed_in()));
+    cx.run_until_parked();
+    press(cx, p.window, &["r"]);
+    let hint = p.page.read_with(cx, |p, _| p.hint_for_test());
+    assert!(hint.expect("a hint").0.contains("Gerrit's file list"));
+    assert!(!p.http.sent().iter().any(|r| r.method == "PUT"));
+}
+
 use crate::diff_load::DiffSource;
 
 fn with_stored_diff(mut store: Store) -> Store {
