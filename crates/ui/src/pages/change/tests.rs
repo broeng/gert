@@ -841,14 +841,9 @@ fn r_only_hints_for_anonymous_sessions(cx: &mut TestAppContext) {
     assert!(f.http.sent().iter().all(|r| r.method == "GET"));
 }
 
-/// [`seeded`] plus a chain of `n` changes around change 7 (the middle one),
-/// cached for its current patch set.
-fn seeded_with_chain(n: u64) -> Store {
-    seeded_with_chain_at(n, n / 2)
-}
-
-/// Like [`seeded_with_chain`], with change 7 at row `at` (0 is the tip).
-/// The others are 100 + their row.
+/// [`seeded`] plus a chain of `n` changes with change 7 at row `at` (0 is
+/// the tip), cached for its current patch set. The others are 100 + their
+/// row.
 fn seeded_with_chain_at(n: u64, at: u64) -> Store {
     let mut store = seeded();
     let chain: Vec<model::RelatedChange> = (0..n)
@@ -881,9 +876,10 @@ fn wheel(cx: &mut TestAppContext, f: &Fixture, at: gpui_kit::Point<gpui_kit::Pix
 
 #[gpui_kit::test]
 fn the_wheel_over_the_relation_chain_scrolls_the_chain_and_not_the_page(cx: &mut TestAppContext) {
+    // The current change first, so that the box starts at the top.
     let f = page_in(
         cx,
-        seeded_with_chain(14),
+        seeded_with_chain_at(14, 0),
         None,
         setup(),
         ChangeView::default(),

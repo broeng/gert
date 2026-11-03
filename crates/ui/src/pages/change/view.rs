@@ -1427,8 +1427,11 @@ fn wheel_stays_in_box(offset: Pixels, delta: Pixels, max: Pixels) -> bool {
 
 /// The scroll offset (at most 0, down to `-max`) that brings `item` into
 /// view in the scroll box at `viewport`, both as laid out unscrolled, from
-/// `offset`: scrolled just far enough to show it whole.
+/// `offset`: centred if `center`, otherwise scrolled just far enough to
+/// show it whole. A chain that fits stays at the top, and one near an end
+/// stops there rather than centre it.
 pub(super) fn reveal_offset(
+    center: bool,
     offset: Pixels,
     viewport: Bounds<Pixels>,
     item: Bounds<Pixels>,
@@ -1436,7 +1439,9 @@ pub(super) fn reveal_offset(
 ) -> Pixels {
     let top = item.top() - viewport.top();
     let (height, view) = (item.size.height, viewport.size.height);
-    let y = if top + offset < px(0.) || height > view {
+    let y = if center {
+        (view - height) / 2. - top
+    } else if top + offset < px(0.) || height > view {
         -top
     } else if top + height + offset > view {
         view - top - height
@@ -1611,24 +1616,35 @@ mod wheel_tests {
 
     /// A box 100 high at y 50 over rows 20 high: row `ix` of the content
     /// as laid out unscrolled.
-    fn reveal(offset: f32, ix: usize, rows: usize) -> f32 {
+    fn reveal(center: bool, offset: f32, ix: usize, rows: usize) -> f32 {
         let viewport = Bounds::new(point(px(0.), px(50.)), size(px(200.), px(100.)));
         let item = Bounds::new(
             point(px(0.), px(50. + 20. * ix as f32)),
             size(px(200.), px(20.)),
         );
         let max = px((20. * rows as f32 - 100.).max(0.));
-        reveal_offset(px(offset), viewport, item, max).as_f32()
+        reveal_offset(center, px(offset), viewport, item, max).as_f32()
+    }
+
+    #[test]
+    fn centring_the_current_row_stops_at_the_ends() {
+        // Row 10 of 30 (top 200, middle 210) lands in the middle (50).
+        assert_eq!(reveal(true, 0., 10, 30), -160.);
+        // Near the top or the bottom the box goes only as far as it can.
+        assert_eq!(reveal(true, -300., 1, 30), 0.);
+        assert_eq!(reveal(true, 0., 29, 30), -500.);
+        // A chain that fits does not move.
+        assert_eq!(reveal(true, 0., 3, 5), 0.);
     }
 
     #[test]
     fn revealing_scrolls_only_as_far_as_needed() {
         // Visible already: stays.
-        assert_eq!(reveal(-100., 6, 30), -100.);
+        assert_eq!(reveal(false, -100., 6, 30), -100.);
         // Below: its bottom meets the box's bottom.
-        assert_eq!(reveal(0., 10, 30), -120.);
+        assert_eq!(reveal(false, 0., 10, 30), -120.);
         // Above: its top meets the box's top.
-        assert_eq!(reveal(-300., 4, 30), -80.);
+        assert_eq!(reveal(false, -300., 4, 30), -80.);
     }
 
     #[test]
