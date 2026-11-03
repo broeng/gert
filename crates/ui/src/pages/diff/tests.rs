@@ -273,7 +273,11 @@ fn diff_page_loading_as(
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
                 super::DiffPageEvent::OpenFile(r) => format!("open {}", r.path),
                 super::DiffPageEvent::Compare(r) => format!("compare {:?} {}", r.base, r.path),
-                super::DiffPageEvent::Reply(_) => "reply".to_owned(),
+                // A local review names its version.
+                super::DiffPageEvent::Reply(r) => match r.target {
+                    Some(t) if t.is_local() => format!("reply to {}", t.0),
+                    _ => "reply".to_owned(),
+                },
                 super::DiffPageEvent::Actions(_) => "actions".to_owned(),
                 super::DiffPageEvent::UpToChange => "up".to_owned(),
             };
@@ -2273,7 +2277,8 @@ mod local_versions {
             .read_with(cx, |p, _| assert!(!p.is_reviewed_for_test()));
         // `a` asks for the reply dialog: a local review of this version.
         press(cx, p.window, &["a"]);
-        assert!(p.events.lock().expect("log").contains(&"reply".to_owned()));
+        let asked = format!("reply to {}", versions[0].0);
+        assert!(p.events.lock().expect("log").contains(&asked));
         assert!(p.http.requested().is_empty(), "{:?}", p.http.requested());
     }
 

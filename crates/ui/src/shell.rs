@@ -2955,6 +2955,16 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn open_reply_for_test(
+        &mut self,
+        request: ReplyRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_reply(request, window, cx);
+    }
+
+    #[cfg(test)]
     pub(crate) fn switcher_for_test(&self) -> Option<Entity<ServerSwitcher>> {
         self.switcher.clone()
     }
