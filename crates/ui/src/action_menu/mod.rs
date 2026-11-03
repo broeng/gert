@@ -1531,13 +1531,10 @@ impl Render for ActionDialog {
                                             .child(b.pill(cx))
                                     })),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .truncate()
-                                    .child(format!("#{} {subject}", self.number)),
-                            ),
+                            .child(div().text_xs().text_color(muted).truncate().child(format!(
+                                "{} {subject}",
+                                crate::change_detail::change_label(self.number)
+                            ))),
                     )
                     .child(body)
                     .child(

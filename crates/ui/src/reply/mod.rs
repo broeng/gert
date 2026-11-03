@@ -63,6 +63,7 @@ use model::{
 use sync::{DraftSave, PublishOutcome};
 
 use crate::{
+    change_detail::{change_label, patch_set_label},
     comments::ChangeComments,
     outbox::DraftOutbox,
     servers::ServerBadge,
@@ -611,7 +612,7 @@ impl ReplyDialog {
                 // some: show the drafts as they are now.
                 self.outbox.update(cx, |o, cx| o.published(change, cx));
                 let listed: Vec<_> = self.drafts().iter().map(|d| d.id).collect();
-                self.error = Some(describe(&e, &listed));
+                self.error = Some(describe(&e, &listed, &self.detail.revisions));
             }
         }
         cx.notify();
@@ -784,7 +785,12 @@ pub(crate) fn put_text(
 /// A failed send, in words for the dialog. `listed` are the drafts the
 /// dialog shows in its list (with the "Upload drafts" button); the
 /// message's own draft is not among them.
-fn describe(e: &sync::Error, listed: &[model::LocalDraftId]) -> String {
+/// `revisions` are the change's, to name a patch set.
+fn describe(
+    e: &sync::Error,
+    listed: &[model::LocalDraftId],
+    revisions: &[model::Revision],
+) -> String {
     use gerrit_api::Error as Api;
     match e {
         sync::Error::DraftsNotUploaded(list)
@@ -800,7 +806,8 @@ fn describe(e: &sync::Error, listed: &[model::LocalDraftId]) -> String {
         }
         sync::Error::DraftsNotUploaded(list) => {
             let first = list.first().map_or(String::new(), |d| {
-                format!(" ({} on patch set {}: {})", d.path, d.patch_set, d.reason)
+                let patch_set = patch_set_label(revisions, d.patch_set);
+                format!(" ({} on {patch_set}: {})", d.path, d.reason)
             });
             format!(
                 "Not sent: {} draft comment{} could not be uploaded{first}. \
@@ -1012,7 +1019,8 @@ impl Render for ReplyDialog {
         });
 
         let draft_list = (!drafts.is_empty()).then(|| {
-            let rows: Vec<_> = drafts.iter().map(|d| draft_row(d, cx)).collect();
+            let revisions = &self.detail.revisions;
+            let rows: Vec<_> = drafts.iter().map(|d| draft_row(d, revisions, cx)).collect();
             v_flex()
                 .gap_0p5()
                 .child(section("DRAFTS TO PUBLISH"))
@@ -1151,7 +1159,7 @@ impl Render for ReplyDialog {
                                     .text_xs()
                                     .text_color(muted)
                                     .truncate()
-                                    .child(format!("#{} {subject}", self.number)),
+                                    .child(format!("{} {subject}", change_label(self.number))),
                             ),
                     )
                     .child(
@@ -1337,7 +1345,12 @@ impl ReplyDialog {
     }
 }
 
-fn draft_row(d: &DraftItem, cx: &mut Context<ReplyDialog>) -> AnyElement {
+/// `revisions` are the change's, to name the draft's patch set.
+fn draft_row(
+    d: &DraftItem,
+    revisions: &[model::Revision],
+    cx: &mut Context<ReplyDialog>,
+) -> AnyElement {
     let theme = cx.theme().clone();
     h_flex()
         .gap_2()
@@ -1367,7 +1380,7 @@ fn draft_row(d: &DraftItem, cx: &mut Context<ReplyDialog>) -> AnyElement {
                     .text_xs()
                     .text_color(theme.warning)
                     .bg(theme.warning.opacity(0.15))
-                    .child(format!("PS {}", d.patch_set)),
+                    .child(patch_set_label(revisions, d.patch_set)),
             )
         })
         .children(d.problem().map(|p| {

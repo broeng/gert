@@ -37,7 +37,7 @@ use sync::Syncer;
 use crate::{
     action_menu,
     actions::*,
-    change_detail::{self, Viewer},
+    change_detail::{self, Viewer, patch_set_label},
     checkouts::Checkouts,
     comments::{ChangeComments, CommentsEvent},
     diff::{
@@ -918,7 +918,8 @@ impl DiffPage {
                             ..self.route.clone()
                         });
                     } else {
-                        note = format!("{note}; patchset {new} is now current");
+                        let label = patch_set_label(&d.revisions, new);
+                        note = format!("{note}; {label} is now current");
                     }
                 }
                 self.detail = Some(change_detail::carry_local(d.clone(), self.detail.as_ref()));
@@ -1190,9 +1191,11 @@ impl DiffPage {
             .detail
             .as_ref()
             .map_or_else(Vec::new, |d| crate::row::chips(&d.summary));
+        let revisions = self.detail.as_ref().map_or(&[][..], |d| &d.revisions);
+        let label = |n| patch_set_label(revisions, n);
         let pair = match self.route.base {
-            Some(b) => format!("Patchset {b} \u{2192} {}", self.route.target),
-            None => format!("Base \u{2192} Patchset {}", self.route.target),
+            Some(b) => format!("{} \u{2192} {}", label(b), label(self.route.target)),
+            None => format!("Base \u{2192} {}", label(self.route.target)),
         };
         let position = self.position_label();
         let style = self.current_style().cloned().unwrap_or_default();
@@ -1237,7 +1240,7 @@ impl DiffPage {
                                 div()
                                     .text_color(theme.link)
                                     .flex_none()
-                                    .child(format!("Change {}:", self.route.change)),
+                                    .child(change_heading(self.route.change)),
                             )
                             .child(div().font_semibold().min_w_0().truncate().child(subject)),
                     )
@@ -1457,6 +1460,16 @@ impl DiffPage {
     }
 }
 
+/// The breadcrumb's name of the change: `Change 123:`, or `Local change:`
+/// (its number is synthetic).
+fn change_heading(number: model::ChangeNumber) -> String {
+    if number.is_local() {
+        "Local change:".to_owned()
+    } else {
+        format!("Change {number}:")
+    }
+}
+
 /// The detail (from [`change_detail`], so with the local patch sets), the
 /// comparison and its stored file list. Gerrit is asked for the detail
 /// only when the cache lacks the patch sets of the route, never for a
@@ -1506,15 +1519,18 @@ async fn load_everything(
         }
     }
     let Some(d) = detail.clone().filter(|_| has_revisions(&detail)) else {
-        return fail(
-            detail,
-            format!(
-                "Change {} with patch set {} is not available{}.",
-                route.change,
-                route.target,
-                if can_sync { "" } else { " offline" }
-            ),
+        let revisions = detail.as_ref().map_or(&[][..], |d| &d.revisions);
+        let offline = if can_sync || route.change.is_local() {
+            ""
+        } else {
+            " offline"
+        };
+        let error = format!(
+            "{} with {} is not available{offline}.",
+            change_heading(route.change).trim_end_matches(':'),
+            patch_set_label(revisions, route.target),
         );
+        return fail(detail, error);
     };
     let (Some(target), base) = (
         d.revision(route.target).map(|r| r.as_ref()),

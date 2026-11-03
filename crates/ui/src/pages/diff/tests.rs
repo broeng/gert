@@ -1061,7 +1061,7 @@ fn an_older_patch_set_stays_and_the_note_names_the_current_one(cx: &mut TestAppC
         let page = p.page.read(cx);
         assert_eq!(
             page.hint_for_test(),
-            Some(("Rebased; patchset 4 is now current".to_owned(), false))
+            Some(("Rebased; PS 4 is now current".to_owned(), false))
         );
         assert_eq!(
             page.detail_for_test().and_then(|d| d.current_patch_set),

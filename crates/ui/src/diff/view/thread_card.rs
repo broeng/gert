@@ -83,7 +83,9 @@ pub(super) fn thread_row(
 fn location_label(thread: &Thread, tr: &ThreadRow) -> Option<String> {
     match (thread.location, tr.detached) {
         _ if thread.path == PATCHSET_LEVEL_PATH => {
-            Some(format!("Patchset {} comment", thread.patch_set))
+            // The view has no revision list: a local patch set is "local".
+            let patch_set = crate::change_detail::patch_set_label(&[], thread.patch_set);
+            Some(format!("{patch_set} comment"))
         }
         (Location::File, _) => Some("File comment".to_owned()),
         (loc, true) => loc

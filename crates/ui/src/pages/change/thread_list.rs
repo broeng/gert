@@ -31,6 +31,7 @@ use super::{
 };
 use crate::{
     actions::*,
+    change_detail::patch_set_label,
     diff::{
         DiffEvent, DiffSizing, DiffView,
         actions::{NextThread, PrevThread},
@@ -333,6 +334,10 @@ impl ChangePage {
             .map(|t| relative(Timestamp::now(), t, &TimeZone::system()))
             .unwrap_or_default();
         let id = thread.id.clone();
+        let patch_set = patch_set_label(
+            self.detail.as_ref().map_or(&[], |d| d.revisions.as_slice()),
+            thread.patch_set,
+        );
         h_flex()
             .id(("thread-row", pos))
             .test_support()
@@ -359,11 +364,12 @@ impl ChangePage {
             )
             .child(
                 div()
-                    .w(px(34.))
+                    .w(px(48.))
                     .flex_none()
+                    .truncate()
                     .text_xs()
                     .text_color(muted)
-                    .child(format!("PS{}", thread.patch_set)),
+                    .child(patch_set),
             )
             .child(div().w(px(110.)).flex_none().truncate().child(who))
             .child(
@@ -392,7 +398,10 @@ impl ChangePage {
     pub(super) fn patchset_comments(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let current = self.detail.as_ref().and_then(|d| d.current_patch_set);
+        let current = self.detail.as_ref().and_then(|d| {
+            d.current_patch_set
+                .map(|n| patch_set_label(&d.revisions, n))
+        });
         let can_comment = self.session.can_comment();
         v_flex()
             .gap_1()
@@ -406,7 +415,7 @@ impl ChangePage {
                             div()
                                 .text_xs()
                                 .text_color(muted)
-                                .child(format!("new ones go to patchset {n}")),
+                                .child(format!("new ones go to {n}")),
                         )
                     })
                     .child(div().flex_1())

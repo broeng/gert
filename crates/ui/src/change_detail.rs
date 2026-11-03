@@ -423,6 +423,16 @@ pub fn patch_set_label(list: &[Revision], number: PatchSetNumber) -> String {
         .map_or_else(|| "local".to_owned(), |i| format!("local {}", i + 1))
 }
 
+/// How a change is named on screen: `#123`, or `local` for a local change
+/// (its number is synthetic).
+pub fn change_label(number: ChangeNumber) -> String {
+    if number.is_local() {
+        "local".to_owned()
+    } else {
+        format!("#{number}")
+    }
+}
+
 /// Where patch set `number` is in `list`, the order the pages work in.
 pub fn position(list: &[Revision], number: PatchSetNumber) -> Option<usize> {
     list.iter().position(|r| r.number == number)

@@ -109,6 +109,9 @@ fn the_label_helper_never_shows_a_synthetic_number() {
         "local"
     );
     assert_eq!(position(&d.revisions, second), Some(4));
+    assert_eq!(change_label(ChangeNumber(42)), "#42");
+    let synthetic = ChangeNumber::local(3).expect("local");
+    assert_eq!(change_label(synthetic), "local");
 }
 
 #[test]

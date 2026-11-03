@@ -1094,9 +1094,9 @@ fn the_upload_hint_names_the_button_only_when_the_list_has_the_drafts() {
     };
     // Draft 1 is in the dialog's list, 2 is the message.
     let both = sync::Error::DraftsNotUploaded(vec![pending(1), pending(2)]);
-    assert!(super::describe(&both, &[LocalDraftId(1)]).contains("Upload drafts"));
+    assert!(super::describe(&both, &[LocalDraftId(1)], &[]).contains("Upload drafts"));
     let only_message = sync::Error::DraftsNotUploaded(vec![pending(2)]);
-    let text = super::describe(&only_message, &[LocalDraftId(1)]);
+    let text = super::describe(&only_message, &[LocalDraftId(1)], &[]);
     assert!(!text.contains("Upload drafts"), "{text}");
     assert!(text.contains("message could not be uploaded"), "{text}");
 }
