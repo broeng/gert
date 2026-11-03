@@ -24,7 +24,12 @@ fn at(minute: u32) -> Timestamp {
         .expect("timestamp")
 }
 
+/// Local version `id` named "local `id`".
 fn local(id: i64, sha: &str, seen: u32) -> Revision {
+    named(id, sha, seen, u32::try_from(id).expect("small id"))
+}
+
+fn named(id: i64, sha: &str, seen: u32, ordinal: u32) -> Revision {
     Revision {
         number: PatchSetNumber::local(id).expect("local number"),
         sha: sha.into(),
@@ -34,7 +39,7 @@ fn local(id: i64, sha: &str, seen: u32) -> Revision {
         ref_name: None,
         description: None,
         commit: None,
-        local_ordinal: None,
+        local_ordinal: Some(ordinal),
     }
 }
 
@@ -69,7 +74,7 @@ fn local_versions_go_after_the_patch_set_current_when_they_were_seen() {
 fn merging_again_replaces_and_a_pushed_version_drops_out() {
     let d = merge(gerrit(), vec![local(1, "l1", 35), local(2, "l2", 40)]);
     let d = merge(d, vec![local(2, "l2", 40)]);
-    assert_eq!(labels(&d), ["PS 1", "PS 2", "PS 3", "local 1"]);
+    assert_eq!(labels(&d), ["PS 1", "PS 2", "PS 3", "local 2"]);
     // A version whose commit is a Gerrit patch set now.
     let d = merge(gerrit(), vec![local(1, "sha3", 35)]);
     assert_eq!(labels(&d), ["PS 1", "PS 2", "PS 3"]);
@@ -101,7 +106,7 @@ fn a_fresh_detail_takes_the_local_versions_on_screen() {
 
 #[test]
 fn the_label_helper_never_shows_a_synthetic_number() {
-    let d = merge(gerrit(), vec![local(7, "l1", 35), local(9, "l2", 40)]);
+    let d = merge(gerrit(), vec![named(7, "l1", 35, 1), named(9, "l2", 40, 2)]);
     let second = PatchSetNumber::local(9).expect("local");
     assert_eq!(patch_set_label(&d.revisions, PatchSetNumber(2)), "PS 2");
     assert_eq!(patch_set_label(&d.revisions, second), "local 2");
@@ -113,6 +118,9 @@ fn the_label_helper_never_shows_a_synthetic_number() {
     assert_eq!(change_label(ChangeNumber(42)), "#42");
     let synthetic = ChangeNumber::local(3).expect("local");
     assert_eq!(change_label(synthetic), "local");
+    // The stored name, not the place: local 1 was pushed and dropped out.
+    let d = merge(gerrit(), vec![named(9, "l2", 40, 2)]);
+    assert_eq!(patch_set_label(&d.revisions, second), "local 2");
 }
 
 #[test]
@@ -138,9 +146,18 @@ fn labels_are_borrowed_or_default_to_code_review() {
     assert_eq!(permitted["Verified"], [0, 1]);
     assert_eq!(values["Verified"].len(), 3);
     assert!(!permitted.contains_key("Code-Review"));
-    // Nothing permitted (a closed change): the whole range.
-    let closed = BorrowedLabels {
+    // A lender that permits nothing: the whole range.
+    let nothing = BorrowedLabels {
         permitted: Default::default(),
+        ..borrowed.clone()
+    };
+    let (permitted, _) = labels_of(Some(nothing));
+    assert_eq!(permitted["Verified"], [-1, 0, 1]);
+    // A closed lender permits post-submit votes only (here just +1): the
+    // whole range too.
+    let closed = BorrowedLabels {
+        permitted: [("Verified".to_owned(), vec![1])].into(),
+        open: false,
         ..borrowed
     };
     let (permitted, _) = labels_of(Some(closed));
@@ -199,17 +216,11 @@ fn a_local_change_is_synthesised_from_its_row() {
         )
         .expect("reconcile");
     store
-        .set_account_email(SERVER, Some(TEST_EMAIL))
-        .expect("email");
+        .set_account(SERVER, AccountId(5), Some("u"), Some(TEST_EMAIL))
+        .expect("account");
     let number = local_number(&store, "I1");
     let syncer = syncer(store);
-    let viewer = Viewer {
-        username: Some("u".into()),
-        account: Some(AccountId(5)),
-    };
-    let p = cached(&syncer, number, &viewer)
-        .expect("read")
-        .expect("found");
+    let p = cached(&syncer, number).expect("read").expect("found");
     assert_eq!(p.fetched_at, None);
     assert_eq!(p.local.as_ref().map(|r| r.change_id.as_str()), Some("I1"));
     let d = p.detail;
@@ -238,7 +249,7 @@ fn a_local_change_is_synthesised_from_its_row() {
 }
 
 #[test]
-fn a_local_change_borrows_the_labels_of_a_cached_change_and_knows_other_authors() {
+fn a_local_change_borrows_the_labels_of_a_cached_change() {
     let mut store = Store::open_in_memory().expect("store");
     store.server_id(URL).expect("server");
     let mut lender = detail(9, 1, 1);
@@ -265,17 +276,14 @@ fn a_local_change_borrows_the_labels_of_a_cached_change_and_knows_other_authors(
         .expect("reconcile");
     let number = local_number(&store, "I1");
     let syncer = syncer(store);
-    let viewer = Viewer {
-        username: Some("u".into()),
-        account: Some(AccountId(5)),
-    };
-    let d = cached(&syncer, number, &viewer)
+    let d = cached(&syncer, number)
         .expect("read")
         .expect("found")
         .detail;
     assert_eq!(d.permitted_labels["Verified"], [-1, 0, 1]);
     assert!(!d.permitted_labels.contains_key("Code-Review"));
     assert_eq!(d.summary.branch, "", "unknown target branch");
+    // The account was never fetched: no account, but the author's name.
     assert_eq!(d.summary.owner.id, AccountId(0));
     assert_eq!(d.summary.owner.username, None);
     assert_eq!(d.summary.owner.email.as_deref(), Some("someone@else"));
@@ -302,7 +310,7 @@ fn a_cached_gerrit_change_gets_its_local_versions_and_the_store_keeps_none() {
         .reconcile_local(SERVER, "p", &[op], at(45))
         .expect("reconcile");
     let syncer = syncer(store);
-    let p = cached(&syncer, ChangeNumber(7), &Viewer::default())
+    let p = cached(&syncer, ChangeNumber(7))
         .expect("read")
         .expect("found");
     assert_eq!(p.fetched_at, Some(at(31)));
@@ -314,11 +322,7 @@ fn a_cached_gerrit_change_gets_its_local_versions_and_the_store_keeps_none() {
         .expect("cached")
         .detail;
     assert!(stored.revisions.iter().all(|r| !r.number.is_local()));
-    assert!(
-        cached(&syncer, ChangeNumber(8), &Viewer::default())
-            .expect("read")
-            .is_none()
-    );
+    assert!(cached(&syncer, ChangeNumber(8)).expect("read").is_none());
 }
 
 #[test]
@@ -346,7 +350,7 @@ fn commits_come_from_the_checkout() {
         .expect("reconcile");
     let number = local_number(&store, "I1");
     let syncer = syncer(store);
-    let mut d = cached(&syncer, number, &Viewer::default())
+    let mut d = cached(&syncer, number)
         .expect("read")
         .expect("found")
         .detail;
@@ -369,7 +373,7 @@ fn commits_come_from_the_checkout() {
     assert_eq!(author.and_then(|a| a.email).as_deref(), Some(TEST_EMAIL));
 
     // Without the missing one, the newest version's message and dates.
-    let mut d = cached(&syncer, number, &Viewer::default())
+    let mut d = cached(&syncer, number)
         .expect("read")
         .expect("found")
         .detail;
@@ -387,4 +391,35 @@ fn commits_come_from_the_checkout() {
         .and_then(|c| c.committer.as_ref())
         .and_then(|p| p.date);
     assert_eq!(Some(d.summary.updated), committed);
+}
+
+#[test]
+fn a_failing_git_read_is_not_asked_again_until_forgotten() {
+    let repo = TestRepo::new();
+    let sha = repo.commit("Local work\n\nChange-Id: I1");
+    let opened = Repo::open(repo.path()).expect("repo");
+    // The checkout goes away while it counts as open.
+    std::fs::remove_dir_all(repo.path()).expect("remove");
+    let mut store = Store::open_in_memory().expect("store");
+    store.server_id(URL).expect("server");
+    store
+        .reconcile_local(
+            SERVER,
+            "p",
+            &[upsert("I1", None, &[&sha], TEST_EMAIL)],
+            at(45),
+        )
+        .expect("reconcile");
+    let number = local_number(&store, "I1");
+    let d = cached(&syncer(store), number)
+        .expect("read")
+        .expect("found")
+        .detail;
+    let mut git = GitCommits::default();
+    let wanted = git.wanted(&d);
+    assert_eq!(wanted.len(), 1);
+    git.extend(GitCommits::read(&opened, &wanted));
+    assert!(git.wanted(&d).is_empty(), "a failure settles it for now");
+    git.forget_failures();
+    assert_eq!(git.wanted(&d).len(), 1, "a new detail asks once more");
 }

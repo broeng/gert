@@ -37,7 +37,7 @@ use sync::Syncer;
 use crate::{
     action_menu,
     actions::*,
-    change_detail::{self, Viewer, patch_set_label},
+    change_detail::{self, patch_set_label},
     checkouts::Checkouts,
     comments::{ChangeComments, CommentsEvent},
     diff::{
@@ -289,14 +289,10 @@ impl DiffPage {
         let syncer = self.session.syncer().clone();
         let can_sync = self.session.can_sync();
         let route = self.route.clone();
-        let viewer = Viewer {
-            username: self.session.username.clone(),
-            account: None,
-        };
         self.loading = true;
         self.task = Some(cx.spawn(async move |this, cx| {
             let loaded = cx
-                .background_spawn(load_everything(syncer, can_sync, route, viewer))
+                .background_spawn(load_everything(syncer, can_sync, route))
                 .await;
             this.update(cx, |this, cx| this.loaded(loaded, cx)).ok();
         }));
@@ -838,7 +834,9 @@ impl DiffPage {
 
     /// `a`: asks the shell for the reply dialog.
     fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
-        if self.route.change.is_local() {
+        // A reply would go to Gerrit's current patch set, not the local
+        // version shown.
+        if self.route.change.is_local() || self.route.target.is_local() {
             self.hint
                 .say(reply::LOCAL_LATER, false, cx, |p| &mut p.hint);
             return;
@@ -1207,6 +1205,7 @@ impl DiffPage {
             Some(b) => format!("{} \u{2192} {}", label(b), label(self.route.target)),
             None => format!("Base \u{2192} {}", label(self.route.target)),
         };
+        let heading = change_heading(self.route.change);
         let position = self.position_label();
         let style = self.current_style().cloned().unwrap_or_default();
         let mode = match prefs.view_mode {
@@ -1250,7 +1249,8 @@ impl DiffPage {
                                 div()
                                     .text_color(theme.link)
                                     .flex_none()
-                                    .child(change_heading(self.route.change)),
+                                    .child(heading.clone())
+                                    .debug_selector(move || format!("diff-change: {heading}")),
                             )
                             .child(div().font_semibold().min_w_0().truncate().child(subject)),
                     )
@@ -1301,7 +1301,12 @@ impl DiffPage {
                                 .child("\u{2713} reviewed"),
                         )
                     })
-                    .child(div().text_color(muted).child(pair))
+                    .child(
+                        div()
+                            .text_color(muted)
+                            .child(pair.clone())
+                            .debug_selector(move || format!("diff-pair: {pair}")),
+                    )
                     .children(position.map(|p| div().text_color(muted).child(p)))
                     .children(list_path.map(|p| local_marker("files-local", &p, cx)))
                     .children(self.hint.current().map(|(text, error)| {
@@ -1484,12 +1489,7 @@ fn change_heading(number: model::ChangeNumber) -> String {
 /// comparison and its stored file list. Gerrit is asked for the detail
 /// only when the cache lacks the patch sets of the route, never for a
 /// local change.
-async fn load_everything(
-    syncer: Syncer,
-    can_sync: bool,
-    route: DiffRoute,
-    viewer: Viewer,
-) -> Loaded {
+async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Loaded {
     let fail = |detail: Option<ChangeDetail>, error: String| Loaded {
         detail,
         files_key: None,
@@ -1497,7 +1497,7 @@ async fn load_everything(
         files_missed: false,
         error: Some(error),
     };
-    let mut detail = match change_detail::cached(&syncer, route.change, &viewer) {
+    let mut detail = match change_detail::cached(&syncer, route.change) {
         Ok(p) => p.map(|p| p.detail),
         Err(e) => {
             log::warn!("reading cached change {}: {e}", route.change);

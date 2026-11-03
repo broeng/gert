@@ -20,8 +20,8 @@ use crate::{
 impl ChangePage {
     /// The buttons of the header bar.
     pub(super) fn quick_buttons(&self, cx: &App) -> Vec<QuickButton> {
-        // Votes on a local change wait for local reviews (later).
-        if self.number.is_local() {
+        // Votes on a local version wait for local reviews (later).
+        if self.on_local_target() {
             return Vec::new();
         }
         let objections = plan::drafts_object(&self.comments.read(cx).threads());
@@ -47,6 +47,11 @@ impl ChangePage {
     /// Casts the vote of the button at `position`.
     pub(super) fn quick_vote(&mut self, position: usize, cx: &mut Context<Self>) {
         if self.voting() {
+            return;
+        }
+        if self.on_local_target() {
+            self.hint
+                .say(reply::LOCAL_LATER, false, cx, |p| &mut p.hint);
             return;
         }
         if let Some(why) = reply::unavailable(&self.session) {

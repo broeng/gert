@@ -1910,3 +1910,83 @@ fn r_waits_for_gerrits_list(cx: &mut TestAppContext) {
     assert!(!is_reviewed(cx, &p));
     assert!(!p.http.sent().iter().any(|r| r.method == "PUT"));
 }
+
+#[gpui_kit::test]
+fn a_local_version_of_a_gerrit_change_is_named_in_the_header_and_cannot_be_replied_to(
+    cx: &mut TestAppContext,
+) {
+    use local_git::testutil::{TEST_EMAIL, TestRepo};
+    use store::{LocalChangeUpsert, LocalOp, NewLocalPatchSet, ServerId};
+    let repo = TestRepo::new();
+    repo.write("README", b"one\n");
+    let base = repo.commit("Base");
+    repo.write("README", b"two\n");
+    let sha = repo.commit("Amended locally\n\nChange-Id: I7");
+    let mut store = seeded();
+    let mut d = detail(7, 3, 3);
+    d.summary.project = "p".into();
+    store
+        .save_change_detail(ServerId(1), &d, now())
+        .expect("detail");
+    let op = LocalOp::Upsert(LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: "I7".into(),
+        gerrit_number: Some(ChangeNumber(7)),
+        subject: "Amended locally".into(),
+        author_name: "Test Author".into(),
+        author_email: TEST_EMAIL.into(),
+        updated: now(),
+        state: Some(model::LocalChangeState::Local),
+        patch_sets: vec![NewLocalPatchSet {
+            sha: sha.clone().into(),
+            parent_sha: Some(base.into()),
+            seen_at: now(),
+        }],
+    });
+    store
+        .reconcile_local(ServerId(1), "p", &[op], now())
+        .expect("reconcile");
+    let local = store
+        .local_patch_sets_by_sha(ServerId(1), &sha.clone().into())
+        .expect("versions")[0]
+        .number;
+    let route = DiffRoute {
+        change: ChangeNumber(7),
+        base: Some(PatchSetNumber(3)),
+        target: local,
+        path: "README".into(),
+        thread: None,
+    };
+    let project = crate::session::ProjectSettings::new("p", repo.path().to_string_lossy());
+    let p = diff_page_loading_in(
+        cx,
+        store,
+        route,
+        http(),
+        gerrit_api::Auth::Anonymous,
+        Vec::new(),
+        Vec::new(),
+        LocalDiff::default(),
+        vec![project],
+    );
+    let mut visual = gpui_kit::VisualTestContext::from_window(p.window, cx);
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("diff-change: Change 7:").is_some());
+    assert!(
+        visual
+            .debug_bounds("diff-pair: PS 3 \u{2192} local 1")
+            .is_some()
+    );
+    // A reply would land on PS 3, not on what is shown.
+    press(cx, p.window, &["a"]);
+    let note = cx.update(|cx| p.page.read(cx).hint_for_test());
+    assert_eq!(
+        note.map(|n| n.0).as_deref(),
+        Some(crate::reply::LOCAL_LATER)
+    );
+    assert!(p.events.lock().expect("log").is_empty());
+    for r in p.http.requested() {
+        assert!(!r.contains(&sha), "{r}");
+    }
+}

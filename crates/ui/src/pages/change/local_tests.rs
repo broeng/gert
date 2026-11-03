@@ -110,6 +110,8 @@ fn seed_gerrit_change(store: &mut Store) {
     let mut d = detail(7, 3, 3);
     d.summary.project = "p".into();
     d.summary.change_id = Some("I7".into());
+    // The user may vote: the header has a quick vote.
+    d.permitted_labels = [("Code-Review".to_owned(), vec![-1, 0, 1])].into();
     for (r, m) in d.revisions.iter_mut().zip([10, 20, 30]) {
         r.created = Some(at(m));
     }
@@ -460,9 +462,20 @@ fn a_gerrit_change_lists_its_local_version_and_shows_its_files_from_the_checkout
     );
     cx.update(|cx| assert_eq!(f.page.read(cx).file_paths(), ["/COMMIT_MSG"]));
 
+    let quick =
+        |cx: &mut TestAppContext| cx.update(|cx| f.page.read(cx).quick_buttons_for_test(cx).len());
+    assert_eq!(quick(cx), 1, "a quick vote on PS 3");
+
     // The local version as the target: its files come from the checkout.
     let local = f.local_patch_set(cx, 1);
     f.pick(cx, |s, d| s.set_target(d, local));
+    // A vote or reply now would land on PS 3, which is not what is shown.
+    assert_eq!(quick(cx), 0);
+    f.press(cx, "shift-v");
+    assert_eq!(f.hint(cx).as_deref(), Some(crate::reply::LOCAL_LATER));
+    f.press(cx, "a");
+    assert_eq!(f.hint(cx).as_deref(), Some(crate::reply::LOCAL_LATER));
+    assert!(!f.events.lock().expect("log").contains(&"reply".to_owned()));
     cx.update(|cx| {
         let p = f.page.read(cx);
         assert_eq!(p.selection_for_test(), (None, Some(local)));
@@ -642,5 +655,52 @@ fn a_local_change_picks_up_a_new_version_on_refresh(cx: &mut TestAppContext) {
         assert_eq!(p.selection_for_test().0, Some(first));
         assert_eq!(p.file_paths(), ["/COMMIT_MSG", "README"]);
     });
+    assert!(f.http.requested().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_checkout_that_breaks_costs_one_git_read_per_refresh(cx: &mut TestAppContext) {
+    let ck = checkout();
+    let store = store_with(
+        &[row(
+            "I1",
+            None,
+            LocalChangeState::Local,
+            &[&ck.local],
+            &ck.base,
+        )],
+        |_| {},
+    );
+    let number = store
+        .local_changes_by_change_id(SERVER, "I1")
+        .expect("rows")[0]
+        .number;
+    let f = page(cx, store, number, &ck, |_| {});
+    // The checkout goes away while it counts as open, and a new version
+    // shows up in the store: its commit cannot be read.
+    std::fs::remove_dir_all(ck.repo.path()).expect("remove");
+    let new = "1".repeat(40);
+    f.store
+        .lock()
+        .expect("store")
+        .reconcile_local(
+            SERVER,
+            "p",
+            &[row("I1", None, LocalChangeState::Local, &[&new], &ck.base)],
+            at(46),
+        )
+        .expect("reconcile");
+    // Each refresh tries once and settles (a loop would never park).
+    for _ in 0..2 {
+        f.press(cx, "shift-r");
+        cx.update(|cx| {
+            let p = f.page.read(cx);
+            let d = p.detail().expect("detail");
+            assert_eq!(d.revisions.len(), 2);
+            assert!(d.revisions[1].commit.is_none());
+            assert!(d.revisions[0].commit.is_some(), "read before it broke");
+            assert_eq!(*p.status_for_test(), crate::pages::list::Status::Idle);
+        });
+    }
     assert!(f.http.requested().is_empty());
 }

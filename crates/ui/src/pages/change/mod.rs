@@ -38,9 +38,8 @@ use std::{
 use gpui_kit::*;
 use jiff::Timestamp;
 use model::{
-    AccountId, ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, DiffKey, DiffPair,
-    FileCommentCounts, FileEntry, FilesKey, LocalChange, RelatedChange, RevisionId, Thread,
-    ThreadId,
+    ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, DiffKey, DiffPair, FileCommentCounts,
+    FileEntry, FilesKey, LocalChange, PatchSetNumber, RelatedChange, RevisionId, Thread, ThreadId,
 };
 use store::CachedFileList;
 use sync::PollPolicy;
@@ -48,7 +47,7 @@ use sync::PollPolicy;
 use crate::{
     action_menu,
     actions::*,
-    change_detail::{self, GitCommits, Provided, Viewer},
+    change_detail::{self, GitCommits, Provided},
     checkouts::Checkouts,
     comments::{ChangeComments, CommentsEvent},
     diff::{
@@ -185,8 +184,6 @@ pub struct ChangePage {
     /// every detail the page takes.
     git: GitCommits,
     git_task: Option<Task<()>>,
-    /// The signed-in account, the owner of the user's local changes.
-    account: Option<AccountId>,
     fetched_at: Option<Timestamp>,
     /// The cache has been read (an empty cache counts).
     loaded: bool,
@@ -321,7 +318,6 @@ impl ChangePage {
             local_row: None,
             git: GitCommits::default(),
             git_task: None,
-            account: None,
             fetched_at: None,
             loaded: false,
             status: Status::Idle,
@@ -378,16 +374,10 @@ impl ChangePage {
                 CommentsEvent::Changed => this.apply_threads(cx),
                 CommentsEvent::Unauthorized => cx.emit(ChangeEvent::Unauthorized),
             }));
+        let syncer = this.session.syncer().clone();
         this.task = Some(cx.spawn(async move |this, cx| {
-            // The account arrives right after the page is made (see
-            // `set_account`), before this runs.
-            let Ok((syncer, viewer)) =
-                this.update(cx, |this, _| (this.session.syncer().clone(), this.viewer()))
-            else {
-                return;
-            };
             let cached = cx
-                .background_spawn(async move { change_detail::cached(&syncer, number, &viewer) })
+                .background_spawn(async move { change_detail::cached(&syncer, number) })
                 .await;
             this.update(cx, |this, cx| {
                 this.loaded = true;
@@ -706,11 +696,11 @@ impl ChangePage {
     /// that are new. No network.
     fn reload_local(&mut self, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
-        let (number, viewer) = (self.number, self.viewer());
+        let number = self.number;
         self.status = Status::Refreshing;
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { change_detail::cached(&syncer, number, &viewer) })
+                .background_spawn(async move { change_detail::cached(&syncer, number) })
                 .await;
             this.update(cx, |this, cx| {
                 this.status = Status::Idle;
@@ -728,14 +718,6 @@ impl ChangePage {
         }));
     }
 
-    /// Who the provider takes as the user.
-    fn viewer(&self) -> Viewer {
-        Viewer {
-            username: self.session.username.clone(),
-            account: self.account,
-        }
-    }
-
     /// Takes what the provider read from the store and loads what depends
     /// on it (from the cache; also from the server if `network`).
     fn take_provided(&mut self, p: Provided, network: bool, cx: &mut Context<Self>) {
@@ -747,15 +729,18 @@ impl ChangePage {
 
     /// The one place the page's detail is replaced: the commits read from
     /// the checkout go onto its local patch sets, and those not read yet
-    /// are looked up.
+    /// are looked up (those git failed to read for the last detail once
+    /// more).
     fn set_detail(&mut self, mut detail: ChangeDetail, cx: &mut Context<Self>) {
         change_detail::apply_commits(&mut detail, &self.git);
+        self.git.forget_failures();
         self.detail = Some(detail);
         self.load_git(cx);
     }
 
     /// Reads the commits of the local patch sets that are not known yet
-    /// from the checkout, unless that is under way.
+    /// from the checkout, unless that is under way. Every read settles its
+    /// commits (found, missing or failed), so asking again after one ends.
     fn load_git(&mut self, cx: &mut Context<Self>) {
         let Some(d) = &self.detail else {
             return;
@@ -783,12 +768,6 @@ impl ChangePage {
             })
             .ok();
         }));
-    }
-
-    /// Names the signed-in account, which owns the user's local changes.
-    /// Set right after the page is made, before anything has loaded.
-    pub fn set_account(&mut self, account: Option<AccountId>) {
-        self.account = account;
     }
 
     /// Works out which file list and related changes the current detail and
@@ -828,11 +807,12 @@ impl ChangePage {
             self.related = None;
         }
         self.read_threads(cx);
+        // Gerrit knows no relation chain of a local change or version.
+        let target_local = key.as_ref().is_some_and(|k| k.target.number.is_local());
         if let Some(key) = key {
             self.load_files(key, network, cx);
         }
-        // Gerrit knows no relation chain of a local change.
-        if let Some(sha) = sha.filter(|_| !self.number.is_local()) {
+        if let Some(sha) = sha.filter(|_| !self.number.is_local() && !target_local) {
             self.load_related(sha, network, cx);
         }
     }
@@ -1889,7 +1869,7 @@ impl ChangePage {
 
     /// `a`: asks the shell for the reply dialog.
     fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
-        if self.number.is_local() {
+        if self.on_local_target() {
             self.hint
                 .say(reply::LOCAL_LATER, false, cx, |p| &mut p.hint);
             return;
@@ -1953,6 +1933,19 @@ impl ChangePage {
                 .hint
                 .say("The change is not loaded yet", false, cx, |p| &mut p.hint),
         }
+    }
+
+    /// Whether a reply or vote would be on a local version: a local change,
+    /// or a local patch set picked as the target. Until local reviews exist
+    /// (LC4a) neither may go out, since Gerrit would take it for the
+    /// current patch set, which the user may not have reviewed.
+    pub(super) fn on_local_target(&self) -> bool {
+        self.number.is_local()
+            || self
+                .detail
+                .as_ref()
+                .and_then(|d| self.sel.target_number(d))
+                .is_some_and(PatchSetNumber::is_local)
     }
 
     /// The Submit chain button.

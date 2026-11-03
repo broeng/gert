@@ -119,8 +119,9 @@ impl Sent {
     }
 }
 
-/// Why the reply dialog does not open on a local change yet.
-pub const LOCAL_LATER: &str = "Replying to local changes comes in a later version";
+/// Why the reply dialog and quick votes do nothing on a local change or a
+/// local patch set yet.
+pub const LOCAL_LATER: &str = "Replies and votes on local versions come in a later version";
 
 /// Why the reply dialog cannot open now, as a note for the user.
 pub fn unavailable(session: &Session) -> Option<&'static str> {

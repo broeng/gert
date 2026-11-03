@@ -28,7 +28,7 @@
 //! Gerrit patch set uploaded later comes after it. In practice local
 //! versions are newer than everything on Gerrit, so they are appended.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui_kit::{AppContext as _, AsyncApp, Entity};
 use local_git::{Local, Repo};
@@ -48,34 +48,25 @@ pub struct Provided {
     pub detail: ChangeDetail,
     /// When Gerrit's part was fetched; `None` for a local change.
     pub fetched_at: Option<Timestamp>,
-    /// The store row of a local change.
+    /// The store row of a local change. Code that matches branches or
+    /// builds lookup keys must read its `branch` (`None` when the target
+    /// branch is unknown), never the synthesised `summary.branch`, which is
+    /// an empty placeholder then.
     pub local: Option<LocalChange>,
-}
-
-/// Who is looking: the owner of a local change is the signed-in account
-/// when the commit's author email is the account's.
-#[derive(Clone, Debug, Default)]
-pub struct Viewer {
-    pub username: Option<String>,
-    pub account: Option<AccountId>,
 }
 
 /// The detail of `number` from the store, merged or synthesised (see the
 /// module comment), without the commits git adds. No network, no git.
 /// `None` when nothing is cached (a Gerrit change) or the row is gone (a
 /// local change). Blocking (SQLite): call from the background executor.
-pub fn cached(
-    syncer: &Syncer,
-    number: ChangeNumber,
-    viewer: &Viewer,
-) -> Result<Option<Provided>, sync::Error> {
+pub fn cached(syncer: &Syncer, number: ChangeNumber) -> Result<Option<Provided>, sync::Error> {
     if number.is_local() {
         let Some((row, versions)) = syncer.local_change(number)? else {
             return Ok(None);
         };
         let labels = syncer.labels_to_borrow(&row.project, row.branch.as_deref())?;
-        let email = syncer.account_email()?;
-        let detail = synthesise(&row, &versions, labels, viewer, email.as_deref());
+        let account = syncer.account()?;
+        let detail = synthesise(&row, &versions, labels, account);
         return Ok(Some(Provided {
             detail,
             fetched_at: None,
@@ -168,7 +159,7 @@ fn local_revision(v: &LocalPatchSet) -> Revision {
         ref_name: None,
         description: None,
         commit: None,
-        local_ordinal: None,
+        local_ordinal: Some(v.ordinal),
     }
 }
 
@@ -178,16 +169,19 @@ fn synthesise(
     row: &LocalChange,
     versions: &[LocalPatchSet],
     labels: Option<BorrowedLabels>,
-    viewer: &Viewer,
-    account_email: Option<&str>,
+    account: Option<(AccountId, Option<String>)>,
 ) -> ChangeDetail {
-    let mine = account_email.is_some_and(|e| e.trim().eq_ignore_ascii_case(&row.author_email));
+    // The owner is the signed-in account, as stored when it was last
+    // fetched: discovery only takes commits whose author email is the
+    // account's or one of the checkout's own author emails, so every local
+    // change is the user's. Name and email are the commit author's. Before
+    // the account was ever fetched, the id is 0 (no account).
+    let (id, username) = account.unwrap_or((AccountId(0), None));
     let owner = Account {
-        // No account id is known for anybody else; 0 is no account.
-        id: viewer.account.filter(|_| mine).unwrap_or(AccountId(0)),
+        id,
         name: Some(row.author_name.clone()).filter(|n| !n.trim().is_empty()),
         email: Some(row.author_email.clone()),
-        username: viewer.username.clone().filter(|_| mine),
+        username,
         display_name: None,
     };
     let revisions: Vec<Revision> = versions.iter().map(local_revision).collect();
@@ -198,7 +192,8 @@ fn synthesise(
             number: row.number,
             change_id: Some(row.change_id.clone()),
             project: row.project.clone(),
-            // Empty for an unknown target branch; the page says so.
+            // Empty for an unknown target branch; the page says so. Not a
+            // key: see `Provided::local`.
             branch: row.branch.clone().unwrap_or_default(),
             subject: row.subject.clone(),
             status: ChangeStatus::New,
@@ -237,8 +232,9 @@ fn synthesise(
 }
 
 /// The labels a local change shows: the borrowed ones, else Code-Review
-/// -2..+2 with Gerrit's standard texts. Borrowed values the user may not
-/// give at all (a closed change permits nothing) are offered whole.
+/// -2..+2 with Gerrit's standard texts. A closed lender permits only
+/// post-submit votes (often just the maximum), and a lender may permit
+/// nothing at all: then every value the label defines is offered.
 fn labels_of(
     labels: Option<BorrowedLabels>,
 ) -> (
@@ -246,7 +242,7 @@ fn labels_of(
     BTreeMap<String, Vec<LabelValue>>,
 ) {
     match labels {
-        Some(b) if b.permitted.values().any(|v| !v.is_empty()) => (b.permitted, b.values),
+        Some(b) if b.open && b.permitted.values().any(|v| !v.is_empty()) => (b.permitted, b.values),
         Some(b) => {
             let permitted = b
                 .values
@@ -290,7 +286,13 @@ pub fn default_labels() -> (
 /// Local commits read from the checkout, by SHA; `None` for one the
 /// checkout does not have (so it is not asked again).
 #[derive(Clone, Debug, Default)]
-pub struct GitCommits(HashMap<RevisionId, Option<Commit>>);
+pub struct GitCommits {
+    found: HashMap<RevisionId, Option<Commit>>,
+    /// Commits git failed to read (the checkout moved, permissions): not
+    /// asked again until [`GitCommits::forget_failures`], so that a broken
+    /// checkout costs one git call per detail, not a loop.
+    failed: HashSet<RevisionId>,
+}
 
 impl GitCommits {
     /// The local revisions of `detail` that were not looked up yet.
@@ -299,33 +301,46 @@ impl GitCommits {
             .revisions
             .iter()
             .filter(|r| r.number.is_local() && r.commit.is_none())
-            .filter(|r| !self.0.contains_key(&r.sha))
+            .filter(|r| !self.found.contains_key(&r.sha) && !self.failed.contains(&r.sha))
             .map(|r| r.sha.clone())
             .collect()
     }
 
     /// Takes in what another lookup found.
     pub fn extend(&mut self, other: GitCommits) {
-        self.0.extend(other.0);
+        for sha in other.found.keys() {
+            self.failed.remove(sha);
+        }
+        self.found.extend(other.found);
+        self.failed.extend(other.failed);
     }
 
-    /// Reads `shas` from `repo`. Missing commits are remembered as such;
-    /// git failures are logged and left to ask again. Blocking.
+    /// Lets the commits git failed to read be asked for again: for a new
+    /// detail (a refresh), so a checkout that comes back is used again.
+    pub fn forget_failures(&mut self) {
+        self.failed.clear();
+    }
+
+    /// Reads `shas` from `repo`. Missing commits are remembered as such,
+    /// git failures as failed (logged). Blocking.
     pub fn read(repo: &Repo, shas: &[RevisionId]) -> Self {
-        let mut out = HashMap::new();
+        let mut out = Self::default();
         for sha in shas {
             match repo.commit(sha) {
                 Ok(Local::Available(info)) => {
-                    out.insert(sha.clone(), Some(commit_of(&info)));
+                    out.found.insert(sha.clone(), Some(commit_of(&info)));
                 }
                 Ok(Local::NotLocal(why)) => {
                     log::debug!("local version {sha} is not in the checkout: {why}");
-                    out.insert(sha.clone(), None);
+                    out.found.insert(sha.clone(), None);
                 }
-                Err(e) => log::warn!("reading local version {sha}: {e}"),
+                Err(e) => {
+                    log::warn!("reading local version {sha}: {e}");
+                    out.failed.insert(sha.clone());
+                }
             }
         }
-        Self(out)
+        out
     }
 }
 
@@ -361,7 +376,7 @@ fn commit_of(info: &CommitInfo) -> Commit {
 pub fn apply_commits(detail: &mut ChangeDetail, git: &GitCommits) {
     for r in detail.revisions.iter_mut().filter(|r| r.number.is_local()) {
         if r.commit.is_none()
-            && let Some(Some(c)) = git.0.get(&r.sha)
+            && let Some(Some(c)) = git.found.get(&r.sha)
         {
             r.commit = Some(c.clone());
         }
@@ -411,17 +426,18 @@ pub async fn load_commits(
 // ---- display ----
 
 /// How a patch set is named on screen: `PS 3` for a Gerrit patch set,
-/// `local 1` for the first local version in `list` (the change's merged
-/// revisions), plain `local` for a local number `list` does not have.
-/// Never the synthetic number.
+/// `local 2` for a local version in `list` (the change's merged revisions)
+/// by its stored name ([`Revision::local_ordinal`]: the second version
+/// seen, also once the first is on Gerrit), plain `local` for a local
+/// number `list` does not have. Never the synthetic number.
 pub fn patch_set_label(list: &[Revision], number: PatchSetNumber) -> String {
     if !number.is_local() {
         return format!("PS {number}");
     }
     list.iter()
-        .filter(|r| r.number.is_local())
-        .position(|r| r.number == number)
-        .map_or_else(|| "local".to_owned(), |i| format!("local {}", i + 1))
+        .find(|r| r.number == number)
+        .and_then(|r| r.local_ordinal)
+        .map_or_else(|| "local".to_owned(), |n| format!("local {n}"))
 }
 
 /// How a change is named on screen: `#123`, or `local` for a local change

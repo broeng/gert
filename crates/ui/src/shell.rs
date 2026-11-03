@@ -1842,17 +1842,11 @@ impl Shell {
         let owner = session.key.clone();
         let badge = self.servers.badge(&owner);
         let checkouts = self.checkouts(&owner, cx);
-        let account = self
-            .servers
-            .get(&owner)
-            .and_then(|e| e.me.as_ref())
-            .map(|me| me.id);
         let page = cx.new(|cx| {
             let mut page = ChangePage::new(
                 session, settings, layout, filters, syntax, number, view, active, outbox, cx,
             );
             page.set_checkouts(checkouts);
-            page.set_account(account);
             page.set_server_badge(badge, cx);
             if let Some(chain) = chain {
                 page.adopt_chain(chain, cx);
