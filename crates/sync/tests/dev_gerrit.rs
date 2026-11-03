@@ -674,6 +674,11 @@ fn consolidation_posts_one_tagged_review_and_keeps_other_drafts() {
         .collect();
     assert_eq!(ours.len(), 1, "{messages}");
     let tag = ours[0]["tag"].as_str().unwrap();
+    // The tag names the review, so a post whose claim was lost is found.
+    assert!(
+        tag.starts_with(&format!("devtest-local-{}-r{}-", row.id.0, review.id.0)),
+        "{tag}"
+    );
     println!("posted message: {}", ours[0]);
     let me = get("/accounts/self")["_account_id"].clone();
     assert_eq!(ours[0]["author"]["_account_id"], me);
