@@ -515,6 +515,46 @@ fn transitions_check_the_state_they_start_from_and_keep_notes() {
 }
 
 #[test]
+fn a_quick_vote_sets_one_label_and_leaves_the_message_alone() {
+    let Fx {
+        mut s,
+        id,
+        versions,
+        ..
+    } = fx();
+    let r = s
+        .create_pending_review(id, &new_review(versions[0].number, "the message"))
+        .unwrap();
+    // The message was edited after the caller read the review.
+    s.update_pending_review(id, r.id, &edit(2, "edited meanwhile"), ts(T0))
+        .unwrap()
+        .unwrap();
+    let v = s
+        .set_review_label(id, r.id, "Verified", 1, LocalApproval::Exact, ts(T2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        v.labels,
+        BTreeMap::from([("Code-Review".to_owned(), 2), ("Verified".to_owned(), 1)])
+    );
+    assert_eq!(v.message.as_deref(), Some("edited meanwhile"));
+    assert_eq!((v.voted_at, v.strategy), (ts(T2), LocalApproval::Exact));
+    // Not once it is claimed for sending.
+    s.mark_pending_review_sending(id, r.id, &[PendingReviewState::Pending], "n")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.set_review_label(id, r.id, "Verified", -1, LocalApproval::Exact, ts(T2))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        s.load_pending_review(id, r.id).unwrap().unwrap().labels,
+        v.labels
+    );
+}
+
+#[test]
 fn a_superseded_label_is_removed_without_revoting() {
     use PendingReviewState::*;
     let Fx {

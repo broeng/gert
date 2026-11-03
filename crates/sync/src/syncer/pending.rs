@@ -3,7 +3,7 @@
 //! `store::pending_reviews`). No network: nothing here talks to the
 //! server; consolidation sends them later.
 
-use model::{ChangeNumber, PendingReview, PendingReviewId, Timestamp};
+use model::{ChangeNumber, LocalApproval, PendingReview, PendingReviewId, Timestamp};
 use store::{NewPendingReview, PendingReviewEdit};
 
 use super::Syncer;
@@ -36,6 +36,26 @@ impl Syncer {
         Ok(self
             .store()
             .update_pending_review(self.server, id, edit, Timestamp::now())?)
+    }
+
+    /// Gives one label's vote in a review that is still pending, leaving
+    /// the rest of it alone (a quick vote). `None` when it is gone or no
+    /// longer pending. Blocking (SQLite).
+    pub fn set_pending_review_label(
+        &self,
+        id: PendingReviewId,
+        label: &str,
+        value: i32,
+        strategy: LocalApproval,
+    ) -> Result<Option<PendingReview>, Error> {
+        Ok(self.store().set_review_label(
+            self.server,
+            id,
+            label,
+            value,
+            strategy,
+            Timestamp::now(),
+        )?)
     }
 
     /// Withdraws a pending review; its message stays as an ordinary draft.

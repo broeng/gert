@@ -66,6 +66,12 @@ fn pending_reviews_are_written_and_listed_without_the_network() {
         (edited.message.as_deref(), edited.unresolved),
         (Some("edited"), true)
     );
+    let voted = syncer
+        .set_pending_review_label(first.id, "Verified", 1, LocalApproval::Exact)
+        .unwrap()
+        .unwrap();
+    assert_eq!(voted.labels.get("Verified"), Some(&1));
+    assert_eq!(voted.message.as_deref(), Some("edited"));
     assert!(syncer.cancel_pending_review(second.id).unwrap());
     // Only held and failed reviews can be dropped.
     assert!(!syncer.drop_pending_review(first.id).unwrap());

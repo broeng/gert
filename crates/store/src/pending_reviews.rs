@@ -500,6 +500,45 @@ impl Store {
         Ok(moved)
     }
 
+    /// Gives one label's vote in a review that is still `Pending` (a quick
+    /// vote on its version), leaving the other votes and the message
+    /// alone. A new vote: `voted_at` becomes `now` and the strategy the
+    /// project's mode now. Read and written in one transaction, so a
+    /// message edited meanwhile is never overwritten. `None` if the review
+    /// is gone or no longer pending; nothing is written then.
+    pub fn set_review_label(
+        &mut self,
+        server: ServerId,
+        id: PendingReviewId,
+        label: &str,
+        value: i32,
+        strategy: LocalApproval,
+        now: Timestamp,
+    ) -> Result<Option<PendingReview>, Error> {
+        let tx = self.conn.transaction()?;
+        let Some(mut review) = load(&tx, server, id)? else {
+            return Ok(None);
+        };
+        if review.state != PendingReviewState::Pending {
+            return Ok(None);
+        }
+        review.labels.insert(label.to_owned(), value);
+        tx.execute(
+            "UPDATE pending_reviews SET labels = ?3, strategy = ?4, voted_at_ms = ?5
+             WHERE server_id = ?1 AND id = ?2",
+            params![
+                server.0,
+                id.0,
+                serde_json::to_string(&review.labels)?,
+                strategy.as_str(),
+                millis(now)
+            ],
+        )?;
+        let review = load(&tx, server, id)?;
+        tx.commit()?;
+        Ok(review)
+    }
+
     /// Removes one label's vote from a review that is not being sent, when
     /// a newer review sets the same label and supersedes it. Not a new
     /// vote: `voted_at` and the strategy stay. `None` if the review is gone
