@@ -146,6 +146,8 @@ pub enum Block {
     /// The header bar and the three columns under it: change info, commit
     /// message and relation chain.
     Header,
+    /// The pending reviews of local versions, while there are unsent ones.
+    PendingReviews,
     /// Patch set selector and the "Files" heading.
     PatchSets,
     /// The file filter buttons, and the table header under them.
@@ -169,6 +171,8 @@ pub enum Block {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Content {
     pub loaded: bool,
+    /// Pending reviews not sent yet.
+    pub reviews: usize,
     /// Files the filters leave visible.
     pub files: usize,
     /// Threads the list shows (after the filter).
@@ -180,6 +184,9 @@ pub fn blocks(c: Content) -> Vec<Block> {
     let mut v = vec![Block::Header];
     if !c.loaded {
         return v;
+    }
+    if c.reviews > 0 {
+        v.push(Block::PendingReviews);
     }
     v.push(Block::PatchSets);
     v.push(Block::FilterBar);
@@ -450,6 +457,7 @@ mod tests {
         assert_eq!(none, [Block::Header]);
         let b = blocks(Content {
             loaded: true,
+            reviews: 0,
             files: 2,
             threads: 1,
             messages: 2,
@@ -486,6 +494,16 @@ mod tests {
                 Block::ThreadsNotice,
                 Block::PatchSetComments,
             ]
+        );
+        // Local reviews waiting: their card under the header.
+        let b = blocks(Content {
+            loaded: true,
+            reviews: 2,
+            ..Default::default()
+        });
+        assert_eq!(
+            &b[..3],
+            [Block::Header, Block::PendingReviews, Block::PatchSets]
         );
     }
 

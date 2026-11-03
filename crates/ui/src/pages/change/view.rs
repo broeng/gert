@@ -39,6 +39,7 @@ use crate::{
 /// one card.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
+    Reviews,
     Files,
     Comments,
     Log,
@@ -48,6 +49,7 @@ impl Section {
     fn of(b: Block) -> Option<Self> {
         match b {
             Block::Header => None,
+            Block::PendingReviews => Some(Self::Reviews),
             Block::PatchSets | Block::FilterBar | Block::FilesNotice | Block::File(_) => {
                 Some(Self::Files)
             }
@@ -132,6 +134,7 @@ impl ChangePage {
         };
         let inner = match block {
             Block::Header => self.header(window, cx),
+            Block::PendingReviews => self.pending_reviews_card(cx),
             Block::PatchSets => self.patch_sets(cx),
             Block::FilterBar => self.filter_bar(cx),
             Block::FilesNotice => self.files_notice(cx),
@@ -1752,6 +1755,11 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::new_patchset_comment_action))
             .on_action(cx.listener(Self::toggle_reviewed))
             .on_action(cx.listener(Self::reply))
+            .on_action(cx.listener(Self::next_review))
+            .on_action(cx.listener(Self::prev_review))
+            .on_action(cx.listener(Self::edit_review_action))
+            .on_action(cx.listener(Self::cancel_review_action))
+            .on_action(cx.listener(Self::drop_review_action))
             .on_action(cx.listener(Self::open_actions))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::page_up))

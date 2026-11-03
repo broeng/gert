@@ -202,7 +202,10 @@ fn page_in(
         cx.subscribe(&page, move |_, ev: &ChangeEvent, _| {
             let text = match ev {
                 ChangeEvent::Refreshed => "refreshed".to_owned(),
-                ChangeEvent::Reply(_) => "reply".to_owned(),
+                ChangeEvent::Reply(r) => match r.edit {
+                    Some(id) => format!("reply edit {}", id.0),
+                    None => "reply".to_owned(),
+                },
                 ChangeEvent::Actions(_) => "actions".to_owned(),
                 ChangeEvent::Unauthorized => "unauthorized".to_owned(),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),

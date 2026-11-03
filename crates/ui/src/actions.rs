@@ -115,6 +115,17 @@ actions!(
         /// `p s` on the change page: the local checkout settings of the
         /// change's project.
         ProjectCheckout,
+        /// `l n` / `l p` on the change page: select the next / previous
+        /// pending review of the local versions.
+        NextPendingReview,
+        PrevPendingReview,
+        /// `l e`: edit the selected pending review in the reply dialog.
+        EditPendingReview,
+        /// `l c`: cancel the selected pending review (its message stays as a
+        /// draft).
+        CancelPendingReview,
+        /// `l d`: drop the selected held or failed review (asks once).
+        DropPendingReview,
         // Diff page.
         /// Show or hide the diff preferences panel.
         TogglePrefs,
@@ -467,6 +478,28 @@ pub fn change_entries() -> Vec<Entry> {
             "P S",
             KeyBinding::new("p s", ProjectCheckout, Some(k)),
             "Local checkout of the change's project (settings, or add one)",
+        ),
+        // `l` for "local": the pending reviews of local versions.
+        e(
+            "L N / L P",
+            KeyBinding::new("l n", NextPendingReview, Some(k)),
+            "Next / previous local review (reviews of local versions, not sent yet)",
+        ),
+        e("", KeyBinding::new("l p", PrevPendingReview, Some(k)), ""),
+        e(
+            "L E",
+            KeyBinding::new("l e", EditPendingReview, Some(k)),
+            "Edit the selected local review in the reply dialog",
+        ),
+        e(
+            "L C",
+            KeyBinding::new("l c", CancelPendingReview, Some(k)),
+            "Cancel the selected local review; its message stays as a draft",
+        ),
+        e(
+            "L D",
+            KeyBinding::new("l d", DropPendingReview, Some(k)),
+            "Drop the selected held or failed local review (press twice)",
         ),
         e(
             "Space / Shift-Space",

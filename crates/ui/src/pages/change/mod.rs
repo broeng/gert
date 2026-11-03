@@ -20,6 +20,7 @@
 
 #[cfg(test)]
 mod local_tests;
+mod pending;
 mod quick_vote;
 mod requirements;
 mod state;
@@ -307,6 +308,15 @@ pub struct ChangePage {
     outbox: Entity<DraftOutbox>,
     /// The threads as last read from `comments`.
     threads: Arc<Vec<Thread>>,
+    /// The pending reviews of the change's local versions, as last read
+    /// from `comments` (see [`pending`]).
+    reviews: Arc<Vec<model::PendingReview>>,
+    /// The review the local reviews card has selected; `None` is the newest.
+    review_cursor: Option<model::PendingReviewId>,
+    /// The review a first "drop" asked about.
+    confirm_drop: Option<model::PendingReviewId>,
+    /// A cancel or drop on its way to the store.
+    reviews_task: Option<Task<()>>,
     /// The filter the user picked; `None` is the default for the threads.
     thread_filter: Option<ThreadFilter>,
     /// Indexes into `threads` of those the list shows.
@@ -406,6 +416,10 @@ impl ChangePage {
             comments: comments.clone(),
             outbox,
             threads: Arc::default(),
+            reviews: Arc::default(),
+            review_cursor: None,
+            confirm_drop: None,
+            reviews_task: None,
             thread_filter: None,
             listed: Vec::new(),
             thread_cursor: None,
@@ -1474,6 +1488,7 @@ impl ChangePage {
         let d = self.detail.as_ref();
         Content {
             loaded: d.is_some(),
+            reviews: self.listed_reviews().len(),
             files: self.visible.len(),
             threads: self.listed.len(),
             messages: d.map_or(0, |d| d.messages.len()),

@@ -20,6 +20,13 @@ impl Fixture {
         cx.run_until_parked();
     }
 
+    /// Presses the keys of a chord (`"l e"`) one after the other.
+    fn chord(&self, cx: &mut TestAppContext, keys: &str) {
+        for k in keys.split(' ') {
+            self.press(cx, k);
+        }
+    }
+
     /// Every draft of the page's change in the store (sealed ones too).
     fn stored_drafts(&self, number: ChangeNumber) -> Vec<model::Draft> {
         self.store
@@ -265,6 +272,187 @@ fn a_quick_vote_on_a_local_patch_set_of_a_gerrit_change_stays_local(cx: &mut Tes
         !f.http.requested().iter().any(|r| r.contains("/review")),
         "{:?}",
         f.http.requested()
+    );
+    f.assert_nothing_local_sent(&[&ck.local]);
+}
+
+/// Pending reviews on `version`: one per entry of `states`, each with a
+/// message naming its state, the held and failed ones with their reason.
+fn seed_reviews(store: &mut Store, version: PatchSetNumber, states: &[model::PendingReviewState]) {
+    use model::PendingReviewState as S;
+    for (i, state) in states.iter().enumerate() {
+        let r = store
+            .create_pending_review(
+                SERVER,
+                &store::NewPendingReview {
+                    patch_set: version,
+                    labels: [("Code-Review".to_owned(), 1 + i as i32 % 2)].into(),
+                    strategy: model::LocalApproval::Exact,
+                    message: format!("review {i}, {}", state.as_str()),
+                    unresolved: false,
+                    created: at(50 + i as u32),
+                    replaces_draft: None,
+                },
+            )
+            .expect("review");
+        let note = match state {
+            S::Held => Some("amended before upload"),
+            S::Failed => Some("403 not allowed"),
+            _ => None,
+        };
+        if *state != S::Pending {
+            store
+                .set_pending_review_state(SERVER, r.id, &[S::Pending], *state, note)
+                .expect("state");
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn the_local_reviews_card_lists_states_and_its_keys_edit_cancel_and_drop(cx: &mut TestAppContext) {
+    use model::PendingReviewState as S;
+    let ck = checkout();
+    let mut store = store_with(
+        &[row(
+            "I1",
+            None,
+            LocalChangeState::Local,
+            &[&ck.local],
+            &ck.base,
+        )],
+        |_| {},
+    );
+    let row = store
+        .local_changes_by_change_id(SERVER, "I1")
+        .expect("rows")
+        .remove(0);
+    let version = store
+        .local_patch_sets(SERVER, row.id)
+        .expect("versions")
+        .remove(0)
+        .number;
+    seed_reviews(&mut store, version, &[S::Pending, S::Held, S::Failed]);
+    let number = row.number;
+    let f = page(cx, store, number, &ck, |_| {});
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert_eq!(p.blocks_for_test()[1], Block::PendingReviews);
+        assert_eq!(p.listed_reviews_for_test().len(), 3);
+    });
+    let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
+    visual.run_until_parked();
+    for state in [
+        "pending-review-0: pending",
+        "pending-review-1: held: amended before upload",
+        "pending-review-2: failed: 403 not allowed",
+    ] {
+        assert!(visual.debug_bounds(state).is_some(), "{state}");
+    }
+
+    // The newest (failed) is selected: it cannot be edited or cancelled.
+    f.chord(cx, "l e");
+    assert!(f.hint(cx).is_some_and(|h| h.starts_with("Only a pending")));
+    f.chord(cx, "l c");
+    assert!(f.hint(cx).is_some_and(|h| h.contains("drop it instead")));
+    // Up to the pending one: edit opens the dialog on it, cancel unseals.
+    f.chord(cx, "l p");
+    f.chord(cx, "l p");
+    f.chord(cx, "l e");
+    let first = f.reviews(number)[0].clone();
+    assert_eq!(
+        f.events.lock().expect("log").last().cloned(),
+        Some(format!("reply edit {}", first.id.0))
+    );
+    f.chord(cx, "l d");
+    assert!(f.hint(cx).is_some_and(|h| h.contains("cancel it instead")));
+    f.chord(cx, "l c");
+    assert_eq!(
+        f.hint(cx).as_deref(),
+        Some("Review cancelled; its message is kept as a draft")
+    );
+    assert_eq!(f.reviews(number).len(), 2);
+    let drafts = f.stored_drafts(number);
+    assert_eq!(drafts.len(), 3, "two sealed, one unsealed");
+    let kept = drafts
+        .iter()
+        .find(|d| Some(d.local_id) == first.message_draft)
+        .expect("the message");
+    assert!(!kept.is_sealed() && kept.is_local());
+    cx.update(|cx| assert_eq!(f.page.read(cx).listed_reviews_for_test().len(), 2));
+
+    // Dropping asks once; the newest (failed) goes with its message.
+    f.chord(cx, "l d");
+    assert!(
+        f.hint(cx)
+            .is_some_and(|h| h.starts_with("Drop this review"))
+    );
+    assert_eq!(f.reviews(number).len(), 2);
+    f.chord(cx, "l d");
+    assert_eq!(f.hint(cx).as_deref(), Some("Review dropped"));
+    let left = f.reviews(number);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].state, S::Held);
+    f.chord(cx, "l d");
+    f.chord(cx, "l d");
+    assert!(f.reviews(number).is_empty());
+    // Nothing waits: no card, and the keys say so.
+    cx.update(|cx| {
+        assert!(
+            !f.page
+                .read(cx)
+                .blocks_for_test()
+                .contains(&Block::PendingReviews)
+        )
+    });
+    f.chord(cx, "l e");
+    assert_eq!(f.hint(cx).as_deref(), Some("No local reviews waiting here"));
+    assert!(f.http.requested().is_empty(), "{:?}", f.http.requested());
+}
+
+#[gpui_kit::test]
+fn a_gerrit_change_lists_the_reviews_of_its_local_versions(cx: &mut TestAppContext) {
+    let ck = checkout();
+    let mut store = store_with(
+        &[row(
+            "I7",
+            Some(ChangeNumber(7)),
+            LocalChangeState::Local,
+            &[&ck.local],
+            &ck.base,
+        )],
+        seed_gerrit_change,
+    );
+    let row = store
+        .local_changes_by_change_id(SERVER, "I7")
+        .expect("rows")
+        .remove(0);
+    let version = store
+        .local_patch_sets(SERVER, row.id)
+        .expect("versions")
+        .remove(0)
+        .number;
+    seed_reviews(&mut store, version, &[model::PendingReviewState::Pending]);
+    let f = page(cx, store, ChangeNumber(7), &ck, |_| {});
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert!(p.blocks_for_test().contains(&Block::PendingReviews));
+        // It is on the local version, which the row names.
+        let reviews = p.listed_reviews_for_test();
+        assert_eq!(reviews.len(), 1);
+        let label = crate::change_detail::patch_set_label(
+            &p.detail().expect("detail").revisions,
+            reviews[0].patch_set,
+        );
+        assert_eq!(label, "local 1");
+    });
+    // Edit opens the dialog on it even while PS 3 is shown.
+    f.chord(cx, "l e");
+    assert!(
+        f.events
+            .lock()
+            .expect("log")
+            .iter()
+            .any(|e| e.starts_with("reply edit"))
     );
     f.assert_nothing_local_sent(&[&ck.local]);
 }
