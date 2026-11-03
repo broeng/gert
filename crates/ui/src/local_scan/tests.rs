@@ -535,13 +535,16 @@ fn opening_a_local_row_sends_nothing_and_notifies_nothing(cx: &mut TestAppContex
         Route::Change(number)
     );
     s.assert_no_local_number_sent(&f);
-    // The change page does not even try: no error on it.
+    // The change page shows it from the store, with no error on it.
     let change = cx
         .update(|cx| s.shell.read(cx).change_page_for_test())
         .expect("the change page");
     cx.update(|cx| {
         let page = change.read(cx);
-        assert!(page.detail().is_none());
+        let detail = page.detail().expect("the synthesised detail");
+        assert_eq!(detail.summary.number, number);
+        assert_eq!(detail.summary.subject, "Own change");
+        assert_eq!(page.local_row_for_test().map(|r| r.number), Some(number));
         assert_eq!(*page.status_for_test(), crate::pages::list::Status::Idle);
     });
     let store = s.store.lock().expect("store");

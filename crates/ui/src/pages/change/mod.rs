@@ -36,8 +36,9 @@ use std::{
 use gpui_kit::*;
 use jiff::Timestamp;
 use model::{
-    ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, DiffKey, DiffPair, FileCommentCounts,
-    FileEntry, FilesKey, RelatedChange, RevisionId, Thread, ThreadId,
+    AccountId, ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, DiffKey, DiffPair,
+    FileCommentCounts, FileEntry, FilesKey, LocalChange, RelatedChange, RevisionId, Thread,
+    ThreadId,
 };
 use store::CachedFileList;
 use sync::PollPolicy;
@@ -45,6 +46,7 @@ use sync::PollPolicy;
 use crate::{
     action_menu,
     actions::*,
+    change_detail::{self, GitCommits, Provided, Viewer},
     checkouts::Checkouts,
     comments::{ChangeComments, CommentsEvent},
     diff::{
@@ -111,6 +113,9 @@ pub enum ChangeEvent {
 /// The file list of the current patch set pair.
 /// Why `r` waits for Gerrit's file list.
 const REVIEWED_WAITS: &str = "Reviewed marks come with Gerrit's file list";
+/// The files notice of a local version the checkout cannot list.
+const LOCAL_FILES_UNAVAILABLE: &str =
+    "the project's checkout does not have this version (the files of local versions come from it)";
 
 #[derive(Default)]
 struct Files {
@@ -169,7 +174,17 @@ pub struct ChangePage {
     session: Session,
     settings: Entity<DiffSettings>,
     number: ChangeNumber,
+    /// What [`change_detail`] provides: Gerrit's detail with the local
+    /// patch sets, or a local change's synthesised one. Never stored.
     detail: Option<ChangeDetail>,
+    /// The store row of a local change.
+    local_row: Option<LocalChange>,
+    /// The commits of the local patch sets, read from the checkout, put on
+    /// every detail the page takes.
+    git: GitCommits,
+    git_task: Option<Task<()>>,
+    /// The signed-in account, the owner of the user's local changes.
+    account: Option<AccountId>,
     fetched_at: Option<Timestamp>,
     /// The cache has been read (an empty cache counts).
     loaded: bool,
@@ -301,6 +316,10 @@ impl ChangePage {
             visible: Vec::new(),
             number,
             detail: None,
+            local_row: None,
+            git: GitCommits::default(),
+            git_task: None,
+            account: None,
             fetched_at: None,
             loaded: false,
             status: Status::Idle,
@@ -357,19 +376,21 @@ impl ChangePage {
                 CommentsEvent::Changed => this.apply_threads(cx),
                 CommentsEvent::Unauthorized => cx.emit(ChangeEvent::Unauthorized),
             }));
-        let syncer = this.session.syncer().clone();
         this.task = Some(cx.spawn(async move |this, cx| {
+            // The account arrives right after the page is made (see
+            // `set_account`), before this runs.
+            let Ok((syncer, viewer)) =
+                this.update(cx, |this, _| (this.session.syncer().clone(), this.viewer()))
+            else {
+                return;
+            };
             let cached = cx
-                .background_spawn(async move { syncer.cached_change(number) })
+                .background_spawn(async move { change_detail::cached(&syncer, number, &viewer) })
                 .await;
             this.update(cx, |this, cx| {
                 this.loaded = true;
                 match cached {
-                    Ok(Some(c)) => {
-                        this.detail = Some(c.detail);
-                        this.fetched_at = Some(c.fetched_at);
-                        this.apply_selection(false, cx);
-                    }
+                    Ok(Some(p)) => this.take_provided(p, false, cx),
                     Ok(None) => this.rebuild_blocks(),
                     Err(e) => {
                         log::warn!("reading cached change {number}: {e}");
@@ -395,6 +416,11 @@ impl ChangePage {
     #[cfg(test)]
     pub fn detail(&self) -> Option<&ChangeDetail> {
         self.detail.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn local_row_for_test(&self) -> Option<&LocalChange> {
+        self.local_row.as_ref()
     }
 
     #[cfg(test)]
@@ -588,10 +614,10 @@ impl ChangePage {
         if self.ticks.is_multiple_of(10) {
             cx.notify(); // keeps "updated 3m ago" current
         }
-        // Gerrit does not have a local change, and the guards would only
-        // turn the request into an error on the page.
-        if !self.session.can_sync() || !self.loaded || self.status.busy() || self.number.is_local()
-        {
+        // A local change is read from the store again (new versions the
+        // scanner found), never from Gerrit, which does not have it.
+        let can_refresh = self.session.can_sync() || self.number.is_local();
+        if !can_refresh || !self.loaded || self.status.busy() {
             return;
         }
         let now = Timestamp::now();
@@ -610,20 +636,37 @@ impl ChangePage {
         }
     }
 
-    /// Fetches the change detail; the file list and related changes follow
-    /// in [`Self::apply_selection`].
+    /// Fetches the change detail, with the local patch sets the store has
+    /// now; the file list and related changes follow in
+    /// [`Self::apply_selection`]. A local change is read from the store
+    /// again instead.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.number.is_local() {
+            self.reload_local(cx);
+            return;
+        }
         let syncer = self.session.syncer().clone();
         let number = self.number;
         self.status = Status::Refreshing;
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { syncer.refresh_change(number).await })
+                .background_spawn(async move {
+                    let detail = syncer.refresh_change(number).await?;
+                    let locals = change_detail::local_revisions(&syncer, number);
+                    Ok::<_, sync::Error>((detail, locals))
+                })
                 .await;
             this.update(cx, |this, cx| {
                 let now = Timestamp::now();
                 match result {
-                    Ok(detail) => {
+                    Ok((detail, locals)) => {
+                        let detail = match locals {
+                            Ok(locals) => change_detail::merge(detail, locals),
+                            Err(e) => {
+                                log::warn!("reading the local patch sets of {number}: {e}");
+                                change_detail::carry_local(detail, this.detail.as_ref())
+                            }
+                        };
                         cx.emit(ChangeEvent::Refreshed);
                         this.track.success(now);
                         // A change that moved may have new comments.
@@ -634,7 +677,7 @@ impl ChangePage {
                         if moved {
                             this.comments.update(cx, |c, cx| c.change_updated(cx));
                         }
-                        this.detail = Some(detail);
+                        this.set_detail(detail, cx);
                         this.fetched_at = Some(now);
                         this.status = Status::Idle;
                         this.apply_selection(true, cx);
@@ -654,6 +697,96 @@ impl ChangePage {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Reads a local change from the store again: its row and versions
+    /// (the scanner may have found a new one); git fills in the commits
+    /// that are new. No network.
+    fn reload_local(&mut self, cx: &mut Context<Self>) {
+        let syncer = self.session.syncer().clone();
+        let (number, viewer) = (self.number, self.viewer());
+        self.status = Status::Refreshing;
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { change_detail::cached(&syncer, number, &viewer) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.status = Status::Idle;
+                this.track.success(Timestamp::now());
+                match result {
+                    Ok(Some(p)) => this.take_provided(p, false, cx),
+                    // The row is gone (pushed and consolidated, or dropped):
+                    // keep what is on screen.
+                    Ok(None) => {}
+                    Err(e) => log::warn!("reading local change: {e}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Who the provider takes as the user.
+    fn viewer(&self) -> Viewer {
+        Viewer {
+            username: self.session.username.clone(),
+            account: self.account,
+        }
+    }
+
+    /// Takes what the provider read from the store and loads what depends
+    /// on it (from the cache; also from the server if `network`).
+    fn take_provided(&mut self, p: Provided, network: bool, cx: &mut Context<Self>) {
+        self.fetched_at = p.fetched_at;
+        self.local_row = p.local;
+        self.set_detail(p.detail, cx);
+        self.apply_selection(network, cx);
+    }
+
+    /// The one place the page's detail is replaced: the commits read from
+    /// the checkout go onto its local patch sets, and those not read yet
+    /// are looked up.
+    fn set_detail(&mut self, mut detail: ChangeDetail, cx: &mut Context<Self>) {
+        change_detail::apply_commits(&mut detail, &self.git);
+        self.detail = Some(detail);
+        self.load_git(cx);
+    }
+
+    /// Reads the commits of the local patch sets that are not known yet
+    /// from the checkout, unless that is under way.
+    fn load_git(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = &self.detail else {
+            return;
+        };
+        if self.git_task.is_some() || self.git.wanted(d).is_empty() {
+            return;
+        }
+        let (detail, known, checkouts) = (d.clone(), self.git.clone(), self.checkouts.clone());
+        self.git_task = Some(cx.spawn(async move |this, cx| {
+            let read = change_detail::load_commits(&detail, &known, checkouts, cx).await;
+            this.update(cx, |this, cx| {
+                this.git_task = None;
+                let Some(read) = read else {
+                    return;
+                };
+                this.git.extend(read);
+                if let Some(mut d) = this.detail.take() {
+                    change_detail::apply_commits(&mut d, &this.git);
+                    this.detail = Some(d);
+                }
+                // The header (commit message, author) grew.
+                this.remeasure(Block::Header);
+                cx.notify();
+                this.load_git(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Names the signed-in account, which owns the user's local changes.
+    /// Set right after the page is made, before anything has loaded.
+    pub fn set_account(&mut self, account: Option<AccountId>) {
+        self.account = account;
     }
 
     /// Works out which file list and related changes the current detail and
@@ -696,14 +829,16 @@ impl ChangePage {
         if let Some(key) = key {
             self.load_files(key, network, cx);
         }
-        if let Some(sha) = sha {
+        // Gerrit knows no relation chain of a local change.
+        if let Some(sha) = sha.filter(|_| !self.number.is_local()) {
             self.load_related(sha, network, cx);
         }
     }
 
     fn load_files(&mut self, key: FilesKey, network: bool, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
-        let sync = network && self.session.can_sync();
+        // Gerrit cannot list a local version: the checkout does.
+        let sync = network && self.session.can_sync() && !key.is_local();
         self.files_task = Some(cx.spawn(async move |this, cx| {
             let cached = {
                 let (syncer, key) = (syncer.clone(), key.clone());
@@ -756,23 +891,37 @@ impl ChangePage {
         }
         self.update_local(cx);
         if matches!(&self.local, LocalState::Ready(_, None)) {
-            return; // no checkout, or it cannot serve this comparison
+            // No checkout, or it cannot serve this comparison.
+            self.no_local_list(key, cx);
+            return;
         }
         let lazy = self.local.lazy(key, &Arc::default());
         let key = key.clone();
         self.local_files_task = Some(cx.spawn(async move |this, cx| {
             let made = local_file_list(lazy, cx).await;
-            if let Some((path, files)) = made {
-                this.update(cx, |this, cx| {
-                    // Gerrit's list (or a stored one) may have come first,
-                    // or another pair been picked.
+            this.update(cx, |this, cx| match made {
+                // Gerrit's list (or a stored one) may have come first, or
+                // another pair been picked.
+                Some((path, files)) => {
                     if this.files.key.as_ref() == Some(&key) && !this.files.loaded {
                         this.apply_list(&key, files, HashSet::new(), Some(path), cx);
                     }
-                })
-                .ok();
-            }
+                }
+                None => this.no_local_list(&key, cx),
+            })
+            .ok();
         }));
+    }
+
+    /// The checkout cannot list `key`. Gerrit's list comes instead, except
+    /// for a local version, which Gerrit does not have: then the notice
+    /// says so (never one of Gerrit's errors).
+    fn no_local_list(&mut self, key: &FilesKey, cx: &mut Context<Self>) {
+        if key.is_local() && self.files.key.as_ref() == Some(key) && !self.files.loaded {
+            self.files.error = Some(LOCAL_FILES_UNAVAILABLE.to_owned());
+            self.rebuild_blocks();
+            cx.notify();
+        }
     }
 
     /// Shows `files`. `local` is the checkout they were made in, `None` for
@@ -1767,7 +1916,8 @@ impl ChangePage {
     fn take_detail(&mut self, detail: Option<ChangeDetail>, cx: &mut Context<Self>) {
         match detail {
             Some(d) => {
-                self.detail = Some(d);
+                let d = change_detail::carry_local(d, self.detail.as_ref());
+                self.set_detail(d, cx);
                 self.fetched_at = Some(Timestamp::now());
                 self.apply_selection(true, cx);
             }
@@ -1809,7 +1959,8 @@ impl ChangePage {
     pub fn action_done(&mut self, done: &action_menu::Done, cx: &mut Context<Self>) {
         match &done.detail {
             Some(d) => {
-                self.detail = Some(d.clone());
+                let d = change_detail::carry_local(d.clone(), self.detail.as_ref());
+                self.set_detail(d, cx);
                 self.fetched_at = Some(Timestamp::now());
                 self.apply_selection(true, cx);
             }
@@ -1843,7 +1994,8 @@ impl ChangePage {
     /// The server refused an action and the change was fetched again: show
     /// it as it is now, without a note (the dialog shows the error).
     pub fn detail_refreshed(&mut self, detail: &ChangeDetail, cx: &mut Context<Self>) {
-        self.detail = Some(detail.clone());
+        let d = change_detail::carry_local(detail.clone(), self.detail.as_ref());
+        self.set_detail(d, cx);
         self.fetched_at = Some(Timestamp::now());
         self.apply_selection(true, cx);
         cx.notify();
@@ -1855,6 +2007,10 @@ impl ChangePage {
     fn toggle_reviewed(&mut self, _: &ToggleReviewed, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(why) = reviewed::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
+            return;
+        }
+        if self.files.key.as_ref().is_some_and(FilesKey::is_local) {
+            self.hint.say(reviewed::LOCAL, false, cx, |p| &mut p.hint);
             return;
         }
         if !self.files.loaded || self.files.local.is_some() {

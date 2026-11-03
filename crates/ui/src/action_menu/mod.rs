@@ -953,6 +953,8 @@ impl ActionDialog {
         self.selected = kind
             .and_then(|k| self.entries.iter().position(|e| e.kind == k))
             .unwrap_or(0);
+        // Keep the local patch sets of the page's detail.
+        let detail = crate::change_detail::carry_local(detail, Some(&self.detail));
         self.detail = detail.clone();
         self.sync_rows(cx);
         cx.emit(ActionEvent::Refreshed(Box::new(detail)));

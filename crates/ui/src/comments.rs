@@ -95,7 +95,9 @@ impl ChangeComments {
     /// Fetches the comments again (a refresh already running is followed by
     /// one more, so a change that happened meanwhile is not missed).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        if !self.session.can_sync() {
+        // Gerrit has no comments on a local change: they are all drafts in
+        // the store.
+        if !self.session.can_sync() || self.change.is_local() {
             return;
         }
         if self.refreshing {

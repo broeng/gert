@@ -5,6 +5,7 @@ mod action_menu;
 mod actions;
 mod attention;
 mod card;
+mod change_detail;
 mod checkouts;
 mod comments;
 pub mod diff;

@@ -18,6 +18,9 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// Why `r` does nothing on a local version: the marks are Gerrit's.
+pub const LOCAL: &str = "Local versions have no reviewed marks";
+
 /// Why the mark cannot be set now, as a note for the user.
 pub fn unavailable(session: &Session) -> Option<&'static str> {
     if !session.can_comment() {

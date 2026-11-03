@@ -37,6 +37,7 @@ use sync::Syncer;
 use crate::{
     action_menu,
     actions::*,
+    change_detail::{self, Viewer},
     checkouts::Checkouts,
     comments::{ChangeComments, CommentsEvent},
     diff::{
@@ -288,10 +289,14 @@ impl DiffPage {
         let syncer = self.session.syncer().clone();
         let can_sync = self.session.can_sync();
         let route = self.route.clone();
+        let viewer = Viewer {
+            username: self.session.username.clone(),
+            account: None,
+        };
         self.loading = true;
         self.task = Some(cx.spawn(async move |this, cx| {
             let loaded = cx
-                .background_spawn(load_everything(syncer, can_sync, route))
+                .background_spawn(load_everything(syncer, can_sync, route, viewer))
                 .await;
             this.update(cx, |this, cx| this.loaded(loaded, cx)).ok();
         }));
@@ -330,7 +335,8 @@ impl DiffPage {
                 .ok();
             }));
         }
-        if self.session.can_sync() {
+        // Gerrit cannot list a local version: only the checkout can.
+        if self.session.can_sync() && !key.is_local() {
             self.files_pending += 1;
             let syncer = self.session.syncer().clone();
             let task_key = key.clone();
@@ -756,7 +762,8 @@ impl DiffPage {
     /// Fetches the next file's diff in the background so that `]` is
     /// instant.
     fn prefetch_next(&mut self, shown: &DiffKey, next: &str, cx: &mut Context<Self>) {
-        if !self.session.can_sync() || self.files.is_empty() {
+        // Gerrit has nothing to prefetch for a local version.
+        if !self.session.can_sync() || self.files.is_empty() || shown.is_local() {
             return;
         }
         let syncer: Syncer = self.session.syncer().clone();
@@ -860,7 +867,7 @@ impl DiffPage {
     /// has it now and say so.
     pub fn reply_sent(&mut self, sent: &reply::Sent, cx: &mut Context<Self>) {
         if let Some(d) = &sent.detail {
-            self.detail = Some(d.clone());
+            self.detail = Some(change_detail::carry_local(d.clone(), self.detail.as_ref()));
         }
         let (note, warning) = sent.note();
         self.hint.say(note, warning, cx, |p| &mut p.hint);
@@ -914,7 +921,7 @@ impl DiffPage {
                         note = format!("{note}; patchset {new} is now current");
                     }
                 }
-                self.detail = Some(d.clone());
+                self.detail = Some(change_detail::carry_local(d.clone(), self.detail.as_ref()));
             }
             None => note = format!("{note}; could not refresh the change"),
         }
@@ -934,7 +941,10 @@ impl DiffPage {
     /// The server refused an action and the change was fetched again: show
     /// the chips as they are now (the dialog shows the error).
     pub fn detail_refreshed(&mut self, detail: &ChangeDetail, cx: &mut Context<Self>) {
-        self.detail = Some(detail.clone());
+        self.detail = Some(change_detail::carry_local(
+            detail.clone(),
+            self.detail.as_ref(),
+        ));
         self.restyle(cx);
         cx.notify();
     }
@@ -952,6 +962,10 @@ impl DiffPage {
         let Some(key) = self.files_key.clone() else {
             return;
         };
+        if key.is_local() {
+            self.hint.say(reviewed::LOCAL, false, cx, |p| &mut p.hint);
+            return;
+        }
         if (self.files_pending > 0 && !self.files_loaded) || self.files_local.is_some() {
             // Gerrit's list, computed before the mark, would replace it.
             self.hint.say(
@@ -1443,7 +1457,16 @@ impl DiffPage {
     }
 }
 
-async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Loaded {
+/// The detail (from [`change_detail`], so with the local patch sets), the
+/// comparison and its stored file list. Gerrit is asked for the detail
+/// only when the cache lacks the patch sets of the route, never for a
+/// local change.
+async fn load_everything(
+    syncer: Syncer,
+    can_sync: bool,
+    route: DiffRoute,
+    viewer: Viewer,
+) -> Loaded {
     let fail = |detail: Option<ChangeDetail>, error: String| Loaded {
         detail,
         files_key: None,
@@ -1451,8 +1474,8 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
         files_missed: false,
         error: Some(error),
     };
-    let mut detail = match syncer.cached_change(route.change) {
-        Ok(c) => c.map(|c| c.detail),
+    let mut detail = match change_detail::cached(&syncer, route.change, &viewer) {
+        Ok(p) => p.map(|p| p.detail),
         Err(e) => {
             log::warn!("reading cached change {}: {e}", route.change);
             None
@@ -1463,9 +1486,19 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
             d.revision(route.target).is_some() && route.base.is_none_or(|b| d.revision(b).is_some())
         })
     };
-    if !has_revisions(&detail) && can_sync {
+    if !has_revisions(&detail) && can_sync && !route.change.is_local() {
         match syncer.refresh_change(route.change).await {
-            Ok(d) => detail = Some(d),
+            Ok(d) => {
+                detail = Some(
+                    match change_detail::local_revisions(&syncer, route.change) {
+                        Ok(locals) => change_detail::merge(d, locals),
+                        Err(e) => {
+                            log::warn!("reading the local patch sets of {}: {e}", route.change);
+                            change_detail::carry_local(d, detail.as_ref())
+                        }
+                    },
+                )
+            }
             Err(e) if is_unauthorized(&e) => {
                 return fail(detail, "unauthorized".into());
             }

@@ -17,10 +17,11 @@ use model::{
 
 use super::{
     ChangeEvent, ChangePage, Phase,
-    state::{Block, PatchSel, size_text},
+    state::{Block, PatchSel, before, size_text},
 };
 use crate::{
     actions::*,
+    change_detail::patch_set_label,
     diff_load::DiffSource,
     filters::{FileStyle, FilterAction},
     local_source::{local_chip, local_marker},
@@ -670,22 +671,21 @@ impl ChangePage {
         let Some(d) = &self.detail else {
             return div().into_any_element();
         };
+        let menu = patch_set_menu(d, &self.sel);
         let target = self.sel.target_number(d);
-        let base = self.sel.base_number(d);
-        let current = d.current_patch_set;
-        let target_text = match target {
-            Some(n) if Some(n) == current => format!("Patchset {n} (current)"),
-            Some(n) => format!("Patchset {n}"),
-            None => "unknown".into(),
-        };
-        let base_text = match base {
-            Some(n) => format!("Patchset {n}"),
-            None => "Base".into(),
-        };
         let info = target
             .and_then(|n| d.revision(n))
             .map(|r| {
                 let mut parts = Vec::new();
+                if r.number.is_local() {
+                    // `created` is when the version was first seen.
+                    parts.push("only in the local checkout".to_owned());
+                    if let Some(t) = r.created {
+                        let when = relative(Timestamp::now(), t, &TimeZone::system());
+                        parts.push(format!("first seen {when}"));
+                    }
+                    return parts.join(", ");
+                }
                 if let Some(u) = &r.uploader {
                     parts.push(format!("uploaded by {}", u.display()));
                 }
@@ -710,44 +710,12 @@ impl ChangePage {
             .map(|f| f.lines_deleted)
             .sum();
         let count = files.iter().filter(|f| !f.is_special()).count();
-        // Newest first, as in the web UI; "Base" goes below the patch sets.
-        let choice = |n: PatchSetNumber, picked: Option<PatchSetNumber>, enabled: bool| {
-            let mut label = format!("Patchset {n}");
-            if Some(n) == current {
-                label.push_str(" (current)");
-            }
-            if let Some(desc) = d
-                .revision(n)
-                .and_then(|r| r.description.as_deref())
-                .filter(|s| !s.is_empty())
-            {
-                label.push_str(&format!("  \u{201C}{desc}\u{201D}"));
-            }
-            PatchSetChoice {
-                value: Some(n),
-                label: label.into(),
-                checked: picked == Some(n),
-                enabled,
-            }
-        };
-        let target_choices: Vec<_> = d
-            .revisions
-            .iter()
-            .rev()
-            .map(|r| choice(r.number, target, true))
-            .collect();
-        let base_choices: Vec<_> = d
-            .revisions
-            .iter()
-            .rev()
-            .map(|r| choice(r.number, base, target.is_some_and(|t| r.number < t)))
-            .chain([PatchSetChoice {
-                value: None,
-                label: "Base".into(),
-                checked: base.is_none(),
-                enabled: true,
-            }])
-            .collect();
+        let PatchSetMenu {
+            base_text,
+            target_text,
+            base_choices,
+            target_choices,
+        } = menu;
         let page = cx.entity().downgrade();
         v_flex()
             .child(
@@ -1308,11 +1276,87 @@ fn message_lines(ix: usize, m: &ChangeMessage, link: Hsla) -> Vec<AnyElement> {
 }
 
 /// One entry of a patch set dropdown; `value` `None` is "Base".
-struct PatchSetChoice {
-    value: Option<PatchSetNumber>,
-    label: SharedString,
-    checked: bool,
-    enabled: bool,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PatchSetChoice {
+    pub value: Option<PatchSetNumber>,
+    pub label: SharedString,
+    pub checked: bool,
+    pub enabled: bool,
+}
+
+/// What the two patch set dropdowns say and offer.
+#[derive(Clone, Debug)]
+pub(super) struct PatchSetMenu {
+    pub base_text: String,
+    pub target_text: String,
+    pub base_choices: Vec<PatchSetChoice>,
+    pub target_choices: Vec<PatchSetChoice>,
+}
+
+/// The dropdowns for `d` with `sel` picked: the patch sets newest first,
+/// as in the web UI, in the order of the change's list (local versions
+/// among Gerrit's), with "Base" below them. A base must come before the
+/// target in that list.
+pub(super) fn patch_set_menu(d: &ChangeDetail, sel: &PatchSel) -> PatchSetMenu {
+    let target = sel.target_number(d);
+    let base = sel.base_number(d);
+    let current = d.current_patch_set;
+    let label = |n: PatchSetNumber| patch_set_label(&d.revisions, n);
+    let target_text = match target {
+        Some(n) if Some(n) == current => format!("{} (current)", label(n)),
+        Some(n) => label(n),
+        None => "unknown".into(),
+    };
+    let base_text = base.map_or_else(|| "Base".to_owned(), label);
+    let choice = |n: PatchSetNumber, picked: Option<PatchSetNumber>, enabled: bool| {
+        let mut text = label(n);
+        if Some(n) == current {
+            text.push_str(" (current)");
+        }
+        if let Some(desc) = d
+            .revision(n)
+            .and_then(|r| r.description.as_deref())
+            .filter(|s| !s.is_empty())
+        {
+            text.push_str(&format!("  \u{201C}{desc}\u{201D}"));
+        }
+        PatchSetChoice {
+            value: Some(n),
+            label: text.into(),
+            checked: picked == Some(n),
+            enabled,
+        }
+    };
+    let target_choices = d
+        .revisions
+        .iter()
+        .rev()
+        .map(|r| choice(r.number, target, true))
+        .collect();
+    let base_choices = d
+        .revisions
+        .iter()
+        .rev()
+        .map(|r| {
+            choice(
+                r.number,
+                base,
+                target.is_some_and(|t| before(d, r.number, t)),
+            )
+        })
+        .chain([PatchSetChoice {
+            value: None,
+            label: "Base".into(),
+            checked: base.is_none(),
+            enabled: true,
+        }])
+        .collect();
+    PatchSetMenu {
+        base_text,
+        target_text,
+        base_choices,
+        target_choices,
+    }
 }
 
 /// A button that opens a menu of patch sets and applies `pick` to the

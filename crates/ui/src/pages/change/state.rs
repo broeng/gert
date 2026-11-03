@@ -3,13 +3,29 @@
 
 use model::{ChangeDetail, FilesKey, PatchSetNumber, PatchSetRef};
 
+use crate::change_detail::position;
+
 /// The patch set pair being compared, as the user picked it.
+///
+/// "Older" and "newer" are positions in the change's revision list (see
+/// [`crate::change_detail`] for the order), not patch set numbers: a local
+/// patch set has a synthetic number far above Gerrit's, but may sit
+/// before a Gerrit patch set uploaded after it was first seen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PatchSel {
     /// `None` compares with the parent commit ("Base").
     pub base: Option<PatchSetNumber>,
     /// `None` follows the current patch set.
     pub target: Option<PatchSetNumber>,
+}
+
+/// Whether patch set `a` comes before patch set `b` in `d`'s list; false
+/// if either is not in it.
+pub fn before(d: &ChangeDetail, a: PatchSetNumber, b: PatchSetNumber) -> bool {
+    match (position(&d.revisions, a), position(&d.revisions, b)) {
+        (Some(a), Some(b)) => a < b,
+        _ => false,
+    }
 }
 
 impl PatchSel {
@@ -21,11 +37,10 @@ impl PatchSel {
             .or(d.current_patch_set)
     }
 
-    /// The base shown: the pick if it exists and is older than the target.
+    /// The base shown: the pick if it exists and comes before the target.
     pub fn base_number(&self, d: &ChangeDetail) -> Option<PatchSetNumber> {
         let target = self.target_number(d)?;
-        self.base
-            .filter(|b| *b < target && d.revision(*b).is_some())
+        self.base.filter(|b| before(d, *b, target))
     }
 
     pub fn target_ref(&self, d: &ChangeDetail) -> Option<PatchSetRef> {
@@ -45,8 +60,9 @@ impl PatchSel {
         })
     }
 
-    /// Moves the target to the next / previous patch set, wrapping. A base
-    /// that is no longer older than the target goes back to "Base".
+    /// Moves the target to the next / previous patch set in the list,
+    /// wrapping. A base that no longer comes before the target goes back
+    /// to "Base".
     pub fn cycle_target(&mut self, d: &ChangeDetail, forward: bool) {
         let Some(current) = self.target_number(d) else {
             return;
@@ -58,7 +74,8 @@ impl PatchSel {
     }
 
     /// Shows patch set `n`. Picking the current one follows the current
-    /// patch set again; a base that is no longer older goes back to "Base".
+    /// patch set again; a base that no longer comes before it goes back to
+    /// "Base".
     pub fn set_target(&mut self, d: &ChangeDetail, n: PatchSetNumber) {
         if d.revision(n).is_none() {
             return;
@@ -72,30 +89,27 @@ impl PatchSel {
     }
 
     /// Compares with patch set `n`, or with "Base" for `None`. A patch set
-    /// that is not older than the target is ignored.
+    /// that does not come before the target is ignored.
     pub fn set_base(&mut self, d: &ChangeDetail, n: Option<PatchSetNumber>) {
         let Some(target) = self.target_number(d) else {
             return;
         };
-        if n.is_none_or(|b| b < target && d.revision(b).is_some()) {
+        if n.is_none_or(|b| before(d, b, target)) {
             self.base = n;
         }
     }
 
-    /// Moves the base through "Base" and the patch sets older than the
-    /// target, wrapping.
+    /// Moves the base through "Base" and the patch sets before the target,
+    /// wrapping.
     pub fn cycle_base(&mut self, d: &ChangeDetail, forward: bool) {
-        let Some(target) = self.target_number(d) else {
+        let Some(target) = self
+            .target_number(d)
+            .and_then(|n| position(&d.revisions, n))
+        else {
             return;
         };
         let mut options: Vec<Option<PatchSetNumber>> = vec![None];
-        options.extend(
-            d.revisions
-                .iter()
-                .map(|r| r.number)
-                .filter(|n| *n < target)
-                .map(Some),
-        );
+        options.extend(d.revisions[..target].iter().map(|r| Some(r.number)));
         let current = self.base_number(d);
         let at = options.iter().position(|o| *o == current).unwrap_or(0);
         let len = options.len();
@@ -344,6 +358,82 @@ mod tests {
         assert_eq!(sel.base, ps(1));
         sel.set_base(&d, None);
         assert_eq!(sel.base, None);
+    }
+
+    /// Patch sets 1..=3 of Gerrit with `local 1` between PS 2 and PS 3
+    /// (seen while PS 2 was current) and `local 2` after PS 3.
+    fn mixed() -> (ChangeDetail, PatchSetNumber, PatchSetNumber) {
+        let mut d = detail(3, 3);
+        let l1 = PatchSetNumber::local(1).expect("local");
+        let l2 = PatchSetNumber::local(2).expect("local");
+        let rev = |n: PatchSetNumber, sha: &str| Revision {
+            number: n,
+            sha: sha.into(),
+            ..d.revisions[0].clone()
+        };
+        let (r1, r2) = (rev(l1, "l1"), rev(l2, "l2"));
+        d.revisions.insert(2, r1);
+        d.revisions.push(r2);
+        (d, l1, l2)
+    }
+
+    #[test]
+    fn older_means_earlier_in_the_list_not_a_smaller_number() {
+        let (d, l1, l2) = mixed();
+        assert!(before(&d, l1, PatchSetNumber(3)));
+        assert!(!before(&d, l2, PatchSetNumber(3)));
+        assert!(before(&d, PatchSetNumber(3), l2));
+        assert!(!before(&d, PatchSetNumber(9), l2), "not in the list");
+
+        // A local target with a Gerrit base.
+        let mut sel = PatchSel::default();
+        sel.set_target(&d, l2);
+        assert_eq!(sel.target, Some(l2));
+        sel.set_base(&d, ps(3));
+        assert_eq!(sel.base_number(&d), ps(3));
+        let key = sel.files_key(&d).expect("key");
+        assert_eq!(key.target.number, l2);
+        assert_eq!(key.base.map(|b| b.number), ps(3));
+        // Another local version as the base.
+        sel.set_base(&d, Some(l1));
+        assert_eq!(sel.base_number(&d), Some(l1));
+        // PS 3 as the target: local 1 still comes before it, local 2 not.
+        sel.set_target(&d, PatchSetNumber(3));
+        assert_eq!(sel.target, None, "PS 3 is current");
+        assert_eq!(sel.base, Some(l1));
+        sel.set_base(&d, Some(l2));
+        assert_eq!(sel.base, Some(l1), "local 2 comes after PS 3: ignored");
+        // Local 1 as the target: the base goes back to Base.
+        sel.set_target(&d, l1);
+        assert_eq!(sel.base, None);
+    }
+
+    #[test]
+    fn cycling_goes_through_the_list_in_its_order() {
+        let (d, l1, l2) = mixed();
+        let mut sel = PatchSel::default(); // PS 3, the current one
+        sel.cycle_target(&d, true);
+        assert_eq!(sel.target, Some(l2));
+        sel.cycle_target(&d, true);
+        assert_eq!(sel.target, ps(1), "wraps");
+        sel.cycle_target(&d, false);
+        assert_eq!(sel.target, Some(l2));
+        sel.cycle_target(&d, false);
+        assert_eq!(sel.target, None);
+        sel.cycle_target(&d, false);
+        assert_eq!(sel.target, Some(l1));
+
+        // The base goes through what comes before local 2.
+        let mut sel = PatchSel {
+            base: None,
+            target: Some(l2),
+        };
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            sel.cycle_base(&d, true);
+            seen.push(sel.base);
+        }
+        assert_eq!(seen, [ps(1), ps(2), Some(l1), ps(3), None]);
     }
 
     #[test]

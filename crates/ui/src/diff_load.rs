@@ -50,7 +50,8 @@ pub enum DiffSource {
 /// Diffs are keyed by revision SHA and immutable, so a cached one is final
 /// and nothing else is asked. A local diff is not written to the store, so
 /// the cache only ever holds what Gerrit sent. The checkout never fails a
-/// load: when it cannot serve, the diff comes from Gerrit. With `can_sync`
+/// load: when it cannot serve, the diff comes from Gerrit, except for a
+/// local change or patch set, which only the checkout has. With `can_sync`
 /// false (offline, not signed in) a local diff still shows. Blocking
 /// (SQLite, git, network): call from the background executor.
 pub async fn load_diff(
@@ -70,6 +71,12 @@ pub async fn load_diff(
         && let Some(diff) = local.diff(&key)
     {
         return Ok((diff, DiffSource::Local));
+    }
+    if key.is_local() {
+        // Gerrit does not have it, and must not be asked.
+        return Err(LoadError::Failed(
+            "the local checkout cannot show this diff".into(),
+        ));
     }
     if !can_sync {
         return Err(LoadError::Failed(

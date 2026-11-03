@@ -327,7 +327,8 @@ impl ActionDialog {
         self.rev.changed = true;
         match detail {
             Some(d) => {
-                self.detail = d;
+                // Keep the local patch sets of the page's detail.
+                self.detail = crate::change_detail::carry_local(d, Some(&self.detail));
                 self.rev.fresh = true;
             }
             None => {

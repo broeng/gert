@@ -124,7 +124,8 @@ impl DraftOutbox {
     }
 
     /// Carries out what a diff view asked for. `detail` supplies the commit
-    /// of the patch set a new draft goes to.
+    /// of the patch set a new draft goes to: the page's detail from
+    /// [`crate::change_detail`], so a local patch set is found too.
     pub fn request(
         &mut self,
         change: ChangeNumber,
