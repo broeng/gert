@@ -193,6 +193,11 @@ struct Sending {
     reviewed: bool,
     /// How many requests for the path are open.
     open: u32,
+    /// What the server has, as far as we know: the mark before the first
+    /// of these requests, then the value of each one that worked.
+    confirmed: bool,
+    /// Why the last request that failed did.
+    failure: Option<String>,
 }
 
 impl EventEmitter<FileListEvent> for FileList {}
@@ -488,18 +493,21 @@ impl FileList {
         path: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        let Some(key) = self.files.key.clone() else {
-            return Ok(());
-        };
         if self.files.marks_wait() {
             return Err(reviewed::WAITS);
         }
-        let reviewed = !self.files.is_reviewed(path);
+        let Some(key) = self.files.key.clone() else {
+            return Err(reviewed::WAITS);
+        };
+        let was = self.files.is_reviewed(path);
+        let reviewed = !was;
         set_mark(Arc::make_mut(&mut self.files.reviewed), path, reviewed);
-        let sending = self
-            .sending
-            .entry(path.to_owned())
-            .or_insert(Sending { reviewed, open: 0 });
+        let sending = self.sending.entry(path.to_owned()).or_insert(Sending {
+            reviewed,
+            open: 0,
+            confirmed: was,
+            failure: None,
+        });
         sending.reviewed = reviewed;
         sending.open += 1;
         cx.emit(FileListEvent::MarksChanged);
@@ -519,6 +527,9 @@ impl FileList {
         Ok(())
     }
 
+    /// A request for the mark of `path` ended. Once none for it is open,
+    /// the mark shows what the server has (a failure puts it back) and the
+    /// last failure is said; while others are open, they decide.
     fn sent(
         &mut self,
         key: &FilesKey,
@@ -528,30 +539,59 @@ impl FileList {
         outcome: reviewed::Outcome,
         cx: &mut Context<Self>,
     ) {
-        if generation == self.generation
-            && let Some(sending) = self.sending.get_mut(path)
-        {
-            sending.open -= 1;
-            if sending.open == 0 {
-                self.sending.remove(path);
-            }
-        }
-        let (error, login) = match outcome {
-            reviewed::Outcome::Done => return,
+        let (failure, login) = match outcome {
+            reviewed::Outcome::Done => (None, false),
             reviewed::Outcome::Unauthorized => (None, true),
             reviewed::Outcome::Failed(e) => (Some(e), false),
         };
-        // Back to what the server has, unless another pair is shown now.
-        if self.files.key.as_ref() == Some(key) && self.files.is_reviewed(path) == reviewed {
-            set_mark(Arc::make_mut(&mut self.files.reviewed), path, !reviewed);
-            cx.emit(FileListEvent::MarksChanged);
-        }
-        if let Some(e) = error {
-            let note = reviewed::failure_note(path, reviewed, &e);
-            cx.emit(FileListEvent::ReviewedFailed(note));
-        }
         if login {
             cx.emit(FileListEvent::Unauthorized);
+        }
+        let worked = failure.is_none() && !login;
+        if generation != self.generation {
+            // From an earlier visit of the pair (the list was read again
+            // since): a failure puts the mark back, unless a request sent
+            // since covers it.
+            if !worked
+                && !self.sending.contains_key(path)
+                && self.files.key.as_ref() == Some(key)
+                && self.files.is_reviewed(path) == reviewed
+            {
+                set_mark(Arc::make_mut(&mut self.files.reviewed), path, !reviewed);
+                cx.emit(FileListEvent::MarksChanged);
+                if let Some(e) = failure {
+                    let note = reviewed::failure_note(path, reviewed, &e);
+                    cx.emit(FileListEvent::ReviewedFailed(note));
+                }
+            }
+            return;
+        }
+        let Some(sending) = self.sending.get_mut(path) else {
+            return;
+        };
+        sending.open -= 1;
+        if worked {
+            sending.confirmed = reviewed;
+        } else if let Some(e) = failure {
+            sending.failure = Some(e);
+        }
+        if sending.open > 0 {
+            return;
+        }
+        let Some(done) = self.sending.remove(path) else {
+            return;
+        };
+        if self.files.is_reviewed(path) != done.confirmed {
+            set_mark(
+                Arc::make_mut(&mut self.files.reviewed),
+                path,
+                done.confirmed,
+            );
+            cx.emit(FileListEvent::MarksChanged);
+            if let Some(e) = done.failure {
+                let note = reviewed::failure_note(path, done.reviewed, &e);
+                cx.emit(FileListEvent::ReviewedFailed(note));
+            }
         }
     }
 }

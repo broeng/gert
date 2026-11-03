@@ -389,7 +389,7 @@ fn a_401_on_the_mark_puts_it_back_and_goes_to_the_login_flow(cx: &mut TestAppCon
     });
     cx.run_until_parked();
     assert!(!s.files(cx).is_reviewed("src/a.rs"));
-    assert_eq!(s.events().last().map(String::as_str), Some("unauthorized"));
+    assert!(s.events().contains(&"unauthorized".to_owned()));
 }
 
 #[gpui_kit::test]
@@ -430,7 +430,33 @@ fn a_mark_waits_for_gerrits_list(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_failed_first_toggle_does_not_undo_the_second(cx: &mut TestAppContext) {
+fn a_failed_first_toggle_does_not_undo_the_third(cx: &mut TestAppContext) {
+    let http = RouteHttpClient::new();
+    // On (refused), off (works), on (refused).
+    http.route(PUT_A, 403, "not allowed");
+    http.route(
+        "DELETE /changes/7/revisions/sha1/files/src%2Fa.rs/reviewed",
+        204,
+        "",
+    );
+    let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
+    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
+    toggle(cx, &s, 3);
+    assert!(s.files(cx).is_reviewed("src/a.rs"));
+    cx.run_until_parked();
+    // The server has it off, as the DELETE left it; one note for the
+    // last refusal.
+    assert!(!s.files(cx).is_reviewed("src/a.rs"));
+    let failed = s
+        .events()
+        .iter()
+        .filter(|e| e.starts_with("failed: "))
+        .count();
+    assert_eq!(failed, 1);
+}
+
+#[gpui_kit::test]
+fn a_refusal_that_a_later_mark_covers_says_nothing(cx: &mut TestAppContext) {
     let http = RouteHttpClient::new();
     http.route(PUT_A, 403, "not allowed");
     http.route(
@@ -440,22 +466,21 @@ fn a_failed_first_toggle_does_not_undo_the_second(cx: &mut TestAppContext) {
     );
     let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
     s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
-    // On, then off again before the first answer.
-    for _ in 0..2 {
-        cx.update(|cx| {
-            s.list.update(cx, |l, cx| {
-                l.toggle_reviewed("src/a.rs", cx).expect("toggled")
-            })
-        });
-    }
+    // On (refused) then off (works): off is what was asked for last.
+    toggle(cx, &s, 2);
     cx.run_until_parked();
     assert!(!s.files(cx).is_reviewed("src/a.rs"));
-    let failed = s
-        .events()
-        .iter()
-        .filter(|e| e.starts_with("failed: "))
-        .count();
-    assert_eq!(failed, 1);
+    assert!(!s.events().iter().any(|e| e.starts_with("failed: ")));
+}
+
+fn toggle(cx: &mut TestAppContext, s: &Setup, times: usize) {
+    for _ in 0..times {
+        cx.update(|cx| {
+            s.list
+                .update(cx, |l, cx| l.toggle_reviewed("src/a.rs", cx))
+                .expect("toggled")
+        });
+    }
 }
 
 #[gpui_kit::test]
