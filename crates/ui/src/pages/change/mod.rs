@@ -337,6 +337,9 @@ pub struct ChangePage {
     /// The comments held from local reviews, as last read from `comments`
     /// (see [`held`]).
     held_drafts: Arc<Vec<model::Draft>>,
+    /// The project's `local_approval` as the held card last read it, for
+    /// which held votes may only be dropped.
+    held_setting: LocalApproval,
     /// The item the held card has selected; `None` is the first.
     held_cursor: Option<sync::HeldItem>,
     /// The held item a first "drop" asked about.
@@ -450,6 +453,7 @@ impl ChangePage {
             review_cursor: None,
             reviews_task: None,
             held_drafts: Arc::default(),
+            held_setting: LocalApproval::Exact,
             held_cursor: None,
             confirm_held: None,
             held_timer: None,

@@ -78,8 +78,13 @@ impl HeldRow {
 
 /// The rows of the held card: each held or failed review (in creation
 /// order) with its reason, its votes (by label) and its message, then the
-/// held comments in creation order.
-pub(super) fn held_rows(reviews: &[PendingReview], drafts: &[Draft]) -> Vec<HeldRow> {
+/// held comments in creation order. `drop_only` says which votes may only
+/// be dropped.
+pub(super) fn held_rows(
+    reviews: &[PendingReview],
+    drafts: &[Draft],
+    drop_only: impl Fn(&PendingReview, &str, i32) -> bool,
+) -> Vec<HeldRow> {
     let mut rows = Vec::new();
     for r in reviews.iter().filter(|r| {
         matches!(
@@ -96,7 +101,7 @@ pub(super) fn held_rows(reviews: &[PendingReview], drafts: &[Draft]) -> Vec<Held
                 review: r.clone(),
                 label: label.clone(),
                 value: *value,
-                drop_only: r.drop_only.contains(label),
+                drop_only: drop_only(r, label, *value),
             });
         }
         if r.message.as_deref().is_some_and(|m| !m.trim().is_empty()) {
@@ -136,9 +141,32 @@ fn published_text(row: &HeldRow, out: &HeldPublished) -> (String, bool) {
 }
 
 impl ChangePage {
-    /// The held card's rows (see [`held_rows`]).
+    /// The held card's rows (see [`held_rows`]). A vote may only be
+    /// dropped as `sync::held_vote_drop_only` judges it against Gerrit's
+    /// current patch set (also what `Syncer::publish_held` refuses), with
+    /// the project's `local_approval` as last read (`held_setting`); with
+    /// no Gerrit patch set to publish onto, as recorded.
     pub(super) fn held_rows(&self) -> Vec<HeldRow> {
-        held_rows(&self.reviews, &self.held_drafts)
+        let target = self.publish_target().and_then(|ps| {
+            self.detail
+                .as_ref()
+                .and_then(|d| d.revision(ps))
+                .map(|r| r.sha.clone())
+        });
+        let detail = self.detail.as_ref();
+        held_rows(&self.reviews, &self.held_drafts, |r, label, value| {
+            match (detail, &target) {
+                (Some(d), Some(sha)) => {
+                    sync::held_vote_drop_only(d, r, label, value, sha, self.held_setting)
+                }
+                _ => r.drop_only.contains(label),
+            }
+        })
+    }
+
+    /// Reads the project's `local_approval` again for the held card.
+    pub(super) fn read_held_setting(&mut self, cx: &App) {
+        self.held_setting = self.local_approval(cx);
     }
 
     /// The selected row: the one under the selection, else the first item.
@@ -273,6 +301,12 @@ impl ChangePage {
         let Some(item) = row.item() else {
             return;
         };
+        self.read_held_setting(cx);
+        // Judged again with the setting as it is now.
+        let Some(row) = self.held_row_by_item(&item) else {
+            return;
+        };
+        let row = &row;
         if let HeldRow::Vote {
             drop_only: true, ..
         } = row
@@ -294,9 +328,12 @@ impl ChangePage {
         let syncer = self.session.syncer().clone();
         let change = self.number;
         let row = row.clone();
+        let setting = self.held_setting;
         self.held_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { syncer.publish_held(change, onto, &[item]).await })
+                .background_spawn(async move {
+                    syncer.publish_held(change, onto, &[item], setting).await
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.held_task = None;
@@ -405,6 +442,7 @@ impl ChangePage {
     // ---- rendering ----
 
     pub(super) fn held_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.read_held_setting(cx);
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let rows = self.held_rows();
@@ -694,7 +732,9 @@ mod tests {
     fn rows_are_each_reviews_votes_and_message_then_the_comments() {
         let held = review(1, PendingReviewState::Held);
         let pending = review(2, PendingReviewState::Pending);
-        let rows = held_rows(&[held.clone(), pending], &[draft(5)]);
+        let rows = held_rows(&[held.clone(), pending], &[draft(5)], |r, l, _| {
+            r.drop_only.contains(l)
+        });
         let items: Vec<Option<HeldItem>> = rows.iter().map(HeldRow::item).collect();
         assert_eq!(
             items,
@@ -730,7 +770,7 @@ mod tests {
         let mut empty = review(3, PendingReviewState::Failed);
         empty.labels.clear();
         empty.message = None;
-        assert!(held_rows(&[empty], &[]).is_empty());
+        assert!(held_rows(&[empty], &[], |_, _, _| false).is_empty());
     }
 
     #[test]

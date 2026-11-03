@@ -34,7 +34,10 @@ fn held_closed(f: &Fx) -> (LocalChange, PendingReview, Draft) {
 }
 
 fn publish(f: &Fx, onto: u32, items: &[HeldItem]) -> Result<HeldPublished, Error> {
-    block_on(f.syncer.publish_held(CHANGE, PatchSetNumber(onto), items))
+    block_on(
+        f.syncer
+            .publish_held(CHANGE, PatchSetNumber(onto), items, LocalApproval::Exact),
+    )
 }
 
 fn vote(r: &PendingReview, label: &str) -> HeldItem {
@@ -396,4 +399,185 @@ fn quotes_say_where_a_comment_was() {
     );
     d.path = PATCHSET_LEVEL_PATH.into();
     assert_eq!(super::super::held::quote("local 1", &d), "On local 1: why?");
+}
+
+// ---- approvals that may not move ----
+
+/// Project `p` under `follow`.
+fn follow() -> ConsolidateOptions {
+    ConsolidateOptions {
+        local_approval: BTreeMap::from([("p".to_owned(), LocalApproval::Follow)]),
+        ..ConsolidateOptions::default()
+    }
+}
+
+/// The answer to a post that applies nothing.
+fn applies_nothing(f: &Fx, current: u32) {
+    f.posts_apply(json!({}), current);
+}
+
+#[test]
+fn a_non_exact_approval_on_a_closed_change_is_drop_only() {
+    // +2 given on l1, which never reached Gerrit; the change was merged
+    // with another commit (s9).
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), None, &["l1"]);
+    let r = f.review(&v[0], &[("Code-Review", 2), ("Verified", -1)], "");
+    f.query_finds(&[(7, "main", "MERGED")]);
+    f.gerrit("MERGED", &["s9"], json!([]));
+    f.run();
+    let r = f.reloaded(&r);
+    assert_eq!(r.state, PendingReviewState::Held);
+    // Recorded when held, from the change's labels.
+    assert_eq!(r.drop_only, ["Code-Review".to_owned()].into());
+    // And judged again at publish time, also for data held before that
+    // was recorded.
+    f.syncer
+        .store()
+        .set_held_drop_only(f.syncer.server, r.id, &BTreeSet::new())
+        .unwrap();
+    let e = publish(&f, 1, &[vote(&r, "Code-Review")]).unwrap_err();
+    assert!(
+        matches!(&e, Error::DropOnly(l) if l == "Code-Review"),
+        "{e}"
+    );
+    assert!(f.http.posts().is_empty());
+    // Not an approval: publishable.
+    f.posts_apply(json!({"Verified": -1}), 1);
+    publish(&f, 1, &[vote(&r, "Verified")]).unwrap();
+    assert_eq!(f.http.posts()[0]["labels"], json!({"Verified": -1}));
+}
+
+#[test]
+fn a_failed_approval_is_drop_only_once_the_patch_set_moved_on() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let r = f.review(&v[0], &[("Code-Review", 2)], "LGTM");
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.http.queue(
+        "POST /changes/7/revisions/",
+        403,
+        "Applying label \"Code-Review\": 2 is restricted",
+    );
+    applies_nothing(&f, 1);
+    f.run();
+    let r = f.reloaded(&r);
+    assert_eq!(r.state, PendingReviewState::Failed);
+    // PS 2 is uploaded: the +2 was given on PS 1.
+    f.gerrit("NEW", &["s1", "s2"], json!([]));
+    let posts = f.http.posts().len();
+    let e = publish(&f, 2, &[vote(&r, "Code-Review")]).unwrap_err();
+    assert!(matches!(&e, Error::DropOnly(_)), "{e}");
+    assert_eq!(f.http.posts().len(), posts);
+    // Dropping works.
+    assert!(f.syncer.drop_held(&vote(&r, "Code-Review")).unwrap());
+}
+
+#[test]
+fn another_accounts_approval_is_drop_only_once_moved_on() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let server = f.syncer.server;
+    f.syncer
+        .store()
+        .set_account(server, AccountId(2000), Some("other"), None)
+        .unwrap();
+    let r = f.review(&v[0], &[("Code-Review", 2)], "");
+    f.syncer
+        .store()
+        .set_account(server, AccountId(ME), Some("me"), None)
+        .unwrap();
+    f.gerrit("NEW", &["s1"], json!([]));
+    applies_nothing(&f, 1);
+    f.run();
+    let r = f.reloaded(&r);
+    assert_eq!(r.state, PendingReviewState::Held);
+    // Given on PS 1: not publishable once PS 2 is current.
+    f.gerrit("NEW", &["s1", "s2"], json!([]));
+    let e = publish(&f, 2, &[vote(&r, "Code-Review")]).unwrap_err();
+    assert!(matches!(&e, Error::DropOnly(_)), "{e}");
+    assert!(f.http.posts().is_empty());
+}
+
+#[test]
+fn a_purely_local_approval_under_follow_may_still_be_published() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), None, &["l1"]);
+    // Given long before Gerrit's change was created (2024-01-01).
+    let r = f.review_with(
+        &v[0],
+        &[("Code-Review", 2)],
+        "",
+        LocalApproval::Follow,
+        ts("2023-06-01T00:00:00Z"),
+    );
+    f.query_finds(&[(7, "main", "MERGED")]);
+    f.gerrit("MERGED", &["s9"], json!([]));
+    f.run_with(&follow());
+    let r = f.reloaded(&r);
+    assert!(r.drop_only.is_empty(), "{:?}", r.drop_only);
+    // `exact` now for the project: the stricter wins.
+    let e = block_on(f.syncer.publish_held(
+        CHANGE,
+        PatchSetNumber(1),
+        &[vote(&r, "Code-Review")],
+        LocalApproval::Exact,
+    ))
+    .unwrap_err();
+    assert!(matches!(&e, Error::DropOnly(_)), "{e}");
+    f.posts_apply(json!({"Code-Review": 2}), 1);
+    block_on(f.syncer.publish_held(
+        CHANGE,
+        PatchSetNumber(1),
+        &[vote(&r, "Code-Review")],
+        LocalApproval::Follow,
+    ))
+    .unwrap();
+    assert_eq!(f.http.posts()[0]["labels"], json!({"Code-Review": 2}));
+}
+
+#[test]
+fn a_publish_that_fails_keeps_where_its_votes_were_given() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), None, &["l1"]);
+    let r = f.review_with(
+        &v[0],
+        &[("Code-Review", 2)],
+        "",
+        LocalApproval::Follow,
+        ts("2023-06-01T00:00:00Z"),
+    );
+    f.query_finds(&[(7, "main", "MERGED")]);
+    f.gerrit("MERGED", &["s9"], json!([]));
+    f.run_with(&follow());
+    let r = f.reloaded(&r);
+    f.http
+        .queue("POST /changes/7/revisions/", 403, "not permitted");
+    let out = block_on(f.syncer.publish_held(
+        CHANGE,
+        PatchSetNumber(1),
+        &[vote(&r, "Code-Review")],
+        LocalApproval::Follow,
+    ))
+    .unwrap();
+    assert!(matches!(out.outcome, PostOutcome::Refused { .. }));
+    let failed = f.syncer.held_items(CHANGE).unwrap().reviews.remove(0);
+    assert_eq!(
+        (
+            failed.given_on_sha.clone(),
+            failed.voted_at,
+            failed.strategy
+        ),
+        (r.given_on_sha.clone(), r.voted_at, r.strategy)
+    );
+    // Still publishable under follow, still not under exact.
+    assert!(matches!(
+        block_on(f.syncer.publish_held(
+            CHANGE,
+            PatchSetNumber(1),
+            &[vote(&failed, "Code-Review")],
+            LocalApproval::Exact,
+        )),
+        Err(Error::DropOnly(_))
+    ));
 }

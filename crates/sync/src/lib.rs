@@ -28,4 +28,5 @@ pub use syncer::{
     ConsolidationTiming, DraftCounts, DraftSave, FoundChange, HeldItem, HeldPublished, NewChange,
     POST_DEADLINE, Ported, PostOutcome, PostReport, PublishOutcome, QueryUpdate, RefreshSource,
     RetryReport, ReviewerAdded, SLOW_RECHECK, StopFlag, Syncer, WatchOptions, held_place,
+    held_vote_drop_only,
 };

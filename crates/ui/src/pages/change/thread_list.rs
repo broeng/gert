@@ -49,6 +49,7 @@ impl ChangePage {
         self.threads = self.comments.read(cx).threads();
         self.reviews = self.comments.read(cx).reviews();
         self.held_drafts = self.comments.read(cx).held_drafts();
+        self.read_held_setting(cx);
         self.held_changed();
         self.remeasure(Block::PendingReviews);
         self.remeasure(Block::Held);

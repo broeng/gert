@@ -1453,8 +1453,11 @@ fn a_held_publish_is_claimed_as_a_post_of_its_own() {
         (Sending, ChangeNumber(42), PatchSetNumber(3), Some("n1"))
     );
     assert_eq!(new.labels, BTreeMap::from([("Verified".to_owned(), 1)]));
-    // Given on the commit it is published to: an exact match.
-    assert_eq!(new.given_on_sha, gerrit_ps(3).sha);
+    // Where, when and how the votes were given stays.
+    assert_eq!(
+        (new.given_on_sha.clone(), new.voted_at, new.strategy),
+        (r.given_on_sha.clone(), r.voted_at, r.strategy)
+    );
     assert_eq!(new.message.as_deref(), Some("LGTM"));
     assert_eq!(post.drafts.len(), 2);
     let comment = s.load_draft(id, d.local_id).unwrap().unwrap();

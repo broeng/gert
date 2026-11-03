@@ -439,7 +439,7 @@ pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
 pub use consolidate::{
     CLAIM_STALE, ConsolidateOptions, ConsolidateReport, ConsolidationTiming, FoundChange, HeldItem,
     HeldPublished, POST_DEADLINE, Ported, PostOutcome, PostReport, SLOW_RECHECK, StopFlag,
-    held_place,
+    held_place, held_vote_drop_only,
 };
 pub use edits::ReviewerAdded;
 pub use local::ChainCommit;

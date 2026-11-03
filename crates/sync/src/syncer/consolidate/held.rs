@@ -18,9 +18,13 @@
 //! run on that server (in this process or another): while one runs, it
 //! refuses with [`Error::ConsolidationBusy`] and sends nothing.
 //!
-//! An approval held as drop-only ("approvals are only sent on the exact
+//! An approval that may not move ("approvals are only sent on the exact
 //! commit they were given on") is never published: [`Error::DropOnly`],
-//! before anything is sent, whatever the caller asks.
+//! before anything is sent, whatever the caller asks. Which votes those are
+//! is judged by [`held_vote_drop_only`] from the change as it is right
+//! before the post (an approval given on another commit, unless purely
+//! local under a strategy that lets it move), whatever was recorded when
+//! the vote was held; the held card shows the same.
 
 use model::{COMMIT_MSG_PATH, Draft, Location, MERGE_LIST_PATH, PATCHSET_LEVEL_PATH, PatchSetRef};
 use store::{HeldItems, HeldPublish};
@@ -99,8 +103,10 @@ impl Syncer {
     /// patch set `onto`, at the user's request (see the module
     /// documentation). The items must belong to one local change.
     ///
-    /// Checked first, before anything is sent: a drop-only vote fails with
-    /// [`Error::DropOnly`]; another consolidation run on the server with
+    /// `setting` is the project's `local_approval` now (`exact` without an
+    /// entry). Checked first, before anything is sent: a vote that may
+    /// only be dropped ([`held_vote_drop_only`], as recorded and again
+    /// against the fresh change) fails with [`Error::DropOnly`]; another consolidation run on the server with
     /// [`Error::ConsolidationBusy`]; `onto` no longer being Gerrit's
     /// current patch set (asked right before the post) with
     /// [`Error::NotCurrent`]; an item that is no longer held, or items of
@@ -114,6 +120,7 @@ impl Syncer {
         gerrit: ChangeNumber,
         onto: PatchSetNumber,
         items: &[HeldItem],
+        setting: LocalApproval,
     ) -> Result<HeldPublished, Error> {
         if gerrit.is_local() || onto.is_local() {
             return Err(ApiError::LocalNumber(format!("change {gerrit}, patch set {onto}")).into());
@@ -145,7 +152,7 @@ impl Syncer {
             Err(e) => return Err(e),
         }
         let result = self
-            .publish_held_leased(gerrit, onto, items, &held, &owner)
+            .publish_held_leased(gerrit, onto, items, &held, &owner, setting)
             .await;
         if let Err(e) = self.store().end_consolidation_lease(self.server, &owner) {
             log::warn!("ending the consolidation lease: {e}");
@@ -160,6 +167,7 @@ impl Syncer {
         items: &[HeldItem],
         held: &HeldItems,
         owner: &str,
+        setting: LocalApproval,
     ) -> Result<HeldPublished, Error> {
         let local_change = self.owner_of(items, held)?;
         // Is `onto` current? Asked right before the post.
@@ -173,6 +181,17 @@ impl Syncer {
         }
         let rev = detail.revision(current).ok_or(Error::HeldChanged)?.clone();
         self.ensure_on_server(&rev.sha)?;
+        // An approval that may not move is refused, judged from the change
+        // as it is now, also if nothing marked it when it was held.
+        for item in items {
+            if let HeldItem::Vote { review, label } = item
+                && let Some(r) = held.reviews.iter().find(|r| r.id == *review)
+                && let Some(value) = r.labels.get(label)
+                && held_vote_drop_only(&detail, r, label, *value, &rev.sha, setting)
+            {
+                return Err(Error::DropOnly(label.clone()));
+            }
+        }
         let mut publish = HeldPublish {
             local_change,
             gerrit,

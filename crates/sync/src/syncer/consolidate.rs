@@ -518,11 +518,16 @@ impl Settled {
     }
 
     fn failed(votes: Votes, error: String) -> Self {
+        Self::failed_with(votes, error, BTreeSet::new())
+    }
+
+    /// Failed, with the labels of `votes` that may only be dropped.
+    fn failed_with(votes: Votes, error: String, drop_only: BTreeSet<String>) -> Self {
         Self {
             state: PendingReviewState::Failed,
             note: Some(error.clone()),
             keep: votes.clone(),
-            drop_only: BTreeSet::new(),
+            drop_only,
             outcome: PostOutcome::VotesFailed { votes, error },
         }
     }
@@ -859,7 +864,7 @@ impl Syncer {
                 // Learn whether it was merged or abandoned.
                 let held = match self.refresh_change(number).await {
                     Ok(detail) if detail.summary.status != ChangeStatus::New => {
-                        self.hold_closed(row, number, &detail.summary.status, run)
+                        self.hold_closed(row, number, &detail, run)
                     }
                     Ok(_) => Ok(()),
                     Err(e) => Err(e.into()),
@@ -1045,7 +1050,7 @@ impl Syncer {
     ) -> Result<(), Problem> {
         if lite.summary.status != ChangeStatus::New {
             // Every time: whatever was written since is held too.
-            return self.hold_closed(row, number, &lite.summary.status, run);
+            return self.hold_closed(row, number, lite, run);
         }
         if row.state == LocalChangeState::Closed {
             // Restored: the Gerrit state is open again, but what was held
@@ -1079,7 +1084,7 @@ impl Syncer {
         if newly_pushed || data.exact_work(&shas) || data.moved_sendable() || port_work {
             let detail = self.refresh_change(number).await?;
             if detail.summary.status != ChangeStatus::New {
-                return self.hold_closed(row, number, &detail.summary.status, run);
+                return self.hold_closed(row, number, &detail, run);
             }
             self.consolidate_open(row, number, detail, run).await
         } else {
@@ -1097,32 +1102,34 @@ impl Syncer {
     ) -> Result<(), Problem> {
         run.report.found.push(found(row, number));
         if detail.summary.status != ChangeStatus::New {
-            return self.hold_closed(row, number, &detail.summary.status, run);
+            return self.hold_closed(row, number, &detail, run);
         }
         self.consolidate_open(row, number, detail, run).await
     }
 
-    /// Holds everything of a change found merged or abandoned.
+    /// Holds everything of a change found merged or abandoned, its
+    /// approvals that may not move as drop-only (judged from `detail`).
     fn hold_closed(
         &self,
         row: &LocalChange,
         number: ChangeNumber,
-        status: &ChangeStatus,
+        detail: &ChangeDetail,
         run: &mut Run<'_>,
     ) -> Result<(), Problem> {
-        let reason = match status {
+        let reason = match &detail.summary.status {
             ChangeStatus::Merged => "change merged".to_owned(),
             ChangeStatus::Abandoned => "change abandoned".to_owned(),
             other => format!("change {}", other.to_string().to_lowercase()),
         };
-        match self
+        let held = self
             .store()
-            .hold_closed_local_change(self.server, row.id, number, &reason)
-        {
+            .hold_closed_local_change(self.server, row.id, number, &reason);
+        match held {
             Ok(Some((reviews, drafts))) => {
                 if row.state != LocalChangeState::Closed || reviews + drafts > 0 {
                     run.report.closed.push((row.id, number));
                 }
+                self.mark_drop_only(row, number, detail, run.options)?;
                 Ok(())
             }
             Ok(None) => Ok(()),
@@ -1509,7 +1516,7 @@ impl Syncer {
             .into_iter()
             .partition(|r| r.author.is_none_or(|a| a == run.me));
         for r in &foreign {
-            self.hold_foreign(row, number, r, run)?;
+            self.hold_foreign(row, number, detail, r, run)?;
         }
         self.supersede(row, number, detail, &reviews, current, run.options)?;
         let mut revisions: BTreeSet<PatchSetNumber> = reviews.iter().map(|r| r.patch_set).collect();
@@ -1589,6 +1596,39 @@ impl Syncer {
         Ok(())
     }
 
+    /// Records which votes of `row`'s held and failed reviews on `number`
+    /// may only be dropped, as [`held_vote_drop_only`] judges them against
+    /// `detail`'s current patch set. Skipped when `detail` does not say the
+    /// labels' values (a batch query's answer): the held card and
+    /// [`Syncer::publish_held`] judge again from the change as it is then.
+    fn mark_drop_only(
+        &self,
+        row: &LocalChange,
+        number: ChangeNumber,
+        detail: &ChangeDetail,
+        options: &ConsolidateOptions,
+    ) -> Result<(), Problem> {
+        if detail.label_values.is_empty() {
+            return Ok(());
+        }
+        let mut store = self.store();
+        for r in store.pending_reviews_of_local_change(self.server, row.id)? {
+            if r.change != number
+                || !matches!(
+                    r.state,
+                    PendingReviewState::Held | PendingReviewState::Failed
+                )
+            {
+                continue;
+            }
+            let drop_only = drop_only_now(row, detail, &r, options);
+            if drop_only != r.drop_only {
+                store.set_held_drop_only(self.server, r.id, &drop_only)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Holds pending review `r`, written while another account was signed
     /// in: the run's account does not send it on its own. The user may
     /// publish it from the held card (then as the account signed in now),
@@ -1597,17 +1637,20 @@ impl Syncer {
         &self,
         row: &LocalChange,
         number: ChangeNumber,
+        detail: &ChangeDetail,
         r: &PendingReview,
         run: &mut Run<'_>,
     ) -> Result<(), Problem> {
         let reason = foreign_reason(r);
-        let held = self.store().set_pending_review_state(
-            self.server,
+        let mut change = ReviewStateChange::new(
             r.id,
             &[PendingReviewState::Pending],
             PendingReviewState::Held,
-            Some(&reason),
-        )?;
+            Some(reason.clone()),
+        );
+        change.drop_only = drop_only_now(row, detail, r, run.options);
+        let drop_only: Vec<String> = change.drop_only.iter().cloned().collect();
+        let held = self.store().apply_review_state(self.server, &change)?;
         if held {
             run.report.posts.push(PostReport {
                 local_change: row.id,
@@ -1619,7 +1662,7 @@ impl Syncer {
                 recovered: false,
                 outcome: PostOutcome::VotesHeld {
                     votes: r.labels.clone().into_iter().collect(),
-                    drop_only: Vec::new(),
+                    drop_only,
                     reason,
                 },
             });
@@ -1779,7 +1822,10 @@ impl Syncer {
             Err(e) if !input.labels.is_empty() && is_vote_refusal(&e) => {
                 // Votes never sink comments: the same post without them,
                 // under the same claim and tag.
-                let failed = Settled::failed(sent_votes.clone(), refusal_text(&e));
+                let drop_only = review
+                    .map(|r| drop_only_now(row, detail, r, run.options))
+                    .unwrap_or_default();
+                let failed = Settled::failed_with(sent_votes.clone(), refusal_text(&e), drop_only);
                 let bare = ReviewInput {
                     labels: BTreeMap::new(),
                     ..input.clone()
@@ -2667,6 +2713,60 @@ fn foreign_reason(r: &PendingReview) -> String {
         "written while signed in as {who}; it is sent only by that account, or published from \
          here"
     )
+}
+
+/// Whether held vote `label` = `value` of `review` may only be dropped
+/// rather than published onto `target`, a patch set of `detail`: it is
+/// already marked so ([`PendingReview::drop_only`]), or it is an approval
+/// (the label's highest positive value on `detail`) given on another
+/// commit than `target`, unless the review is purely local (its votes
+/// were given before the change was on Gerrit) and the stricter of its
+/// `local_approval` snapshot and `setting` (the project's now) lets
+/// approvals move (anything but `exact`). The held card shows it and
+/// [`Syncer::publish_held`] refuses by it, so the strict rule and `exact`
+/// hold however the review came to be held.
+pub fn held_vote_drop_only(
+    detail: &ChangeDetail,
+    review: &PendingReview,
+    label: &str,
+    value: i32,
+    target: &RevisionId,
+    setting: LocalApproval,
+) -> bool {
+    review.drop_only.contains(label)
+        || (is_approval(detail, label, value)
+            && review.given_on_sha != *target
+            && !(purely_local(detail, review)
+                && review.strategy.max(setting) != LocalApproval::Exact))
+}
+
+/// The labels of `review`'s votes that may only be dropped as things are
+/// now: [`held_vote_drop_only`] against `detail`'s current patch set, with
+/// the project's setting from `options`.
+fn drop_only_now(
+    row: &LocalChange,
+    detail: &ChangeDetail,
+    review: &PendingReview,
+    options: &ConsolidateOptions,
+) -> BTreeSet<String> {
+    let Some(target) = detail
+        .current_patch_set
+        .and_then(|ps| detail.revision(ps))
+        .map(|r| r.sha.clone())
+    else {
+        return review.drop_only.clone();
+    };
+    let setting = options
+        .local_approval
+        .get(&row.project)
+        .copied()
+        .unwrap_or(LocalApproval::Exact);
+    review
+        .labels
+        .iter()
+        .filter(|(l, v)| held_vote_drop_only(detail, review, l, **v, &target, setting))
+        .map(|(l, _)| l.clone())
+        .collect()
 }
 
 /// The labels of `votes` that may only be dropped when held: approvals

@@ -217,7 +217,11 @@ pub(crate) fn apply_change(
             params![server.0, change.review.0, serde_json::to_string(labels)?],
         )?;
     }
-    if change.state == PendingReviewState::Held && !change.drop_only.is_empty() {
+    if matches!(
+        change.state,
+        PendingReviewState::Held | PendingReviewState::Failed
+    ) && !change.drop_only.is_empty()
+    {
         conn.execute(
             "UPDATE pending_reviews SET drop_only = ?3 WHERE server_id = ?1 AND id = ?2",
             params![
@@ -554,6 +558,60 @@ impl Store {
         let moved = transition(&tx, server, id, None, from, to, note)?;
         tx.commit()?;
         Ok(moved)
+    }
+
+    /// Applies `change` (see [`crate::ReviewStateChange`]) to review
+    /// `change.review`: the transition, the votes it keeps and, held or
+    /// failed, which may only be dropped. False if it is gone or in none of
+    /// the states `change.from`.
+    pub fn apply_review_state(
+        &mut self,
+        server: ServerId,
+        change: &crate::ReviewStateChange,
+    ) -> Result<bool, Error> {
+        let tx = self.conn.transaction()?;
+        let moved = apply_change(&tx, server, None, change)?;
+        tx.commit()?;
+        Ok(moved)
+    }
+
+    /// Records which votes of a held or failed review may only be dropped
+    /// (labels it has no vote on are left out). False if the review is gone
+    /// or in another state.
+    pub fn set_held_drop_only(
+        &mut self,
+        server: ServerId,
+        id: PendingReviewId,
+        drop_only: &std::collections::BTreeSet<String>,
+    ) -> Result<bool, Error> {
+        let tx = self.conn.transaction()?;
+        let Some(r) = load(&tx, server, id)? else {
+            return Ok(false);
+        };
+        if !matches!(
+            r.state,
+            PendingReviewState::Held | PendingReviewState::Failed
+        ) {
+            return Ok(false);
+        }
+        let kept: std::collections::BTreeSet<&String> = drop_only
+            .iter()
+            .filter(|l| r.labels.contains_key(*l))
+            .collect();
+        tx.execute(
+            "UPDATE pending_reviews SET drop_only = ?3 WHERE server_id = ?1 AND id = ?2",
+            params![
+                server.0,
+                id.0,
+                if kept.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&kept)?)
+                }
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Gives one label's vote in a review that is still `Pending` (a quick

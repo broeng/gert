@@ -12,6 +12,13 @@ use super::*;
 /// comment on `src/a.rs` line 7 are held. Its page, signed in; posts are
 /// answered with Verified +1 applied.
 fn held_page(cx: &mut TestAppContext, merged: bool) -> (Fixture, Checkout) {
+    held_page_with(cx, merged, true)
+}
+
+/// Like [`held_page`]; with `recorded` false nothing marked the approval
+/// drop-only when it was held (as for data held before that was
+/// recorded): the card judges it from the change.
+fn held_page_with(cx: &mut TestAppContext, merged: bool, recorded: bool) -> (Fixture, Checkout) {
     let ck = checkout();
     let mut store = store_with(
         &[row(
@@ -83,7 +90,9 @@ fn held_page(cx: &mut TestAppContext, merged: bool) -> (Fixture, Checkout) {
         PendingReviewState::Held,
         Some("Your local version never reached Gerrit".into()),
     );
-    held.drop_only = ["Code-Review".to_owned()].into();
+    if recorded {
+        held.drop_only = ["Code-Review".to_owned()].into();
+    }
     store
         .rewrite_local_change(
             SERVER,
@@ -104,6 +113,13 @@ fn held_page(cx: &mut TestAppContext, merged: bool) -> (Fixture, Checkout) {
     } else {
         change_7(3)
     };
+    // The change's labels, so the page knows which vote is an approval.
+    let mut detail: Value = serde_json::from_str(&detail).expect("json");
+    detail["labels"] = json!({
+        "Code-Review": {"values": {"-2": "", "-1": "", " 0": "", "+1": "", "+2": ""}},
+        "Verified": {"values": {"-1": "", " 0": "", "+1": "", "+2": ""}},
+    });
+    let detail = detail.to_string();
     let f = page(cx, store, ChangeNumber(7), &ck, |http| {
         http.route_json("/changes/7?", &detail);
         http.route_json(
@@ -288,5 +304,18 @@ fn a_merged_change_says_published_votes_are_post_submit_votes(cx: &mut TestAppCo
     assert_eq!(posts.len(), 1);
     assert!(posts[0].0.contains("/revisions/sha3/review"));
     assert_eq!(posts[0].1["labels"], json!({"Verified": 1}));
+    f.assert_no_local_in_bodies(&ck);
+}
+
+#[gpui_kit::test]
+fn an_approval_given_on_another_commit_is_drop_only_whatever_was_recorded(cx: &mut TestAppContext) {
+    let (f, ck) = held_page_with(cx, false, false);
+    let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
+    visual.run_until_parked();
+    // The +2 was given on the local version, not on PS 3: drop only.
+    assert!(visual.debug_bounds("held-drop-only").is_some());
+    f.chord(cx, "w s");
+    assert!(f.hint(cx).is_some_and(|h| h.contains("only be dropped")));
+    assert!(f.review_posts().is_empty());
     f.assert_no_local_in_bodies(&ck);
 }

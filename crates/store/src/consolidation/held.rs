@@ -5,8 +5,9 @@
 //! idempotent and recovered the same way after a crash.
 //! [`Store::claim_held_publish`] turns the selection, in one transaction,
 //! into a new pending review in state `Sending` on the change's current
-//! patch set, whose votes are the selected votes (given on that very
-//! commit: the user chose to publish them there), whose message is the
+//! patch set, whose votes are the selected votes (keeping where, when and
+//! under which strategy they were given, so the approval rules judge them
+//! as before should the post fail), whose message is the
 //! selected review message, and whose inline comments are the selected
 //! held comments, rewritten as patch-set-level comments (their text is the
 //! caller's, quoting where they were). Everything carries the post's nonce
@@ -45,7 +46,8 @@ pub struct HeldPublish {
     /// Held comments with the text they are posted with, as a
     /// patch-set-level comment.
     pub comments: Vec<(LocalDraftId, String)>,
-    /// The new review's `created` and `voted_at`.
+    /// The new review's `created` (and `voted_at` when it carries no
+    /// votes).
     pub at: Timestamp,
 }
 
@@ -262,10 +264,25 @@ impl Store {
         let (change, gerrit) = (Some(p.local_change), Some(p.gerrit));
         // Check everything before writing anything.
         let mut votes: BTreeMap<String, i32> = BTreeMap::new();
+        // Where the votes were given, when and under which strategy: the
+        // new review keeps it, so the approval rules judge it as before
+        // (should it fail and be held again).
+        let mut origin: Option<(String, i64, String)> = None;
         for (id, label) in &p.votes {
             let Some(r) = held_review(&tx, server, *id, change, gerrit)? else {
                 return Ok(None);
             };
+            let this = (
+                r.given_on_sha.as_str().to_owned(),
+                crate::review_cache::millis(r.voted_at),
+                r.strategy.as_str().to_owned(),
+            );
+            if origin.as_ref().is_some_and(|o| *o != this) {
+                // Votes given on different commits or at different times
+                // do not go in one post.
+                return Ok(None);
+            }
+            origin = Some(this);
             if r.drop_only.contains(label) {
                 return Err(Error::DropOnly(label.clone()));
             }
@@ -291,12 +308,19 @@ impl Store {
         }
 
         let at = crate::review_cache::millis(p.at);
+        let (given_on, voted_at, strategy) = origin.unwrap_or_else(|| {
+            (
+                p.to.sha.as_str().to_owned(),
+                at,
+                model::LocalApproval::Exact.as_str().to_owned(),
+            )
+        });
         // By the account that publishes it: the signed-in one.
         let inserted = tx.execute(
             "INSERT INTO pending_reviews (server_id, local_change_id, change_number, patch_set,
                  revision_sha, given_on_sha, labels, strategy, state, created_ms, voted_at_ms,
                  nonce, author_id, author_name)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, 'sending', ?8, ?8, ?9, account_id,
+             SELECT ?1, ?2, ?3, ?4, ?5, ?10, ?6, ?7, 'sending', ?8, ?11, ?9, account_id,
                  account_username
              FROM servers WHERE id = ?1",
             params![
@@ -306,9 +330,11 @@ impl Store {
                 p.to.number.0,
                 p.to.sha.as_str(),
                 serde_json::to_string(&votes)?,
-                model::LocalApproval::Exact.as_str(),
+                strategy,
                 at,
-                nonce
+                nonce,
+                given_on,
+                voted_at
             ],
         )?;
         if inserted == 0 {
