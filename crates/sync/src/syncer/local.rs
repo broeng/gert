@@ -244,11 +244,17 @@ impl Syncer {
                             None => continue,
                         }
                     }
-                    (None, _) => ChainCommit::Local {
-                        change: row.number,
-                        patch_set: v.number,
-                        ordinal: v.ordinal,
-                    },
+                    (None, _) => {
+                        // The change page shows the newest version unless
+                        // told otherwise.
+                        let all = store.local_patch_sets(self.server, row.id)?;
+                        ChainCommit::Local {
+                            change: row.number,
+                            patch_set: v.number,
+                            ordinal: v.ordinal,
+                            newest: all.last().is_some_and(|w| w.id == v.id),
+                        }
+                    }
                 };
                 break;
             }
@@ -290,11 +296,14 @@ impl Syncer {
 /// [`Syncer::classify_chain`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChainCommit {
-    /// Version `ordinal` ("local 2") of local change `change`.
+    /// Version `ordinal` ("local 2") of local change `change`; `newest`
+    /// when it is the change's newest version (the one its page shows by
+    /// default).
     Local {
         change: ChangeNumber,
         patch_set: PatchSetNumber,
         ordinal: u32,
+        newest: bool,
     },
     /// Local version `ordinal` of Gerrit change `change`: not a patch set
     /// on Gerrit.

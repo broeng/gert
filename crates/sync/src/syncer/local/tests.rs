@@ -512,6 +512,7 @@ fn chain_commits_are_told_apart_from_the_store() {
             change: own.number,
             patch_set: own_versions[0].number,
             ordinal: 1,
+            newest: true,
         }
     );
     assert_eq!(
@@ -573,4 +574,142 @@ fn chain_commits_are_told_apart_from_the_store() {
         "{kinds:?}"
     );
     assert_eq!(http.requests().len(), 1);
+}
+
+/// A change as the server sends it: Change-Id `I2`, one patch set whose
+/// commit is `sha`.
+fn change_on(number: u64, branch: &str, sha: &str) -> String {
+    let body = json!({
+        "_number": number, "branch": branch, "change_id": "I2", "project": "p",
+        "created": "2024-02-01 09:59:32.126000000", "owner": {"_account_id": 1},
+        "status": "NEW", "subject": "s", "updated": "2024-02-01 10:00:00.000000000",
+        "mergeable": true, "current_revision": sha,
+        "revisions": {sha: {"_number": 1}}
+    });
+    format!(")]}}'\n{body}")
+}
+
+fn upsert(
+    change_id: &str,
+    gerrit: Option<ChangeNumber>,
+    state: LocalChangeState,
+    sha: &str,
+) -> store::LocalOp {
+    store::LocalOp::Upsert(store::LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: change_id.into(),
+        gerrit_number: gerrit,
+        subject: "s".into(),
+        author_name: "Me".into(),
+        author_email: "me@example.com".into(),
+        updated: Timestamp::now(),
+        state: Some(state),
+        patch_sets: vec![store::NewLocalPatchSet {
+            sha: sha.into(),
+            parent_sha: None,
+            seen_at: Timestamp::now(),
+        }],
+    })
+}
+
+#[test]
+fn chain_commits_in_the_corners() {
+    let (http, syncer) = syncer();
+    // The same Change-Id on two branches: 42 on main, 43 on stable.
+    http.push_response(200, change_on(42, "main", "pushed"));
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    http.push_response(200, change_on(43, "stable", "on-stable"));
+    block_on(syncer.refresh_change(ChangeNumber(43))).unwrap();
+    // I1: a local change amended once; I5: versions of 55 (not cached),
+    // one mapped to its patch set 3; I6: versions of 66, consolidated.
+    let server = syncer.server;
+    let apply = |op| {
+        syncer
+            .store()
+            .reconcile_local(server, "p", &[op], Timestamp::now())
+            .unwrap()
+    };
+    apply(upsert("I1", None, LocalChangeState::Local, "v1"));
+    apply(upsert("I1", None, LocalChangeState::Local, "v2"));
+    apply(upsert(
+        "I5",
+        Some(ChangeNumber(55)),
+        LocalChangeState::Local,
+        "m5",
+    ));
+    let m5 = syncer
+        .store()
+        .local_patch_sets_by_sha(server, &"m5".into())
+        .unwrap()
+        .remove(0);
+    let report = apply(store::LocalOp::MapPatchSet {
+        patch_set: m5.id,
+        gerrit_patch_set: PatchSetNumber(3),
+    });
+    assert_eq!(report.patch_sets_mapped, 1);
+    apply(upsert(
+        "I6",
+        Some(ChangeNumber(66)),
+        LocalChangeState::Consolidated,
+        "x6",
+    ));
+    let i6 = syncer
+        .store()
+        .local_changes_by_change_id(server, "I6")
+        .unwrap()
+        .remove(0);
+    assert_eq!(i6.state, LocalChangeState::Consolidated);
+
+    let chain: Vec<CommitInfo> = ["v1", "v2", "m5", "x6", "on-stable", "pushed"]
+        .iter()
+        .map(|sha| commit(sha, "I2").commit)
+        .collect();
+    let kinds = syncer.classify_chain("p", &chain).unwrap();
+    // The older version of I1 is not its newest; the newer one is.
+    assert!(
+        matches!(
+            kinds[0],
+            ChainCommit::Local {
+                ordinal: 1,
+                newest: false,
+                ..
+            }
+        ),
+        "{:?}",
+        kinds[0]
+    );
+    assert!(
+        matches!(
+            kinds[1],
+            ChainCommit::Local {
+                ordinal: 2,
+                newest: true,
+                ..
+            }
+        ),
+        "{:?}",
+        kinds[1]
+    );
+    // Mapped while 55 is not cached: its patch set, nothing else known.
+    assert_eq!(
+        kinds[2],
+        ChainCommit::Gerrit {
+            change: ChangeNumber(55),
+            patch_set: PatchSetNumber(3),
+            current: None,
+            summary: None,
+        }
+    );
+    // What was on a consolidated row's versions moved to its change.
+    assert_eq!(kinds[3], ChainCommit::Unknown);
+    // Matched by commit, not by Change-Id: the right branch's change.
+    for (kind, number) in [(&kinds[4], 43), (&kinds[5], 42)] {
+        assert!(
+            matches!(kind, ChainCommit::Gerrit { change, patch_set: PatchSetNumber(1), .. }
+                if *change == ChangeNumber(number)),
+            "{kind:?}"
+        );
+    }
+    assert_eq!(http.requests().len(), 2);
 }

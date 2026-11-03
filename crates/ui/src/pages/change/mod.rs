@@ -1212,7 +1212,21 @@ impl ChangePage {
             .map(|e| {
                 let this = e.commit.sha == *sha;
                 let (open, related) = match &e.kind {
-                    ChainCommit::Local { change, .. } => (Some(ChainOpen::Change(*change)), None),
+                    // An older version (something may be built on it) at
+                    // that version; the newest is what the page shows anyway.
+                    ChainCommit::Local {
+                        change,
+                        patch_set,
+                        newest,
+                        ..
+                    } => {
+                        let open = if *newest {
+                            ChainOpen::Change(*change)
+                        } else {
+                            ChainOpen::At(*change, *patch_set)
+                        };
+                        (Some(open), None)
+                    }
                     ChainCommit::LocalVersion {
                         change, patch_set, ..
                     } => (Some(ChainOpen::At(*change, *patch_set)), None),
@@ -2099,19 +2113,26 @@ impl ChangePage {
         cx.notify();
     }
 
-    /// Opens the change `delta` rows further down the relation chain (the
-    /// list is newest descendant first), replacing the history entry. Does
-    /// nothing at the ends, or when this change is not in the chain.
+    /// Opens the nearest change in the direction of `delta` (1: down the
+    /// relation chain, which is newest descendant first; -1: up), passing
+    /// rows that open nothing (a plain commit, a "more" row), and replaces
+    /// the history entry. Does nothing at the ends, or when this change is
+    /// not in the chain.
     fn step_related(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(r) = &self.related else {
             return;
         };
-        let target = r
-            .rows
-            .iter()
-            .position(|row| row.this)
-            .and_then(|i| i.checked_add_signed(delta))
-            .filter(|&i| i < r.rows.len());
+        let Some(from) = r.rows.iter().position(|row| row.this) else {
+            return;
+        };
+        let mut ix = from;
+        let target = loop {
+            match ix.checked_add_signed(delta).filter(|&i| i < r.rows.len()) {
+                Some(next) if r.rows[next].open.is_some() => break Some(next),
+                Some(next) => ix = next,
+                None => break None,
+            }
+        };
         if let Some(ix) = target {
             self.open_chain_row(ix, true, cx);
         }

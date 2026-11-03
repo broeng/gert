@@ -956,3 +956,78 @@ fn a_local_series_has_its_relation_chain_from_the_checkout(cx: &mut TestAppConte
     assert_eq!(rows[1], row("#9 local 1", "Second, amended", true));
     f.assert_nothing_local_sent(&[&s.first, &s.second, &s.third]);
 }
+
+#[gpui_kit::test]
+fn a_chain_opens_an_older_version_at_that_version_and_steps_past_plain_commits(
+    cx: &mut TestAppContext,
+) {
+    // B (I3) is built on A's first version through a plain commit; A (I1)
+    // was then amended on another branch, B not rebased.
+    let repo = TestRepo::new();
+    repo.write("README", b"one\n");
+    let base = repo.commit("Base");
+    repo.write("a", b"a\n");
+    let a1 = repo.commit("First local\n\nChange-Id: I1");
+    repo.write("p", b"p\n");
+    repo.commit("Plain");
+    repo.write("b", b"b\n");
+    let b = repo.commit("Built on the first\n\nChange-Id: I3");
+    repo.git(&["checkout", "-q", "-b", "other", &base]);
+    repo.write("a", b"amended\n");
+    let a2 = repo.commit("First local, amended\n\nChange-Id: I1");
+    let store = store_with(
+        &[
+            row("I1", None, LocalChangeState::Local, &[&a1, &a2], &base),
+            row("I3", None, LocalChangeState::Local, &[&b], &a1),
+        ],
+        |_| {},
+    );
+    let a = store
+        .local_changes_by_change_id(SERVER, "I1")
+        .expect("rows")
+        .remove(0);
+    let first_of_a = store.local_patch_sets(SERVER, a.id).expect("versions")[0].number;
+    let number_of_b = store
+        .local_changes_by_change_id(SERVER, "I3")
+        .expect("rows")[0]
+        .number;
+    let project = ProjectSettings {
+        local_changes: true,
+        ..ProjectSettings::new("p", repo.path().to_string_lossy())
+    };
+    let f = page_in(cx, store, number_of_b, project, |_| {});
+    for _ in 0..100 {
+        if !cx.update(|cx| f.page.read(cx).chain_for_test()).is_empty() {
+            break;
+        }
+        cx.executor().allow_parking();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+    let labels: Vec<String> = cx.update(|cx| {
+        f.page
+            .read(cx)
+            .chain_for_test()
+            .into_iter()
+            .map(|r| r.0)
+            .collect()
+    });
+    assert_eq!(labels.len(), 4, "{labels:?}");
+    assert_eq!(labels[0], "local");
+    assert_eq!(labels[2], "local");
+
+    // A's first version, not its newest one (which B is not built on).
+    f.page.update(cx, |p, cx| p.open_chain_row(2, false, cx));
+    // Shift-J passes the plain commit; Shift-K at the top does nothing.
+    f.press(cx, "shift-j");
+    f.press(cx, "shift-k");
+    let at = format!("{:?}", Some(first_of_a));
+    assert_eq!(
+        *f.events.lock().expect("log"),
+        [
+            format!("change {} at {at}", a.number),
+            format!("replace {} at {at}", a.number),
+        ]
+    );
+    assert!(f.http.requested().is_empty());
+}

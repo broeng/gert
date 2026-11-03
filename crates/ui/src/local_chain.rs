@@ -170,6 +170,7 @@ mod tests {
                 change: ChangeNumber(ChangeNumber::LOCAL_BASE + 1),
                 patch_set: PatchSetNumber(PatchSetNumber::LOCAL_BASE + 1),
                 ordinal: 1,
+                newest: true,
             },
         };
         assert_eq!(label(&local), "local");
