@@ -1043,3 +1043,63 @@ fn abandoning_a_refused_post_fails_the_review_and_holds_its_comments_at_once() {
         None
     );
 }
+
+#[test]
+fn a_closed_change_holds_its_reviews_and_drafts() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (a, r, other) = moved(&mut s, id, &c, &v1, &v2);
+    // Still on a version: a draft and a review created after the move.
+    let local = draft(&mut s, id, &c, &v1, "local");
+    let late = review(&mut s, id, &v1);
+    let (reviews, drafts) = s
+        .hold_closed_local_change(id, c.id, ChangeNumber(42), "change merged")
+        .unwrap()
+        .unwrap();
+    assert_eq!((reviews, drafts), (3, 2));
+    let row = s.local_change(id, c.id).unwrap().unwrap();
+    assert_eq!(
+        (row.state, row.gerrit_number),
+        (LocalChangeState::Closed, Some(ChangeNumber(42)))
+    );
+    for x in [&r, &other, &late] {
+        let now = s.load_pending_review(id, x.id).unwrap().unwrap();
+        assert_eq!(
+            (now.state, now.held_reason.as_deref()),
+            (Held, Some("change merged"))
+        );
+    }
+    for d in [&a, &local] {
+        let now = s.load_draft(id, d.local_id).unwrap().unwrap();
+        assert_eq!(now.held_reason.as_deref(), Some("change merged"));
+    }
+    // The review messages go with their reviews.
+    let msg = s.load_draft(id, r.message_draft.unwrap()).unwrap().unwrap();
+    assert_eq!(msg.held_reason, None);
+    let held = s.held_items(id, ChangeNumber(42)).unwrap();
+    assert_eq!((held.drafts.len(), held.reviews.len()), (2, 3));
+    // Held drafts are not claimed by a post.
+    let post = s
+        .claim_local_post(id, c.id, None, "n1", &who())
+        .unwrap()
+        .unwrap();
+    assert!(post.drafts.is_empty());
+    assert_eq!(
+        s.hold_closed_local_change(id, c.id, ChangeNumber(43), "x")
+            .unwrap_err()
+            .to_string(),
+        Error::OtherGerritChange(ChangeNumber(42)).to_string()
+    );
+}
+
+#[test]
+fn checked_times_are_kept_per_change() {
+    let (mut s, id, c, ..) = setup();
+    assert_eq!(s.local_change_checked_at(id, c.id).unwrap(), None);
+    s.mark_local_changes_checked(id, &[c.id], ts(T1)).unwrap();
+    assert_eq!(s.local_change_checked_at(id, c.id).unwrap(), Some(ts(T1)));
+    assert_eq!(
+        s.local_change_checked_at(id, LocalChangeId(999)).unwrap(),
+        None
+    );
+}

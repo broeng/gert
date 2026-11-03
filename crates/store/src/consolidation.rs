@@ -395,7 +395,7 @@ impl Store {
         }
         // The drafts of this post: reserved for the change, except the
         // messages of its other reviews.
-        let mine = "server_id = ?1 AND reserved_by = ?2
+        let mine = "server_id = ?1 AND reserved_by = ?2 AND held_reason IS NULL
                     AND (pending_review_id IS NULL OR pending_review_id IS ?3)";
         let review_id = review.map(|(id, _)| id.0);
         let taken: bool = tx.query_row(
@@ -563,6 +563,105 @@ impl Store {
         let n = release_drafts(&tx, server, change, nonce)?;
         tx.commit()?;
         Ok(n)
+    }
+
+    /// Holds everything unsent of a local change whose Gerrit change
+    /// `gerrit` is merged or abandoned, in one transaction: sets the Gerrit
+    /// change (moving what is on the synthetic number there, as
+    /// [`Store::rewrite_local_change`] does) and the state `Closed`, makes
+    /// its pending reviews `Held` and gives its drafts (on its local patch
+    /// sets, or reserved for its post) `reason` as their held reason. A
+    /// post in flight (claimed drafts, a review being sent) is left to its
+    /// run. Nothing of it is sent automatically any more, also if the
+    /// change is restored: the user publishes or drops it from the held
+    /// card. `None` if the change is gone; fails with
+    /// [`Error::OtherGerritChange`] or [`Error::LocalTarget`] as the
+    /// rewrite does. Returns how many reviews and drafts it held.
+    pub fn hold_closed_local_change(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        gerrit: ChangeNumber,
+        reason: &str,
+    ) -> Result<Option<(usize, usize)>, Error> {
+        if gerrit.is_local() {
+            return Err(Error::LocalTarget);
+        }
+        let tx = self.conn.transaction()?;
+        let Some(row) = load_change(&tx, server, change)? else {
+            return Ok(None);
+        };
+        if let Some(other) = row.gerrit_number
+            && other != gerrit
+        {
+            return Err(Error::OtherGerritChange(other));
+        }
+        tx.execute(
+            "UPDATE local_changes SET gerrit_number = ?3 WHERE server_id = ?1 AND id = ?2",
+            params![server.0, change.0, number(gerrit)],
+        )?;
+        // Also what was written on the synthetic number since: it is held
+        // on the Gerrit change, where the held card looks.
+        move_to_gerrit_number(&tx, server, change, gerrit)?;
+        set_state(&tx, server, change, LocalChangeState::Closed)?;
+        let reviews = tx.execute(
+            "UPDATE pending_reviews SET state = 'held', held_reason = ?3, error = NULL,
+                 drop_only = NULL
+             WHERE server_id = ?1 AND local_change_id = ?2 AND state = 'pending'",
+            params![server.0, change.0, reason],
+        )?;
+        let numbers = crate::local::patch_set_numbers("?2");
+        let drafts = tx.execute(
+            &format!(
+                "UPDATE drafts SET held_reason = ?3
+                 WHERE server_id = ?1 AND held_reason IS NULL AND pending_review_id IS NULL
+                   AND posting_nonce IS NULL AND state <> 'pending_delete'
+                   AND (reserved_by = ?2 OR patch_set IN {numbers})"
+            ),
+            params![server.0, change.0, reason],
+        )?;
+        tx.commit()?;
+        Ok(Some((reviews, drafts)))
+    }
+
+    /// Records that consolidation asked Gerrit about these local changes
+    /// at `at`.
+    pub fn mark_local_changes_checked(
+        &mut self,
+        server: ServerId,
+        changes: &[LocalChangeId],
+        at: Timestamp,
+    ) -> Result<(), Error> {
+        let tx = self.conn.transaction()?;
+        for c in changes {
+            tx.execute(
+                "UPDATE local_changes SET checked_ms = ?3 WHERE server_id = ?1 AND id = ?2",
+                params![server.0, c.0, millis(at)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// When consolidation last asked Gerrit about a local change; `None`
+    /// if never (or the change is gone).
+    pub fn local_change_checked_at(
+        &self,
+        server: ServerId,
+        change: LocalChangeId,
+    ) -> Result<Option<Timestamp>, Error> {
+        use rusqlite::OptionalExtension;
+        let ms: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT checked_ms FROM local_changes WHERE server_id = ?1 AND id = ?2",
+                params![server.0, change.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        ms.flatten()
+            .map(crate::review_cache::from_millis)
+            .transpose()
     }
 
     /// Gives up a claimed post that did not reach the server, in one
