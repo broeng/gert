@@ -151,6 +151,17 @@ fn page(
     ck: &Checkout,
     routes: impl FnOnce(&RouteHttpClient),
 ) -> Fixture {
+    page_in(cx, store, number, ck.project(), routes)
+}
+
+/// Like [`page`], with the checkout of `project`.
+fn page_in(
+    cx: &mut TestAppContext,
+    store: Store,
+    number: ChangeNumber,
+    project: ProjectSettings,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fixture {
     let http = RouteHttpClient::new();
     routes(&http);
     let env = env_with(store, &http);
@@ -162,7 +173,7 @@ fn page(
         password: "p".into(),
     };
     let session = Session::new(&env, &server, Some(auth)).expect("session");
-    let projects = vec![ck.project()];
+    let projects = vec![project];
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
     let (window, page) = open(cx, |window, cx| {
@@ -190,13 +201,17 @@ fn page(
         });
         cx.subscribe(&page, move |_, ev: &ChangeEvent, _| {
             let text = match ev {
-                ChangeEvent::Refreshed => "refreshed",
-                ChangeEvent::Reply(_) => "reply",
-                ChangeEvent::Actions(_) => "actions",
-                ChangeEvent::Unauthorized => "unauthorized",
-                _ => "other",
+                ChangeEvent::Refreshed => "refreshed".to_owned(),
+                ChangeEvent::Reply(_) => "reply".to_owned(),
+                ChangeEvent::Actions(_) => "actions".to_owned(),
+                ChangeEvent::Unauthorized => "unauthorized".to_owned(),
+                ChangeEvent::OpenChange(n) => format!("change {n}"),
+                ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
+                ChangeEvent::OpenChangeAt(n, v) => format!("change {n} at {:?}", v.target),
+                ChangeEvent::ReplaceChangeAt(n, v) => format!("replace {n} at {:?}", v.target),
+                _ => "other".to_owned(),
             };
-            log.lock().expect("log").push(text.to_owned());
+            log.lock().expect("log").push(text);
         })
         .detach();
         let focus = page.read(cx).focus_handle_for_test();
@@ -773,4 +788,171 @@ fn a_patch_set_and_a_rebased_local_version_say_why_they_cannot_be_compared(
         assert_eq!(p.file_paths(), ["/COMMIT_MSG", "README"]);
     });
     f.assert_nothing_local_sent(&[&rebased]);
+}
+
+/// The Change-Id of change 7 in [`series`].
+fn id_of_7() -> String {
+    format!("I{}", "7".repeat(40))
+}
+
+/// A series of local commits on `main` on top of patch set 1 of Gerrit
+/// change 7: a local change (I1), a local version of Gerrit change 9 (I9)
+/// and another local change (I3), newest last.
+struct Series {
+    repo: TestRepo,
+    gerrit: String,
+    first: String,
+    second: String,
+    third: String,
+}
+
+fn series() -> Series {
+    let repo = TestRepo::new();
+    repo.write("README", b"one\n");
+    repo.commit("Base");
+    repo.write("README", b"two\n");
+    // A real Change-Id: the Gerrit patch set is found through it.
+    let gerrit = repo.commit(&format!("On Gerrit\n\nChange-Id: {}", id_of_7()));
+    repo.write("a", b"a\n");
+    let first = repo.commit("First local\n\nChange-Id: I1");
+    repo.write("b", b"b\n");
+    let second = repo.commit("Second, amended\n\nChange-Id: I9");
+    repo.write("c", b"c\n");
+    let third = repo.commit("Third local\n\nChange-Id: I3");
+    Series {
+        repo,
+        gerrit,
+        first,
+        second,
+        third,
+    }
+}
+
+impl Series {
+    fn store(&self) -> Store {
+        let rows = [
+            row(
+                "I1",
+                None,
+                LocalChangeState::Local,
+                &[&self.first],
+                &self.gerrit,
+            ),
+            row(
+                "I9",
+                Some(ChangeNumber(9)),
+                LocalChangeState::Local,
+                &[&self.second],
+                &self.first,
+            ),
+            row(
+                "I3",
+                None,
+                LocalChangeState::Local,
+                &[&self.third],
+                &self.second,
+            ),
+        ];
+        store_with(&rows, |store| {
+            // 7's only patch set is the bottom of the series; 9 has one
+            // patch set the checkout does not have.
+            for (n, sha) in [(7, self.gerrit.clone()), (9, "sha9".to_owned())] {
+                let mut d = detail(n, 1, 1);
+                d.summary.project = "p".into();
+                d.summary.change_id = Some(if n == 7 { id_of_7() } else { "I9".into() });
+                d.revisions[0].sha = sha.clone().into();
+                d.revisions[0].created = Some(at(1));
+                d.current_revision = Some(sha.into());
+                store
+                    .save_change_detail(SERVER, &d, Timestamp::now())
+                    .expect("detail");
+            }
+        })
+    }
+
+    fn project(&self) -> ProjectSettings {
+        ProjectSettings {
+            local_changes: true,
+            ..ProjectSettings::new("p", self.repo.path().to_string_lossy())
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn a_local_series_has_its_relation_chain_from_the_checkout(cx: &mut TestAppContext) {
+    let s = series();
+    let store = s.store();
+    let number = |id: &str| {
+        store
+            .local_changes_by_change_id(SERVER, id)
+            .expect("rows")
+            .remove(0)
+            .number
+    };
+    let (first, third) = (number("I1"), number("I3"));
+    let version_of_9 = store
+        .local_patch_sets_by_sha(SERVER, &s.second.clone().into())
+        .expect("versions")[0]
+        .number;
+    let f = page_in(cx, store, first, s.project(), |_| {});
+    let chain = |cx: &mut TestAppContext, f: &Fixture| {
+        for _ in 0..100 {
+            if !cx.update(|cx| f.page.read(cx).chain_for_test()).is_empty() {
+                break;
+            }
+            cx.executor().allow_parking();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        cx.update(|cx| f.page.read(cx).chain_for_test())
+    };
+    let row = |label: &str, subject: &str, this: bool| (label.to_owned(), subject.to_owned(), this);
+    // Newest first, down to (and with) the Gerrit patch set it is built
+    // on; the base commit below is 7's own business.
+    assert_eq!(
+        chain(cx, &f),
+        [
+            row("local", "Third local", false),
+            row("#9 local 1", "Second, amended", false),
+            row("local", "First local", true),
+            row("#7 PS 1", "On Gerrit", false),
+        ]
+    );
+    let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("chain-row: #9 local 1").is_some());
+
+    // A click opens the row: a local change by its route, a local version
+    // at its patch set, a current Gerrit patch set as its change. This
+    // change's own row does nothing.
+    for ix in [0, 1, 3, 2] {
+        f.page.update(cx, |p, cx| p.open_chain_row(ix, false, cx));
+    }
+    // Shift-K and Shift-J step to the neighbours.
+    f.press(cx, "shift-k");
+    f.press(cx, "shift-j");
+    let v9 = format!("{:?}", Some(version_of_9));
+    assert_eq!(
+        *f.events.lock().expect("log"),
+        [
+            format!("change {third}"),
+            format!("change 9 at {v9}"),
+            "change 7".to_owned(),
+            format!("replace 9 at {v9}"),
+            "replace 7".to_owned(),
+        ]
+    );
+    let labels: Vec<String> = chain(cx, &f).into_iter().map(|r| r.0).collect();
+    assert_no_synthetic(&labels, &[first.0, third.0, u64::from(version_of_9.0)]);
+    assert!(f.http.requested().is_empty(), "{:?}", f.http.requested());
+
+    // Gerrit change 9 with its local version as the target: the same
+    // chain from the checkout, with that version on show.
+    let f = page_in(cx, s.store(), ChangeNumber(9), s.project(), |_| {});
+    let local = f.local_patch_set(cx, 1);
+    f.pick(cx, |sel, d| sel.set_target(d, local));
+    let rows = chain(cx, &f);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[1], row("#9 local 1", "Second, amended", true));
+    f.assert_nothing_local_sent(&[&s.first, &s.second, &s.third]);
 }

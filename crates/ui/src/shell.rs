@@ -1886,6 +1886,17 @@ impl Shell {
                 }
                 ChangeEvent::Search(q) => this.search(q.clone(), window, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
+                ChangeEvent::OpenChangeAt(n, view) => {
+                    this.remember_selection(cx);
+                    this.nav.push(Route::Change(*n));
+                    this.nav.set_change_view(Some(view.clone()));
+                    this.show(window, cx)
+                }
+                ChangeEvent::ReplaceChangeAt(n, view) => {
+                    this.nav.replace(Route::Change(*n));
+                    this.nav.set_change_view(Some(view.clone()));
+                    this.show(window, cx)
+                }
                 // Like stepping through files: Back leaves the walk.
                 ChangeEvent::ReplaceChange(n) => {
                     this.nav.replace(Route::Change(*n));

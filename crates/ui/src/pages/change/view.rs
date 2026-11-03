@@ -21,7 +21,7 @@ use super::{
 };
 use crate::{
     actions::*,
-    change_detail::{change_label, patch_set_label},
+    change_detail::patch_set_label,
     diff_load::DiffSource,
     filters::{FileStyle, FilterAction},
     local_source::{local_chip, local_marker},
@@ -1113,7 +1113,7 @@ impl ChangePage {
 
     /// Whether there is a relation chain worth showing.
     pub(super) fn has_chain(&self) -> bool {
-        self.related.as_ref().is_some_and(|r| r.changes.len() > 1)
+        self.related.as_ref().is_some_and(|r| r.rows.len() > 1)
     }
 
     /// The relation chain, `None` when there is nothing but this change.
@@ -1134,9 +1134,10 @@ impl ChangePage {
         let own = self.detail.as_ref().map(|d| &d.summary);
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let rows = r.changes.iter().enumerate().map(|(i, c)| {
-            let this_change = c.number == self.number;
-            let number = c.number;
+        // Room for "#12345 local 2" in a chain read from the checkout.
+        let label_width = if r.from_git { 112. } else { 64. };
+        let rows = r.rows.iter().enumerate().map(|(i, row)| {
+            let this_change = row.this;
             h_flex()
                 .id(("related", i))
                 .gap_2()
@@ -1144,12 +1145,8 @@ impl ChangePage {
                 .items_center()
                 .text_sm()
                 .when(this_change, |d| d.bg(theme.accent))
-                .hover(|d| d.bg(theme.list_hover))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if number != this.number {
-                        cx.emit(super::ChangeEvent::OpenChange(number));
-                    }
-                }))
+                .when(row.open.is_some(), |d| d.hover(|d| d.bg(theme.list_hover)))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_chain_row(i, false, cx)))
                 .child(
                     div()
                         .w(px(12.))
@@ -1157,31 +1154,41 @@ impl ChangePage {
                         .text_color(theme.primary)
                         .child(if this_change { "\u{2192}" } else { "" }),
                 )
-                .child(
+                .child({
+                    let label = row.label.clone();
                     div()
-                        .w(px(64.))
+                        .w(px(label_width))
                         .flex_none()
                         .whitespace_nowrap()
                         .text_color(muted)
-                        .child(change_label(c.number)),
-                )
+                        .child(label.clone())
+                        .debug_selector(move || format!("chain-row: {label}"))
+                })
                 .child(
                     div()
                         .min_w_0()
                         .truncate()
                         .when(this_change, |d| d.font_semibold())
-                        .child(related_subject(c)),
+                        .child(row.subject.clone()),
                 )
                 .child(div().flex_1())
-                .children(related_pills(
-                    c,
-                    // Until the chain's summaries arrive, this change's own
-                    // row uses the detail the page already has.
-                    r.summaries
-                        .get(&c.number)
-                        .or(own.filter(|s| s.number == c.number)),
-                    cx,
-                ))
+                .children(
+                    row.related
+                        .as_ref()
+                        .map(|c| {
+                            related_pills(
+                                c,
+                                // Until the chain's summaries arrive, this change's
+                                // own row uses the detail the page already has.
+                                r.summaries
+                                    .get(&c.number)
+                                    .or(own.filter(|s| s.number == c.number)),
+                                cx,
+                            )
+                        })
+                        .into_iter()
+                        .flatten(),
+                )
         });
         let scroll = self.related_scroll.clone();
         let list = v_flex()
@@ -1614,7 +1621,7 @@ pub(super) fn reveal_offset(
     y.clamp(-max.max(px(0.)), px(0.))
 }
 
-fn related_subject(c: &RelatedChange) -> String {
+pub(super) fn related_subject(c: &RelatedChange) -> String {
     c.commit
         .as_ref()
         .map_or_else(|| "(no subject)".to_owned(), |k| k.subject.clone())

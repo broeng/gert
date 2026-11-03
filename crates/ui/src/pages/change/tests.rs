@@ -205,6 +205,8 @@ fn page_in_with(
                 ChangeEvent::Search(q) => format!("search {q}"),
                 ChangeEvent::OpenChange(n) => format!("change {n}"),
                 ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
+                ChangeEvent::OpenChangeAt(n, v) => format!("change {n} at {:?}", v.target),
+                ChangeEvent::ReplaceChangeAt(n, v) => format!("replace {n} at {:?}", v.target),
                 ChangeEvent::Advance(n, note) => format!("advance {n}: {note}"),
                 ChangeEvent::OpenDiff(d) => format!(
                     "diff {} {:?}..{} {}{}",

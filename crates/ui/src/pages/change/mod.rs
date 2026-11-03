@@ -42,7 +42,7 @@ use model::{
     FileEntry, FilesKey, LocalChange, PatchSetNumber, RelatedChange, RevisionId, Thread, ThreadId,
 };
 use store::CachedFileList;
-use sync::PollPolicy;
+use sync::{ChainCommit, PollPolicy};
 
 use crate::{
     action_menu,
@@ -57,6 +57,7 @@ use crate::{
     diff_load::{DiffSource, LoadError, load_diff},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
+    local_chain,
     local_source::{
         LocalLazy, LocalSource, LocalState, Lookup, Renames, Resolved, Unserved, local_file_list,
         lookup, renames_of,
@@ -87,6 +88,11 @@ pub enum ChangeEvent {
     /// Shift-J / Shift-K stepped to a related change: replaces the current
     /// history entry, so that Back leaves the walk.
     ReplaceChange(ChangeNumber),
+    /// Like `OpenChange`, at a patch set (a row of a relation chain read
+    /// from the checkout: a local version, or an older patch set).
+    OpenChangeAt(ChangeNumber, ChangeView),
+    /// Like `ReplaceChange`, at a patch set.
+    ReplaceChangeAt(ChangeNumber, ChangeView),
     /// A vote went through and the next change of the chain is open: like
     /// `ReplaceChange`, and the new page shows the note.
     Advance(ChangeNumber, String),
@@ -135,8 +141,14 @@ struct Files {
 #[derive(Clone)]
 struct Related {
     sha: RevisionId,
+    /// Gerrit's related changes; empty for a chain read from the checkout.
     changes: Vec<RelatedChange>,
-    /// Labels of the open changes in the chain, once fetched.
+    /// What the chain shows, newest first.
+    rows: Vec<ChainRow>,
+    /// Read from the checkout (see [`crate::local_chain`]), not Gerrit's.
+    from_git: bool,
+    /// Labels of the open changes in the chain, once fetched (from the
+    /// cache for a chain read from the checkout).
     summaries: HashMap<ChangeNumber, ChangeSummary>,
     /// Taken over from the page of another change in the chain, and shown
     /// until this change's own list arrives.
@@ -151,6 +163,44 @@ pub struct ChainHandover {
     related: Related,
     scroll: ScrollHandle,
     drawn: Option<bool>,
+}
+
+/// One row of the relation chain: a change of Gerrit's related changes,
+/// or a commit of a chain read from the checkout.
+#[derive(Clone)]
+struct ChainRow {
+    /// `#123`; for a chain from the checkout also `local`, `#7 local 2`,
+    /// `#7 PS 3` or a short commit id. Never a synthetic number.
+    label: String,
+    subject: String,
+    /// The change on show (for a chain from the checkout: its commit).
+    this: bool,
+    /// Where a click goes; `None` for this row and for a commit that is no
+    /// change.
+    open: Option<ChainOpen>,
+    /// What the status pills come from: Gerrit's entry, or for a Gerrit
+    /// patch set in a chain from the checkout one made from its cached
+    /// summary (never outdated: the pill is about Gerrit's chain).
+    related: Option<RelatedChange>,
+}
+
+/// Where a click on a relation chain row goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChainOpen {
+    /// Another change, at its current patch set.
+    Change(ChangeNumber),
+    /// Another change at this patch set.
+    At(ChangeNumber, PatchSetNumber),
+    /// This change's patch set.
+    Here(PatchSetNumber),
+}
+
+/// The other change a chain row leads to, if any.
+fn row_change(open: Option<ChainOpen>) -> Option<ChangeNumber> {
+    match open? {
+        ChainOpen::Change(n) | ChainOpen::At(n, _) => Some(n),
+        ChainOpen::Here(_) => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -433,7 +483,7 @@ impl ChangePage {
 
     #[cfg(test)]
     pub(crate) fn chain_len_for_test(&self) -> usize {
-        self.related.as_ref().map_or(0, |r| r.changes.len())
+        self.related.as_ref().map_or(0, |r| r.rows.len())
     }
 
     #[cfg(test)]
@@ -808,13 +858,18 @@ impl ChangePage {
             self.related = None;
         }
         self.read_threads(cx);
-        // Gerrit knows no relation chain of a local change or version.
+        // Gerrit knows no relation chain of a local change or version: the
+        // checkout does.
         let target_local = key.as_ref().is_some_and(|k| k.target.number.is_local());
         if let Some(key) = key {
             self.load_files(key, network, cx);
         }
-        if let Some(sha) = sha.filter(|_| !self.number.is_local() && !target_local) {
-            self.load_related(sha, network, cx);
+        if let Some(sha) = sha {
+            if self.number.is_local() || target_local {
+                self.load_git_chain(sha, cx);
+            } else {
+                self.load_related(sha, network, cx);
+            }
         }
     }
 
@@ -1071,7 +1126,7 @@ impl ChangePage {
                 .eq(changes.iter().map(|c| c.number))
         });
         let summaries = match self.related.take() {
-            Some(r) if &r.sha == sha && !r.adopted => r.summaries,
+            Some(r) if &r.sha == sha && !r.adopted && !r.from_git => r.summaries,
             // The previous page's votes stay for the changes still at the
             // same patch set, until this chain's own arrive.
             Some(r) if r.adopted => {
@@ -1092,9 +1147,21 @@ impl ChangePage {
             .filter(|c| matches!(c.status, Some(ChangeStatus::New)))
             .map(|c| c.number)
             .collect();
+        let rows = changes
+            .iter()
+            .map(|c| ChainRow {
+                label: change_detail::change_label(c.number),
+                subject: view::related_subject(c),
+                this: c.number == self.number,
+                open: (c.number != self.number).then_some(ChainOpen::Change(c.number)),
+                related: Some(c.clone()),
+            })
+            .collect();
         self.related = Some(Related {
             sha: sha.clone(),
             changes,
+            rows,
+            from_git: false,
             summaries,
             adopted: false,
         });
@@ -1106,6 +1173,161 @@ impl ChangePage {
         if self.session.can_sync() {
             self.load_related_summaries(sha.clone(), open, cx);
         }
+    }
+
+    /// Reads the relation chain of the commit `sha` from the checkout and
+    /// names its commits from the store (see [`crate::local_chain`]). No
+    /// network.
+    fn load_git_chain(&mut self, sha: RevisionId, cx: &mut Context<Self>) {
+        let Some(project) = self.detail.as_ref().map(|d| d.summary.project.clone()) else {
+            return;
+        };
+        let (syncer, checkouts) = (self.session.syncer().clone(), self.checkouts.clone());
+        self.related_task = Some(cx.spawn(async move |this, cx| {
+            let read = local_chain::read(checkouts, project, sha.clone(), syncer, cx).await;
+            if let Some(entries) = read {
+                this.update(cx, |this, cx| this.apply_git_chain(&sha, entries, cx))
+                    .ok();
+            }
+        }));
+    }
+
+    fn apply_git_chain(
+        &mut self,
+        sha: &RevisionId,
+        entries: Vec<local_chain::ChainEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .detail
+            .as_ref()
+            .and_then(|d| self.sel.target_ref(d))
+            .map(|t| t.sha);
+        if current.as_ref() != Some(sha) {
+            return;
+        }
+        let mut summaries = HashMap::new();
+        let rows: Vec<ChainRow> = entries
+            .iter()
+            .map(|e| {
+                let this = e.commit.sha == *sha;
+                let (open, related) = match &e.kind {
+                    ChainCommit::Local { change, .. } => (Some(ChainOpen::Change(*change)), None),
+                    ChainCommit::LocalVersion {
+                        change, patch_set, ..
+                    } => (Some(ChainOpen::At(*change, *patch_set)), None),
+                    ChainCommit::Gerrit {
+                        change,
+                        patch_set,
+                        current,
+                        summary,
+                    } => {
+                        let open = if *current == Some(*patch_set) {
+                            ChainOpen::Change(*change)
+                        } else {
+                            ChainOpen::At(*change, *patch_set)
+                        };
+                        let related = summary.as_deref().map(|s| {
+                            summaries.insert(*change, s.clone());
+                            RelatedChange {
+                                project: s.project.clone(),
+                                change_id: s.change_id.clone(),
+                                number: *change,
+                                patch_set: *patch_set,
+                                current_patch_set: None,
+                                status: Some(s.status.clone()),
+                                submittable: s.submittable,
+                                work_in_progress: s.work_in_progress,
+                                commit: None,
+                            }
+                        });
+                        (Some(open), related)
+                    }
+                    ChainCommit::Unknown => (None, None),
+                };
+                // A version of the change on show is picked on this page.
+                let open = open
+                    .map(|o| match o {
+                        ChainOpen::Change(n) | ChainOpen::At(n, _) if n == self.number => {
+                            match e.kind {
+                                ChainCommit::Local { patch_set, .. }
+                                | ChainCommit::LocalVersion { patch_set, .. }
+                                | ChainCommit::Gerrit { patch_set, .. } => {
+                                    ChainOpen::Here(patch_set)
+                                }
+                                ChainCommit::Unknown => o,
+                            }
+                        }
+                        o => o,
+                    })
+                    .filter(|_| !this);
+                ChainRow {
+                    label: local_chain::label(e),
+                    subject: e.commit.subject(),
+                    this,
+                    open,
+                    related,
+                }
+            })
+            .collect();
+        // As for Gerrit's chain: the same rows again stay where the user
+        // scrolled them.
+        let moved = self.related.as_ref().is_none_or(|r| {
+            !r.rows
+                .iter()
+                .map(|row| (&row.label, row.this))
+                .eq(rows.iter().map(|row| (&row.label, row.this)))
+        });
+        self.related = Some(Related {
+            sha: sha.clone(),
+            changes: Vec::new(),
+            rows,
+            from_git: true,
+            summaries,
+            adopted: false,
+        });
+        if moved {
+            self.reveal_current_related();
+        }
+        self.rebuild_blocks();
+        cx.notify();
+    }
+
+    /// Goes where relation chain row `ix` leads: another change (a new
+    /// history entry, or the current one replaced when `replace`), or
+    /// another patch set of this one.
+    pub(super) fn open_chain_row(&mut self, ix: usize, replace: bool, cx: &mut Context<Self>) {
+        let Some(open) = self
+            .related
+            .as_ref()
+            .and_then(|r| r.rows.get(ix))
+            .and_then(|r| r.open)
+        else {
+            return;
+        };
+        let at = |target| ChangeView {
+            target: Some(target),
+            ..ChangeView::default()
+        };
+        match (open, replace) {
+            (ChainOpen::Change(n), false) => cx.emit(ChangeEvent::OpenChange(n)),
+            (ChainOpen::Change(n), true) => cx.emit(ChangeEvent::ReplaceChange(n)),
+            (ChainOpen::At(n, ps), false) => cx.emit(ChangeEvent::OpenChangeAt(n, at(ps))),
+            (ChainOpen::At(n, ps), true) => cx.emit(ChangeEvent::ReplaceChangeAt(n, at(ps))),
+            (ChainOpen::Here(ps), _) => self.change_patch_sets(|s, d| s.set_target(d, ps), cx),
+        }
+    }
+
+    /// The relation chain as drawn: each row's label, subject and whether
+    /// it is the change on show.
+    #[cfg(test)]
+    pub(crate) fn chain_for_test(&self) -> Vec<(String, String, bool)> {
+        self.related.as_ref().map_or_else(Vec::new, |r| {
+            r.rows
+                .iter()
+                .map(|row| (row.label.clone(), row.subject.clone(), row.this))
+                .collect()
+        })
     }
 
     /// Fetches the votes of the open changes in the chain for their markers.
@@ -1780,14 +2002,14 @@ impl ChangePage {
         let Some(r) = &self.related else {
             return;
         };
-        let Some(ix) = r.changes.iter().position(|c| c.number == self.number) else {
+        let Some(ix) = r.rows.iter().position(|row| row.this) else {
             self.reveal_related = false;
             return;
         };
         let scroll = &self.related_scroll;
         let item = scroll
             .bounds_for_item(ix)
-            .filter(|_| drawn == Some(panel) && scroll.children_count() == r.changes.len());
+            .filter(|_| drawn == Some(panel) && scroll.children_count() == r.rows.len());
         match item {
             Some(item) => {
                 let offset = scroll.offset();
@@ -1809,9 +2031,32 @@ impl ChangePage {
     /// change is in it.
     pub fn chain_for(&self, server: &ServerKey, number: ChangeNumber) -> Option<ChainHandover> {
         let r = self.related.as_ref()?;
-        (self.session.key == *server && r.changes.iter().any(|c| c.number == number)).then(|| {
+        let has = r
+            .rows
+            .iter()
+            .any(|row| row_change(row.open) == Some(number));
+        (self.session.key == *server && has).then(|| {
+            // Where this page's row leads from the next page: this change
+            // at the patch set shown, unless that is the current one.
+            let shown = self.detail.as_ref().and_then(|d| {
+                let target = self.sel.target_number(d)?;
+                (Some(target) != d.current_patch_set).then_some(target)
+            });
+            let from = match shown {
+                Some(ps) => ChainOpen::At(self.number, ps),
+                None => ChainOpen::Change(self.number),
+            };
+            let mut related = r.clone();
+            for row in &mut related.rows {
+                row.open = match row.open {
+                    _ if row.this => Some(from),
+                    Some(ChainOpen::Here(ps)) => Some(ChainOpen::At(self.number, ps)),
+                    open => open,
+                };
+                row.this = false;
+            }
             ChainHandover {
-                related: r.clone(),
+                related,
                 scroll: self.related_scroll.clone(),
                 drawn: self.related_drawn,
             }
@@ -1819,11 +2064,34 @@ impl ChangePage {
     }
 
     /// Shows the chain the previous page handed over until this change's
-    /// own list arrives, scrolled as it was.
+    /// own list arrives, scrolled as it was. The row of this change (at
+    /// the patch set asked for, if the chain has it) becomes this page's
+    /// own.
     pub fn adopt_chain(&mut self, chain: ChainHandover, cx: &mut Context<Self>) {
+        let mut related = chain.related;
+        let mine = |open: Option<ChainOpen>| row_change(open) == Some(self.number);
+        let at = related
+            .rows
+            .iter()
+            .position(|row| match (row.open, self.sel.target) {
+                (Some(ChainOpen::At(_, ps)), Some(want)) => mine(row.open) && ps == want,
+                (Some(ChainOpen::Change(_)), None) => mine(row.open),
+                _ => false,
+            })
+            .or_else(|| related.rows.iter().position(|row| mine(row.open)));
+        for (ix, row) in related.rows.iter_mut().enumerate() {
+            if Some(ix) == at {
+                row.this = true;
+                row.open = None;
+            } else if mine(row.open) {
+                // Another version of this change: picked on this page once
+                // its own chain is read.
+                row.open = None;
+            }
+        }
         self.related = Some(Related {
             adopted: true,
-            ..chain.related
+            ..related
         });
         self.related_scroll = chain.scroll;
         self.related_drawn = chain.drawn;
@@ -1839,13 +2107,13 @@ impl ChangePage {
             return;
         };
         let target = r
-            .changes
+            .rows
             .iter()
-            .position(|c| c.number == self.number)
-            .and_then(|i| r.changes.get(i.checked_add_signed(delta)?))
-            .map(|c| c.number);
-        if let Some(n) = target {
-            cx.emit(ChangeEvent::ReplaceChange(n));
+            .position(|row| row.this)
+            .and_then(|i| i.checked_add_signed(delta))
+            .filter(|&i| i < r.rows.len());
+        if let Some(ix) = target {
+            self.open_chain_row(ix, true, cx);
         }
     }
 
