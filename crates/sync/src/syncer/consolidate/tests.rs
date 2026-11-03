@@ -3119,6 +3119,14 @@ fn a_version_on_no_named_branch_is_ported() {
     assert_eq!(f.fate(&d).posted()["line"], 9);
     assert!(f.http.post_targets()[0].contains("/revisions/s1/review"));
     f.assert_nothing_local(&["l2"]);
+    // Every version is done with (s1 on Gerrit, l2 ported) and nothing is
+    // unsent: a tombstone, which keeps its Gerrit change for redirects.
+    assert_eq!(report.consolidated, [(row.id, CHANGE)]);
+    let now = f.row(&row);
+    assert_eq!(
+        (now.state, now.gerrit_number),
+        (LocalChangeState::Consolidated, Some(CHANGE))
+    );
 }
 
 #[test]
@@ -3398,3 +3406,5 @@ fn base_side_comments_of_a_merge_are_held() {
     let why = f.fate(&d).held();
     assert!(why.contains("merge commit"), "{why}");
 }
+
+mod held;

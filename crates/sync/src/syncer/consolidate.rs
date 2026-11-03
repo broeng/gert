@@ -164,7 +164,10 @@ use store::{Claimant, ConsolidationRewrite, LocalPost, PatchSetMove, ReviewState
 use super::Syncer;
 use crate::{Error, HasCheckout, PortCommit, PortError, PortMaps, PortSource};
 
+mod held;
 mod port;
+
+pub use held::{HeldItem, HeldPublished};
 
 /// Votes as label and value, sorted by label.
 type Votes = Vec<(String, i32)>;
@@ -382,8 +385,9 @@ pub struct ConsolidateReport {
     /// Local versions that never reached Gerrit, ported or held (as
     /// planned: a draft edited meanwhile stays where it is).
     pub ported: Vec<Ported>,
-    /// Local changes with nothing unsent left, all of whose versions are
-    /// Gerrit patch sets: tombstones now.
+    /// Local changes with nothing unsent left, each of whose versions is a
+    /// Gerrit patch set or never will be one (ported, superseded): tombstones
+    /// now.
     pub consolidated: Vec<(LocalChangeId, ChangeNumber)>,
     /// Problems that skipped one change but not the run.
     pub errors: Vec<(LocalChangeId, String)>,
@@ -433,7 +437,12 @@ impl From<Error> for Problem {
         let ends_run = match &e {
             Error::Api(a) => a.is_retryable() || a.is_unauthorized(),
             Error::Store(_) | Error::LeaseLost | Error::PostTimedOut | Error::Stopped => true,
-            Error::DraftsNotUploaded(_) | Error::Local(_) => false,
+            Error::DraftsNotUploaded(_)
+            | Error::Local(_)
+            | Error::DropOnly(_)
+            | Error::ConsolidationBusy
+            | Error::NotCurrent { .. }
+            | Error::HeldChanged => false,
         };
         if ends_run {
             Self::Stop(e)
@@ -1179,32 +1188,17 @@ impl Syncer {
         }
     }
 
-    /// Marks the row consolidated if all its versions are Gerrit patch
-    /// sets; the store refuses while anything is unsent.
+    /// Marks the row consolidated once nothing of it is left to do: nothing
+    /// unsent, and every version a Gerrit patch set or never to become one
+    /// (`store::Store::settle_local_change`).
     fn finish_change(
         &self,
         row: &LocalChange,
         number: ChangeNumber,
         run: &mut Run<'_>,
     ) -> Result<(), Problem> {
-        let mut store = self.store();
-        let Some(now) = store.local_change(self.server, row.id)? else {
-            return Ok(());
-        };
-        if now.state == LocalChangeState::Consolidated {
-            run.report.consolidated.push((row.id, number));
-            return Ok(());
-        }
-        if now.state == LocalChangeState::Closed {
-            return Ok(());
-        }
-        let all_mapped = store
-            .local_patch_sets(self.server, row.id)?
-            .iter()
-            .all(|v| v.gerrit_patch_set.is_some());
-        if all_mapped
-            && store.set_local_change_state(self.server, row.id, LocalChangeState::Consolidated)?
-                == Some(LocalChangeState::Consolidated)
+        if self.store().settle_local_change(self.server, row.id)?
+            == Some(LocalChangeState::Consolidated)
         {
             run.report.consolidated.push((row.id, number));
         }

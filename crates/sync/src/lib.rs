@@ -25,7 +25,7 @@ pub use poll::{PollPolicy, PollState};
 pub use port::{HasCheckout, NotLocalPath, PathMap, PortCommit, PortError, PortMaps, PortSource};
 pub use syncer::{
     CLAIM_STALE, ChainCommit, CommentsView, ConsolidateOptions, ConsolidateReport,
-    ConsolidationTiming, DraftCounts, DraftSave, FoundChange, NewChange, POST_DEADLINE, Ported,
-    PostOutcome, PostReport, PublishOutcome, QueryUpdate, RefreshSource, RetryReport,
-    ReviewerAdded, SLOW_RECHECK, StopFlag, Syncer, WatchOptions,
+    ConsolidationTiming, DraftCounts, DraftSave, FoundChange, HeldItem, HeldPublished, NewChange,
+    POST_DEADLINE, Ported, PostOutcome, PostReport, PublishOutcome, QueryUpdate, RefreshSource,
+    RetryReport, ReviewerAdded, SLOW_RECHECK, StopFlag, Syncer, WatchOptions,
 };

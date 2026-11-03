@@ -28,6 +28,29 @@ pub enum Error {
     /// out or another account signed in. It stopped before its next post.
     #[error("the consolidation run was stopped")]
     Stopped,
+    /// A held vote that may only be dropped (an approval given on another
+    /// commit) was asked to be published. Nothing was sent.
+    #[error(
+        "the {0} vote is an approval given on another commit; approvals are only sent on the \
+         exact commit they were given on, so it can only be dropped"
+    )]
+    DropOnly(String),
+    /// A consolidation run on the server is going on (it holds the lease),
+    /// so a publish of held items did not start. Nothing was sent.
+    #[error("your local reviews are being sent right now; try again in a moment")]
+    ConsolidationBusy,
+    /// A publish of held items named a patch set that is no longer the
+    /// change's current one. Nothing was sent.
+    #[error("PS {} is no longer the current patch set (PS {} is)", .asked.0, .current.0)]
+    NotCurrent {
+        asked: PatchSetNumber,
+        current: PatchSetNumber,
+    },
+    /// A publish of held items named items that are no longer held (sent,
+    /// dropped, being sent), or items of several local changes. Nothing
+    /// was sent.
+    #[error("the held items changed meanwhile; nothing was sent")]
+    HeldChanged,
 }
 
 impl Error {

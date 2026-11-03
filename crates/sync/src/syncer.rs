@@ -437,8 +437,8 @@ mod watch;
 pub use actions::NewChange;
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
 pub use consolidate::{
-    CLAIM_STALE, ConsolidateOptions, ConsolidateReport, ConsolidationTiming, FoundChange,
-    POST_DEADLINE, Ported, PostOutcome, PostReport, SLOW_RECHECK, StopFlag,
+    CLAIM_STALE, ConsolidateOptions, ConsolidateReport, ConsolidationTiming, FoundChange, HeldItem,
+    HeldPublished, POST_DEADLINE, Ported, PostOutcome, PostReport, SLOW_RECHECK, StopFlag,
 };
 pub use edits::ReviewerAdded;
 pub use local::ChainCommit;
