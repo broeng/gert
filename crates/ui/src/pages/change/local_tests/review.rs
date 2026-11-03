@@ -311,6 +311,88 @@ fn a_quick_vote_on_a_local_patch_set_of_a_gerrit_change_stays_local(cx: &mut Tes
     f.assert_nothing_local_sent(&[&ck.local]);
 }
 
+#[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
+fn a_vote_on_an_older_local_version_carries_over_to_the_newer_one(cx: &mut TestAppContext) {
+    let ck = checkout();
+    ck.repo
+        .git(&["commit", "-q", "--amend", "-m", "Amended\n\nChange-Id: I1"]);
+    let amended = ck.repo.git(&["rev-parse", "HEAD"]);
+    let store = store_with(
+        &[row(
+            "I1",
+            None,
+            LocalChangeState::Local,
+            &[&ck.local, &amended],
+            &ck.base,
+        )],
+        |_| {},
+    );
+    let number = store
+        .local_changes_by_change_id(SERVER, "I1")
+        .expect("rows")[0]
+        .number;
+    let f = page(cx, store, number, &ck, |_| {});
+    let (v1, v2) = (f.local_patch_set(cx, 1), f.local_patch_set(cx, 2));
+    let save = |version, labels: &[(&str, i32)]| {
+        f.store
+            .lock()
+            .expect("store")
+            .create_pending_review(
+                SERVER,
+                &store::NewPendingReview {
+                    patch_set: version,
+                    labels: labels.iter().map(|(l, v)| ((*l).to_owned(), *v)).collect(),
+                    strategy: model::LocalApproval::Follow,
+                    message: String::new(),
+                    unresolved: false,
+                    created: Timestamp::now(),
+                    offline: false,
+                    replaces_draft: None,
+                },
+            )
+            .expect("review");
+    };
+    save(v1, &[("Code-Review", 2), ("Verified", 1)]);
+    f.page.update(cx, |p, cx| {
+        p.outbox.update(cx, |o, cx| o.published(number, cx))
+    });
+    cx.run_until_parked();
+    let boxes = |cx: &mut TestAppContext| cx.update(|cx| f.page.read(cx).local_votes_for_test());
+    let vote = |label: &str, value, version| (label.to_owned(), value, version);
+    // Local 2, the newest, is shown: local 1's votes carry over.
+    assert_eq!(
+        boxes(cx),
+        [vote("Code-Review", 2, v1), vote("Verified", 1, v1)]
+    );
+    // A vote on local 2 wins over the carried one, and does not go back
+    // to local 1.
+    save(v2, &[("Code-Review", 1)]);
+    f.page.update(cx, |p, cx| {
+        p.outbox.update(cx, |o, cx| o.published(number, cx))
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        boxes(cx),
+        [vote("Code-Review", 1, v2), vote("Verified", 1, v1)]
+    );
+    f.pick(cx, |s, d| s.set_target(d, v1));
+    assert_eq!(
+        boxes(cx),
+        [vote("Code-Review", 2, v1), vote("Verified", 1, v1)]
+    );
+
+    // The trash on local 2 takes the vote back on both versions.
+    f.pick(cx, |s, d| s.set_target(d, v2));
+    f.page
+        .update(cx, |p, cx| p.withdraw_local_vote("Code-Review".into(), cx));
+    cx.run_until_parked();
+    assert_eq!(boxes(cx), [vote("Verified", 1, v1)]);
+    let left: Vec<_> = f.reviews(number).into_iter().map(|r| r.labels).collect();
+    assert_eq!(left, [[("Verified".to_owned(), 1)].into()]);
+    f.assert_nothing_local_sent(&[&ck.local, &amended]);
+}
+
 /// Pending reviews on `version`: one per entry of `states`, each with a
 /// message naming its state, the held and failed ones with their reason.
 fn seed_reviews(store: &mut Store, version: PatchSetNumber, states: &[model::PendingReviewState]) {

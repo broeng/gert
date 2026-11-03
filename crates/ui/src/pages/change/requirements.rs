@@ -6,8 +6,10 @@
 //! those whose vote the user may remove, a trash button. Labels no
 //! requirement mentions are listed in a section of their own.
 //!
-//! On a local version the user's votes in its local reviews that are not
-//! on Gerrit yet are boxes too, each with a `local` pill: on a local
+//! On a local version the user's votes in the local reviews of it and of
+//! the change's older local versions (a vote carries over to an amended
+//! commit, as far as the boxes go) that are not on Gerrit yet are boxes
+//! too, each with a `local` pill: on a local
 //! change, whose labels (borrowed, see [`crate::change_detail`]) are all
 //! in the votes section, and on a local patch set of a Gerrit change next
 //! to Gerrit's votes. Their trash button takes the vote back out of the
@@ -24,12 +26,18 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
-use model::{Account, LabelVote, PendingReviewState, SubmitRequirement, SubmitRequirementStatus};
+use model::{
+    Account, LabelVote, LocalApproval, PatchSetNumber, PendingReviewState, SubmitRequirement,
+    SubmitRequirementStatus,
+};
 
 use super::{ChangeEvent, ChangePage, view::section_title};
 use crate::{
-    change_detail::patch_set_label, local_source::local_chip, reply::plan::vote_text,
-    session::is_unauthorized, time_fmt::relative,
+    change_detail::{patch_set_label, position},
+    local_source::local_chip,
+    reply::plan::vote_text,
+    session::is_unauthorized,
+    time_fmt::relative,
 };
 
 const LABEL_ORDER: [&str; 2] = ["Code-Review", "Verified"];
@@ -50,6 +58,10 @@ struct LocalVote {
     voted_at: model::Timestamp,
     /// Its review is being posted now.
     sending: bool,
+    /// The version it was given on.
+    patch_set: PatchSetNumber,
+    /// Its review's `local_approval` mode.
+    strategy: LocalApproval,
 }
 
 impl ChangePage {
@@ -177,22 +189,49 @@ impl ChangePage {
         names
     }
 
-    /// The user's votes in the local reviews of the local version shown
-    /// that are not on Gerrit yet (pending or being sent), per label: each
-    /// label's from the newest review that has it, since the reviews go to
-    /// Gerrit oldest first. Empty unless a local version is shown.
+    /// The local versions whose votes the boxes show: the one shown and
+    /// the change's local versions before it. Empty unless a local version
+    /// is shown.
+    fn vote_versions(&self) -> Vec<PatchSetNumber> {
+        let (Some(d), Some(target)) = (&self.detail, self.local_target()) else {
+            return Vec::new();
+        };
+        let Some(at) = position(&d.revisions, target.number) else {
+            return Vec::new();
+        };
+        d.revisions[..=at]
+            .iter()
+            .map(|r| r.number)
+            .filter(|n| n.is_local())
+            .collect()
+    }
+
+    /// The user's votes in the local reviews of the [`vote_versions`]
+    /// that are not on Gerrit yet (pending or being sent), per label: the
+    /// shown version's newest review that has the label, else the newest
+    /// of an older version, since the reviews go to Gerrit oldest first.
+    ///
+    /// [`vote_versions`]: ChangePage::vote_versions
     fn local_votes(&self) -> BTreeMap<String, LocalVote> {
-        let Some(target) = self.local_target() else {
+        let versions = self.vote_versions();
+        let Some(target) = versions.last().copied() else {
             return BTreeMap::new();
         };
+        let mut reviews: Vec<_> = self
+            .reviews
+            .iter()
+            .filter(|r| {
+                versions.contains(&r.patch_set)
+                    && matches!(
+                        r.state,
+                        PendingReviewState::Pending | PendingReviewState::Sending
+                    )
+            })
+            .collect();
+        // Stable: creation order within each group, the shown version last.
+        reviews.sort_by_key(|r| r.patch_set == target);
         let mut votes = BTreeMap::new();
-        for r in self.reviews.iter().filter(|r| {
-            r.patch_set == target.number
-                && matches!(
-                    r.state,
-                    PendingReviewState::Pending | PendingReviewState::Sending
-                )
-        }) {
+        for r in reviews {
             for (label, value) in &r.labels {
                 votes.insert(
                     label.clone(),
@@ -200,11 +239,22 @@ impl ChangePage {
                         value: *value,
                         voted_at: r.voted_at,
                         sending: r.state == PendingReviewState::Sending,
+                        patch_set: r.patch_set,
+                        strategy: r.strategy,
                     },
                 );
             }
         }
         votes
+    }
+
+    /// The local vote boxes: label, value and the version each was given on.
+    #[cfg(test)]
+    pub(crate) fn local_votes_for_test(&self) -> Vec<(String, i32, PatchSetNumber)> {
+        self.local_votes()
+            .into_iter()
+            .map(|(label, v)| (label, v.value, v.patch_set))
+            .collect()
     }
 
     /// Width of the name column, so the vote boxes of all lines start at the
@@ -304,9 +354,8 @@ impl ChangePage {
             return None;
         }
         let d = self.detail.as_ref()?;
-        let version = self
-            .local_target()
-            .map(|t| patch_set_label(&d.revisions, t.number))?;
+        let target = self.local_target()?.number;
+        let version = patch_set_label(&d.revisions, v.patch_set);
         let theme = cx.theme();
         let color = if v.value > 0 {
             theme.success
@@ -334,6 +383,11 @@ impl ChangePage {
         let when = relative(Timestamp::now(), v.voted_at, &TimeZone::system());
         let status = if v.sending {
             "Being sent to Gerrit now".to_owned()
+        } else if v.patch_set != target {
+            // The stricter of the review's mode and the project's now, as
+            // consolidation judges it.
+            let strategy = v.strategy.max(self.local_approval(cx));
+            carried_status(&version, strategy, !d.summary.number.is_local())
         } else {
             format!("Sent when {version} is on Gerrit")
         };
@@ -365,20 +419,22 @@ impl ChangePage {
     }
 
     /// Takes the user's local vote on `label` back on the local version
-    /// shown: no review of it sends that label (see
+    /// shown: no review of it or of an older local version (whose votes
+    /// the box may show) sends that label (see
     /// `Store::withdraw_local_vote`). Store writes only.
     pub(super) fn withdraw_local_vote(&mut self, label: String, cx: &mut Context<Self>) {
         if self.voting() {
             return;
         }
-        let Some(target) = self.local_target() else {
+        let versions = self.vote_versions();
+        if versions.is_empty() {
             return;
-        };
+        }
         let syncer = self.session.syncer().clone();
         self.voting = Some(cx.spawn(async move |this, cx| {
             let what = label.clone();
             let result = cx
-                .background_spawn(async move { syncer.withdraw_local_vote(target.number, &what) })
+                .background_spawn(async move { syncer.withdraw_local_vote(&versions, &what) })
                 .await;
             this.update(cx, |this, cx| {
                 this.voting = None;
@@ -509,6 +565,20 @@ fn vote_card(
         .into_any_element()
 }
 
+/// What a local vote given on `version`, an older version than the one
+/// shown, becomes: the review is ported to the version that reaches
+/// Gerrit, and its votes follow only when the mode in force (`strategy`)
+/// is `follow` on a local change (`gerrit_change`: a local version of a
+/// Gerrit change, which holds them by the strict rule). Kept short; the
+/// held card says the rest.
+fn carried_status(version: &str, strategy: LocalApproval, gerrit_change: bool) -> String {
+    if strategy == LocalApproval::Follow && !gerrit_change {
+        format!("Given on {version}; follows the amended commit to Gerrit")
+    } else {
+        format!("Given on {version}; held for you to decide when the change is on Gerrit")
+    }
+}
+
 /// The content of a local vote's hover card.
 fn local_vote_card(
     text: &str,
@@ -623,9 +693,24 @@ pub(super) fn requirement_labels<V>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use model::{ExpressionResult, SubmitRequirement, SubmitRequirementStatus};
+    use model::{ExpressionResult, LocalApproval, SubmitRequirement, SubmitRequirementStatus};
 
-    use super::{ordered, requirement_labels};
+    use super::{carried_status, ordered, requirement_labels};
+
+    #[test]
+    fn a_carried_vote_says_whether_it_follows_the_amended_commit() {
+        let follows = "Given on local 1; follows the amended commit to Gerrit";
+        let held = "Given on local 1; held for you to decide when the change is on Gerrit";
+        assert_eq!(
+            carried_status("local 1", LocalApproval::Follow, false),
+            follows
+        );
+        for strategy in [LocalApproval::ExactOrManual, LocalApproval::Exact] {
+            assert_eq!(carried_status("local 1", strategy, false), held);
+        }
+        // A local version of a Gerrit change: the strict rule.
+        assert_eq!(carried_status("local 1", LocalApproval::Follow, true), held);
+    }
 
     fn requirement(name: &str, expression: &str) -> SubmitRequirement {
         SubmitRequirement {
