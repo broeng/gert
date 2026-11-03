@@ -119,6 +119,8 @@ pub enum ChangeEvent {
     ProjectSettings(String),
     /// A project or person was clicked: show the search for this query.
     Search(String),
+    /// A quick vote on a local version was saved as a local review.
+    LocalReviewSaved,
 }
 
 /// The file list of the current patch set pair.
@@ -2659,6 +2661,13 @@ impl ChangePage {
     }
 
     fn refresh_now(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+        self.reload(cx);
+    }
+
+    /// Reads the change again now (from Gerrit, or a local change from the
+    /// store): its data moved elsewhere, e.g. a consolidation run sent a
+    /// local review.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.track.invalidate();
         self.tick(cx);
     }

@@ -197,6 +197,8 @@ fn page_in_with(
                 ChangeEvent::Unauthorized => "unauthorized".to_owned(),
                 // Not what these tests are about (the shell retries drafts).
                 ChangeEvent::Refreshed => return,
+                // Asks the shell for a consolidation run; nothing more.
+                ChangeEvent::LocalReviewSaved => return,
                 ChangeEvent::Reply(_) => "reply".to_owned(),
                 ChangeEvent::Actions(_) => "actions".to_owned(),
                 ChangeEvent::SubmitChain(_) => "submit chain".to_owned(),

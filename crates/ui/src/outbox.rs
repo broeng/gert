@@ -118,6 +118,23 @@ impl DraftOutbox {
         self.announce(change, cx);
     }
 
+    /// A consolidation run moved or sent the drafts and local reviews of
+    /// `changes` (Gerrit and synthetic numbers): the listeners read them
+    /// again, and the comments of the Gerrit changes on screen are fetched
+    /// again, since what was sent is published now.
+    pub fn consolidated(&mut self, changes: &[ChangeNumber], cx: &mut Context<Self>) {
+        for &change in changes {
+            cx.emit(OutboxEvent::Changed(change));
+            if change.is_local() {
+                continue;
+            }
+            if let Some(c) = self.comments.get(&change).and_then(WeakEntity::upgrade) {
+                c.update(cx, |c, cx| c.refresh(cx));
+            }
+        }
+        self.refresh_counts(cx);
+    }
+
     /// Tells the listeners that the drafts of `change` changed.
     fn announce(&mut self, change: ChangeNumber, cx: &mut Context<Self>) {
         cx.emit(OutboxEvent::Changed(change));

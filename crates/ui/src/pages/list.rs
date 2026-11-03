@@ -261,6 +261,14 @@ impl ChangeListPage {
         self.load_local(cx);
     }
 
+    /// Reads the local changes from the store again, if this page shows
+    /// them: a consolidation run moved some.
+    pub fn reload_local(&mut self, cx: &mut Context<Self>) {
+        if self.local_scanner.is_some() {
+            self.load_local(cx);
+        }
+    }
+
     /// Rows currently shown in section `i`.
     pub fn visible_rows(&self, i: usize) -> &[ChangeSummary] {
         let Some(s) = self.sections.get(i) else {

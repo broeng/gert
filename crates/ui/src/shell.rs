@@ -21,10 +21,11 @@ use crate::{
     actions::{self, *},
     attention::{self, Polled},
     checkouts::Checkouts,
+    consolidation::{self, ConsolidationEvent, Consolidator},
     filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
     goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, LinkServer, resolve_link},
     inbox::{self, InboxOp},
-    local_scan::LocalScanner,
+    local_scan::{LocalScanEvent, LocalScanner},
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
     notifier::Notifier,
@@ -449,10 +450,144 @@ impl Shell {
         }
         let checkouts = self.checkouts(key, cx)?;
         let scanner = cx.new(|cx| LocalScanner::new(checkouts, cx));
+        // A round that changed local change rows may have found something
+        // to send.
+        let owner = key.clone();
+        let sub = cx.subscribe(&scanner, move |this, _, ev: &LocalScanEvent, cx| match ev {
+            LocalScanEvent::Changed => this.consolidate(&owner, cx),
+        });
         let entry = self.servers.get_mut(key)?;
         scanner.update(cx, |s, _| s.set_session(entry.session.as_ref()));
         entry.local_scan = Some(scanner.clone());
+        entry.local_scan_sub = Some(sub);
         Some(scanner)
+    }
+
+    /// Gives the consolidator of server `key` its current session, making
+    /// it the first time the server is signed in (an anonymous server never
+    /// gets one). It is kept from then on, also when the session goes, so
+    /// that a run going on is never dropped (see `consolidation`).
+    fn sync_consolidator(&mut self, key: &ServerKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.servers.get(key) else {
+            return;
+        };
+        let session = entry.session.clone();
+        if let Some(c) = entry.consolidation.clone() {
+            c.update(cx, |c, _| c.set_session(session.as_ref()));
+            return;
+        }
+        if !session.as_ref().is_some_and(|s| s.username.is_some()) {
+            return;
+        }
+        let Some(checkouts) = self.checkouts(key, cx) else {
+            return;
+        };
+        let consolidator = cx.new(|_| {
+            let mut c = Consolidator::new(checkouts);
+            c.set_session(session.as_ref());
+            c
+        });
+        let owner = key.clone();
+        let sub = cx.subscribe_in(
+            &consolidator,
+            window,
+            move |this, _, ev: &ConsolidationEvent, window, cx| match ev {
+                ConsolidationEvent::Ran(report) => this.consolidated(&owner, report, window, cx),
+            },
+        );
+        if let Some(entry) = self.servers.get_mut(key) {
+            entry.consolidation = Some(consolidator);
+            entry.consolidation_sub = Some(sub);
+        }
+    }
+
+    /// Asks the consolidator of server `key` for a run, if the server is
+    /// online (see `consolidation`): after a refresh or poll that worked, a
+    /// scan round that changed rows, a saved local review.
+    fn consolidate(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        let Some(entry) = self.servers.get(key) else {
+            return;
+        };
+        if entry.connection != Connection::Online {
+            return;
+        }
+        if let Some(c) = entry.consolidation.clone() {
+            c.update(cx, |c, cx| c.request(cx));
+        }
+    }
+
+    /// What a consolidation run of server `key` did: logged, and the pages
+    /// follow. A refused login goes the usual way, and a lost connection
+    /// marks the server offline until a refresh works again. The drafts and
+    /// local reviews of every change it touched are read again, the
+    /// dashboard's local section too, the scanner looks again when rows
+    /// changed state, and the page on screen reloads the change and says
+    /// what was sent if it is about it.
+    fn consolidated(
+        &mut self,
+        key: &ServerKey,
+        report: &sync::ConsolidateReport,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (row, e) in &report.errors {
+            log::warn!("consolidating local change {} of {key}: {e}", row.0);
+        }
+        match &report.stopped {
+            Some(e) if e.is_unauthorized() => {
+                self.unauthorized_for(key, window, cx);
+                return;
+            }
+            Some(sync::Error::LeaseLost) => {
+                log::debug!("consolidation of {key}: another run took over");
+            }
+            Some(e) => {
+                log::warn!("consolidating the local changes of {key}: {e}");
+                if matches!(e, sync::Error::Api(a) if a.is_retryable()) {
+                    self.servers.set_connection(key, Connection::Offline);
+                    cx.notify();
+                }
+            }
+            None => {}
+        }
+        if !report.ran {
+            return;
+        }
+        let affected = consolidation::affected(report);
+        if affected.is_empty() {
+            return;
+        }
+        if let Some(outbox) = self.servers.get(key).and_then(|e| e.outbox.clone()) {
+            outbox.update(cx, |o, cx| o.consolidated(&affected, cx));
+        }
+        if consolidation::rows_changed(report) {
+            self.scan_local(key, cx);
+        }
+        if self.nav.current_server() != Some(key) {
+            return;
+        }
+        let shown = self.current_change().map(|(_, n)| n);
+        match &self.page {
+            Page::List(p) => p.update(cx, |p, cx| p.reload_local(cx)),
+            Page::Change(p) if shown.is_some_and(|n| affected.contains(&n)) => {
+                p.update(cx, |p, cx| p.reload(cx))
+            }
+            _ => {}
+        }
+        if let Some((note, error)) = shown.and_then(|n| consolidation::note(report, n)) {
+            self.say_on_page(note, error, cx);
+        }
+    }
+
+    /// A note on the change or diff page on screen (red when `error`).
+    fn say_on_page(&mut self, note: String, error: bool, cx: &mut Context<Self>) {
+        match &self.page {
+            Page::Change(p) if error => p.update(cx, |p, cx| p.say_error(note, cx)),
+            Page::Change(p) => p.update(cx, |p, cx| p.say(note, cx)),
+            Page::Diff(p) if error => p.update(cx, |p, cx| p.say_error(note, cx)),
+            Page::Diff(p) => p.update(cx, |p, cx| p.say(note, cx)),
+            _ => {}
+        }
     }
 
     /// Asks the scanner of server `key` to look for local changes (cheap
@@ -736,6 +871,7 @@ impl Shell {
             entry.attention_task = None;
             entry.watch_task = None;
         }
+        self.sync_consolidator(key, window, cx);
         self.sync_attention_polls(window, cx);
     }
 
@@ -1150,13 +1286,15 @@ impl Shell {
     }
 
     /// A refresh of server `key` worked, so it is reachable: upload its
-    /// drafts that waited, and read the account if it is not known yet.
+    /// drafts that waited, read the account if it is not known yet, and
+    /// send what local changes have for Gerrit.
     fn server_reachable(&mut self, key: &ServerKey, window: &mut Window, cx: &mut Context<Self>) {
         self.servers.set_connection(key, Connection::Online);
         if let Some(outbox) = self.servers.get(key).and_then(|e| e.outbox.clone()) {
             outbox.update(cx, |o, cx| o.retry_all(cx));
         }
         self.fetch_account(key, window, cx);
+        self.consolidate(key, cx);
     }
 
     /// Fetches the signed-in account of server `key` (`me`) unless it is
@@ -1430,6 +1568,20 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn local_scan_for_test(&self, key: &str) -> Option<Entity<LocalScanner>> {
         self.servers.get(&ServerKey::new(key))?.local_scan.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn consolidation_for_test(&self, key: &str) -> Option<Entity<Consolidator>> {
+        self.servers
+            .get(&ServerKey::new(key))?
+            .consolidation
+            .clone()
+    }
+
+    /// Asks for a consolidation run of server `key` as a refresh does.
+    #[cfg(test)]
+    pub(crate) fn consolidate_for_test(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.consolidate(&ServerKey::new(key), cx);
     }
 
     #[cfg(test)]
@@ -1939,6 +2091,7 @@ impl Shell {
                     this.open_project_settings(project, window, cx)
                 }
                 ChangeEvent::Search(q) => this.search(q.clone(), window, cx),
+                ChangeEvent::LocalReviewSaved => this.consolidate(&owner, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 ChangeEvent::OpenChangeAt(n, view) => {
                     this.remember_selection(cx);
@@ -2423,13 +2576,17 @@ impl Shell {
         }
     }
 
-    /// A local review was saved: close the dialog and let the page say so.
+    /// A local review was saved: close the dialog, let the page say so,
+    /// and send it if its version is on Gerrit by now.
     fn reply_saved(&mut self, note: String, window: &mut Window, cx: &mut Context<Self>) {
         self.close_reply(window, cx);
         match &self.page {
             Page::Change(p) => p.update(cx, |p, cx| p.say(note, cx)),
             Page::Diff(p) => p.update(cx, |p, cx| p.say(note, cx)),
             _ => {}
+        }
+        if let Some(key) = self.servers.active_key().cloned() {
+            self.consolidate(&key, cx);
         }
     }
 

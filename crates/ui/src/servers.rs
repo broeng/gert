@@ -21,6 +21,7 @@ use gpui_kit::{
 
 use crate::{
     checkouts::Checkouts,
+    consolidation::Consolidator,
     local_scan::LocalScanner,
     outbox::DraftOutbox,
     session::{ServerConfig, ServerKey, ServerSetup, Session},
@@ -142,6 +143,15 @@ pub(crate) struct ServerEntry {
     /// Looks for local changes in `checkouts`. Made on first use, and only
     /// for a signed-in server.
     pub local_scan: Option<Entity<LocalScanner>>,
+    /// The shell's subscription to `local_scan`.
+    pub local_scan_sub: Option<Subscription>,
+    /// Sends the review data of local changes that reached Gerrit. Made
+    /// when the server first gets a signed-in session and kept for as long
+    /// as the server is configured, so that a run is never dropped half
+    /// way (see `consolidation`).
+    pub consolidation: Option<Entity<Consolidator>>,
+    /// The shell's subscription to `consolidation`.
+    pub consolidation_sub: Option<Subscription>,
     /// The server's own diff preferences (the user's settings on that
     /// server), as last loaded; the shell's shared settings show the
     /// active server's.
@@ -190,6 +200,9 @@ impl ServerEntry {
             syntax: None,
             checkouts: None,
             local_scan: None,
+            local_scan_sub: None,
+            consolidation: None,
+            consolidation_sub: None,
             diff_prefs: None,
             credentials_task: None,
             bookmarks_task: None,

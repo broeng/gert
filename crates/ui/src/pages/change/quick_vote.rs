@@ -191,6 +191,7 @@ impl ChangePage {
                             button.text()
                         );
                         this.hint.say(text, false, cx, |p| &mut p.hint);
+                        cx.emit(ChangeEvent::LocalReviewSaved);
                     }
                     Err(e) => {
                         let text = reply::describe_local(&e);

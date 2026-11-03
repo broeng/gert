@@ -8,6 +8,7 @@ mod card;
 mod change_detail;
 mod checkouts;
 mod comments;
+mod consolidation;
 pub mod diff;
 mod diff_load;
 pub mod filters;
