@@ -2328,7 +2328,7 @@ impl Shell {
         let checkouts = self.checkouts(&owner, cx);
         let page = cx.new(|cx| {
             let mut page = DiffPage::new(session, settings, filters, syntax, route, outbox, cx);
-            page.set_checkouts(checkouts);
+            page.set_checkouts(checkouts, cx);
             page.set_server_badge(badge, cx);
             page
         });

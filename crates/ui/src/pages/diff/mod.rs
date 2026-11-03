@@ -25,8 +25,6 @@ mod prefs;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::HashSet, sync::Arc};
-
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -45,13 +43,11 @@ use crate::{
         actions::{NextFile, PrevFile},
     },
     diff_load::{DiffSource, LoadError, context_label, load_diff},
+    file_list::{Ask, FileList, FileListEvent, Files, Seed},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
     local_rules::{self, Op, Target},
-    local_source::{
-        LocalSource, LocalState, Lookup, Renames, Resolved, Unserved, local_file_list,
-        local_marker, lookup, renames_of,
-    },
+    local_source::{LocalSource, local_marker},
     nav::DiffRoute,
     outbox::{self, DraftOutbox},
     reply, reviewed,
@@ -92,10 +88,9 @@ struct Loaded {
     detail: Option<ChangeDetail>,
     /// The comparison, also when its file list could not be had.
     files_key: Option<FilesKey>,
-    files: Option<(Vec<FileEntry>, HashSet<String>)>,
-    /// The store had no list for `files_key`; the page gets it (from the
-    /// checkout and Gerrit) after this.
-    files_missed: bool,
+    /// What the store had for `files_key`: on a miss the file list gets it
+    /// from the checkout and Gerrit after this.
+    seed: Seed,
     error: Option<String>,
 }
 
@@ -104,28 +99,15 @@ pub struct DiffPage {
     settings: Entity<DiffSettings>,
     route: DiffRoute,
     detail: Option<ChangeDetail>,
-    files_key: Option<FilesKey>,
-    files: Vec<FileEntry>,
-    /// A list (possibly empty) is in `files`.
-    files_loaded: bool,
-    /// The checkout `files` was made in, while it is the local list that
-    /// Gerrit's has not replaced yet (no reviewed marks, never stored).
-    files_local: Option<std::path::PathBuf>,
-    /// How many of the requests for a missing list (Gerrit, the checkout)
-    /// have not answered yet.
-    files_pending: u8,
-    files_task: Option<Task<()>>,
-    /// Making the list in the checkout.
-    local_files_task: Option<Task<()>>,
+    /// The comparison's file list, its local source and reviewed marks.
+    file_list: Entity<FileList>,
+    /// What `file_list` last said (its key is fixed for the page).
+    files: Files,
     /// Looking for a stored diff while the list is missing.
     stored_probe: Option<Task<()>>,
-    /// The server's local checkouts, when it has any.
+    /// The server's local checkouts, when it has any (the file list has
+    /// them too).
     checkouts: Option<Entity<Checkouts>>,
-    /// The local source for `files_key`, once resolved.
-    local: LocalState,
-    local_task: Option<Task<()>>,
-    /// The renames of `files`, for the local source.
-    renames: Arc<Renames>,
     /// Where the diff on screen came from.
     source: Option<DiffSource>,
     /// The file filter rules and which are on, shared by all pages.
@@ -135,8 +117,6 @@ pub struct DiffPage {
     syntax: Entity<SyntaxCache>,
     /// The filter style of each entry of `files`.
     styles: Vec<FileStyle>,
-    /// The files of this patch set the user marked reviewed.
-    reviewed: HashSet<String>,
     /// A note for the user (why a key did nothing, a failed request).
     hint: Hint,
     /// The server's name and color, when there are several servers.
@@ -190,29 +170,21 @@ impl DiffPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let comments = outbox.update(cx, |o, cx| o.comments(route.change, cx));
+        let file_list = cx.new(|_| FileList::new(session.clone()));
         let want_thread = route.thread.clone();
         let mut this = Self {
             session,
             settings: settings.clone(),
             route,
             detail: None,
-            files_key: None,
-            files: Vec::new(),
-            files_loaded: false,
-            files_local: None,
-            files_pending: 0,
-            files_task: None,
-            local_files_task: None,
+            file_list: file_list.clone(),
+            files: Files::default(),
             stored_probe: None,
             checkouts: None,
-            local: LocalState::Unknown,
-            local_task: None,
-            renames: Arc::default(),
             source: None,
             filters: filters.clone(),
             syntax,
             styles: Vec::new(),
-            reviewed: HashSet::new(),
             hint: Hint::default(),
             server_badge: None,
             key: None,
@@ -245,6 +217,8 @@ impl DiffPage {
                 CommentsEvent::Changed => this.apply_threads(cx),
                 CommentsEvent::Unauthorized => cx.emit(DiffPageEvent::Unauthorized),
             }));
+        this._subs
+            .push(cx.subscribe(&file_list, |this, _, ev, cx| this.files_changed(ev, cx)));
         this.load(cx);
         this
     }
@@ -302,65 +276,6 @@ impl DiffPage {
         }));
     }
 
-    /// The store had no file list. Asks Gerrit (if it can be asked) and the
-    /// checkout (if it has the commits) at the same time: the first answer
-    /// is shown, and Gerrit's replaces the checkout's. Nothing stored comes
-    /// from the checkout. The diff is fetched once there is a list, or
-    /// when no request is left to bring one.
-    fn miss_files(&mut self, cx: &mut Context<Self>) {
-        let Some(key) = self.files_key.clone() else {
-            return;
-        };
-        self.files_task = None;
-        self.local_files_task = None;
-        self.files_pending = 0;
-        self.probe_stored_diff(&key, cx);
-        self.ensure_local(&key, cx);
-        if !matches!(self.local, LocalState::Ready(_, Err(_))) {
-            let lazy = self.local.lazy(&key, &Arc::default());
-            self.files_pending += 1;
-            let task_key = key.clone();
-            self.local_files_task = Some(cx.spawn(async move |this, cx| {
-                let made = local_file_list(lazy, cx).await;
-                this.update(cx, |this, cx| {
-                    this.files_pending = this.files_pending.saturating_sub(1);
-                    // Gerrit's list may have come first.
-                    if let Some((path, files)) = made
-                        && !this.files_loaded
-                    {
-                        this.apply_list(&task_key, files, HashSet::new(), Some(path), cx);
-                    }
-                    this.files_settled(cx);
-                })
-                .ok();
-            }));
-        }
-        // Gerrit cannot list a local version: only the checkout can.
-        if self.session.can_sync() && !key.is_local() {
-            self.files_pending += 1;
-            let syncer = self.session.syncer().clone();
-            let task_key = key.clone();
-            self.files_task = Some(cx.spawn(async move |this, cx| {
-                let fetched = cx
-                    .background_spawn(async move { syncer.refresh_files(&key).await })
-                    .await;
-                this.update(cx, |this, cx| {
-                    this.files_pending = this.files_pending.saturating_sub(1);
-                    match fetched {
-                        Ok(c) => {
-                            let reviewed = c.reviewed.unwrap_or_default().into_iter().collect();
-                            this.apply_list(&task_key, c.files, reviewed, None, cx);
-                        }
-                        Err(e) => log::warn!("fetching files of change {}: {e}", this.route.change),
-                    }
-                    this.files_settled(cx);
-                })
-                .ok();
-            }));
-        }
-        self.files_settled(cx);
-    }
-
     /// A stored diff is shown without waiting for a list: the diff is
     /// fetched at once if the store has it (`load_diff` then reads the
     /// store and never touches git).
@@ -380,7 +295,7 @@ impl DiffPage {
     /// Fetches the diff and does the step asked for meanwhile, once a list
     /// has arrived or nothing is left that could bring one.
     fn files_settled(&mut self, cx: &mut Context<Self>) {
-        if !self.files_loaded && self.files_pending > 0 {
+        if !self.files.settled {
             return;
         }
         self.fetch(cx);
@@ -389,47 +304,38 @@ impl DiffPage {
         }
     }
 
-    /// Shows `files`. `local` is the checkout they were made in, `None` for
-    /// Gerrit's list, which also stops the checkout's from landing late.
-    fn apply_list(
-        &mut self,
-        key: &FilesKey,
-        files: Vec<FileEntry>,
-        reviewed: HashSet<String>,
-        local: Option<std::path::PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.files_key.as_ref() != Some(key) {
-            return;
+    /// The file list said something changed: take its snapshot, and redo
+    /// what depends on it.
+    fn files_changed(&mut self, ev: &FileListEvent, cx: &mut Context<Self>) {
+        self.files = self.file_list.read(cx).files();
+        match ev {
+            FileListEvent::Listed => {
+                // What depends on the list: the styles, the old path of a
+                // rename, the files ahead (and the prefetch decision), the
+                // position; then the diff, if it waited for the list.
+                self.restyle(cx);
+                self.apply_threads(cx);
+                self.ahead_state = None;
+                self.ahead(cx);
+                self.files_settled(cx);
+            }
+            FileListEvent::Changed => self.files_settled(cx),
+            FileListEvent::MarksChanged => {}
+            FileListEvent::LocalResolved => {
+                // The prefetch decision and the marker depend on it.
+                self.ahead_state = None;
+                self.ahead(cx);
+            }
+            FileListEvent::ReviewedFailed(note) => {
+                self.hint.say(note.clone(), true, cx, |p| &mut p.hint);
+            }
+            FileListEvent::Unauthorized => cx.emit(DiffPageEvent::Unauthorized),
         }
-        if local.is_none() {
-            // The checkout's list is not needed any more.
-            self.local_files_task = None;
-        }
-        self.files = files;
-        self.files_loaded = true;
-        self.files_local = local;
-        self.renames = renames_of(&self.files);
-        self.reviewed = reviewed;
-        self.restyle(cx);
-        // What depends on the list: the old path of a rename, the files
-        // ahead (and the prefetch decision), the position.
-        self.apply_threads(cx);
-        self.ahead_state = None;
-        self.ahead(cx);
         cx.notify();
     }
 
     fn loaded(&mut self, l: Loaded, cx: &mut Context<Self>) {
         self.detail = l.detail;
-        self.files_key = l.files_key;
-        if let Some((files, reviewed)) = l.files {
-            self.files = files;
-            self.files_loaded = true;
-            self.renames = renames_of(&self.files);
-            self.reviewed = reviewed;
-            self.restyle(cx);
-        }
         let step = self.pending_step.take();
         if let Some(e) = l.error {
             self.loading = false;
@@ -437,19 +343,36 @@ impl DiffPage {
             cx.notify();
             return;
         }
-        if self.files_key.is_some() && l.files_missed {
-            // The diff is fetched, and the step done, once a list is there.
+        let Some(key) = l.files_key else {
+            self.loading = false;
+            self.error = Some("the diff could not be requested".into());
+            if let Some(forward) = step {
+                self.step_file(forward, cx);
+            }
+            cx.notify();
+            return;
+        };
+        let project = self
+            .detail
+            .as_ref()
+            .map(|d| d.summary.project.clone())
+            .unwrap_or_default();
+        let miss = matches!(l.seed, Seed::Miss);
+        self.file_list.update(cx, |f, cx| {
+            f.load(Some(key.clone()), &project, l.seed, Ask::OnMiss, cx)
+        });
+        self.files = self.file_list.read(cx).files();
+        self.restyle(cx);
+        if miss {
+            // The diff is fetched, and the step done, once a list is there
+            // (or nothing is left to bring one); a stored diff at once.
             self.pending_step = step;
-            self.miss_files(cx);
+            self.probe_stored_diff(&key, cx);
+            self.files_settled(cx);
             cx.notify(); // the header, from the detail
             return;
         }
-        if self.files_key.is_some() {
-            self.fetch(cx);
-        } else {
-            self.loading = false;
-            self.error = Some("the diff could not be requested".into());
-        }
+        self.fetch(cx);
         if let Some(forward) = step {
             self.step_file(forward, cx);
         }
@@ -466,7 +389,12 @@ impl DiffPage {
                 .matcher(&self.session.key, &d.summary.project),
             None => FileMatcher::default(),
         };
-        self.styles = self.files.iter().map(|f| matcher.style(&f.path)).collect();
+        self.styles = self
+            .files
+            .list
+            .iter()
+            .map(|f| matcher.style(&f.path))
+            .collect();
     }
 
     /// The filter style of the file shown.
@@ -477,7 +405,7 @@ impl DiffPage {
     /// Fetches the diff for the current preferences (after the whitespace
     /// option changed). The shown diff stays until the new one is there.
     fn fetch(&mut self, cx: &mut Context<Self>) {
-        let Some(files) = self.files_key.clone() else {
+        let Some(files) = self.files.key.clone() else {
             return;
         };
         let key = self.make_key(&files, cx);
@@ -499,8 +427,7 @@ impl DiffPage {
         }
         // A stored diff is shown without waiting for git: load_diff awaits
         // the local source only after the store missed.
-        self.ensure_local(&files, cx);
-        let local = self.local.lazy(&files, &self.renames);
+        let local = self.files.local_lazy();
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(load_diff(syncer, key.clone(), can_sync, local))
@@ -615,6 +542,7 @@ impl DiffPage {
         };
         let old_path = self
             .files
+            .list
             .iter()
             .find(|f| f.path == self.route.path)
             .and_then(|f| f.old_path.clone());
@@ -647,18 +575,20 @@ impl DiffPage {
     /// file, which is never highlighted), its diff is just prefetched. Does
     /// nothing when nothing it depends on changed since the last call.
     fn ahead(&mut self, cx: &mut Context<Self>) {
-        let (Some(files), Some(shown)) = (self.files_key.clone(), self.shown.clone()) else {
+        let (Some(files), Some(shown)) = (self.files.key.clone(), self.shown.clone()) else {
             return;
         };
         let prefs = self.prefs(cx);
         let enabled = prefs.syntax_highlighting;
         let next = self.position().and_then(|from| {
             let skipped = |i: usize| self.styles.get(i).is_some_and(skips);
-            next_unskipped(self.files.len(), from, true, skipped)
+            next_unskipped(self.files.list.len(), from, true, skipped)
         });
-        let next = next.and_then(|i| self.files.get(i)).map(|f| f.path.clone());
+        let next = next
+            .and_then(|i| self.files.list.get(i))
+            .map(|f| f.path.clone());
         let keys: Vec<DiffKey> = if enabled {
-            ahead_paths(&self.files, &self.styles, Some(&self.route.path))
+            ahead_paths(&self.files.list, &self.styles, Some(&self.route.path))
                 .into_iter()
                 .map(|p| diff_key(&files, p, prefs.ignore_whitespace.clone()))
                 .collect()
@@ -675,7 +605,7 @@ impl DiffPage {
         }
         let session = self.session.clone();
         let keys = state.keys.clone();
-        let local = self.local.lazy(&files, &self.renames);
+        let local = self.files.local_lazy();
         self.syntax
             .update(cx, |c, cx| c.set_queue(keys, &session, local, enabled, cx));
         let covered = enabled && state.next.as_deref().is_some_and(|p| !is_magic(p));
@@ -685,61 +615,16 @@ impl DiffPage {
         self.ahead_state = Some(state);
     }
 
-    /// Starts finding the local source for `files` unless that is done or
-    /// under way.
-    fn ensure_local(&mut self, files: &FilesKey, cx: &mut Context<Self>) {
-        if self.local.is_for(files) {
-            return;
-        }
-        let project = self.detail.as_ref().map(|d| d.summary.project.clone());
-        let found = match &project {
-            Some(p) => lookup(&self.checkouts, p, files, cx),
-            None => Lookup::Unconfigured,
-        };
-        self.local_task = None;
-        self.local = match found {
-            Lookup::Unconfigured => LocalState::Ready(files.clone(), Err(Unserved::NoCheckout)),
-            Lookup::Ready(s) => LocalState::Ready(files.clone(), Ok(s)),
-            Lookup::Pending(p) => {
-                let key = files.clone();
-                let shared = p.clone();
-                self.local_task = Some(cx.spawn(async move |this, cx| {
-                    let source = shared.await;
-                    this.update(cx, |this, cx| this.local_resolved(&key, source, cx))
-                        .ok();
-                }));
-                LocalState::Resolving(files.clone(), p)
-            }
-        };
-    }
-
-    fn local_resolved(&mut self, files: &FilesKey, source: Resolved, cx: &mut Context<Self>) {
-        if !matches!(&self.local, LocalState::Resolving(k, _) if k == files) {
-            return;
-        }
-        self.local = LocalState::Ready(files.clone(), source);
-        self.local_task = None;
-        // The prefetch decision and the marker depend on it.
-        self.ahead_state = None;
-        self.ahead(cx);
-        cx.notify();
-    }
-
     /// The local source for the comparison on show, once resolved.
     fn local_source(&self) -> Option<LocalSource> {
-        let source = self.local.source_for(self.files_key.as_ref()?)?;
-        Some(source.with_renames(self.renames.clone()))
+        self.files.local_source()
     }
 
     /// Whether the comparison involves a local version whose two sides
-    /// have different parents (a rebase). Gerrit marks the edits a rebase
-    /// brings, which git cannot, so the checkout leaves such a comparison
-    /// to Gerrit, and Gerrit does not have the local version: nobody can
+    /// have different parents (see [`Files::parents_differ`]): nobody can
     /// show it.
     fn parents_differ(&self) -> bool {
-        self.files_key.as_ref().is_some_and(|k| {
-            k.is_local() && self.local.unserved(k) == Some(Unserved::ParentsDiffer)
-        })
+        self.files.parents_differ()
     }
 
     /// The same file against the parent, which the checkout can show.
@@ -754,19 +639,20 @@ impl DiffPage {
     /// Names the server's checkouts, so diffs can come from the project's
     /// local checkout. Set right after the page is made, before anything
     /// has loaded.
-    pub fn set_checkouts(&mut self, checkouts: Option<Entity<Checkouts>>) {
-        self.checkouts = checkouts;
+    pub fn set_checkouts(&mut self, checkouts: Option<Entity<Checkouts>>, cx: &mut App) {
+        self.checkouts = checkouts.clone();
+        self.file_list.update(cx, |f, _| f.set_checkouts(checkouts));
     }
 
     /// The checkout the file list was made in, while it is the local one.
     #[cfg(test)]
     pub(crate) fn files_local_for_test(&self) -> Option<&std::path::Path> {
-        self.files_local.as_deref()
+        self.files.checkout()
     }
 
     #[cfg(test)]
     pub(crate) fn file_paths_for_test(&self) -> Vec<&str> {
-        self.files.iter().map(|f| f.path.as_str()).collect()
+        self.files.list.iter().map(|f| f.path.as_str()).collect()
     }
 
     #[cfg(test)]
@@ -778,7 +664,7 @@ impl DiffPage {
     /// instant.
     fn prefetch_next(&mut self, shown: &DiffKey, next: &str, cx: &mut Context<Self>) {
         // Gerrit has nothing to prefetch for a local version.
-        if !self.session.can_sync() || self.files.is_empty() || shown.is_local() {
+        if !self.session.can_sync() || self.files.list.is_empty() || shown.is_local() {
             return;
         }
         let syncer: Syncer = self.session.syncer().clone();
@@ -794,12 +680,13 @@ impl DiffPage {
         // next entry of the list it is given.
         let files: Vec<FileEntry> = self
             .files
+            .list
             .iter()
             .zip(&self.styles)
             .filter(|(f, style)| f.path == self.route.path || !skips(style))
             .map(|(f, _)| f.clone())
             .collect();
-        let key = match &self.files_key {
+        let key = match &self.files.key {
             Some(fk) => self.make_key(fk, cx),
             None => shown.clone(),
         };
@@ -830,7 +717,7 @@ impl DiffPage {
 
     #[cfg(test)]
     pub(crate) fn is_reviewed_for_test(&self) -> bool {
-        self.reviewed.contains(&self.route.path)
+        self.files.is_reviewed(&self.route.path)
     }
 
     #[cfg(test)]
@@ -1021,74 +908,33 @@ impl DiffPage {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
-        let Some(key) = self.files_key.clone() else {
+        if self.files.key.is_none() {
             return;
-        };
-        if (self.files_pending > 0 && !self.files_loaded) || self.files_local.is_some() {
+        }
+        if !self.files.settled || self.files.checkout.is_some() {
             // Gerrit's list, computed before the mark, would replace it.
             self.hint.say(reviewed::WAITS, false, cx, |p| &mut p.hint);
             return;
         }
         let path = self.route.path.clone();
-        let reviewed = !self.reviewed.contains(&path);
-        self.mark_reviewed(&path, reviewed);
-        cx.notify();
-        let syncer = self.session.syncer().clone();
-        let (change, sha, sent) = (self.route.change, key.target.sha.clone(), path.clone());
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_spawn(reviewed::send(syncer, change, sha, sent, reviewed))
-                .await;
-            this.update(cx, |this, cx| {
-                this.reviewed_result(&key, &path, reviewed, outcome, cx)
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn mark_reviewed(&mut self, path: &str, reviewed: bool) {
-        if reviewed {
-            self.reviewed.insert(path.to_owned());
-        } else {
-            self.reviewed.remove(path);
-        }
-    }
-
-    fn reviewed_result(
-        &mut self,
-        key: &FilesKey,
-        path: &str,
-        reviewed: bool,
-        outcome: reviewed::Outcome,
-        cx: &mut Context<Self>,
-    ) {
-        let (error, login) = match outcome {
-            reviewed::Outcome::Done => return,
-            reviewed::Outcome::Unauthorized => (None, true),
-            reviewed::Outcome::Failed(e) => (Some(e), false),
-        };
-        if self.files_key.as_ref() == Some(key) && self.reviewed.contains(path) == reviewed {
-            self.mark_reviewed(path, !reviewed);
-        }
-        if let Some(e) = error {
-            let note = reviewed::failure_note(path, reviewed, &e);
-            self.hint.say(note, true, cx, |p| &mut p.hint);
-        }
-        if login {
-            cx.emit(DiffPageEvent::Unauthorized);
-        }
+        let reviewed = !self.files.is_reviewed(&path);
+        self.file_list
+            .update(cx, |f, cx| f.set_reviewed(&path, reviewed, cx));
+        self.files = self.file_list.read(cx).files();
         cx.notify();
     }
 
     // ---- navigation between files ----
 
     fn position(&self) -> Option<usize> {
-        self.files.iter().position(|f| f.path == self.route.path)
+        self.files
+            .list
+            .iter()
+            .position(|f| f.path == self.route.path)
     }
 
     fn go_to(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(file) = self.files.get(ix) else {
+        let Some(file) = self.files.list.get(ix) else {
             return;
         };
         if file.path != self.route.path {
@@ -1106,15 +952,13 @@ impl DiffPage {
     /// comes while the file list is still loading; it waits for it.
     fn step_file(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(from) = self.position() else {
-            if (self.loading && self.files_key.is_none())
-                || (self.files_pending > 0 && !self.files_loaded)
-            {
+            if (self.loading && self.files.key.is_none()) || !self.files.settled {
                 self.pending_step = Some(forward);
             }
             return;
         };
         let skipped = |i: usize| self.styles.get(i).is_some_and(skips);
-        match next_unskipped(self.files.len(), from, forward, skipped) {
+        match next_unskipped(self.files.list.len(), from, forward, skipped) {
             Some(i) => self.go_to(i, cx),
             None if forward => cx.emit(DiffPageEvent::UpToChange),
             None => {}
@@ -1204,6 +1048,7 @@ impl DiffPage {
     fn path_label(&self) -> String {
         let old = self
             .files
+            .list
             .iter()
             .find(|f| f.path == self.route.path)
             .and_then(|f| f.old_path.clone());
@@ -1266,7 +1111,7 @@ impl DiffPage {
             .flatten();
         // The list the position and `]` go by comes from the checkout too;
         // the marker of a local diff already says it.
-        let list_path = self.files_local.clone().filter(|_| local_path.is_none());
+        let list_path = self.files.checkout.clone().filter(|_| local_path.is_none());
         v_flex()
             .px_3()
             .py_2()
@@ -1337,7 +1182,7 @@ impl DiffPage {
                     .items_baseline()
                     .flex_wrap()
                     .text_sm()
-                    .when(self.reviewed.contains(&self.route.path), |d| {
+                    .when(self.files.is_reviewed(&self.route.path), |d| {
                         d.child(
                             div()
                                 .text_xs()
@@ -1575,8 +1420,7 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
     let fail = |detail: Option<ChangeDetail>, error: String| Loaded {
         detail,
         files_key: None,
-        files: None,
-        files_missed: false,
+        seed: Seed::Unread,
         error: Some(error),
     };
     let mut detail = match change_detail::cached(&syncer, route.change) {
@@ -1626,20 +1470,21 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
         base,
         target,
     };
-    // A miss is the page's to fill: from the checkout, and from Gerrit.
-    let files = match syncer.cached_files(&files_key) {
-        Ok(Some(c)) => Some((c.files, c.reviewed)),
-        Ok(None) => None,
+    // Read here, with the detail, so that the first diff fetch has the
+    // list's renames. A miss is the file list's to fill: from the checkout,
+    // and from Gerrit.
+    let seed = match syncer.cached_files(&files_key) {
+        Ok(Some(c)) => Seed::Hit(c),
+        Ok(None) => Seed::Miss,
         Err(e) => {
             log::warn!("reading cached files: {e}");
-            None
+            Seed::Miss
         }
     };
     Loaded {
         detail: Some(d),
         files_key: Some(files_key),
-        files_missed: files.is_none(),
-        files: files.map(|(f, r)| (f, r.unwrap_or_default().into_iter().collect())),
+        seed,
         error: None,
     }
 }

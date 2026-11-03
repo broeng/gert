@@ -265,7 +265,7 @@ fn diff_page_loading_as(
         let checkouts = cx.new(|_| crate::checkouts::Checkouts::new(projects));
         let page = cx.new(|cx| {
             let mut page = DiffPage::new(session, settings, filters, syntax, route, outbox, cx);
-            page.set_checkouts(Some(checkouts));
+            page.set_checkouts(Some(checkouts), cx);
             page
         });
         cx.subscribe(&page, move |_, ev: &super::DiffPageEvent, _| {
@@ -1212,7 +1212,7 @@ fn a_bracket_pressed_while_the_page_loads_is_done_once_the_files_are_there(
         Vec::new(),
         LocalDiff::default(),
     );
-    cx.update(|cx| assert!(p.page.read(cx).files.is_empty()));
+    cx.update(|cx| assert!(p.page.read(cx).files.list.is_empty()));
     press(cx, p.window, &["]"]);
     assert_eq!(opened(&p), ["open src/b.rs"]);
 }
@@ -2000,8 +2000,8 @@ fn r_waits_for_gerrits_list(cx: &mut TestAppContext) {
     // The window between the page knowing the comparison and the list
     // arriving cannot be held open with a synchronous fake: put it back.
     p.page.update(cx, |p, _| {
-        p.files_loaded = false;
-        p.files_pending = 1;
+        p.files.loaded = false;
+        p.files.settled = false;
     });
     press(cx, p.window, &["r"]);
     let hint = p.page.read_with(cx, |p, _| p.hint_for_test());
