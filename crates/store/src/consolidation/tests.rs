@@ -443,7 +443,14 @@ fn finishing_the_post_removes_what_was_sent_and_then_it_consolidates() {
     );
     s.rewrite_local_change(id, &rw).unwrap().unwrap();
     let claim = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n", &who())
+        .claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Pending][..])),
+            PatchSetNumber(1),
+            "n",
+            &who(),
+        )
         .unwrap()
         .unwrap();
     let claimed = claim.review.unwrap();
@@ -657,7 +664,14 @@ fn claiming_a_post_marks_its_drafts_and_review_with_one_nonce() {
     let (mut s, id, c, v1, v2) = setup();
     let (a, r, other) = moved(&mut s, id, &c, &v1, &v2);
     let post = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
+        .claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Pending][..])),
+            PatchSetNumber(1),
+            "n1",
+            &who(),
+        )
         .unwrap()
         .unwrap();
     let review = post.review.unwrap();
@@ -681,16 +695,31 @@ fn claiming_a_post_marks_its_drafts_and_review_with_one_nonce() {
     // Another run cannot claim it, with or without the review; the same
     // run can (a retry after a crash).
     assert_eq!(
-        s.claim_local_post(id, c.id, None, "n2", &who()).unwrap(),
-        None
-    );
-    assert_eq!(
-        s.claim_local_post(id, c.id, Some((other.id, &[Pending][..])), "n2", &who())
+        s.claim_local_post(id, c.id, None, PatchSetNumber(1), "n2", &who())
             .unwrap(),
         None
     );
+    assert_eq!(
+        s.claim_local_post(
+            id,
+            c.id,
+            Some((other.id, &[Pending][..])),
+            PatchSetNumber(1),
+            "n2",
+            &who()
+        )
+        .unwrap(),
+        None
+    );
     let again = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
+        .claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Pending][..])),
+            PatchSetNumber(1),
+            "n1",
+            &who(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(again.drafts.len(), 2);
@@ -705,7 +734,14 @@ fn claiming_a_post_marks_its_drafts_and_review_with_one_nonce() {
         .unwrap();
     assert!(s.unfinished_local_posts(id).unwrap().is_empty());
     let retry = s
-        .claim_local_post(id, c.id, Some((r.id, &[Failed][..])), "n3", &who())
+        .claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Failed][..])),
+            PatchSetNumber(1),
+            "n3",
+            &who(),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(retry.review.unwrap().nonce.as_deref(), Some("n3"));
@@ -718,7 +754,14 @@ fn a_claimed_post_reads_back_exactly_as_claimed() {
     let (a, r, other) = moved(&mut s, id, &c, &v1, &v2);
     assert_eq!(s.local_post(id, c.id, "n1").unwrap(), None);
     let claimed = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
+        .claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Pending][..])),
+            PatchSetNumber(1),
+            "n1",
+            &who(),
+        )
         .unwrap()
         .unwrap();
     // Reserved after the claim (by a later rewrite): not part of the post.
@@ -788,7 +831,7 @@ fn a_comment_only_post_has_a_nonce_too() {
     );
     s.rewrite_local_change(id, &rw).unwrap().unwrap();
     let post = s
-        .claim_local_post(id, c.id, None, "n1", &who())
+        .claim_local_post(id, c.id, None, PatchSetNumber(1), "n1", &who())
         .unwrap()
         .unwrap();
     assert_eq!((post.review, post.drafts.len()), (None, 1));
@@ -811,15 +854,11 @@ fn claims_that_do_not_fit_write_nothing() {
     let other_change = add(&mut s, id, "IO", None);
     // Not in the states named, another change's review, a gone change.
     assert_eq!(
-        s.claim_local_post(id, c.id, Some((r.id, &[Held][..])), "n", &who())
-            .unwrap(),
-        None
-    );
-    assert_eq!(
         s.claim_local_post(
             id,
-            other_change.id,
-            Some((r.id, &[Pending][..])),
+            c.id,
+            Some((r.id, &[Held][..])),
+            PatchSetNumber(1),
             "n",
             &who()
         )
@@ -827,7 +866,19 @@ fn claims_that_do_not_fit_write_nothing() {
         None
     );
     assert_eq!(
-        s.claim_local_post(id, LocalChangeId(999), None, "n", &who())
+        s.claim_local_post(
+            id,
+            other_change.id,
+            Some((r.id, &[Pending][..])),
+            PatchSetNumber(1),
+            "n",
+            &who()
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        s.claim_local_post(id, LocalChangeId(999), None, PatchSetNumber(1), "n", &who())
             .unwrap(),
         None
     );
@@ -862,9 +913,16 @@ fn only_claims_of_gone_runs_that_are_old_enough_are_recovered() {
         owner: "old-run",
         at: claimed_at,
     };
-    s.claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &by)
-        .unwrap()
-        .unwrap();
+    s.claim_local_post(
+        id,
+        c.id,
+        Some((r.id, &[Pending][..])),
+        PatchSetNumber(1),
+        "n1",
+        &by,
+    )
+    .unwrap()
+    .unwrap();
     let young = ts("2024-03-01T10:30:00Z");
     let old = ts("2024-03-01T11:30:00Z");
     // Still in flight: claimed after `stale_before`, by another run.
@@ -923,9 +981,16 @@ fn a_claim_recorded_by_no_run_is_recoverable() {
     use PendingReviewState::*;
     let (mut s, id, c, v1, v2) = setup();
     let (_, r, _) = moved(&mut s, id, &c, &v1, &v2);
-    s.claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
-        .unwrap()
-        .unwrap();
+    s.claim_local_post(
+        id,
+        c.id,
+        Some((r.id, &[Pending][..])),
+        PatchSetNumber(1),
+        "n1",
+        &who(),
+    )
+    .unwrap()
+    .unwrap();
     // As a claim made before claims named their run (v15).
     s.conn.execute("DELETE FROM local_post_claims", []).unwrap();
     assert_eq!(
@@ -933,9 +998,16 @@ fn a_claim_recorded_by_no_run_is_recoverable() {
         [(c.id, "n1".to_owned())]
     );
     // Deleting the change removes its claims.
-    s.claim_local_post(id, c.id, Some((r.id, &[Sending][..])), "n1", &who())
-        .unwrap()
-        .unwrap();
+    s.claim_local_post(
+        id,
+        c.id,
+        Some((r.id, &[Sending][..])),
+        PatchSetNumber(1),
+        "n1",
+        &who(),
+    )
+    .unwrap()
+    .unwrap();
     assert!(s.delete_local_change(id, c.id).unwrap());
     let left: i64 = s
         .conn
@@ -953,7 +1025,14 @@ fn finishing_a_post_keeps_the_votes_that_did_not_reach_gerrit() {
         .unwrap()
         .unwrap();
     let post = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
+        .claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Pending][..])),
+            PatchSetNumber(1),
+            "n1",
+            &who(),
+        )
         .unwrap()
         .unwrap();
     let posted: Vec<(LocalDraftId, u32)> = post
@@ -977,7 +1056,14 @@ fn finishing_a_post_keeps_the_votes_that_did_not_reach_gerrit() {
     assert_eq!(s.load_draft(id, a.local_id).unwrap(), None);
     // Claiming it again (a manual publish) clears the marker.
     let again = s
-        .claim_local_post(id, c.id, Some((r.id, &[Held][..])), "n2", &who())
+        .claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Held][..])),
+            PatchSetNumber(1),
+            "n2",
+            &who(),
+        )
         .unwrap()
         .unwrap();
     assert!(again.review.unwrap().drop_only.is_empty());
@@ -988,9 +1074,16 @@ fn abandoning_a_refused_post_fails_the_review_and_holds_its_comments_at_once() {
     use PendingReviewState::*;
     let (mut s, id, c, v1, v2) = setup();
     let (a, r, _) = moved(&mut s, id, &c, &v1, &v2);
-    s.claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
-        .unwrap()
-        .unwrap();
+    s.claim_local_post(
+        id,
+        c.id,
+        Some((r.id, &[Pending][..])),
+        PatchSetNumber(1),
+        "n1",
+        &who(),
+    )
+    .unwrap()
+    .unwrap();
     let failed = ReviewStateChange::new(r.id, &[Sending], Failed, Some("400 bad line".into()));
     let released = s
         .abandon_local_post(
@@ -1022,9 +1115,16 @@ fn abandoning_a_refused_post_fails_the_review_and_holds_its_comments_at_once() {
     // Given up before sending: back to pending, nothing held.
     let (mut s, id, c, v1, v2) = setup();
     let (a, r, _) = moved(&mut s, id, &c, &v1, &v2);
-    s.claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
-        .unwrap()
-        .unwrap();
+    s.claim_local_post(
+        id,
+        c.id,
+        Some((r.id, &[Pending][..])),
+        PatchSetNumber(1),
+        "n1",
+        &who(),
+    )
+    .unwrap()
+    .unwrap();
     let back = ReviewStateChange::new(r.id, &[Sending], Pending, None);
     s.abandon_local_post(id, c.id, "n1", Some(&back), None)
         .unwrap()
@@ -1080,7 +1180,7 @@ fn a_closed_change_holds_its_reviews_and_drafts() {
     assert_eq!((held.drafts.len(), held.reviews.len()), (2, 3));
     // Held drafts are not claimed by a post.
     let post = s
-        .claim_local_post(id, c.id, None, "n1", &who())
+        .claim_local_post(id, c.id, None, PatchSetNumber(1), "n1", &who())
         .unwrap()
         .unwrap();
     assert!(post.drafts.is_empty());
@@ -1102,4 +1202,90 @@ fn checked_times_are_kept_per_change() {
         s.local_change_checked_at(id, LocalChangeId(999)).unwrap(),
         None
     );
+}
+
+#[test]
+fn a_post_claims_only_the_drafts_of_its_revision() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let on1 = draft(&mut s, id, &c, &v1, "on PS 1");
+    let on2 = draft(&mut s, id, &c, &v2, "on PS 2");
+    let r = review(&mut s, id, &v2);
+    let rw = rewrite(
+        &c,
+        vec![
+            PatchSetMove {
+                from: v1.number,
+                to: gerrit_ps(1),
+                exact: true,
+                drafts: vec![(on1.local_id, None)],
+                reviews: vec![],
+            },
+            PatchSetMove {
+                from: v2.number,
+                to: gerrit_ps(2),
+                exact: true,
+                drafts: vec![(on2.local_id, None)],
+                reviews: vec![r.id],
+            },
+        ],
+    );
+    s.rewrite_local_change(id, &rw).unwrap().unwrap();
+    // A review must be claimed on its own revision.
+    assert_eq!(
+        s.claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Pending][..])),
+            PatchSetNumber(1),
+            "n1",
+            &who()
+        )
+        .unwrap(),
+        None
+    );
+    let post = s
+        .claim_local_post(
+            id,
+            c.id,
+            Some((r.id, &[Pending][..])),
+            PatchSetNumber(2),
+            "n1",
+            &who(),
+        )
+        .unwrap()
+        .unwrap();
+    let ids: Vec<LocalDraftId> = post.drafts.iter().map(|d| d.local_id).collect();
+    assert_eq!(ids, [on2.local_id, r.message_draft.unwrap()]);
+    assert_eq!(posting_nonce(&s, on1.local_id), None);
+    // Refused: only what the post carried is held.
+    let failed = ReviewStateChange::new(r.id, &[Sending], Failed, Some("400".into()));
+    s.abandon_local_post(
+        id,
+        c.id,
+        "n1",
+        Some(&failed),
+        Some("Gerrit refused the post: 400"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        s.load_draft(id, on2.local_id)
+            .unwrap()
+            .unwrap()
+            .held_reason
+            .as_deref(),
+        Some("Gerrit refused the post: 400")
+    );
+    assert_eq!(
+        s.load_draft(id, on1.local_id).unwrap().unwrap().held_reason,
+        None
+    );
+    // PS 1's comment is still free for its own post.
+    let other = s
+        .claim_local_post(id, c.id, None, PatchSetNumber(1), "n2", &who())
+        .unwrap()
+        .unwrap();
+    assert_eq!(other.drafts.len(), 1);
+    assert_eq!(other.drafts[0].local_id, on1.local_id);
 }

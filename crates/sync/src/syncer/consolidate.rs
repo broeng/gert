@@ -1164,6 +1164,7 @@ impl Syncer {
                     self.server,
                     row.id,
                     Some((r.id, &[PendingReviewState::Pending])),
+                    ps,
                     &nonce,
                     &run.claimant(),
                 )?;
@@ -1188,6 +1189,7 @@ impl Syncer {
                     self.server,
                     row.id,
                     None,
+                    ps,
                     &nonce,
                     &run.claimant(),
                 )?;

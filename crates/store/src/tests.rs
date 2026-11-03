@@ -1142,6 +1142,7 @@ fn v13_keeps_a_reserved_draft_claimable() {
             ServerId(1),
             model::LocalChangeId(1),
             None,
+            model::PatchSetNumber(1),
             "n1",
             &crate::Claimant {
                 owner: "run",

@@ -376,16 +376,33 @@ impl Store {
     /// [`Store::unfinished_local_posts`]; [`Store::finish_local_post`] or
     /// [`Store::release_local_post`] clear it.
     ///
-    /// Claiming again with the same nonce returns the same post (a retry
-    /// after a crash). `None`, writing nothing, if the change is gone, if
-    /// a draft or the review is claimed under another nonce, or if the
-    /// review is not the change's or in none of the states `from`. The
-    /// claim records `by` (see [`Store::recoverable_local_posts`]).
+    /// Only drafts on `patch_set`, the revision the post goes to, are
+    /// claimed (Gerrit posts a review's comments on its revision); a
+    /// review must be on it too. Claiming again with the same nonce returns
+    /// the same post (a retry after a crash). `None`, writing nothing, if
+    /// the change is gone, if a draft or the review is claimed under
+    /// another nonce, or if the review is not the change's, not on
+    /// `patch_set` or in none of the states `from`. The claim records `by`
+    /// (see [`Store::recoverable_local_posts`]) and is on disk when this
+    /// returns, also after a power cut.
     pub fn claim_local_post(
         &mut self,
         server: ServerId,
         change: LocalChangeId,
         review: Option<(PendingReviewId, &[PendingReviewState])>,
+        patch_set: PatchSetNumber,
+        nonce: &str,
+        by: &Claimant<'_>,
+    ) -> Result<Option<LocalPost>, Error> {
+        self.durably(|s| s.claim_in(server, change, review, patch_set, nonce, by))
+    }
+
+    fn claim_in(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        review: Option<(PendingReviewId, &[PendingReviewState])>,
+        patch_set: PatchSetNumber,
         nonce: &str,
         by: &Claimant<'_>,
     ) -> Result<Option<LocalPost>, Error> {
@@ -393,9 +410,11 @@ impl Store {
         if load_change(&tx, server, change)?.is_none() {
             return Ok(None);
         }
-        // The drafts of this post: reserved for the change, except the
-        // messages of its other reviews.
+        // The drafts of this post: reserved for the change on the revision
+        // posted to, not held, refused or deleted, except the messages of
+        // its other reviews.
         let mine = "server_id = ?1 AND reserved_by = ?2 AND held_reason IS NULL
+                    AND patch_set = ?5 AND state NOT IN ('failed', 'pending_delete')
                     AND (pending_review_id IS NULL OR pending_review_id IS ?3)";
         let review_id = review.map(|(id, _)| id.0);
         let taken: bool = tx.query_row(
@@ -403,7 +422,7 @@ impl Store {
                 "SELECT EXISTS (SELECT 1 FROM drafts WHERE {mine}
                      AND posting_nonce IS NOT NULL AND posting_nonce <> ?4)"
             ),
-            params![server.0, change.0, review_id, nonce],
+            params![server.0, change.0, review_id, nonce, patch_set.0],
             |r| r.get(0),
         )?;
         if taken {
@@ -418,7 +437,7 @@ impl Store {
                 let again =
                     r.state == PendingReviewState::Sending && r.nonce.as_deref() == Some(nonce);
                 let claimable = from.contains(&r.state) && r.state != PendingReviewState::Sending;
-                if r.local_change != change || !(again || claimable) {
+                if r.local_change != change || r.patch_set != patch_set || !(again || claimable) {
                     return Ok(None);
                 }
                 tx.execute(
@@ -432,9 +451,13 @@ impl Store {
         };
         tx.execute(
             &format!("UPDATE drafts SET posting_nonce = ?4 WHERE {mine}"),
-            params![server.0, change.0, review_id, nonce],
+            params![server.0, change.0, review_id, nonce, patch_set.0],
         )?;
-        let drafts = crate::drafts::query(&tx, mine, &[&server.0, &change.0, &review_id])?;
+        let drafts = crate::drafts::query(
+            &tx,
+            "server_id = ?1 AND reserved_by = ?2 AND posting_nonce = ?3",
+            &[&server.0, &change.0, &nonce],
+        )?;
         record_claim(&tx, server, change, nonce, by)?;
         tx.commit()?;
         Ok(Some(LocalPost {
@@ -450,6 +473,17 @@ impl Store {
     /// claimed ([`Store::local_post`]), in one transaction. `None`,
     /// writing nothing, otherwise or if nothing carries the nonce.
     pub fn adopt_local_post(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        nonce: &str,
+        by: &Claimant<'_>,
+        stale_before: Timestamp,
+    ) -> Result<Option<LocalPost>, Error> {
+        self.durably(|s| s.adopt_in(server, change, nonce, by, stale_before))
+    }
+
+    fn adopt_in(
         &mut self,
         server: ServerId,
         change: LocalChangeId,
@@ -473,6 +507,24 @@ impl Store {
         record_claim(&tx, server, change, nonce, by)?;
         tx.commit()?;
         Ok(Some(post))
+    }
+
+    /// Runs `f` with `synchronous = FULL`, so that its commit is on disk
+    /// before the caller goes on: a claim must survive a power cut, or the
+    /// post it was made for could be sent a second time. The database
+    /// otherwise runs with `NORMAL`, which may lose the last commits.
+    fn durably<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T, Error>) -> Result<T, Error> {
+        let before: i64 = self
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+        self.conn.execute_batch("PRAGMA synchronous = FULL")?;
+        let out = f(self);
+        let restored = self
+            .conn
+            .execute_batch(&format!("PRAGMA synchronous = {before}"));
+        let out = out?;
+        restored?;
+        Ok(out)
     }
 
     /// The unfinished posts ([`Store::unfinished_local_posts`]) that a run
