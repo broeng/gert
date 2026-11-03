@@ -678,6 +678,12 @@ fn consolidation_posts_one_tagged_review_and_keeps_other_drafts() {
     let me = get("/accounts/self")["_account_id"].clone();
     assert_eq!(ours[0]["author"]["_account_id"], me);
     assert_eq!(ours[0]["_revision_number"], ps.number.0);
+    // Recovery reads the votes a post cast from this first line.
+    let text = ours[0]["message"].as_str().unwrap();
+    assert!(
+        text.starts_with(&format!("Patch Set {}: Code-Review+1", ps.number.0)),
+        "{text}"
+    );
 
     // Exactly the local comments, with the tag; the web UI draft is still
     // a draft.
@@ -908,4 +914,216 @@ fn a_restricted_vote_is_refused_and_the_comments_still_go_out() {
         comments["/PATCHSET_LEVEL"][0]["message"],
         "local review message"
     );
+}
+
+// ---- consolidation lookups (LC5a) ----
+//
+// * `change:"project~branch~Change-Id"` finds a change; each part is
+//   URL-decoded by Gerrit (`ChangeTriplet.parse`), so a branch with `+` or
+//   `%` is found only with its parts percent-encoded.
+// * A bare `change:Change-Id` finds the change in any branch.
+// * A Change-Id that is not `I` and hex digits makes Gerrit refuse the
+//   whole query (400 "Invalid change format"), which is why such rows are
+//   never asked about.
+// * A posted review's change message starts "Patch Set N: Code-Review+1":
+//   the votes it cast, which recovery reads.
+
+impl Fx {
+    /// A local change row without a Gerrit change (as the scanner makes
+    /// one): project `project`, `branch` if known, one version `sha`, and a
+    /// pending review with Code-Review +1 and a message.
+    fn purely_local(
+        &self,
+        project: &str,
+        branch: Option<&str>,
+        change_id: &str,
+        sha: &model::RevisionId,
+    ) -> (model::LocalChange, model::PendingReview) {
+        let mut store = self.store.lock().unwrap();
+        let upsert = store::LocalChangeUpsert {
+            seen: None,
+            branch: branch.map(Into::into),
+            change_id: change_id.into(),
+            gerrit_number: None,
+            subject: "local".into(),
+            author_name: "Alice".into(),
+            author_email: "alice@example.com".into(),
+            updated: model::Timestamp::now(),
+            state: None,
+            patch_sets: vec![store::NewLocalPatchSet {
+                sha: sha.clone(),
+                parent_sha: None,
+                seen_at: model::Timestamp::now(),
+            }],
+        };
+        store
+            .reconcile_local(
+                self.server,
+                project,
+                &[store::LocalOp::Upsert(upsert)],
+                model::Timestamp::now(),
+            )
+            .unwrap();
+        let row = store
+            .local_changes_by_change_id(self.server, change_id)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.project == project)
+            .unwrap();
+        let version = store
+            .local_patch_sets(self.server, row.id)
+            .unwrap()
+            .remove(0);
+        let review = store
+            .create_pending_review(
+                self.server,
+                &store::NewPendingReview {
+                    patch_set: version.number,
+                    labels: [("Code-Review".to_owned(), 1)].into(),
+                    strategy: model::LocalApproval::Exact,
+                    message: "found by the lookup".into(),
+                    unresolved: false,
+                    created: model::Timestamp::now(),
+                    replaces_draft: None,
+                },
+            )
+            .unwrap();
+        (row, review)
+    }
+}
+
+/// The Change-Id and current patch set of change `n`.
+fn identity(f: &Fx, n: ChangeNumber) -> (String, PatchSetRef) {
+    let detail = block_on(f.syncer.refresh_change(n)).expect("detail");
+    (
+        detail.summary.change_id.clone().unwrap(),
+        detail.current().unwrap().as_ref(),
+    )
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn the_lookup_finds_changes_by_triplet_and_by_change_id() {
+    let f = alice();
+    // Known branch: by triplet.
+    let by_triplet = new_change();
+    let (id1, ps1) = identity(&f, by_triplet);
+    let (row1, review1) = f.purely_local("demo/scheduler", Some("main"), &id1, &ps1.sha);
+    // Branch unknown: by Change-Id.
+    let by_id = new_change();
+    let (id2, ps2) = identity(&f, by_id);
+    let (row2, review2) = f.purely_local("demo/scheduler", None, &id2, &ps2.sha);
+    // Not on Gerrit.
+    let unknown = format!("I{:040x}", 0xdead_beef_u64);
+    let (row3, _) = f.purely_local(
+        "demo/scheduler",
+        Some("main"),
+        &unknown,
+        &model::RevisionId("0000000000000000000000000000000000000001".into()),
+    );
+    // A Change-Id Gerrit cannot be asked about is never sent.
+    let (row4, _) = f.purely_local(
+        "demo/scheduler",
+        Some("main"),
+        "Inot-a-change-id",
+        &model::RevisionId("0000000000000000000000000000000000000002".into()),
+    );
+
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default()));
+    assert!(
+        report.stopped.is_none() && report.errors.is_empty(),
+        "{report:?}"
+    );
+    let found: Vec<(model::LocalChangeId, ChangeNumber)> = report
+        .found
+        .iter()
+        .map(|x| (x.local_change, x.gerrit))
+        .collect();
+    assert!(found.contains(&(row1.id, by_triplet)), "{report:?}");
+    assert!(found.contains(&(row2.id, by_id)), "{report:?}");
+    assert_eq!(report.not_found, [row3.id]);
+    assert_eq!(
+        f.review_now(&review1).state,
+        model::PendingReviewState::Sent
+    );
+    assert_eq!(
+        f.review_now(&review2).state,
+        model::PendingReviewState::Sent
+    );
+    let store = f.store.lock().unwrap();
+    let state = |id| store.local_change(f.server, id).unwrap().unwrap().state;
+    assert_eq!(state(row1.id), model::LocalChangeState::Consolidated);
+    assert_eq!(state(row3.id), model::LocalChangeState::Local);
+    assert_eq!(state(row4.id), model::LocalChangeState::Local);
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn a_malformed_change_id_fails_the_whole_query() {
+    let (code, body) = raw(
+        "GET",
+        "/changes/?q=change:Inot-a-change-id%20OR%20change:I0000000000000000000000000000000000000000",
+        serde_json::Value::Null,
+    );
+    println!("malformed Change-Id in a query: {code} {body}");
+    assert_eq!(code, 400, "{body}");
+    assert!(body.contains("Invalid change format"), "{body}");
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn a_branch_with_plus_and_percent_is_found_by_its_encoded_triplet() {
+    let f = alice();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let branch = format!("dev+test%{stamp}");
+    let encoded: String = branch
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    let (code, body) = raw_as(
+        "admin",
+        "PUT",
+        &format!("/projects/demo%2Fscheduler/branches/{encoded}"),
+        serde_json::json!({"revision": "main"}),
+    );
+    assert_eq!(code, 201, "{body}");
+    let n = new_change_in("demo/scheduler", &branch);
+    let (id, ps) = identity(&f, n);
+    // An unencoded triplet does not find it.
+    let (code, body) = raw(
+        "GET",
+        &format!(
+            "/changes/?q={}",
+            format!("change:\"demo/scheduler~{branch}~{id}\"")
+                .replace('%', "%25")
+                .replace('+', "%2B")
+                .replace('"', "%22")
+        ),
+        serde_json::Value::Null,
+    );
+    println!("unencoded triplet: {code} {}", &body[..body.len().min(120)]);
+    assert!(
+        !body.contains(&id),
+        "an unencoded triplet found the change: {body}"
+    );
+    let (row, review) = f.purely_local("demo/scheduler", Some(&branch), &id, &ps.sha);
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default()));
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(
+        report
+            .found
+            .iter()
+            .any(|x| x.local_change == row.id && x.gerrit == n),
+        "{report:?}"
+    );
+    assert_eq!(f.review_now(&review).state, model::PendingReviewState::Sent);
 }
