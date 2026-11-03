@@ -8,7 +8,10 @@
 //! The scenarios: (a) a review of the very commit that is pushed is sent
 //! as given, under every `local_approval`; (b) a review of a version
 //! amended before the push is ported, its comment on a changed line held,
-//! its +2 cast or held by strategy; (c) a +2 on a local patch set of a
+//! its +2 cast or held by strategy, and what `exact-or-manual` held is
+//! published from the held card (`exact`'s may only be dropped); a
+//! `follow` review saved just before the push falls under the strict rule
+//! (the five-minute window); (c) a +2 on a local patch set of a
 //! Gerrit change is cast only when that commit is pushed as it is; (d) our
 //! line maps agree with Gerrit's own porting of drafts.
 //!
@@ -23,7 +26,7 @@
 //! * "Purely local" needs the votes to be older than the Gerrit change by
 //!   more than the five minutes allowed for clock skew. A push right after
 //!   the review counts as "on Gerrit when given" (the strict rule), so (b)
-//!   dates its reviews ten minutes back.
+//!   dates its reviews ten minutes back, and one test pins that rule.
 
 use std::{path::Path, process::Command};
 
@@ -44,10 +47,28 @@ struct Clone {
     repo: Repo,
 }
 
+/// Environment variables that would point git at another repository: set
+/// when the tests run from a git hook, they would make the commits and
+/// pushes below go to that repository (gert's own). The same list as
+/// local-git's.
+const REMOVED_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+];
+
 /// Runs git in `dir` as alice (author and committer, which Gerrit checks
-/// on push) without the developer's own git configuration.
+/// on push) without the developer's own git configuration, and never on
+/// a repository the environment names.
 fn git_in(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let mut cmd = Command::new("git");
+    for var in REMOVED_ENV {
+        cmd.env_remove(var);
+    }
+    let out = cmd
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -77,7 +98,10 @@ impl Clone {
             authority.trim_end_matches('/')
         );
         let path = dir.path().to_str().unwrap().to_owned();
-        git_in(Path::new("."), &["clone", "-q", &url, &path]);
+        // From the temporary directory's parent, never from the working
+        // directory (which may be a repository).
+        let parent = dir.path().parent().unwrap();
+        git_in(parent, &["clone", "-q", &url, &path]);
         git_in(dir.path(), &["config", "user.name", "Alice"]);
         git_in(dir.path(), &["config", "user.email", "alice@example.com"]);
         let repo = Repo::open(dir.path()).expect("open clone");
@@ -132,7 +156,9 @@ impl Clone {
     }
 }
 
-/// The clone as consolidation's port source, as the app's checkouts are.
+/// The clone as consolidation's port source, as the app's checkouts are:
+/// a copy of `ui::local_port::CheckoutPorts` for one checkout, which must
+/// map every answer as that does.
 struct Ports(Repo);
 
 impl PortSource for Ports {
@@ -168,6 +194,9 @@ impl PortSource for Ports {
                         Local::Available(map) => PathMap::Lines(map),
                         Local::NotLocal(NotLocal::NotAFile(_)) => {
                             PathMap::NotLocal(NotLocalPath::NotAFile)
+                        }
+                        Local::NotLocal(NotLocal::MissingContent(_)) => {
+                            PathMap::NotLocal(NotLocalPath::MissingContent)
                         }
                         Local::NotLocal(why) => {
                             PathMap::NotLocal(NotLocalPath::Other(why.to_string()))
@@ -670,12 +699,59 @@ fn a_review_of_a_version_amended_before_upload_is_ported_by_strategy() {
                 assert_eq!(review.state, PendingReviewState::Held);
                 assert!(review.drop_only.is_empty(), "{review:?}");
                 assert_eq!(review.labels.get("Code-Review"), Some(&2));
+                // Published from the held card: the vote onto PS 1, the
+                // comment quoted in a patch-set comment, never on a line.
+                let items = [
+                    sync::HeldItem::Vote {
+                        review: review.id,
+                        label: "Code-Review".into(),
+                    },
+                    sync::HeldItem::Comment(held.drafts[0].local_id),
+                ];
+                let out = block_on(syncer.publish_held(
+                    n,
+                    model::PatchSetNumber(1),
+                    &items,
+                    LocalApproval::Follow,
+                ))
+                .expect("published");
+                println!("published: {out:?}");
+                assert_eq!(out.outcome, sync::PostOutcome::Sent);
+                assert_eq!(out.votes, [("Code-Review".to_owned(), 2)]);
+                assert_eq!(alice_votes(n), [("Code-Review".to_owned(), 2)]);
+                let top = comments_on(n, "/PATCHSET_LEVEL");
+                println!("patch-set comments: {top:?}");
+                assert!(
+                    top.iter().any(|(ps, _, m, _)| *ps == 1
+                        && m.contains("line 4")
+                        && m.contains("on four, which changes")),
+                    "{top:?}"
+                );
+                assert_eq!(comments_on(n, &c.path).len(), 1, "nothing on a line");
+                let left = f.syncer.held_items(n).unwrap();
+                assert!(
+                    left.drafts.is_empty() && left.reviews.is_empty(),
+                    "{left:?}"
+                );
             }
             // Held, and the approval may only be dropped.
             LocalApproval::Exact => {
                 assert_eq!(alice_votes(n), []);
                 assert_eq!(review.state, PendingReviewState::Held);
                 assert!(review.drop_only.contains("Code-Review"), "{review:?}");
+                let vote = sync::HeldItem::Vote {
+                    review: review.id,
+                    label: "Code-Review".into(),
+                };
+                let err = block_on(syncer.publish_held(
+                    n,
+                    model::PatchSetNumber(1),
+                    &[vote],
+                    LocalApproval::Follow,
+                ))
+                .unwrap_err();
+                assert!(matches!(err, sync::Error::DropOnly(_)), "{err}");
+                assert_eq!(alice_votes(n), []);
             }
         }
         println!(
@@ -685,6 +761,46 @@ fn a_review_of_a_version_amended_before_upload_is_ported_by_strategy() {
             f.entry(&c.id).change.state
         );
     }
+}
+
+/// Today's rule, pinned: a `follow` review saved just before the push is
+/// not "purely local" (Gerrit's change is less than five minutes younger
+/// than the votes, within the clock skew allowed), so the strict rule
+/// holds its +2 drop-only, and the reason says why.
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn a_follow_review_saved_just_before_the_push_falls_under_the_strict_rule() {
+    let (f, syncer) = Fx::e2e();
+    let clone = Clone::new();
+    clone.branch("e2e-window");
+    let path = unique_path("window");
+    let id = change_id();
+    let v1 = clone.commit(&path, &six_lines("four"), "E2E window", &id);
+    f.scan(&clone);
+    consolidate(&syncer, &clone, LocalApproval::Follow);
+    let v = f.version(&id, &v1);
+    f.comment(f.entry(&id).change.number, &v, &path, 2, "on two");
+    let review = f.review(
+        &v,
+        &[("Code-Review", 2)],
+        LocalApproval::Follow,
+        "saved just now",
+        jiff::SignedDuration::ZERO,
+    );
+    clone.amend(&path, &six_lines("FOUR"));
+    clone.push();
+    f.scan(&clone);
+    consolidate(&syncer, &clone, LocalApproval::Follow);
+
+    let n = gerrit_change(&id);
+    let review = f.review_now(&review);
+    println!("{review:#?}");
+    assert_eq!(comments_on(n, &path).len(), 1, "the comment is ported");
+    assert_eq!(alice_votes(n), []);
+    assert_eq!(review.state, PendingReviewState::Held);
+    assert!(review.drop_only.contains("Code-Review"), "{review:?}");
+    let reason = review.held_reason.unwrap();
+    assert!(reason.contains("within five minutes"), "{reason}");
 }
 
 // ---- (c) local patch sets of a Gerrit change ----
