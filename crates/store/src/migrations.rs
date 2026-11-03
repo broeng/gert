@@ -511,6 +511,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE drafts ADD COLUMN author_id INTEGER;
     ALTER TABLE drafts ADD COLUMN author_name TEXT;
     ",
+    // v22 -> v23: since when none of a local change's versions has been on
+    // a named branch (by the complete scans): a tombstone's age is counted
+    // from then (and from when it was made, whichever is later), so it
+    // stays for a while after a page could last name it. NULL while a
+    // version is on a branch, or until the next complete scan.
+    "
+    ALTER TABLE local_changes ADD COLUMN off_branch_ms INTEGER;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

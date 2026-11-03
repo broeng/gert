@@ -52,6 +52,10 @@ pub struct LocalChangeEntry {
     /// clock; `None` in other states, and for a tombstone made before this
     /// was recorded.
     pub consolidated_at: Option<Timestamp>,
+    /// Since when none of its versions has been on a named branch (by the
+    /// complete scans, [`Store::mark_local_versions_on_branch`]); `None`
+    /// while one is, or before a scan recorded it.
+    pub off_branch_since: Option<Timestamp>,
 }
 
 /// A cached Gerrit change found by its Change-Id (see
@@ -367,6 +371,20 @@ fn consolidated_at(
     ms.flatten().map(from_millis).transpose()
 }
 
+/// Since when none of local change `id`'s versions is on a named branch,
+/// if recorded.
+fn off_branch_since(
+    conn: &Connection,
+    server: ServerId,
+    id: LocalChangeId,
+) -> Result<Option<Timestamp>, Error> {
+    let ms: Option<Option<i64>> = conn
+        .prepare_cached("SELECT off_branch_ms FROM local_changes WHERE server_id = ?1 AND id = ?2")?
+        .query_row(params![server.0, id.0], |r| r.get(0))
+        .optional()?;
+    ms.flatten().map(from_millis).transpose()
+}
+
 /// Deletes a local change and everything on its numbers, inside the
 /// caller's transaction. False if there is no such row.
 fn delete_change(conn: &Connection, server: ServerId, id: LocalChangeId) -> Result<bool, Error> {
@@ -619,6 +637,7 @@ impl Store {
                     patch_sets: load_patch_sets(&self.conn, server, change.id)?,
                     has_unsent: has_unsent(&self.conn, server, change.id)?,
                     consolidated_at: consolidated_at(&self.conn, server, change.id)?,
+                    off_branch_since: off_branch_since(&self.conn, server, change.id)?,
                     change,
                 })
             })
@@ -629,15 +648,20 @@ impl Store {
     /// branch: those whose commit is one of `on_branch`, the commits of a
     /// complete scan ([`model::LocalScan::is_complete`]; never call it
     /// with an incomplete one, whose missing commits may still be there).
-    /// Returns how many versions changed.
+    /// A change none of whose versions is on a branch any more records
+    /// `now` as when they left (kept while they stay off; cleared when one
+    /// is back): a tombstone's age is counted from then. Returns how many
+    /// versions changed.
     pub fn mark_local_versions_on_branch(
         &mut self,
         server: ServerId,
         project: &str,
         on_branch: &[RevisionId],
+        now: Timestamp,
     ) -> Result<usize, Error> {
         let shas: Vec<&str> = on_branch.iter().map(RevisionId::as_str).collect();
-        Ok(self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
             "UPDATE local_patch_sets
              SET on_branch = (sha IN (SELECT value FROM json_each(?3)))
              WHERE server_id = ?1
@@ -645,7 +669,18 @@ impl Store {
                    (SELECT id FROM local_changes WHERE server_id = ?1 AND project = ?2)
                AND on_branch IS NOT (sha IN (SELECT value FROM json_each(?3)))",
             params![server.0, project, serde_json::to_string(&shas)?],
-        )?)
+        )?;
+        tx.execute(
+            "UPDATE local_changes SET off_branch_ms = CASE
+                 WHEN EXISTS (SELECT 1 FROM local_patch_sets p
+                              WHERE p.local_change_id = local_changes.id AND p.on_branch)
+                 THEN NULL
+                 ELSE COALESCE(off_branch_ms, ?3) END
+             WHERE server_id = ?1 AND project = ?2",
+            params![server.0, project, millis(now)],
+        )?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// The versions of a local change in the order they were first seen.

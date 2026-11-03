@@ -49,7 +49,8 @@
 //!   (or history entry) still naming their synthetic numbers redirects to
 //!   the Gerrit change. They go when none of their commits, and no commit
 //!   with their key, is on a branch any more (on a complete scan), and
-//!   they are at least [`TOMBSTONE_AGE`] old: navigation history lives
+//!   [`TOMBSTONE_AGE`] has passed since they left the branches (or since
+//!   the tombstone was made, if later): navigation history lives
 //!   only as long as the app runs, so a tombstone that old (or one made
 //!   before its time was recorded, in an earlier run) is named by no page
 //!   a user is likely to go back to. A tombstone still on a branch stays,
@@ -89,13 +90,21 @@ use store::{
 /// finds a change, and history is not kept across runs).
 pub const TOMBSTONE_AGE: SignedDuration = SignedDuration::from_hours(7 * 24);
 
-/// Whether tombstone `e` is old enough to go at `now` (see
-/// [`TOMBSTONE_AGE`]); one made before its time was recorded is.
+/// Whether tombstone `e` is old enough to go at `now`: its versions left
+/// the named branches, and that and its becoming a tombstone, whichever is
+/// later (the last time a page could name it), are [`TOMBSTONE_AGE`] ago.
+/// One whose leaving is not recorded yet waits for the next complete scan,
+/// unless it was also made before its time was recorded (in an earlier
+/// run, which no page of this run names).
 pub fn tombstone_due(e: &LocalChangeEntry, now: Timestamp) -> bool {
-    e.consolidated_at.is_none_or(|made| {
-        now.checked_sub(TOMBSTONE_AGE)
-            .is_ok_and(|limit| made <= limit)
-    })
+    let Ok(limit) = now.checked_sub(TOMBSTONE_AGE) else {
+        return false;
+    };
+    match (e.off_branch_since, e.consolidated_at) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(off), made) => made.map_or(off, |m| m.max(off)) <= limit,
+    }
 }
 
 /// A local change's key within a project: target branch and Change-Id.

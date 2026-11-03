@@ -89,7 +89,7 @@ impl Syncer {
             // named branch, for porting the ones that are not.
             let on_branch: Vec<RevisionId> =
                 scan.commits.iter().map(|c| c.commit.sha.clone()).collect();
-            store.mark_local_versions_on_branch(self.server, project, &on_branch)?;
+            store.mark_local_versions_on_branch(self.server, project, &on_branch, now)?;
         }
         Ok(report)
     }

@@ -1127,7 +1127,7 @@ fn versions_off_every_named_branch_are_marked_by_a_complete_scan() {
     assert_eq!(on(&s, "p"), [true, true]);
     // a1 was amended away.
     assert_eq!(
-        s.mark_local_versions_on_branch(server, "p", &["a2".into()])
+        s.mark_local_versions_on_branch(server, "p", &["a2".into()], ts(T1))
             .unwrap(),
         1
     );
@@ -1135,11 +1135,11 @@ fn versions_off_every_named_branch_are_marked_by_a_complete_scan() {
     assert_eq!(on(&s, "q"), [true]);
     // Marking the same again changes nothing; a1 back on a branch does.
     assert_eq!(
-        s.mark_local_versions_on_branch(server, "p", &["a2".into()])
+        s.mark_local_versions_on_branch(server, "p", &["a2".into()], ts(T1))
             .unwrap(),
         0
     );
-    s.mark_local_versions_on_branch(server, "p", &["a1".into(), "a2".into()])
+    s.mark_local_versions_on_branch(server, "p", &["a1".into(), "a2".into()], ts(T1))
         .unwrap();
     assert_eq!(on(&s, "p"), [true, true]);
     let _ = row;

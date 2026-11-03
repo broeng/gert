@@ -605,29 +605,51 @@ fn a_tombstone_is_never_resurrected() {
 fn age_tombstones(entries: &mut [LocalChangeEntry]) {
     for e in entries {
         if e.change.state == LocalChangeState::Consolidated {
-            e.consolidated_at = Some(
-                now()
-                    .checked_sub(TOMBSTONE_AGE + jiff::SignedDuration::from_secs(1))
-                    .unwrap(),
-            );
+            let old = now()
+                .checked_sub(TOMBSTONE_AGE + jiff::SignedDuration::from_secs(1))
+                .unwrap();
+            e.consolidated_at = Some(old);
+            e.off_branch_since = Some(old);
         }
     }
 }
 
 #[test]
-fn tombstones_come_of_age_after_a_week() {
+fn tombstones_come_of_age_a_week_after_their_last_possible_use() {
     let mut h = H::new();
-    h.run(&scan(vec![commit("c1", Some("I1"), &["topic"])]));
+    let sc = scan(vec![commit("c1", Some("I1"), &["topic"])]);
+    h.run(&sc);
     h.set_state("I1", LocalChangeState::Consolidated);
     let mut e = h.entry("I1");
     assert!(e.consolidated_at.is_some());
-    let day = jiff::SignedDuration::from_hours(24);
-    e.consolidated_at = Some(now().checked_sub(day * 6).unwrap());
+    // Still on a branch: its leaving is not recorded.
+    assert_eq!(e.off_branch_since, None);
     assert!(!tombstone_due(&e, now()));
-    e.consolidated_at = Some(now().checked_sub(day * 7).unwrap());
+    // A complete scan without it records when it left (as
+    // `Syncer::reconcile_local` does after the plan).
+    let server = h.server;
+    h.store
+        .mark_local_versions_on_branch(server, "p", &[], now())
+        .unwrap();
+    assert_eq!(h.entry("I1").off_branch_since, Some(now()));
+    // Back on a branch: cleared.
+    h.store
+        .mark_local_versions_on_branch(server, "p", &["c1".into()], now())
+        .unwrap();
+    assert_eq!(h.entry("I1").off_branch_since, None);
+    let day = jiff::SignedDuration::from_hours(24);
+    let ago = |days: i32| Some(now().checked_sub(day * days).unwrap());
+    // Counted from the later of leaving the branches and being made.
+    e.consolidated_at = ago(30);
+    e.off_branch_since = ago(6);
+    assert!(!tombstone_due(&e, now()));
+    e.off_branch_since = ago(7);
     assert!(tombstone_due(&e, now()));
+    e.consolidated_at = ago(2);
+    assert!(!tombstone_due(&e, now()), "made two days ago");
     // Made before its time was recorded (in an earlier run).
     e.consolidated_at = None;
+    e.off_branch_since = None;
     assert!(tombstone_due(&e, now()));
 }
 

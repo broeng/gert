@@ -3345,7 +3345,7 @@ fn a_version_on_no_named_branch_is_ported() {
     // A complete scan no longer sees it.
     f.syncer
         .store()
-        .mark_local_versions_on_branch(f.syncer.server, "p", &["s1".into()])
+        .mark_local_versions_on_branch(f.syncer.server, "p", &["s1".into()], Timestamp::now())
         .unwrap();
     let report = f.run_with(&options);
     assert_eq!(report.ported.len(), 1, "{report:?}");

@@ -1621,7 +1621,7 @@ fn a_newer_version_not_on_gerrit_keeps_the_change_open() {
         Some(LocalChangeState::Checking)
     );
     // Taken off every branch: it never reaches Gerrit.
-    s.mark_local_versions_on_branch(id, "p", std::slice::from_ref(&v1.sha))
+    s.mark_local_versions_on_branch(id, "p", std::slice::from_ref(&v1.sha), ts(T1))
         .unwrap();
     assert_eq!(
         s.settle_local_change(id, c.id).unwrap(),
