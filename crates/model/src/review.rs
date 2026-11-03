@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::AccountId;
+use crate::{AccountId, DraftInput};
 
 /// What to do with the user's drafts when a review is posted
 /// (`DraftHandling`).
@@ -57,8 +57,8 @@ pub struct AttentionSetInput {
     pub reason: String,
 }
 
-/// A review to post (`ReviewInput`): a message, label votes, and the drafts
-/// to publish.
+/// A review to post (`ReviewInput`): a message, label votes, inline
+/// comments, and the drafts to publish.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewInput {
     /// The change message. `None` or empty posts none.
@@ -66,6 +66,11 @@ pub struct ReviewInput {
     /// Label name to the voted value. A label that is left out keeps the
     /// user's current vote.
     pub labels: BTreeMap<String, i32>,
+    /// Inline comments posted with the review itself (`comments`, a
+    /// `CommentInput` per comment, keyed by path on the wire), on the
+    /// revision the review is posted to. Unlike drafts, they need not be
+    /// on the server first; `drafts` does not affect them.
+    pub comments: Vec<DraftInput>,
     pub drafts: DraftHandling,
     pub tag: Option<String>,
     pub notify: Option<NotifyHandling>,

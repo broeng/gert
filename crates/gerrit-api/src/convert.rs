@@ -689,10 +689,22 @@ pub(crate) fn review_input(r: &ReviewInput) -> wire::ReviewInput {
                 .collect()
         })
     };
+    let mut comments: BTreeMap<String, Vec<wire::DraftInput>> = BTreeMap::new();
+    for c in &r.comments {
+        // A `CommentInput` is a `DraftInput` whose path is the map key.
+        comments
+            .entry(c.path.clone())
+            .or_default()
+            .push(wire::DraftInput {
+                path: None,
+                ..draft_input(c)
+            });
+    }
     wire::ReviewInput {
         message: r.message.clone().filter(|m| !m.trim().is_empty()),
         tag: r.tag.clone(),
         labels: (!r.labels.is_empty()).then(|| r.labels.clone()),
+        comments: (!comments.is_empty()).then_some(comments),
         drafts: Some(DraftHandling::as_wire(r.drafts).to_owned()),
         notify: r.notify.map(|n| n.as_wire().to_owned()),
         work_in_progress: r.work_in_progress,

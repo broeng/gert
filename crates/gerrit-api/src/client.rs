@@ -2155,6 +2155,55 @@ mod tests {
     }
 
     #[test]
+    fn inline_comments_are_sent_by_path_without_a_path_field() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(200, xssi("{}"));
+        let c = client(&fake, "https://h", basic());
+        let comment = |path: &str, location, message: &str| model::DraftInput {
+            path: path.into(),
+            side: model::Side::Revision,
+            parent: None,
+            location,
+            in_reply_to: None,
+            message: message.into(),
+            unresolved: true,
+        };
+        let range = model::CommentRange {
+            start_line: 2,
+            start_character: 0,
+            end_line: 3,
+            end_character: 4,
+        };
+        let review = ReviewInput {
+            comments: vec![
+                comment("src/a.rs", model::Location::Line(7), "one"),
+                comment(model::PATCHSET_LEVEL_PATH, model::Location::File, "top"),
+                comment("src/a.rs", model::Location::Range(range), "two"),
+            ],
+            drafts: model::DraftHandling::Keep,
+            tag: Some("app-local-1-n".into()),
+            ..ReviewInput::default()
+        };
+        block_on(c.post_review(ChangeNumber(5), &sha_rev(), &review)).unwrap();
+        assert_eq!(
+            body_json(&fake.requests()[0]),
+            json!({
+                "tag": "app-local-1-n",
+                "drafts": "KEEP",
+                "comments": {
+                    "/PATCHSET_LEVEL": [{"message": "top", "unresolved": true}],
+                    "src/a.rs": [
+                        {"side": "REVISION", "line": 7, "message": "one", "unresolved": true},
+                        {"side": "REVISION", "line": 3, "message": "two", "unresolved": true,
+                         "range": {"start_line": 2, "start_character": 0,
+                                   "end_line": 3, "end_character": 4}},
+                    ],
+                },
+            })
+        );
+    }
+
+    #[test]
     fn review_result_error_is_reported_not_raised() {
         let fake = FakeHttpClient::new();
         fake.push_response(

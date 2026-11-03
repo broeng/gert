@@ -391,6 +391,10 @@ pub(crate) struct ReviewInput {
     pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, i32>>,
+    /// Path to its comments. `CommentInput` takes the fields of
+    /// `DraftInput`; the path is the map key, so it is left out of each.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comments: Option<BTreeMap<String, Vec<DraftInput>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drafts: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -645,10 +649,19 @@ mod tests {
             reason: Some("r".into()),
         };
         conforms_value(&spec, "AttentionSetInput", &att);
+        // The vendored spec's `CommentInput` lists only `enable_context`;
+        // Gerrit's REST reference gives it the fields of `CommentInfo` that
+        // a client writes, so check those against `CommentInfo`.
+        let comment = DraftInput {
+            path: None,
+            ..draft.clone()
+        };
+        conforms_value(&spec, "CommentInfo", &comment);
         let review = ReviewInput {
             message: Some("m".into()),
             tag: Some("t".into()),
             labels: Some(BTreeMap::new()),
+            comments: Some(BTreeMap::from([("p".to_owned(), vec![comment])])),
             drafts: Some("KEEP".into()),
             notify: Some("NONE".into()),
             work_in_progress: Some(true),
