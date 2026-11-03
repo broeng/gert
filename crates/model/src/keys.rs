@@ -23,7 +23,23 @@ pub struct DiffKey {
     pub whitespace: Whitespace,
 }
 
+impl FilesKey {
+    /// Whether the comparison involves a local change or a local patch set:
+    /// only the checkout can answer it, never Gerrit.
+    pub fn is_local(&self) -> bool {
+        self.change.is_local()
+            || self.target.number.is_local()
+            || self.base.as_ref().is_some_and(|b| b.number.is_local())
+    }
+}
+
 impl DiffKey {
+    /// Whether the diff involves a local change or a local patch set (see
+    /// [`FilesKey::is_local`]).
+    pub fn is_local(&self) -> bool {
+        self.files_key().is_local()
+    }
+
     /// The file list this diff belongs to.
     pub fn files_key(&self) -> FilesKey {
         FilesKey {
@@ -63,5 +79,31 @@ mod tests {
         assert_eq!(next.path, "b.rs");
         assert_eq!(next.files_key(), key.files_key());
         assert_eq!(next.whitespace, Whitespace::IgnoreAll);
+    }
+
+    #[test]
+    fn a_local_number_anywhere_makes_the_comparison_local() {
+        let ps = |n: u32| PatchSetRef {
+            number: PatchSetNumber(n),
+            sha: "s".into(),
+        };
+        let local = PatchSetNumber::LOCAL_BASE + 1;
+        let key = |change: u64, base: Option<u32>, target: u32| FilesKey {
+            change: ChangeNumber(change),
+            base: base.map(ps),
+            target: ps(target),
+        };
+        assert!(!key(5, Some(1), 2).is_local());
+        assert!(key(5, None, local).is_local());
+        assert!(key(5, Some(local), 2).is_local());
+        assert!(key(ChangeNumber::LOCAL_BASE + 3, None, local).is_local());
+        let diff = DiffKey {
+            change: ChangeNumber(5),
+            base: None,
+            target: ps(local),
+            path: "a".into(),
+            whitespace: Whitespace::IgnoreNone,
+        };
+        assert!(diff.is_local());
     }
 }
