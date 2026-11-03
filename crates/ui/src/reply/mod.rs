@@ -196,10 +196,18 @@ pub fn local_note(label: &str) -> String {
 /// The hint near the votes of a local review whose approvals wait for the
 /// exact commit: always for a local patch set of a Gerrit change (the
 /// strict rule), and for a local change unless its project follows
-/// amended commits. `None` when approvals follow.
+/// amended commits; under `exact-or-manual` it says that votes that did
+/// not go out are offered for a manual publish. `None` when approvals
+/// follow.
 pub fn approval_hint(strategy: LocalApproval, gerrit_change: bool) -> Option<&'static str> {
-    (gerrit_change || strategy != LocalApproval::Follow)
-        .then_some("An approval is only sent on this exact commit")
+    match strategy {
+        _ if gerrit_change => Some("An approval is only sent on this exact commit"),
+        LocalApproval::Follow => None,
+        LocalApproval::ExactOrManual => {
+            Some("Votes are only sent on this exact commit; otherwise you can publish them")
+        }
+        LocalApproval::Exact => Some("An approval is only sent on this exact commit"),
+    }
 }
 
 /// A local review that could not be saved, in words for the dialog and

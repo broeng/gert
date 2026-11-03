@@ -1359,7 +1359,8 @@ fn a_local_review_is_saved_as_a_pending_review_with_the_borrowed_labels(cx: &mut
             (
                 "Local review".to_owned(),
                 Some(NOTE.to_owned()),
-                Some("An approval is only sent on this exact commit"),
+                // The project's `exact-or-manual`.
+                Some("Votes are only sent on this exact commit; otherwise you can publish them"),
             )
         );
         // Nothing borrowed from a cached change: Code-Review -2..+2. And no
@@ -1379,7 +1380,10 @@ fn a_local_review_is_saved_as_a_pending_review_with_the_borrowed_labels(cx: &mut
     );
     assert!(
         visual
-            .debug_bounds("reply-hint: An approval is only sent on this exact commit")
+            .debug_bounds(
+                "reply-hint: Votes are only sent on this exact commit; otherwise you can publish \
+                 them"
+            )
             .is_some()
     );
     type_text(cx, &f, "Looks good");
@@ -1799,4 +1803,21 @@ fn a_local_review_that_could_not_be_saved_says_why() {
         store(store::Error::NotReviewable(LocalChangeState::Consolidated)).contains("on Gerrit")
     );
     assert!(store(store::Error::NotReviewable(LocalChangeState::Closed)).contains("closed"));
+}
+
+#[test]
+fn the_approval_hint_follows_the_rule_that_applies() {
+    use super::approval_hint;
+    use model::LocalApproval;
+    let exact = Some("An approval is only sent on this exact commit");
+    // The strict rule on a Gerrit change, whatever the project says.
+    for s in LocalApproval::ALL {
+        assert_eq!(approval_hint(s, true), exact);
+    }
+    assert_eq!(approval_hint(LocalApproval::Exact, false), exact);
+    assert_eq!(
+        approval_hint(LocalApproval::ExactOrManual, false),
+        Some("Votes are only sent on this exact commit; otherwise you can publish them")
+    );
+    assert_eq!(approval_hint(LocalApproval::Follow, false), None);
 }
