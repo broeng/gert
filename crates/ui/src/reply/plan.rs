@@ -115,14 +115,42 @@ fn own_vote(detail: &ChangeDetail, label: &str, me: Option<&str>) -> i32 {
         .map_or(0, |v| v.value)
 }
 
-/// Selects the values `labels` has (a pending review being edited) in the
-/// rows of those labels.
-pub fn select_votes(rows: &mut [VoteRow], labels: &BTreeMap<String, i32>) {
-    for row in rows {
-        if let Some(v) = labels.get(&row.label) {
-            row.selected = *v;
+/// The rows of a local review: the detail's labels, starting from the
+/// votes of the pending review being edited (`labels`), else from 0. Never
+/// from the user's votes on Gerrit: those are on another patch set, and a
+/// local review records what was given on its version.
+pub fn local_vote_rows(
+    detail: &ChangeDetail,
+    labels: Option<&BTreeMap<String, i32>>,
+) -> Vec<VoteRow> {
+    let mut rows = vote_rows(detail, None);
+    for row in &mut rows {
+        let v = labels.and_then(|l| l.get(&row.label)).copied().unwrap_or(0);
+        row.current = v;
+        row.selected = v;
+    }
+    rows
+}
+
+/// The votes a local review stores: every row that is not 0 or whose label
+/// the review being edited (`edited`) has, and the edited review's labels
+/// that have no row (the borrowed labels may have changed).
+pub fn local_labels(
+    rows: &[VoteRow],
+    edited: Option<&BTreeMap<String, i32>>,
+) -> BTreeMap<String, i32> {
+    let had = |label: &str| edited.is_some_and(|l| l.contains_key(label));
+    let mut labels: BTreeMap<String, i32> = rows
+        .iter()
+        .filter(|r| r.selected != 0 || had(&r.label))
+        .map(|r| (r.label.clone(), r.selected))
+        .collect();
+    for (label, value) in edited.into_iter().flatten() {
+        if !rows.iter().any(|r| &r.label == label) {
+            labels.insert(label.clone(), *value);
         }
     }
+    labels
 }
 
 /// The votes to send: only the labels whose value the user changed. Labels
@@ -158,27 +186,36 @@ impl QuickButton {
 /// `objections` (see [`drafts_object`]), Code-Review is cast at its lowest
 /// permitted value instead: comments on a change say it is not ready yet.
 pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>, objections: bool) -> Vec<QuickButton> {
-    local_quick_votes(detail, me, objections, &BTreeMap::new())
+    buttons(detail, me, objections, false, &BTreeMap::new())
 }
 
 /// [`quick_votes`] for a local version, where the user's vote is the one
-/// of their newest pending review on it (`own`) where that has the label,
-/// else their vote on Gerrit (none on a local change).
+/// in their newest pending review on it (`own`), else none: never their
+/// vote on Gerrit, which is on another patch set.
 pub fn local_quick_votes(
     detail: &ChangeDetail,
     me: Option<&str>,
     objections: bool,
     own: &BTreeMap<String, i32>,
 ) -> Vec<QuickButton> {
+    buttons(detail, me, objections, true, own)
+}
+
+fn buttons(
+    detail: &ChangeDetail,
+    me: Option<&str>,
+    objections: bool,
+    local: bool,
+    own: &BTreeMap<String, i32>,
+) -> Vec<QuickButton> {
     if me.is_none() || detail.summary.status != ChangeStatus::New {
         return Vec::new();
     }
-    let mut rows = vote_rows(detail, me);
-    for row in &mut rows {
-        if let Some(v) = own.get(&row.label) {
-            row.current = *v;
-        }
-    }
+    let rows = if local {
+        local_vote_rows(detail, Some(own))
+    } else {
+        vote_rows(detail, me)
+    };
     rows.into_iter()
         .filter_map(|row| {
             let max = row.choices.iter().map(|c| c.value).max()?;
@@ -853,6 +890,37 @@ mod tests {
         assert!(message_draft(&threads, PatchSetNumber(3)).is_none());
         local.entries.clear();
         assert!(message_draft(&[local, sealed], local_ps).is_none());
+    }
+
+    #[test]
+    fn a_local_review_starts_from_its_own_votes_never_from_gerrit() {
+        let mut d = change();
+        with_labels(&mut d);
+        d.votes.get_mut("Code-Review").unwrap()[1].value = 2; // bob's +2 on Gerrit
+        let rows = local_vote_rows(&d, None);
+        assert!(rows.iter().all(|r| r.current == 0 && r.selected == 0));
+        let edited = BTreeMap::from([("Code-Review".to_owned(), 2), ("Gone".to_owned(), 1)]);
+        let mut rows = local_vote_rows(&d, Some(&edited));
+        let cr = rows.iter().position(|r| r.label == "Code-Review").unwrap();
+        assert_eq!((rows[cr].current, rows[cr].selected), (2, 2));
+        // The +2 is kept although bob has +2 on Gerrit too, and so is the
+        // label without a row.
+        assert_eq!(local_labels(&rows, Some(&edited)), edited);
+        // Set back to 0, a label the review had stays, as 0.
+        rows[cr].selected = 0;
+        assert_eq!(local_labels(&rows, Some(&edited))["Code-Review"], 0);
+        // A new review keeps only what is not 0.
+        let fresh = local_vote_rows(&d, None);
+        assert!(local_labels(&fresh, None).is_empty());
+        // Quick votes: bob's +2 on Gerrit does not make the local +2 applied.
+        let quick = local_quick_votes(&d, Some("bob"), false, &BTreeMap::new());
+        let cr = quick.iter().find(|q| q.label == "Code-Review").unwrap();
+        assert!(!cr.applied);
+        assert!(
+            quick_votes(&d, Some("bob"), false)
+                .iter()
+                .any(|q| q.label == "Code-Review" && q.applied)
+        );
     }
 
     #[test]

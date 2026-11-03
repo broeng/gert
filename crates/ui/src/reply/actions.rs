@@ -62,7 +62,7 @@ pub fn entries() -> Vec<Entry> {
             "escape",
             CloseReply,
             REPLY_DIALOG,
-            "Close; the text stays as a draft (editing a local review: the changes are dropped)",
+            "Close; the text stays as a draft (editing a local review: the review stays as it was)",
         ),
         e(
             "Tab / Shift-Tab",

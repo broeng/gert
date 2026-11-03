@@ -52,12 +52,23 @@
 //! dialog is open and after it closes, so Esc loses nothing; Save turns it
 //! into the review's message in one transaction.
 //!
+//! A local review starts from the votes of the review it edits, else from
+//! none: never from the user's votes on Gerrit, which are on another patch
+//! set. It stores every vote that is not 0, and a 0 for a label the edited
+//! review had.
+//!
 //! Reopening the dialog on a version that has a `Pending` review edits
 //! the newest one in place: the title says "Edit local review", it starts
-//! with the review's votes and message, and Save replaces them. Esc drops
-//! the changes (the review is saved as it was), and "New review instead"
-//! turns the dialog into a fresh local review. The change page's list of
-//! pending reviews opens a particular one ([`ReplyRequest::edit`]).
+//! with the review's votes and message, and Save replaces them. Esc keeps
+//! the review as it was; a message the user changed stays as a local draft
+//! of the version, so a long edit is not lost. "New review instead" turns
+//! the dialog into a fresh local review. If the review left `Pending`
+//! while the dialog was open (consolidation took it), Save makes the
+//! changes a new review instead of losing them. The change page's list of
+//! pending reviews opens a particular one ([`ReplyRequest::edit`]) on its
+//! own version, whatever the page shows; a request about a local version
+//! never becomes a reply to Gerrit, not even when the version or the
+//! review is gone (the dialog says so and saves nothing).
 //!
 //! # Keys
 //!
@@ -256,6 +267,8 @@ pub struct ReplyDialog {
     people: Vec<Person>,
     phase: Phase,
     error: Option<String>,
+    /// Something the user should know about the dialog (not an error).
+    notice: Option<String>,
     send_task: Option<Task<()>>,
     scroll: ScrollHandle,
     focus: FocusHandle,
@@ -316,40 +329,64 @@ impl ReplyDialog {
         let me = session.username.clone();
         let threads = comments.read(cx).threads();
         let reviews = comments.read(cx).reviews();
-        let local_target = target
-            .filter(|n| n.is_local())
-            .or_else(|| detail.current_patch_set.filter(|_| number.is_local()))
-            .and_then(|n| detail.revision(n))
-            .map(|r| r.as_ref());
-        let editing = local_target.as_ref().and_then(|t| {
-            let mut pending = reviews
-                .iter()
-                .rev()
-                .filter(|r| r.state == PendingReviewState::Pending);
-            match edit {
-                Some(id) => pending.find(|r| r.id == id),
-                None => pending.find(|r| r.patch_set == t.number),
+        // A request about a local version is a local review: one that names
+        // a review to edit, a local target, or a local change. It never
+        // becomes a reply to Gerrit, also when the version is missing:
+        // Gerrit would take it for its current patch set.
+        let wants_local =
+            edit.is_some() || target.is_some_and(PatchSetNumber::is_local) || number.is_local();
+        let asked = edit.and_then(|id| reviews.iter().find(|r| r.id == id).cloned());
+        let mut error = None;
+        let mut notice = None;
+        let (local, current, editing) = if wants_local {
+            // The review's own version, whatever the page shows.
+            let version = match (&asked, edit) {
+                (Some(r), _) => Some(r.patch_set),
+                (None, Some(_)) => None,
+                (None, None) => target
+                    .filter(|n| n.is_local())
+                    .or_else(|| detail.current_patch_set.filter(|_| number.is_local())),
+            };
+            let editing = match edit {
+                Some(_) => asked
+                    .clone()
+                    .filter(|r| r.state == PendingReviewState::Pending),
+                None => version.and_then(|v| {
+                    reviews
+                        .iter()
+                        .rev()
+                        .find(|r| r.patch_set == v && r.state == PendingReviewState::Pending)
+                        .cloned()
+                }),
+            };
+            if asked.is_some() && editing.is_none() {
+                notice = Some(
+                    "That review is no longer pending (it is being sent, was sent, or is \
+                     held): this is a new local review of its version."
+                        .to_owned(),
+                );
             }
-            .cloned()
-        });
-        // The review edited is on its own version, which may not be the one
-        // shown.
-        let local_target = match &editing {
-            Some(r) => detail
-                .revision(r.patch_set)
-                .map(|r| r.as_ref())
-                .or(local_target),
-            None => local_target,
+            let current = version.and_then(|n| detail.revision(n)).map(|r| r.as_ref());
+            if current.is_none() {
+                error = Some(
+                    "This local version is not known here any more: nothing can be saved.".into(),
+                );
+            }
+            let local = LocalReview {
+                strategy,
+                editing: editing.clone(),
+            };
+            (Some(local), current, editing)
+        } else {
+            (None, detail.current().map(|r| r.as_ref()), None)
         };
-        let local = local_target.is_some().then(|| LocalReview {
-            strategy,
-            editing: editing.clone(),
-        });
-        let current = local_target.or_else(|| detail.current().map(|r| r.as_ref()));
-        let mut votes = plan::vote_rows(&detail, me.as_deref());
-        if let Some(r) = &editing {
-            plan::select_votes(&mut votes, &r.labels);
-        }
+        // A local review starts from the user's votes in the review edited,
+        // never from their votes on Gerrit, which are on another patch set.
+        let votes = if local.is_some() {
+            plan::local_vote_rows(&detail, editing.as_ref().map(|r| &r.labels))
+        } else {
+            plan::vote_rows(&detail, me.as_deref())
+        };
         // A local review moves no one in or out of the attention set.
         let people = if local.is_some() {
             Vec::new()
@@ -427,7 +464,8 @@ impl ReplyDialog {
             votes,
             people,
             phase: Phase::Editing,
-            error: None,
+            error,
+            notice,
             send_task: None,
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
@@ -495,13 +533,24 @@ impl ReplyDialog {
     /// draft is stored first and uploaded afterwards, and it carries on
     /// after the dialog is gone.
     fn save_message(&mut self, cx: &mut Context<Self>) {
-        // An edited local review keeps its message until Save.
-        if self.editing().is_some() {
-            return;
-        }
         let Some(patch_set) = self.current.clone() else {
             return;
         };
+        // An edited local review keeps its message until Save. A message
+        // the user changed is not thrown away, though: it stays as a local
+        // draft of the version, where "New review instead" finds it.
+        if self.editing().is_some() {
+            let text = self.text(cx);
+            if !text.is_empty() && !self.untouched(cx) {
+                let save = DraftSave::Create {
+                    change: self.number,
+                    patch_set,
+                    input: message_input(text, !self.resolved),
+                };
+                self.outbox.update(cx, |o, cx| o.save(save, cx));
+            }
+            return;
+        }
         let (text, unresolved, change) = (self.text(cx), !self.resolved, self.number);
         self.outbox.update(cx, |o, cx| {
             o.set_message(change, patch_set, text, unresolved, cx)
@@ -557,18 +606,11 @@ impl ReplyDialog {
         self.drafts().iter().filter(|d| d.pending()).count()
     }
 
-    /// The votes of a local review: the changed ones, and those of the
-    /// review being edited that the dialog has no row for.
+    /// The votes of a local review: every label that is not 0 or that the
+    /// review being edited has (so setting it back to 0 is kept as a 0),
+    /// and the edited review's labels the dialog has no row for.
     fn local_labels(&self) -> std::collections::BTreeMap<String, i32> {
-        let mut labels = plan::labels_to_send(&self.votes);
-        if let Some(r) = self.editing() {
-            for (label, value) in &r.labels {
-                if !self.votes.iter().any(|row| &row.label == label) {
-                    labels.insert(label.clone(), *value);
-                }
-            }
-        }
-        labels
+        plan::local_labels(&self.votes, self.editing().map(|r| &r.labels))
     }
 
     fn review(&self) -> model::ReviewInput {
@@ -735,7 +777,8 @@ impl ReplyDialog {
         if local.editing.take().is_none() {
             return;
         }
-        self.votes = plan::vote_rows(&self.detail, self.me.as_deref());
+        self.votes = plan::local_vote_rows(&self.detail, None);
+        self.notice = None;
         let (text, resolved) = match self.message_draft() {
             Some(d) => (d.message.clone(), !d.unresolved),
             None => (String::new(), true),
@@ -847,34 +890,45 @@ impl ReplyDialog {
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    match editing {
-                        Some(id) => {
-                            let edit = PendingReviewEdit {
-                                labels,
-                                strategy,
-                                message,
-                                unresolved,
-                            };
-                            syncer.update_pending_review(id, &edit)
+                    if let Some(id) = editing {
+                        let edit = PendingReviewEdit {
+                            labels: labels.clone(),
+                            strategy,
+                            message: message.clone(),
+                            unresolved,
+                        };
+                        if let Some(r) = syncer.update_pending_review(id, &edit)? {
+                            return Ok((r, false));
                         }
-                        None => {
-                            // The text kept as the version's draft becomes
-                            // the review's message.
-                            let threads = syncer.cached_comments(change)?.threads();
-                            let replaces_draft =
-                                plan::message_draft(&threads, target.number).map(|d| d.local_id);
-                            let input = NewPendingReview {
-                                patch_set: target.number,
-                                labels,
-                                strategy,
-                                message,
-                                unresolved,
-                                created: Timestamp::now(),
-                                replaces_draft,
-                            };
-                            syncer.create_pending_review(&input).map(Some)
-                        }
+                        // It left `Pending` while the dialog was open (being
+                        // sent): the changes become a review of their own
+                        // rather than being lost.
+                        let input = NewPendingReview {
+                            patch_set: target.number,
+                            labels,
+                            strategy,
+                            message,
+                            unresolved,
+                            created: Timestamp::now(),
+                            replaces_draft: None,
+                        };
+                        return syncer.create_pending_review(&input).map(|r| (r, true));
                     }
+                    // The text kept as the version's draft becomes the
+                    // review's message.
+                    let threads = syncer.cached_comments(change)?.threads();
+                    let replaces_draft =
+                        plan::message_draft(&threads, target.number).map(|d| d.local_id);
+                    let input = NewPendingReview {
+                        patch_set: target.number,
+                        labels,
+                        strategy,
+                        message,
+                        unresolved,
+                        created: Timestamp::now(),
+                        replaces_draft,
+                    };
+                    syncer.create_pending_review(&input).map(|r| (r, false))
                 })
                 .await;
             this.update(cx, |this, cx| this.saved(result, &label, cx))
@@ -884,7 +938,7 @@ impl ReplyDialog {
 
     fn saved(
         &mut self,
-        result: Result<Option<PendingReview>, sync::Error>,
+        result: Result<(PendingReview, bool), sync::Error>,
         label: &str,
         cx: &mut Context<Self>,
     ) {
@@ -892,22 +946,20 @@ impl ReplyDialog {
         self.input.update(cx, |i, cx| i.set_disabled(false, cx));
         let edited = self.editing().is_some();
         match result {
-            Ok(Some(_)) => {
+            Ok((_, recreated)) => {
                 // The review list and the drafts (the text left them) moved.
                 self.outbox.update(cx, |o, cx| o.published(self.number, cx));
-                let note = if edited {
+                let note = if recreated {
+                    format!(
+                        "The review was already on its way, so your changes are a new local \
+                         review; sent when {label} is on Gerrit"
+                    )
+                } else if edited {
                     format!("Local review updated; sent when {label} is on Gerrit")
                 } else {
                     local_note(label)
                 };
                 cx.emit(ReplyEvent::Saved(note));
-            }
-            Ok(None) => {
-                self.error = Some(
-                    "Not saved: the review is no longer pending (it is being sent, was sent, \
-                     or is held). Start a new review instead."
-                        .into(),
-                );
             }
             Err(e) => self.error = Some(describe_local(&e)),
         }
@@ -1047,6 +1099,20 @@ impl ReplyDialog {
     #[cfg(test)]
     pub(crate) fn is_local_for_test(&self) -> bool {
         self.is_local()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_for_test(&self) -> Option<PatchSetNumber> {
+        self.current.as_ref().map(|c| c.number)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn asides_for_test(&self) -> Vec<String> {
+        self.notice
+            .iter()
+            .cloned()
+            .chain(self.gerrit_drafts_note())
+            .collect()
     }
 
     /// The title, the local note and the approval hint, as drawn.
@@ -1324,12 +1390,18 @@ impl Render for ReplyDialog {
             (false, None, _) => "Ctrl-Enter sends, Esc closes",
             (true, Some(_), None) => "Cmd-Enter saves, Esc closes",
             (false, Some(_), None) => "Ctrl-Enter saves, Esc closes",
-            (true, Some(_), Some(_)) => "Cmd-Enter saves, Esc drops the changes",
-            (false, Some(_), Some(_)) => "Ctrl-Enter saves, Esc drops the changes",
+            (true, Some(_), Some(_)) => "Cmd-Enter saves, Esc keeps the review as it was",
+            (false, Some(_), Some(_)) => "Ctrl-Enter saves, Esc keeps the review as it was",
         };
         let local = self.is_local();
         let hint = self.hint();
         let note = self.note();
+        let asides: Vec<String> = self
+            .notice
+            .iter()
+            .cloned()
+            .chain(self.gerrit_drafts_note())
+            .collect();
         let can_send = self.can_send(cx);
         let section = |title: &'static str| {
             div()
@@ -1570,6 +1642,16 @@ impl Render for ReplyDialog {
                                             ),
                                         )
                                     })
+                            }))
+                            .children(asides.into_iter().map(|a| {
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .debug_selector({
+                                        let a = a.clone();
+                                        move || format!("reply-aside: {a}")
+                                    })
+                                    .child(a)
                             })),
                     )
                     .child(
@@ -1625,6 +1707,28 @@ impl ReplyDialog {
             &self.detail.revisions,
             target.number,
         )))
+    }
+
+    /// On a Gerrit change's local version: the ordinary drafts of the
+    /// change (replies to Gerrit threads, O2) go up with a reply to Gerrit,
+    /// not with this review, so say that they wait.
+    fn gerrit_drafts_note(&self) -> Option<String> {
+        if self.local.is_none() || self.number.is_local() {
+            return None;
+        }
+        let n = self
+            .threads
+            .iter()
+            .flat_map(|t| &t.entries)
+            .filter(|e| matches!(e, model::Entry::Draft(d) if d.is_ordinary()))
+            .count();
+        (n > 0).then(|| {
+            format!(
+                "{n} Gerrit draft{} wait{} for a reply on Gerrit",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "s" } else { "" }
+            )
+        })
     }
 
     /// The hint near a local review's votes (see [`approval_hint`]).

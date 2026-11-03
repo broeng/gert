@@ -456,3 +456,58 @@ fn a_gerrit_change_lists_the_reviews_of_its_local_versions(cx: &mut TestAppConte
     );
     f.assert_nothing_local_sent(&[&ck.local]);
 }
+
+/// Change 7 as [`seed_gerrit_change`] has it, with the user's Code-Review
+/// +1 (the highest they may give) on PS 3.
+fn seed_with_my_vote(store: &mut Store) {
+    seed_gerrit_change(store);
+    let mut d = store
+        .load_change_detail(SERVER, ChangeNumber(7))
+        .expect("store")
+        .expect("detail")
+        .detail;
+    let mut me = crate::testing::account(9, "u");
+    me.username = Some("u".into());
+    d.votes = [(
+        "Code-Review".to_owned(),
+        vec![model::LabelVote {
+            account: me,
+            value: 1,
+            date: None,
+        }],
+    )]
+    .into();
+    store
+        .save_change_detail(SERVER, &d, Timestamp::now())
+        .expect("detail");
+}
+
+#[gpui_kit::test]
+fn a_vote_on_gerrit_does_not_count_as_the_vote_on_a_local_version(cx: &mut TestAppContext) {
+    let ck = checkout();
+    let store = store_with(
+        &[row(
+            "I7",
+            Some(ChangeNumber(7)),
+            LocalChangeState::Local,
+            &[&ck.local],
+            &ck.base,
+        )],
+        seed_with_my_vote,
+    );
+    let f = page(cx, store, ChangeNumber(7), &ck, |_| {});
+    let buttons =
+        |cx: &mut TestAppContext| cx.update(|cx| f.page.read(cx).quick_buttons_for_test(cx));
+    // On PS 3 the +1 is given already.
+    assert!(buttons(cx)[0].applied);
+    // On the local version it is not: the vote on Gerrit is on PS 3.
+    let local = f.local_patch_set(cx, 1);
+    f.pick(cx, |s, d| s.set_target(d, local));
+    assert!(!buttons(cx)[0].applied);
+    f.press(cx, "shift-v");
+    let reviews = f.reviews(ChangeNumber(7));
+    assert_eq!(reviews.len(), 1, "{:?}", f.hint(cx));
+    assert_eq!(reviews[0].labels, [("Code-Review".to_owned(), 1)].into());
+    assert!(buttons(cx)[0].applied);
+    f.assert_nothing_local_sent(&[&ck.local]);
+}

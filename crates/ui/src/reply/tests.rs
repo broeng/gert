@@ -8,7 +8,7 @@ use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext};
 use model::{
     Account, AccountId, AttentionEntry, ChangeDetail, ChangeNumber, DraftInput, LabelValue,
-    LabelVote, Location, PATCHSET_LEVEL_PATH, PatchSetNumber, PatchSetRef, Side,
+    LabelVote, Location, PATCHSET_LEVEL_PATH, PatchSetNumber, PatchSetRef, PendingReviewId, Side,
 };
 use serde_json::{Value, json};
 use store::{DraftFailure, Store};
@@ -1441,7 +1441,7 @@ fn a_local_review_is_saved_as_a_pending_review_with_the_borrowed_labels(cx: &mut
 }
 
 #[gpui_kit::test]
-fn a_pending_review_is_edited_in_place_and_escape_drops_the_changes(cx: &mut TestAppContext) {
+fn a_pending_review_is_edited_in_place_and_escape_keeps_it_as_it_was(cx: &mut TestAppContext) {
     let f = local_dialog(cx, |_| {});
     let number = local_number(&f);
     type_text(cx, &f, "First thoughts");
@@ -1449,7 +1449,9 @@ fn a_pending_review_is_edited_in_place_and_escape_drops_the_changes(cx: &mut Tes
     press(cx, &f, &[SEND]);
     let id = reviews_of(&f, number)[0].id;
 
-    // Escape while editing leaves the review as it was, and writes no draft.
+    // Escape while editing leaves the review as it was; with the message
+    // untouched it writes no draft either (a changed one is kept, see
+    // `escape_while_editing_keeps_a_changed_message_as_a_local_draft`).
     let request = local_request(
         &f.session,
         &f.store,
@@ -1458,8 +1460,8 @@ fn a_pending_review_is_edited_in_place_and_escape_drops_the_changes(cx: &mut Tes
         model::LocalApproval::Exact,
     );
     let edit = reopen(cx, &f, request.clone());
-    on_dialog(cx, &f, &edit, |d, window, cx| {
-        d.set_text_for_test("First thoughts and more", window, cx);
+    on_dialog(cx, &f, &edit, |d, _, cx| {
+        d.select_vote(0, 0, cx);
         d.close(cx)
     });
     assert_eq!(
@@ -1555,12 +1557,17 @@ fn a_local_version_of_a_gerrit_change_gets_a_local_review_with_the_strict_hint(
             d.texts_for_test().2,
             Some("An approval is only sent on this exact commit")
         );
-        // Bob's +1 on Gerrit is where the row starts.
-        assert_eq!(d.votes_for_test()[0].current, 1);
+        // Bob's +1 on Gerrit is on PS 3, not on this version: the row
+        // starts from 0.
+        assert_eq!(d.votes_for_test()[0].current, 0);
         assert!(d.people_for_test().is_empty());
         // The ordinary draft waiting for its upload is no local comment and
-        // holds nothing up.
+        // holds nothing up, but the dialog says it waits for Gerrit.
         assert!(d.drafts_for_test().is_empty());
+        assert_eq!(
+            d.asides_for_test(),
+            ["1 Gerrit draft waits for a reply on Gerrit"]
+        );
     });
     pick_vote(cx, &f, 0, 4);
     press(cx, &f, &[SEND]);
@@ -1599,4 +1606,176 @@ fn a_version_already_on_gerrit_takes_no_local_review(cx: &mut TestAppContext) {
         assert!(events(&f).is_empty());
         assert!(f.http.requested().is_empty());
     }
+}
+
+/// Change 7 cached with bob's Code-Review +2 on PS 3, a local version `l7`
+/// with a pending review giving +2 there; returns the review.
+fn seed_gerrit_plus_two(store: &mut Store) -> model::PendingReview {
+    let server = setup().server;
+    let mut d = change();
+    d.votes.get_mut("Code-Review").expect("votes")[0].value = 2;
+    store
+        .save_change_detail(server, &d, jiff::Timestamp::now())
+        .expect("detail");
+    let version = crate::testing::local_version(store, Some(CHANGE), "I7", "l7");
+    store
+        .create_pending_review(
+            server,
+            &store::NewPendingReview {
+                patch_set: version.number,
+                labels: [("Code-Review".to_owned(), 2)].into(),
+                strategy: model::LocalApproval::Exact,
+                message: "first".into(),
+                unresolved: false,
+                created: jiff::Timestamp::now(),
+                replaces_draft: None,
+            },
+        )
+        .expect("review")
+}
+
+#[gpui_kit::test]
+fn edit_opens_a_local_review_on_its_version_whatever_the_page_shows(cx: &mut TestAppContext) {
+    let review = Arc::new(Mutex::new(None));
+    let seen = review.clone();
+    let f = dialog_on(
+        cx,
+        move |store| *seen.lock().expect("r") = Some(seed_gerrit_plus_two(store)),
+        |s, st| {
+            let mut r = local_request(s, st, "I7", "l7", model::LocalApproval::Exact);
+            // The page shows PS 3, and its list asks to edit the review.
+            r.target = Some(PatchSetNumber(3));
+            r.edit = Some(PendingReviewId(1));
+            r
+        },
+        ok_review,
+    );
+    let review = review.lock().expect("r").clone().expect("review");
+    assert_eq!(review.id, PendingReviewId(1));
+    cx.update(|cx| {
+        let d = f.dialog.read(cx);
+        assert!(d.is_local_for_test());
+        assert_eq!(d.editing_for_test(), Some(review.id));
+        assert_eq!(d.current_for_test(), Some(review.patch_set));
+        assert_eq!(d.text_for_test(cx), "first");
+        // The review's +2, though bob gave +2 on Gerrit too.
+        assert_eq!(d.votes_for_test()[0].selected, 2);
+    });
+    type_text(cx, &f, ", and more");
+    press(cx, &f, &[SEND]);
+    let reviews = reviews_of(&f, CHANGE);
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].message.as_deref(), Some("first, and more"));
+    // The +2 is kept although it equals bob's vote on Gerrit.
+    assert_eq!(reviews[0].labels, [("Code-Review".to_owned(), 2)].into());
+    assert!(writes(&f).is_empty(), "{:?}", writes(&f));
+}
+
+#[gpui_kit::test]
+fn edit_of_a_review_that_is_gone_or_a_missing_version_never_replies_to_gerrit(
+    cx: &mut TestAppContext,
+) {
+    // The review was cancelled before the dialog opened.
+    let f = dialog_on(
+        cx,
+        |store| {
+            seed_gerrit_plus_two(store);
+        },
+        |s, st| {
+            let mut r = local_request(s, st, "I7", "l7", model::LocalApproval::Exact);
+            r.target = Some(PatchSetNumber(3));
+            r.edit = Some(PendingReviewId(99));
+            r
+        },
+        ok_review,
+    );
+    cx.update(|cx| {
+        let d = f.dialog.read(cx);
+        assert!(d.is_local_for_test());
+        assert_eq!(d.current_for_test(), None);
+        assert!(d.error_for_test().is_some_and(|e| e.contains("not known")));
+    });
+    pick_vote(cx, &f, 0, 4);
+    press(cx, &f, &[SEND]);
+    assert!(events(&f).is_empty());
+    assert!(writes(&f).is_empty(), "{:?}", writes(&f));
+
+    // A local target the detail does not have (yet): no fallback either.
+    let g = dialog_on(
+        cx,
+        |store| {
+            seed_gerrit_plus_two(store);
+        },
+        |s, st| {
+            let mut r = local_request(s, st, "I7", "l7", model::LocalApproval::Exact);
+            r.target = Some(PatchSetNumber(PatchSetNumber::LOCAL_BASE + 77));
+            r
+        },
+        ok_review,
+    );
+    cx.update(|cx| assert_eq!(g.dialog.read(cx).current_for_test(), None));
+    pick_vote(cx, &g, 0, 4);
+    press(cx, &g, &[SEND]);
+    assert!(events(&g).is_empty());
+    assert!(writes(&g).is_empty(), "{:?}", writes(&g));
+}
+
+#[gpui_kit::test]
+fn an_edit_of_a_review_that_left_pending_is_saved_as_a_new_review(cx: &mut TestAppContext) {
+    let f = local_dialog(cx, |store| seed_pending_review(store, "Saved before"));
+    let number = local_number(&f);
+    let id = cx
+        .update(|cx| f.dialog.read(cx).editing_for_test())
+        .expect("editing");
+    // Consolidation claims it while the dialog is open.
+    f.store
+        .lock()
+        .expect("store")
+        .mark_pending_review_sending(
+            setup().server,
+            id,
+            &[model::PendingReviewState::Pending],
+            "n",
+        )
+        .expect("claim")
+        .expect("claimed");
+    type_text(cx, &f, " and an afterthought");
+    press(cx, &f, &[SEND]);
+    let reviews = reviews_of(&f, number);
+    assert_eq!(reviews.len(), 2);
+    assert_eq!(reviews[0].message.as_deref(), Some("Saved before"));
+    assert_eq!(
+        reviews[1].message.as_deref(),
+        Some("Saved before and an afterthought")
+    );
+    assert_eq!(reviews[1].labels, [("Code-Review".to_owned(), 1)].into());
+    assert!(
+        events(&f)[0].contains("already on its way"),
+        "{:?}",
+        events(&f)
+    );
+}
+
+#[gpui_kit::test]
+fn escape_while_editing_keeps_a_changed_message_as_a_local_draft(cx: &mut TestAppContext) {
+    let f = local_dialog(cx, |store| seed_pending_review(store, "Saved before"));
+    let number = local_number(&f);
+    type_text(cx, &f, ", long edit");
+    press(cx, &f, &["escape"]);
+    assert_eq!(events(&f), ["close"]);
+    // The review is as it was; the edited text waits as a local draft.
+    assert_eq!(
+        reviews_of(&f, number)[0].message.as_deref(),
+        Some("Saved before")
+    );
+    let drafts = f
+        .session
+        .syncer()
+        .cached_comments(number)
+        .expect("cache")
+        .drafts;
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].message, "Saved before, long edit");
+    assert!(drafts[0].is_local());
+    assert!(f.http.requested().is_empty());
 }

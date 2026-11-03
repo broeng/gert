@@ -13,7 +13,7 @@
 
 use gpui_kit::*;
 use model::{ChangeNumber, PatchSetRef, PendingReview, PendingReviewState, ReviewInput, Timestamp};
-use store::{NewPendingReview, PendingReviewEdit};
+use store::NewPendingReview;
 use sync::PublishOutcome;
 
 use super::{ChangeEvent, ChangePage};
@@ -160,19 +160,14 @@ impl ChangePage {
         self.voting = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    if let Some(r) = newest {
-                        let mut labels = r.labels.clone();
-                        labels.insert(vote.0.clone(), vote.1);
-                        let edit = PendingReviewEdit {
-                            labels,
-                            strategy,
-                            message: r.message.clone().unwrap_or_default(),
-                            unresolved: r.unresolved,
-                        };
-                        // Gone or claimed for sending meanwhile: a new one.
-                        if let Some(r) = syncer.update_pending_review(r.id, &edit)? {
-                            return Ok(r);
-                        }
+                    // Only the label: the message may have changed since the
+                    // list was read. Gone or claimed for sending meanwhile:
+                    // a new review.
+                    if let Some(r) = newest
+                        && let Some(r) =
+                            syncer.set_pending_review_label(r.id, &vote.0, vote.1, strategy)?
+                    {
+                        return Ok(r);
                     }
                     syncer.create_pending_review(&NewPendingReview {
                         patch_set: target.number,
