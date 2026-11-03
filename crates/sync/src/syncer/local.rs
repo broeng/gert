@@ -16,7 +16,7 @@ use store::{BorrowedLabels, LocalChangeEntry, ReconcileReport, ServerId, Store};
 use super::Syncer;
 use crate::{
     Error,
-    local::{plan_disabled, plan_reconcile, scan_change_ids},
+    local::{plan_disabled, plan_reconcile, scan_change_ids, tombstone_due},
 };
 
 impl Syncer {
@@ -81,7 +81,7 @@ impl Syncer {
             let cached = store.cached_changes_by_change_id(self.server, project, &change_ids)?;
             plan_reconcile(scan, author_emails, &cached, &entries, now)
         } else {
-            plan_disabled(&entries)
+            plan_disabled(&entries, now)
         };
         let report = store.reconcile_local(self.server, project, &ops, now)?;
         if enabled && scan.is_complete() {
@@ -130,10 +130,13 @@ impl Syncer {
         let change_ids = union(scan_change_ids.to_vec(), &entries);
         let cached = store.cached_change_keys(self.server, project, &change_ids)?;
         let mut hasher = DefaultHasher::new();
+        let now = Timestamp::now();
         for e in &entries {
             let c = &e.change;
             (c.id, &c.branch, &c.change_id, c.state, c.gerrit_number).hash(&mut hasher);
             e.has_unsent.hash(&mut hasher);
+            // A tombstone coming of age may go now, though nothing moved.
+            (c.state == LocalChangeState::Consolidated && tombstone_due(e, now)).hash(&mut hasher);
             for p in &e.patch_sets {
                 (&p.sha, p.gerrit_patch_set).hash(&mut hasher);
             }

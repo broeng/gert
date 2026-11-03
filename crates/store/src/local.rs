@@ -48,6 +48,10 @@ pub struct LocalChangeEntry {
     pub patch_sets: Vec<LocalPatchSet>,
     /// See [`Store::has_unsent`].
     pub has_unsent: bool,
+    /// When the change became a tombstone (`Consolidated`), by the store's
+    /// clock; `None` in other states, and for a tombstone made before this
+    /// was recorded.
+    pub consolidated_at: Option<Timestamp>,
 }
 
 /// A cached Gerrit change found by its Change-Id (see
@@ -346,6 +350,23 @@ pub(crate) fn has_unsent(
         .query_row(params![server.0, synthetic(id), id.0], |r| r.get(0))?)
 }
 
+/// When local change `id` became a tombstone, if it is one and that was
+/// recorded.
+fn consolidated_at(
+    conn: &Connection,
+    server: ServerId,
+    id: LocalChangeId,
+) -> Result<Option<Timestamp>, Error> {
+    let ms: Option<Option<i64>> = conn
+        .prepare_cached(
+            "SELECT consolidated_ms FROM local_changes
+             WHERE server_id = ?1 AND id = ?2 AND state = 'consolidated'",
+        )?
+        .query_row(params![server.0, id.0], |r| r.get(0))
+        .optional()?;
+    ms.flatten().map(from_millis).transpose()
+}
+
 /// Deletes a local change and everything on its numbers, inside the
 /// caller's transaction. False if there is no such row.
 fn delete_change(conn: &Connection, server: ServerId, id: LocalChangeId) -> Result<bool, Error> {
@@ -404,9 +425,15 @@ pub(crate) fn set_state(
     if state == LocalChangeState::Consolidated && has_unsent(conn, server, id)? {
         return Ok(Some(current));
     }
+    // A tombstone records when it was made (by the store's clock: the
+    // callers that settle a change carry no time), so the scan can tell
+    // when no page can still name it.
+    let consolidated_ms =
+        (state == LocalChangeState::Consolidated).then(|| millis(Timestamp::now()));
     conn.execute(
-        "UPDATE local_changes SET state = ?3 WHERE server_id = ?1 AND id = ?2",
-        params![server.0, id.0, state.as_str()],
+        "UPDATE local_changes SET state = ?3, consolidated_ms = ?4
+         WHERE server_id = ?1 AND id = ?2",
+        params![server.0, id.0, state.as_str(), consolidated_ms],
     )?;
     Ok(Some(state))
 }
@@ -573,6 +600,7 @@ impl Store {
                 Ok(LocalChangeEntry {
                     patch_sets: load_patch_sets(&self.conn, server, change.id)?,
                     has_unsent: has_unsent(&self.conn, server, change.id)?,
+                    consolidated_at: consolidated_at(&self.conn, server, change.id)?,
                     change,
                 })
             })

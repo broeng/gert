@@ -40,12 +40,21 @@
 //!   snapshot shows unsent data, so the scan settles at once; otherwise
 //!   `Delete` with `else_state`, which the store re-checks, see
 //!   [`LocalOp::Delete`]). A change whose only commits left are Gerrit
-//!   patch sets is deleted without unsent data and otherwise left to
-//!   consolidation.
+//!   patch sets is left to consolidation if it has unsent data; without,
+//!   it becomes a tombstone if it has a Gerrit change (so pages naming it
+//!   still redirect), and is deleted otherwise.
 //! * A `Vanished` change whose commits are back goes back to `Checking`.
 //! * Consolidated rows are tombstones: their known commits never become
-//!   local again, under any key. They go when none of their commits, and
-//!   no commit with their key, is on a branch any more. A *new* commit
+//!   local again, under any key. They keep their Gerrit change, so a page
+//!   (or history entry) still naming their synthetic numbers redirects to
+//!   the Gerrit change. They go when none of their commits, and no commit
+//!   with their key, is on a branch any more (on a complete scan), and
+//!   they are at least [`TOMBSTONE_AGE`] old: navigation history lives
+//!   only as long as the app runs, so a tombstone that old (or one made
+//!   before its time was recorded, in an earlier run) is named by no page
+//!   a user is likely to go back to. A tombstone still on a branch stays,
+//!   however old, since the scan needs it to not make the change local
+//!   again. With the option off, tombstones go at the same age. A *new* commit
 //!   with a tombstone's key (the change amended after the push) is a new
 //!   local patch set of its Gerrit change, and the row goes back to
 //!   `Checking`.
@@ -65,6 +74,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use jiff::SignedDuration;
 use model::{
     BranchTargets, ChangeStatus, LocalChangeState, LocalCommit, LocalScan, PatchSetNumber,
     RevisionId, Timestamp,
@@ -72,6 +82,21 @@ use model::{
 use store::{
     CachedGerritChange, LocalChangeEntry, LocalChangeUpsert, LocalOp, NewLocalPatchSet, Seen,
 };
+
+/// How old a tombstone must be before the scan removes it once its commits
+/// are off every named branch: long enough that no page of this run still
+/// names its synthetic numbers (pages redirect as soon as consolidation
+/// finds a change, and history is not kept across runs).
+pub const TOMBSTONE_AGE: SignedDuration = SignedDuration::from_hours(7 * 24);
+
+/// Whether tombstone `e` is old enough to go at `now` (see
+/// [`TOMBSTONE_AGE`]); one made before its time was recorded is.
+pub fn tombstone_due(e: &LocalChangeEntry, now: Timestamp) -> bool {
+    e.consolidated_at.is_none_or(|made| {
+        now.checked_sub(TOMBSTONE_AGE)
+            .is_ok_and(|limit| made <= limit)
+    })
+}
 
 /// A local change's key within a project: target branch and Change-Id.
 type Key = (Option<String>, String);
@@ -419,15 +444,22 @@ pub fn plan_reconcile(
             | LocalChangeState::Consolidated
                 if e.has_unsent => {}
             LocalChangeState::Consolidated => {
-                if !present {
+                if !present && tombstone_due(e, now) {
                     ops.push(delete(None));
                 }
             }
             // Only commits that are Gerrit patch sets are left: without
             // unsent data there is nothing local to it any more; with some,
-            // that is for consolidation to send.
+            // that is for consolidation to send. One with a Gerrit change
+            // becomes a tombstone, so pages naming it still redirect.
             _ if only_pushed => {
-                if !e.has_unsent {
+                if e.has_unsent {
+                } else if e.change.gerrit_number.is_some() {
+                    ops.push(LocalOp::SetState {
+                        seen: seen(e),
+                        state: LocalChangeState::Consolidated,
+                    });
+                } else {
                     ops.push(delete(None));
                 }
             }
@@ -463,11 +495,13 @@ pub fn scan_change_ids(scan: &LocalScan) -> Vec<String> {
 /// without unsent data goes (the store keeps a row that has some by the
 /// time the plan is applied, in its state), and nothing new is picked up.
 /// Rows with unsent data stay and still consolidate, so turning the option
-/// off never loses a review.
-pub fn plan_disabled(entries: &[LocalChangeEntry]) -> Vec<LocalOp> {
+/// off never loses a review. A tombstone goes only once it is
+/// [`TOMBSTONE_AGE`] old at `now`, so its redirects keep working.
+pub fn plan_disabled(entries: &[LocalChangeEntry], now: Timestamp) -> Vec<LocalOp> {
     entries
         .iter()
         .filter(|e| !e.has_unsent)
+        .filter(|e| e.change.state != LocalChangeState::Consolidated || tombstone_due(e, now))
         .map(|e| LocalOp::Delete {
             seen: seen(e),
             else_state: None,

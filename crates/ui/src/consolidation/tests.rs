@@ -1411,3 +1411,91 @@ fn comments_on_an_amend_the_branch_was_reset_from_are_ported(cx: &mut TestAppCon
         assert!(!r.contains(&amend), "{r}");
     }
 }
+
+#[gpui_kit::test]
+fn a_tombstone_kept_by_the_scan_still_redirects() {
+    use store::{ConsolidationRewrite, LocalChangeUpsert, LocalOp, NewLocalPatchSet, PatchSetMove};
+
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server");
+    let now: Timestamp = "2024-06-15T10:00:00Z".parse().expect("time");
+    let upsert = LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: ID_A.into(),
+        gerrit_number: None,
+        subject: "s".into(),
+        author_name: "Me".into(),
+        author_email: TEST_EMAIL.into(),
+        updated: now,
+        state: None,
+        patch_sets: vec![NewLocalPatchSet {
+            sha: "l1".into(),
+            parent_sha: None,
+            seen_at: now,
+        }],
+    };
+    store
+        .reconcile_local(server, "p", &[LocalOp::Upsert(upsert)], now)
+        .expect("reconcile");
+    let row = store
+        .local_changes_by_change_id(server, ID_A)
+        .expect("rows")
+        .remove(0);
+    let version = store
+        .local_patch_sets(server, row.id)
+        .expect("versions")
+        .remove(0);
+    // Pushed as patch set 1 of change 42 and consolidated: a tombstone.
+    store
+        .rewrite_local_change(
+            server,
+            &ConsolidationRewrite {
+                local_change: row.id,
+                gerrit_number: GERRIT,
+                moves: vec![PatchSetMove {
+                    from: version.number,
+                    to: model::PatchSetRef {
+                        number: PatchSetNumber(1),
+                        sha: "l1".into(),
+                    },
+                    exact: true,
+                    drafts: Vec::new(),
+                    reviews: Vec::new(),
+                }],
+                keep: Vec::new(),
+                review_states: Vec::new(),
+                state: Some(model::LocalChangeState::Consolidated),
+                else_state: None,
+            },
+        )
+        .expect("rewrite")
+        .expect("rewritten");
+    let env = env_with(store, &RouteHttpClient::new());
+    let session = crate::session::Session::new(&env, &setup(), None).expect("session");
+    let syncer = session.syncer();
+    // Its commit left every branch (a complete scan without it), but the
+    // tombstone is young: it stays, with its Gerrit change.
+    let scan = model::LocalScan {
+        fingerprint: 1,
+        commits: Vec::new(),
+        truncated: false,
+        no_remotes: false,
+        targets: Default::default(),
+    };
+    let report = syncer
+        .reconcile_local("p", &scan, &[TEST_EMAIL.to_owned()], true)
+        .expect("reconcile");
+    assert!(report.deleted.is_empty(), "{report:?}");
+    // A history entry of the local change still leads to the Gerrit change.
+    assert_eq!(
+        super::redirect(syncer, &Route::Change(row.number), None).expect("redirect"),
+        Some(super::Redirect {
+            route: Route::Change(GERRIT),
+            view: Some(ChangeView {
+                target: Some(PatchSetNumber(1)),
+                ..Default::default()
+            }),
+        })
+    );
+}

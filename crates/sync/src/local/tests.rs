@@ -580,15 +580,55 @@ fn a_tombstone_is_never_resurrected() {
     assert_eq!(h.plan(&truncated), []);
     // Its commit on another branch with another target keeps it too.
     assert_eq!(h.plan(&scan(vec![commit("c1", Some("I1"), &["fix"])])), []);
-    // Gone from the branches: the tombstone goes.
+    // Gone from the branches, but young: it stays for its redirects.
+    assert_eq!(h.plan(&scan(vec![])), []);
+    // Old enough: the tombstone goes.
     let e = h.entry("I1");
+    let mut entries = h.entries();
+    age_tombstones(&mut entries);
     assert_eq!(
-        h.plan(&scan(vec![])),
+        plan_reconcile(&scan(vec![]), &h.emails, &h.cached, &entries, now()),
         [LocalOp::Delete {
             seen: seen(&e),
             else_state: None,
         }]
     );
+    // Still on a branch, however old: kept, so it is not made local again.
+    assert_eq!(
+        plan_reconcile(&sc, &h.emails, &h.cached, &entries, now()),
+        []
+    );
+}
+
+/// Makes the tombstones of `entries` older than [`TOMBSTONE_AGE`] at
+/// `now()`.
+fn age_tombstones(entries: &mut [LocalChangeEntry]) {
+    for e in entries {
+        if e.change.state == LocalChangeState::Consolidated {
+            e.consolidated_at = Some(
+                now()
+                    .checked_sub(TOMBSTONE_AGE + jiff::SignedDuration::from_secs(1))
+                    .unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
+fn tombstones_come_of_age_after_a_week() {
+    let mut h = H::new();
+    h.run(&scan(vec![commit("c1", Some("I1"), &["topic"])]));
+    h.set_state("I1", LocalChangeState::Consolidated);
+    let mut e = h.entry("I1");
+    assert!(e.consolidated_at.is_some());
+    let day = jiff::SignedDuration::from_hours(24);
+    e.consolidated_at = Some(now().checked_sub(day * 6).unwrap());
+    assert!(!tombstone_due(&e, now()));
+    e.consolidated_at = Some(now().checked_sub(day * 7).unwrap());
+    assert!(tombstone_due(&e, now()));
+    // Made before its time was recorded (in an earlier run).
+    e.consolidated_at = None;
+    assert!(tombstone_due(&e, now()));
 }
 
 #[test]
@@ -730,8 +770,18 @@ fn the_option_off_removes_what_has_no_unsent_data_and_adds_nothing() {
     ]));
     h.add_draft("IB");
     h.set_state("IT", LocalChangeState::Consolidated);
-    let entries = h.entries();
-    let ops = plan_disabled(&entries);
+    let mut entries = h.entries();
+    // A young tombstone stays for its redirects.
+    let young: Vec<LocalChangeId> = plan_disabled(&entries, now())
+        .iter()
+        .map(|op| match op {
+            LocalOp::Delete { seen, .. } => seen.id,
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(young, [h.entry("IA").change.id]);
+    age_tombstones(&mut entries);
+    let ops = plan_disabled(&entries, now());
     let deleted: Vec<LocalChangeId> = ops
         .iter()
         .map(|op| match op {
@@ -801,6 +851,24 @@ fn a_change_with_only_pushed_commits_left_waits_for_consolidation() {
     // Off the branches as well: vanished, for consolidation to decide.
     h.run(&scan(vec![]));
     assert_eq!(h.rows(), s(&["main I1 vanished [c1=ps1]"]));
+}
+
+#[test]
+fn a_pushed_version_of_a_gerrit_change_leaves_a_tombstone() {
+    // c1 is a local patch set of change 42 (which has only PS 1, b1).
+    let mut h = H::new();
+    h.gerrit(42, "I1", "main", ChangeStatus::New, Some(&["b1"]));
+    let sc = scan(vec![commit("c1", Some("I1"), &["topic"])]);
+    h.run(&sc);
+    assert_eq!(h.rows(), s(&["main I1 checking g42 [c1]"]));
+    // Pushed as PS 2: nothing is unsent, so it becomes a tombstone that
+    // keeps its Gerrit change, for the pages that name its numbers.
+    h.cached.clear();
+    h.gerrit(42, "I1", "main", ChangeStatus::New, Some(&["b1", "c1"]));
+    let report = h.run(&sc);
+    assert!(report.is_settled(), "{report:?}");
+    assert_eq!(h.rows(), s(&["main I1 consolidated g42 [c1=ps2]"]));
+    assert_eq!(h.plan(&sc), []);
 }
 
 #[test]

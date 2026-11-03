@@ -468,6 +468,16 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE local_patch_sets ADD COLUMN on_branch INTEGER NOT NULL DEFAULT 1;
     ",
+    // v17 -> v18: when a local change became a tombstone (`consolidated`).
+    // A tombstone keeps its Gerrit change so that pages still naming its
+    // synthetic number redirect; the scan removes it once its commits are
+    // off every named branch and it is old enough that no page of this run
+    // can still name it (navigation history is not kept across runs).
+    // NULL for other states and for tombstones made before this step,
+    // which no page of a later run names.
+    "
+    ALTER TABLE local_changes ADD COLUMN consolidated_ms INTEGER;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

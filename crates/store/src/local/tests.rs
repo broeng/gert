@@ -1166,3 +1166,21 @@ fn only_a_vanished_change_without_a_gerrit_change_is_deleted_as_vanished() {
     assert!(!s.delete_vanished_local_change(id, b.id).unwrap());
     assert!(s.local_change(id, b.id).unwrap().is_some());
 }
+
+#[test]
+fn a_tombstone_records_when_it_was_made() {
+    let (mut s, id) = setup();
+    let a = add(&mut s, id, upsert("IA", None, &["a1"]));
+    let entry = |s: &Store| s.local_changes_of_project(id, "p").unwrap().remove(0);
+    assert_eq!(entry(&s).consolidated_at, None);
+    // Stored in milliseconds.
+    let before = Timestamp::now() - jiff::SignedDuration::from_millis(1);
+    s.set_local_change_state(id, a.id, LocalChangeState::Consolidated)
+        .unwrap();
+    let made = entry(&s).consolidated_at.unwrap();
+    assert!(made >= before && made <= Timestamp::now(), "{made}");
+    // No longer a tombstone: no time.
+    s.set_local_change_state(id, a.id, LocalChangeState::Checking)
+        .unwrap();
+    assert_eq!(entry(&s).consolidated_at, None);
+}
