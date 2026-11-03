@@ -5,7 +5,14 @@
 //! web UI. Hovering a box opens a card with who voted and when, and, for
 //! those whose vote the user may remove, a trash button. Labels no
 //! requirement mentions are listed in a section of their own.
+//!
+//! On a local version the user's votes in its local reviews that are not
+//! on Gerrit yet are boxes too, each with a `local` pill: on a local
+//! change, whose labels (borrowed, see [`crate::change_detail`]) are all
+//! in the votes section, and on a local patch set of a Gerrit change next
+//! to Gerrit's votes.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -16,10 +23,13 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
-use model::{Account, LabelVote, SubmitRequirement, SubmitRequirementStatus};
+use model::{Account, LabelVote, PendingReviewState, SubmitRequirement, SubmitRequirementStatus};
 
 use super::{ChangeEvent, ChangePage, view::section_title};
-use crate::{reply::plan::vote_text, session::is_unauthorized, time_fmt::relative};
+use crate::{
+    change_detail::patch_set_label, local_source::local_chip, reply::plan::vote_text,
+    session::is_unauthorized, time_fmt::relative,
+};
 
 const LABEL_ORDER: [&str; 2] = ["Code-Review", "Verified"];
 
@@ -32,19 +42,31 @@ const NAME_CHAR: f32 = 8.;
 const NAME_MIN: f32 = 90.;
 const NAME_MAX: f32 = 220.;
 
+/// The user's vote on a label in a local review not on Gerrit yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocalVote {
+    value: i32,
+    voted_at: model::Timestamp,
+    /// Its review is being posted now.
+    sending: bool,
+}
+
 impl ChangePage {
     pub(super) fn requirements(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(d) = &self.detail else {
             return div().into_any_element();
         };
         let name_width = self.name_width();
+        let local = self.local_votes();
         let rows: Vec<AnyElement> = ordered(&d.submit_requirements)
             .into_iter()
             .enumerate()
             .map(|(ix, r)| {
                 let chips: Vec<AnyElement> = requirement_labels(r, &d.votes)
                     .iter()
-                    .flat_map(|label| self.vote_chips(ix, label, &d.votes[label], cx))
+                    .flat_map(|label| {
+                        self.vote_chips(ix, label, &d.votes[label], local.get(label), cx)
+                    })
                     .collect();
                 h_flex()
                     .gap_x_2()
@@ -75,12 +97,17 @@ impl ChangePage {
     /// The labels no requirement shows the votes of.
     pub(super) fn votes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let d = self.detail.as_ref()?;
+        let local = self.local_votes();
         let shown: Vec<String> = d
             .submit_requirements
             .iter()
             .flat_map(|r| requirement_labels(r, &d.votes))
             .collect();
-        let mut names: Vec<&String> = d.votes.keys().filter(|n| !shown.contains(n)).collect();
+        let mut names: Vec<&String> = self
+            .label_names(&local)
+            .into_iter()
+            .filter(|n| !shown.contains(n))
+            .collect();
         if names.is_empty() {
             return None;
         }
@@ -100,7 +127,8 @@ impl ChangePage {
             .into_iter()
             .enumerate()
             .map(|(ix, name)| {
-                let chips = self.vote_chips(1000 + ix, name, &d.votes[name], cx);
+                let votes = d.votes.get(name).map_or(&[][..], Vec::as_slice);
+                let chips = self.vote_chips(1000 + ix, name, votes, local.get(name), cx);
                 h_flex()
                     .gap_x_2()
                     .gap_y_0p5()
@@ -131,30 +159,80 @@ impl ChangePage {
         )
     }
 
+    /// The labels with a line: those of the change, on a local change the
+    /// labels it offers (it has no votes from Gerrit), and those of the
+    /// user's local votes `local`.
+    fn label_names<'a>(&'a self, local: &'a BTreeMap<String, LocalVote>) -> Vec<&'a String> {
+        let Some(d) = &self.detail else {
+            return Vec::new();
+        };
+        let offered = d
+            .label_values
+            .keys()
+            .filter(|_| d.summary.number.is_local());
+        let mut names: Vec<&String> = d.votes.keys().chain(offered).chain(local.keys()).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// The user's votes in the local reviews of the local version shown
+    /// that are not on Gerrit yet (pending or being sent), per label: each
+    /// label's from the newest review that has it, since the reviews go to
+    /// Gerrit oldest first. Empty unless a local version is shown.
+    fn local_votes(&self) -> BTreeMap<String, LocalVote> {
+        let Some(target) = self.local_target() else {
+            return BTreeMap::new();
+        };
+        let mut votes = BTreeMap::new();
+        for r in self.reviews.iter().filter(|r| {
+            r.patch_set == target.number
+                && matches!(
+                    r.state,
+                    PendingReviewState::Pending | PendingReviewState::Sending
+                )
+        }) {
+            for (label, value) in &r.labels {
+                votes.insert(
+                    label.clone(),
+                    LocalVote {
+                        value: *value,
+                        voted_at: r.voted_at,
+                        sending: r.state == PendingReviewState::Sending,
+                    },
+                );
+            }
+        }
+        votes
+    }
+
     /// Width of the name column, so the vote boxes of all lines start at the
     /// same place: the longest requirement or label name, within bounds.
     fn name_width(&self) -> Pixels {
         let Some(d) = &self.detail else {
             return px(NAME_MIN);
         };
+        let local = self.local_votes();
         let longest = d
             .submit_requirements
             .iter()
             .map(|r| r.name.as_str())
-            .chain(d.votes.keys().map(String::as_str))
+            .chain(self.label_names(&local).into_iter().map(String::as_str))
             .map(|n| n.chars().count())
             .max()
             .unwrap_or(0);
         px((longest as f32 * NAME_CHAR).clamp(NAME_MIN, NAME_MAX))
     }
 
-    /// One colored box per non-zero vote on `label`. `group` keeps the
-    /// hover card ids of the lines apart.
+    /// One colored box per non-zero vote on `label`, then the user's
+    /// `local` vote on it, if any. `group` keeps the hover card ids of the
+    /// lines apart.
     fn vote_chips(
         &self,
         group: usize,
         label: &str,
         votes: &[LabelVote],
+        local: Option<&LocalVote>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let Some(d) = &self.detail else {
@@ -207,7 +285,64 @@ impl ChangePage {
                     })
                     .into_any_element()
             })
+            .chain(local.and_then(|v| self.local_vote_chip(group, label, v, cx)))
             .collect()
+    }
+
+    /// The box of the user's local vote `v` on `label`, with a `local`
+    /// pill; its card says when it goes to Gerrit. Nothing for a 0, which
+    /// takes a vote back.
+    fn local_vote_chip(
+        &self,
+        group: usize,
+        label: &str,
+        v: &LocalVote,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        if v.value == 0 {
+            return None;
+        }
+        let d = self.detail.as_ref()?;
+        let version = self
+            .local_target()
+            .map(|t| patch_set_label(&d.revisions, t.number))?;
+        let theme = cx.theme();
+        let color = if v.value > 0 {
+            theme.success
+        } else {
+            theme.danger
+        };
+        let chip = h_flex()
+            .flex_none()
+            .gap_0p5()
+            .items_center()
+            .child(
+                div()
+                    .px_1p5()
+                    .rounded_md()
+                    .text_xs()
+                    .font_semibold()
+                    .bg(color)
+                    .text_color(white())
+                    .child(vote_text(v.value)),
+            )
+            .child(local_chip(cx));
+        let id = SharedString::from(format!("local-vote-{group}-{label}"));
+        let selector = format!("local-vote-{label}");
+        let text = format!("{label} {}", vote_text(v.value));
+        let when = relative(Timestamp::now(), v.voted_at, &TimeZone::system());
+        let status = if v.sending {
+            "Being sent to Gerrit now".to_owned()
+        } else {
+            format!("Sent when {version} is on Gerrit")
+        };
+        Some(
+            HoverCard::new(id.clone())
+                .open_delay(Duration::from_millis(250))
+                .trigger(chip.debug_selector(move || selector.clone()))
+                .content(move |_, _, cx| local_vote_card(&text, color, &when, &status, cx))
+                .into_any_element(),
+        )
     }
 
     /// Removes `who`'s vote on `label`.
@@ -313,6 +448,30 @@ fn vote_card(
                 ),
         )
         .children(trash)
+        .into_any_element()
+}
+
+/// The content of a local vote's hover card.
+fn local_vote_card(text: &str, color: Hsla, when: &str, status: &str, cx: &mut App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    v_flex()
+        .min_w(px(200.))
+        .text_sm()
+        .child(
+            h_flex()
+                .gap_1()
+                .child(div().font_semibold().child("Your local vote"))
+                .child(local_chip(cx)),
+        )
+        .child(
+            h_flex()
+                .gap_1()
+                .text_xs()
+                .text_color(muted)
+                .child(div().text_color(color).child(text.to_owned()))
+                .child(format!("\u{b7} {when}")),
+        )
+        .child(div().text_xs().text_color(muted).child(status.to_owned()))
         .into_any_element()
 }
 

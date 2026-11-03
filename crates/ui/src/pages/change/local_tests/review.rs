@@ -196,6 +196,10 @@ fn a_quick_vote_on_a_local_version_goes_into_its_pending_review(cx: &mut TestApp
     );
     // The project's mode, from its checkout entry (the default).
     assert_eq!(r.strategy, model::LocalApproval::Exact);
+    // The vote is a box where Gerrit's votes are, with a local pill.
+    let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("local-vote-Code-Review").is_some());
     // The button knows the vote now; pressing again changes nothing.
     assert!(buttons(cx)[0].applied);
     f.press(cx, "shift-v");
@@ -270,8 +274,17 @@ fn a_quick_vote_on_a_local_patch_set_of_a_gerrit_change_stays_local(cx: &mut Tes
     assert_eq!(reviews[0].labels, [("Code-Review".to_owned(), 1)].into());
     assert_eq!(reviews[0].patch_set, local);
     assert_eq!(reviews[0].strategy, model::LocalApproval::Follow);
+    // A box with a local pill next to Gerrit's votes, while the local
+    // version is shown.
+    let local_box = |cx: &mut TestAppContext| {
+        let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
+        visual.run_until_parked();
+        visual.debug_bounds("local-vote-Code-Review").is_some()
+    };
+    assert!(local_box(cx));
     // PS 3 shown again: a quick vote goes to Gerrit as always.
     f.pick(cx, |s, d| s.set_target(d, PatchSetNumber(3)));
+    assert!(!local_box(cx), "the local vote is not on PS 3");
     cx.update(|cx| assert!(!f.page.read(cx).quick_buttons_for_test(cx)[0].applied));
     assert!(
         !f.http.requested().iter().any(|r| r.contains("/review")),
