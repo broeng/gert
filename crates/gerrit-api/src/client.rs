@@ -185,6 +185,37 @@ impl GerritClient {
 
     /// `GET /changes/?q=...`.
     pub async fn query_changes(&self, query: &ChangeQuery) -> Result<QueryPage, Error> {
+        let infos = self.query_infos(query).await?;
+        let more_changes = infos.last().and_then(|c| c.more_changes).unwrap_or(false);
+        let changes = infos
+            .iter()
+            .map(convert::change_summary)
+            .collect::<Result<_, _>>()?;
+        Ok(QueryPage {
+            changes,
+            more_changes,
+        })
+    }
+
+    /// `GET /changes/?q=...` read as change details, for queries whose
+    /// options ask for more than list rows (`ALL_REVISIONS`, say). Each
+    /// detail is only as complete as the options make it, so do not cache
+    /// it in place of [`GerritClient::get_change`]'s. The second value is
+    /// whether the server has more results.
+    pub async fn query_change_details(
+        &self,
+        query: &ChangeQuery,
+    ) -> Result<(Vec<ChangeDetail>, bool), Error> {
+        let infos = self.query_infos(query).await?;
+        let more = infos.last().and_then(|c| c.more_changes).unwrap_or(false);
+        let details = infos
+            .iter()
+            .map(convert::change_detail)
+            .collect::<Result<_, _>>()?;
+        Ok((details, more))
+    }
+
+    async fn query_infos(&self, query: &ChangeQuery) -> Result<Vec<wire::ChangeInfo>, Error> {
         let mut params = vec![("q", query.query.clone())];
         if let Some(n) = query.limit {
             params.push(("n", n.to_string()));
@@ -199,19 +230,10 @@ impl GerritClient {
                 "<array of changes>",
             )));
         };
-        let infos = items
+        Ok(items
             .into_iter()
             .map(serde_json::from_value::<wire::ChangeInfo>)
-            .collect::<Result<Vec<_>, _>>()?;
-        let more_changes = infos.last().and_then(|c| c.more_changes).unwrap_or(false);
-        let changes = infos
-            .iter()
-            .map(convert::change_summary)
-            .collect::<Result<_, _>>()?;
-        Ok(QueryPage {
-            changes,
-            more_changes,
-        })
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     /// `GET /changes/{n}` with all patch sets and their commits, the change
@@ -999,6 +1021,34 @@ mod tests {
             "https://h/changes/?q=is%3Aopen%20owner%3A%22a%20b%22%20%28x%29\
              &n=25&S=50&o=LABELS&o=DETAILED_ACCOUNTS&o=SUBMITTABLE"
         );
+    }
+
+    #[test]
+    fn a_query_can_be_read_as_details_with_revisions() {
+        let fake = FakeHttpClient::new();
+        fake.push_response(
+            200,
+            xssi(
+                r#"[{"_number": 5, "project": "p", "branch": "main", "change_id": "I5",
+                     "subject": "s", "status": "NEW", "owner": {"_account_id": 1},
+                     "created": "2020-01-02 03:04:05.000000000",
+                     "updated": "2020-01-03 03:04:05.000000000",
+                     "current_revision": "b", "current_revision_number": 2,
+                     "revisions": {"a": {"_number": 1}, "b": {"_number": 2}},
+                     "_more_changes": true}]"#,
+            ),
+        );
+        let c = client(&fake, "https://h", basic());
+        let mut q = ChangeQuery::new("change:5");
+        q.options = vec![crate::ChangeOption::AllRevisions];
+        let (details, more) = block_on(c.query_change_details(&q)).unwrap();
+        assert!(more);
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].current_patch_set, Some(PatchSetNumber(2)));
+        assert_eq!(details[0].revisions.len(), 2);
+        assert_eq!(details[0].revisions[0].sha.as_str(), "a");
+        let url = fake.requests()[0].uri().to_string();
+        assert!(url.contains("o=ALL_REVISIONS"), "{url}");
     }
 
     #[test]
