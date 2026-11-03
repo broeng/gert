@@ -31,7 +31,9 @@ use rusqlite::params;
 
 use crate::{
     Error, ServerId, Store,
-    local::{has_unsent, load_change, load_patch_sets, query_changes, set_state},
+    local::{
+        has_unsent, load_change, load_patch_sets, move_to_gerrit_number, query_changes, set_state,
+    },
     number, pending_reviews,
 };
 
@@ -149,7 +151,11 @@ impl Store {
     /// (with their new anchors), moves the reviews with their message
     /// drafts, holds the drafts in `keep`, applies the review states and
     /// then the change's state (see [`ConsolidationRewrite`]). Nothing that
-    /// is not listed moves.
+    /// is not listed moves to another patch set. When the change gets its
+    /// Gerrit change here, what is left on its synthetic number moves to
+    /// the Gerrit change's number on its own local patch sets, as a
+    /// reconcile does: from now on those are local patch sets of the
+    /// Gerrit change, and their data shows there.
     ///
     /// Returns `None`, writing nothing, if the change is gone, which is
     /// also what a removed server looks like: the caller ends its run.
@@ -180,6 +186,9 @@ impl Store {
             "UPDATE local_changes SET gerrit_number = ?3 WHERE server_id = ?1 AND id = ?2",
             params![server.0, change.id.0, gerrit],
         )?;
+        if change.gerrit_number.is_none() {
+            move_to_gerrit_number(&tx, server, change.id, rewrite.gerrit_number)?;
+        }
         let versions: HashSet<PatchSetNumber> = load_patch_sets(&tx, server, change.id)?
             .into_iter()
             .map(|p| p.number)
@@ -395,6 +404,40 @@ impl Store {
             review: claimed,
             drafts,
         }))
+    }
+
+    /// The post of local change `change` claimed under `nonce`, as it is
+    /// now, without changing anything: the review being sent under it, if
+    /// any, and the drafts carrying it, in creation order. After a crash
+    /// this is exactly what the claim covered, so the caller can check
+    /// whether it reached the server, and finish or post it again. `None`
+    /// if nothing carries the nonce (or the change is gone).
+    pub fn local_post(
+        &self,
+        server: ServerId,
+        change: LocalChangeId,
+        nonce: &str,
+    ) -> Result<Option<LocalPost>, Error> {
+        if load_change(&self.conn, server, change)?.is_none() {
+            return Ok(None);
+        }
+        let review = pending_reviews::query(
+            &self.conn,
+            "r.server_id = ?1 AND r.local_change_id = ?2 AND r.state = 'sending'
+             AND r.nonce = ?3",
+            &[&server.0, &change.0, &nonce],
+        )?
+        .into_iter()
+        .next();
+        let drafts = crate::drafts::query(
+            &self.conn,
+            "server_id = ?1 AND reserved_by = ?2 AND posting_nonce = ?3",
+            &[&server.0, &change.0, &nonce],
+        )?;
+        if review.is_none() && drafts.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(LocalPost { review, drafts }))
     }
 
     /// Gives up a claimed post that was not sent (the server refused it, or

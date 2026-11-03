@@ -441,7 +441,7 @@ fn add_patch_sets(
 /// numbers: once a row has a Gerrit change, its local versions are local
 /// patch sets of that change, and their data belongs there. Inside the
 /// caller's transaction.
-fn move_to_gerrit_number(
+pub(crate) fn move_to_gerrit_number(
     conn: &Connection,
     server: ServerId,
     id: LocalChangeId,

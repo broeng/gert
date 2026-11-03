@@ -294,13 +294,15 @@ fn a_draft_written_after_the_snapshot_stays_and_keeps_the_change_open() {
     let report = s.rewrite_local_change(id, &rw).unwrap().unwrap();
     assert_eq!(report.drafts_moved, 1);
     assert_eq!(report.state, LocalChangeState::Checking);
+    // It stays on its local patch set; with the change found on Gerrit,
+    // that is a local patch set of the Gerrit change now.
     let d = s.load_draft(id, late.local_id).unwrap().unwrap();
     assert_eq!(
         (d.change, d.patch_set, d.reserved_by),
-        (c.number, v2.number, None)
+        (ChangeNumber(42), v2.number, None)
     );
     let r = s.load_pending_review(id, late_review.id).unwrap().unwrap();
-    assert_eq!(r.patch_set, v2.number);
+    assert_eq!((r.change, r.patch_set), (ChangeNumber(42), v2.number));
     assert!(s.has_unsent(id, c.id).unwrap());
 }
 
@@ -348,9 +350,17 @@ fn moves_that_do_not_fit_are_skipped() {
         (report.drafts_moved, report.reviews_moved, report.skipped),
         (0, 0, 7)
     );
-    for d in [&foreign, &unanchored, &wrong_ps] {
+    // Nothing moved to a Gerrit patch set. The other change's draft stays
+    // on its number; this change's drafts are on its Gerrit change now.
+    let now = s.load_draft(id, foreign.local_id).unwrap().unwrap();
+    assert_eq!(
+        (now.change, now.patch_set),
+        (foreign.change, foreign.patch_set)
+    );
+    for d in [&unanchored, &wrong_ps] {
         let now = s.load_draft(id, d.local_id).unwrap().unwrap();
-        assert_eq!((now.change, now.patch_set), (d.change, d.patch_set));
+        assert_eq!((now.change, now.patch_set), (ChangeNumber(42), d.patch_set));
+        assert!(now.reserved_by.is_none());
     }
     // Review states only touch this change's reviews.
     let mut rw = rewrite(&c, vec![]);
@@ -680,6 +690,67 @@ fn claiming_a_post_marks_its_drafts_and_review_with_one_nonce() {
         .unwrap()
         .unwrap();
     assert_eq!(retry.review.unwrap().nonce.as_deref(), Some("n3"));
+}
+
+#[test]
+fn a_claimed_post_reads_back_exactly_as_claimed() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (a, r, other) = moved(&mut s, id, &c, &v1, &v2);
+    assert_eq!(s.local_post(id, c.id, "n1").unwrap(), None);
+    let claimed = s
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1")
+        .unwrap()
+        .unwrap();
+    // Reserved after the claim (by a later rewrite): not part of the post.
+    let late = draft(&mut s, id, &c, &v1, "late");
+    s.rewrite_local_change(
+        id,
+        &rewrite(
+            &c,
+            vec![PatchSetMove {
+                from: v1.number,
+                to: gerrit_ps(1),
+                exact: true,
+                drafts: vec![(late.local_id, None)],
+                reviews: vec![],
+            }],
+        ),
+    )
+    .unwrap()
+    .unwrap();
+    let read = s.local_post(id, c.id, "n1").unwrap().unwrap();
+    assert_eq!(read, claimed);
+    assert_eq!(
+        read.drafts.iter().map(|d| d.local_id).collect::<Vec<_>>(),
+        [a.local_id, r.message_draft.unwrap()]
+    );
+    assert!(read.drafts.iter().all(|d| d.local_id != late.local_id));
+    assert_eq!(s.local_post(id, c.id, "n2").unwrap(), None);
+    assert_eq!(s.local_post(id, other.local_change, "n2").unwrap(), None);
+}
+
+#[test]
+fn a_rewrite_brings_what_is_left_on_the_synthetic_number_to_the_gerrit_change() {
+    let (mut s, id, c, v1, v2) = setup();
+    let stays = draft(&mut s, id, &c, &v1, "on a version that is not on Gerrit");
+    let r = review(&mut s, id, &v1);
+    // Found closed: nothing moves to a Gerrit patch set.
+    let mut rw = rewrite(&c, vec![]);
+    rw.state = Some(LocalChangeState::Closed);
+    let report = s.rewrite_local_change(id, &rw).unwrap().unwrap();
+    assert_eq!(report.state, LocalChangeState::Closed);
+    let d = s.load_draft(id, stays.local_id).unwrap().unwrap();
+    assert_eq!((d.change, d.patch_set), (ChangeNumber(42), v1.number));
+    assert!(d.reserved_by.is_none() && d.held_reason.is_none());
+    let r = s.load_pending_review(id, r.id).unwrap().unwrap();
+    assert_eq!(
+        (r.change, r.patch_set, r.state),
+        (ChangeNumber(42), v1.number, PendingReviewState::Pending)
+    );
+    assert!(s.load_drafts(id, c.number).unwrap().is_empty());
+    assert_eq!(s.load_drafts(id, ChangeNumber(42)).unwrap().len(), 2);
+    let _ = v2;
 }
 
 #[test]
