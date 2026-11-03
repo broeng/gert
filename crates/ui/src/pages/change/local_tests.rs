@@ -1078,3 +1078,7 @@ fn a_long_chain_keeps_the_commits_nearest_and_says_there_are_more(cx: &mut TestA
     assert_eq!(subjects[rows.len() - 2], "Below 2");
     assert_eq!(rows[rows.len() - 1].0, "\u{2026}");
 }
+
+/// Reviews on local versions: drafts, the reply dialog's pending reviews,
+/// quick votes and the list of pending reviews.
+mod review;

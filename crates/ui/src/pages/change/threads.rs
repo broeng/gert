@@ -97,6 +97,17 @@ pub fn has_failed_draft(t: &Thread) -> bool {
         .any(|e| matches!(e, Entry::Draft(d) if matches!(d.sync, DraftSync::Failed { .. })))
 }
 
+/// Whether the thread has drafts and none of them is an ordinary one: they
+/// wait for their local change instead of the upload.
+pub fn has_only_local_drafts(t: &Thread) -> bool {
+    let mut drafts = t.entries.iter().filter_map(|e| match e {
+        Entry::Draft(d) => Some(d),
+        Entry::Published(_) => None,
+    });
+    let first = drafts.next();
+    first.is_some_and(|d| !d.is_ordinary()) && drafts.all(|d| !d.is_ordinary())
+}
+
 /// The patch sets and file name of the diff that shows `t`: the pair the
 /// page compares now if the thread is visible in it, else the thread's own
 /// patch set against the parent (where `Side::Parent` comments are on the
@@ -200,6 +211,30 @@ mod tests {
             },
         )));
         assert!(has_failed_draft(&t));
+    }
+
+    #[test]
+    fn local_drafts_are_told_apart_from_ordinary_ones() {
+        let mut t = on("a", Location::Line(1), true);
+        assert!(!has_only_local_drafts(&t));
+        let mut local = draft(1, Location::Line(1), "mine", DraftSync::PendingCreate);
+        local.patch_set = PatchSetNumber(PatchSetNumber::LOCAL_BASE + 1);
+        assert_eq!(
+            crate::comments::local_note(&local).as_deref(),
+            Some(crate::comments::LOCAL_DRAFT)
+        );
+        t.entries.push(Entry::Draft(local.clone()));
+        assert!(has_only_local_drafts(&t));
+        let mut held = local.clone();
+        held.held_reason = Some("line changed".into());
+        assert_eq!(
+            crate::comments::local_note(&held).as_deref(),
+            Some("Held from your local review: line changed")
+        );
+        let ordinary = draft(2, Location::Line(1), "x", DraftSync::Synced);
+        assert_eq!(crate::comments::local_note(&ordinary), None);
+        t.entries.push(Entry::Draft(ordinary));
+        assert!(!has_only_local_drafts(&t));
     }
 
     #[test]

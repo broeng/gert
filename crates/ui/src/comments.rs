@@ -9,12 +9,31 @@
 use std::sync::Arc;
 
 use gpui_kit::*;
-use model::{ChangeNumber, Thread};
+use model::{ChangeNumber, Draft, Thread};
 
 use crate::{
     outbox::{DraftOutbox, OutboxEvent},
     session::{Session, is_unauthorized},
 };
+
+/// What a draft card says about a draft that is not an ordinary one
+/// ([`Draft::is_ordinary`]): it is never uploaded as a draft, so instead of
+/// its upload state the card says where it stands with its local change.
+/// `None` for an ordinary draft.
+pub fn local_note(d: &Draft) -> Option<String> {
+    if let Some(reason) = &d.held_reason {
+        Some(format!("Held from your local review: {reason}"))
+    } else if d.reserved_by.is_some() {
+        Some("Sent with your local review".to_owned())
+    } else if d.is_local() {
+        Some(LOCAL_DRAFT.to_owned())
+    } else {
+        None
+    }
+}
+
+/// The note of a draft on a local change or a local patch set.
+pub const LOCAL_DRAFT: &str = "Local: sent when this version is on Gerrit";
 
 pub enum CommentsEvent {
     /// The threads changed (loaded from the cache, or refreshed).

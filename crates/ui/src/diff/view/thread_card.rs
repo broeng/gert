@@ -280,7 +280,16 @@ fn entry(
         Entry::Draft(d) => Some(d),
         Entry::Published(_) => None,
     };
+    let local = draft.and_then(crate::comments::local_note);
     let sync = draft.map(|d| match &d.sync {
+        // Never uploaded as a draft: say where it stands instead.
+        _ if local.is_some() => Some(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .children(local.clone())
+                .into_any_element(),
+        ),
         DraftSync::Synced | DraftSync::PendingDelete => None,
         DraftSync::PendingCreate | DraftSync::PendingUpdate => {
             let text = match &d.last_error {
@@ -363,7 +372,11 @@ fn entry(
                             .rounded_sm()
                             .text_xs()
                             .bg(p.card_fg.opacity(0.12))
-                            .child("Draft"),
+                            .child(if local.is_some() {
+                                "Local draft"
+                            } else {
+                                "Draft"
+                            }),
                     )
                 }),
         )

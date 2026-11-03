@@ -382,7 +382,14 @@ impl ChangePage {
             )
             .child(div().flex_none().text_xs().text_color(muted).child(when))
             .when(thread.has_draft(), |d| {
-                d.child(pill("Draft", theme.primary))
+                d.child(pill(
+                    if threads::has_only_local_drafts(&thread) {
+                        "Local draft"
+                    } else {
+                        "Draft"
+                    },
+                    theme.primary,
+                ))
             })
             .when(threads::has_failed_draft(&thread), |d| {
                 d.child(pill("Upload failed", theme.danger))
