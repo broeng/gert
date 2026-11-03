@@ -45,6 +45,9 @@ use crate::{
     review_cache::millis,
 };
 
+mod held;
+pub use held::HeldPublish;
+
 /// A new place for a moved draft whose lines moved (ported).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftAnchor {
@@ -828,6 +831,48 @@ impl Store {
         }
         tx.commit()?;
         Ok(Some(report))
+    }
+
+    /// Makes a local change of a Gerrit change a tombstone (`Consolidated`)
+    /// once nothing of it is left to do: nothing unsent, and every version
+    /// is done with, being a Gerrit patch set or never to become one (a
+    /// version seen later is one, the version is on no named branch, or
+    /// the change vanished), or the Gerrit change is closed. What a run
+    /// ported leaves such versions behind, as does the user publishing or
+    /// dropping the last held item. Read and written in one transaction.
+    /// Returns the state afterwards; `None` if the change is gone.
+    pub fn settle_local_change(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+    ) -> Result<Option<LocalChangeState>, Error> {
+        let tx = self.conn.transaction()?;
+        let Some(row) = load_change(&tx, server, change)? else {
+            return Ok(None);
+        };
+        if row.gerrit_number.is_none()
+            || row.state == LocalChangeState::Consolidated
+            || has_unsent(&tx, server, change)?
+        {
+            return Ok(Some(row.state));
+        }
+        let versions = load_patch_sets(&tx, server, change)?;
+        let done = row.state == LocalChangeState::Closed
+            || versions.iter().all(|v| {
+                v.gerrit_patch_set.is_some()
+                    || !v.on_branch
+                    || row.state == LocalChangeState::Vanished
+                    || versions
+                        .iter()
+                        .any(|w| w.ordinal > v.ordinal && w.gerrit_patch_set.is_some())
+            });
+        let now = if done {
+            set_state(&tx, server, change, LocalChangeState::Consolidated)?.unwrap_or(row.state)
+        } else {
+            row.state
+        };
+        tx.commit()?;
+        Ok(Some(now))
     }
 
     /// What is held on Gerrit change `gerrit` from local reviews: drafts

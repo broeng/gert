@@ -31,8 +31,8 @@ use model::{AccountId, ChangeDetail, ChangeNumber, ChangeSummary, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub use consolidation::{
-    Claimant, ConsolidationRewrite, DraftAnchor, FinishReport, HeldItems, LocalPost, PatchSetMove,
-    ReviewStateChange, RewriteReport,
+    Claimant, ConsolidationRewrite, DraftAnchor, FinishReport, HeldItems, HeldPublish, LocalPost,
+    PatchSetMove, ReviewStateChange, RewriteReport,
 };
 pub use drafts::{CachedComments, DeleteOutcome, DraftCounts, DraftFailure, MergeReport};
 pub use error::Error;

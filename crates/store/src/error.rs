@@ -38,6 +38,14 @@ pub enum Error {
     /// again once that is done.
     #[error("the comment is being sent to Gerrit with your local review")]
     DraftBeingSent,
+    /// A held vote whose label may only be dropped (an approval given on
+    /// another commit than the one it would go to) was asked to be
+    /// published.
+    #[error(
+        "the {0} vote is an approval given on another commit; approvals are only sent on the \
+         exact commit they were given on, so it can only be dropped"
+    )]
+    DropOnly(String),
     #[error("cached timestamp {0:?} is invalid")]
     BadTimestamp(String),
 }

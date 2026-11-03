@@ -1349,3 +1349,296 @@ fn a_draft_written_on_a_closed_changes_version_is_held_at_once() {
         .unwrap();
     assert_eq!(ordinary.held_reason, None);
 }
+
+/// Change `c` held as closed on change 42: its review on v1 (Code-Review
+/// +2 drop-only, Verified +1, message "LGTM") and a draft on v1, held.
+fn held_setup() -> (Store, ServerId, LocalChange, PendingReview, Draft) {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, _) = setup();
+    let d = draft(&mut s, id, &c, &v1, "line 7 is odd");
+    let r = review(&mut s, id, &v1);
+    s.set_review_label(id, r.id, "Verified", 1, LocalApproval::Follow, ts(T1))
+        .unwrap()
+        .unwrap();
+    let mut rw = rewrite(&c, vec![]);
+    rw.keep = vec![(d.local_id, "line 7 changed".into())];
+    let mut held = ReviewStateChange::new(r.id, &[Pending], Held, Some("not exact".into()));
+    held.drop_only = ["Code-Review".to_owned()].into();
+    rw.review_states = vec![held];
+    s.rewrite_local_change(id, &rw).unwrap().unwrap();
+    let r = s.load_pending_review(id, r.id).unwrap().unwrap();
+    assert_eq!(r.drop_only, ["Code-Review".to_owned()].into());
+    let d = s.load_draft(id, d.local_id).unwrap().unwrap();
+    assert!(d.held_reason.is_some());
+    (s, id, c, r, d)
+}
+
+fn publish(c: &LocalChange) -> HeldPublish {
+    HeldPublish {
+        local_change: c.id,
+        gerrit: ChangeNumber(42),
+        to: gerrit_ps(3),
+        votes: vec![],
+        messages: vec![],
+        comments: vec![],
+        at: ts(T1),
+    }
+}
+
+#[test]
+fn held_items_are_dropped_one_by_one() {
+    let (mut s, id, _c, r, d) = held_setup();
+    // A vote it does not have, and an ordinary draft, are left alone.
+    assert!(!s.drop_held_vote(id, r.id, "Other").unwrap());
+    assert!(s.drop_held_vote(id, r.id, "Code-Review").unwrap());
+    let now = s.load_pending_review(id, r.id).unwrap().unwrap();
+    assert_eq!(now.labels, BTreeMap::from([("Verified".to_owned(), 1)]));
+    // The label that may only be dropped went with its vote.
+    assert!(now.drop_only.is_empty());
+    assert!(s.drop_held_message(id, r.id).unwrap());
+    assert!(!s.drop_held_message(id, r.id).unwrap());
+    assert!(
+        s.load_draft(id, r.message_draft.unwrap())
+            .unwrap()
+            .is_none()
+    );
+    // The last vote takes the review with it.
+    assert!(s.drop_held_vote(id, r.id, "Verified").unwrap());
+    assert!(s.load_pending_review(id, r.id).unwrap().is_none());
+    assert!(s.drop_held_draft(id, d.local_id).unwrap());
+    assert!(s.load_draft(id, d.local_id).unwrap().is_none());
+    assert!(
+        s.held_items(id, ChangeNumber(42))
+            .unwrap()
+            .drafts
+            .is_empty()
+    );
+}
+
+#[test]
+fn only_held_items_can_be_dropped() {
+    let (mut s, id, c, v1, _) = setup();
+    let d = draft(&mut s, id, &c, &v1, "local");
+    let r = review(&mut s, id, &v1);
+    assert!(!s.drop_held_draft(id, d.local_id).unwrap());
+    assert!(!s.drop_held_vote(id, r.id, "Code-Review").unwrap());
+    assert!(!s.drop_held_message(id, r.id).unwrap());
+    assert!(s.load_draft(id, d.local_id).unwrap().is_some());
+    assert_eq!(
+        s.load_pending_review(id, r.id)
+            .unwrap()
+            .unwrap()
+            .labels
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_held_publish_is_claimed_as_a_post_of_its_own() {
+    use PendingReviewState::*;
+    let (mut s, id, c, r, d) = held_setup();
+    let mut p = publish(&c);
+    p.votes = vec![(r.id, "Verified".into())];
+    p.messages = vec![r.id];
+    p.comments = vec![(
+        d.local_id,
+        "On local 1, src/a.rs line 7: line 7 is odd".into(),
+    )];
+    let post = s.claim_held_publish(id, &p, "n1", &who()).unwrap().unwrap();
+    let new = post.review.clone().unwrap();
+    assert_ne!(new.id, r.id);
+    assert_eq!(
+        (new.state, new.change, new.patch_set, new.nonce.as_deref()),
+        (Sending, ChangeNumber(42), PatchSetNumber(3), Some("n1"))
+    );
+    assert_eq!(new.labels, BTreeMap::from([("Verified".to_owned(), 1)]));
+    // Given on the commit it is published to: an exact match.
+    assert_eq!(new.given_on_sha, gerrit_ps(3).sha);
+    assert_eq!(new.message.as_deref(), Some("LGTM"));
+    assert_eq!(post.drafts.len(), 2);
+    let comment = s.load_draft(id, d.local_id).unwrap().unwrap();
+    assert_eq!(
+        (
+            comment.path.as_str(),
+            comment.location,
+            comment.patch_set,
+            comment.held_reason.as_deref(),
+            comment.reserved_by,
+            comment.message.as_str(),
+        ),
+        (
+            PATCHSET_LEVEL_PATH,
+            Location::File,
+            PatchSetNumber(3),
+            None,
+            Some(c.id),
+            "On local 1, src/a.rs line 7: line 7 is odd"
+        )
+    );
+    assert_eq!(posting_nonce(&s, d.local_id).as_deref(), Some("n1"));
+    // The held review keeps what was not published.
+    let old = s.load_pending_review(id, r.id).unwrap().unwrap();
+    assert_eq!(old.labels, BTreeMap::from([("Code-Review".to_owned(), 2)]));
+    assert_eq!(old.drop_only, ["Code-Review".to_owned()].into());
+    assert_eq!(old.message_draft, None);
+    // A crash now leaves it for recovery, like any post.
+    assert_eq!(
+        s.unfinished_local_posts(id).unwrap(),
+        [(c.id, "n1".to_owned())]
+    );
+    assert_eq!(s.local_post(id, c.id, "n1").unwrap(), Some(post.clone()));
+    // Posted: the items leave the held list.
+    let posted: Vec<(LocalDraftId, u32)> = post
+        .drafts
+        .iter()
+        .map(|d| (d.local_id, d.version))
+        .collect();
+    let sent = ReviewStateChange::new(new.id, &[Sending], Sent, None);
+    s.finish_local_post(id, c.id, "n1", &posted, &[sent])
+        .unwrap()
+        .unwrap();
+    let held = s.held_items(id, ChangeNumber(42)).unwrap();
+    assert!(held.drafts.is_empty());
+    assert_eq!(held.reviews.len(), 1);
+    assert_eq!(held.reviews[0].id, r.id);
+    assert!(s.unfinished_local_posts(id).unwrap().is_empty());
+}
+
+#[test]
+fn a_held_publish_refuses_drop_only_votes_and_stale_items() {
+    let (mut s, id, c, r, d) = held_setup();
+    let mut p = publish(&c);
+    p.votes = vec![(r.id, "Verified".into()), (r.id, "Code-Review".into())];
+    assert!(matches!(
+        s.claim_held_publish(id, &p, "n1", &who()),
+        Err(Error::DropOnly(l)) if l == "Code-Review"
+    ));
+    // Nothing was written.
+    assert_eq!(
+        s.load_pending_review(id, r.id)
+            .unwrap()
+            .unwrap()
+            .labels
+            .len(),
+        2
+    );
+    assert!(s.unfinished_local_posts(id).unwrap().is_empty());
+    // Items that are not held there any more.
+    for p in [
+        HeldPublish {
+            votes: vec![(r.id, "Other".into())],
+            ..publish(&c)
+        },
+        HeldPublish {
+            gerrit: ChangeNumber(43),
+            comments: vec![(d.local_id, "x".into())],
+            ..publish(&c)
+        },
+        publish(&c),
+    ] {
+        assert_eq!(s.claim_held_publish(id, &p, "n1", &who()).unwrap(), None);
+    }
+    let p = HeldPublish {
+        to: PatchSetRef {
+            number: PatchSetNumber(PatchSetNumber::LOCAL_BASE + 1),
+            sha: "x".into(),
+        },
+        comments: vec![(d.local_id, "x".into())],
+        ..publish(&c)
+    };
+    assert!(matches!(
+        s.claim_held_publish(id, &p, "n1", &who()),
+        Err(Error::LocalTarget)
+    ));
+    // Claimed once: not a second time.
+    let p = HeldPublish {
+        comments: vec![(d.local_id, "x".into())],
+        ..publish(&c)
+    };
+    assert!(
+        s.claim_held_publish(id, &p, "n1", &who())
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(s.claim_held_publish(id, &p, "n2", &who()).unwrap(), None);
+}
+
+#[test]
+fn a_change_with_every_version_done_settles_as_a_tombstone() {
+    let (mut s, id, c, v1, v2) = setup();
+    let mut rw = rewrite(&c, vec![]);
+    // v2 is patch set 1 on Gerrit; v1 never reached it.
+    rw.moves = vec![PatchSetMove {
+        from: v2.number,
+        to: gerrit_ps(1),
+        exact: true,
+        drafts: vec![],
+        reviews: vec![],
+    }];
+    s.rewrite_local_change(id, &rw).unwrap().unwrap();
+    let d = draft(&mut s, id, &c, &v1, "late");
+    assert_eq!(
+        s.settle_local_change(id, c.id).unwrap(),
+        Some(LocalChangeState::Checking)
+    );
+    s.delete_draft(id, d.local_id).unwrap();
+    assert_eq!(
+        s.settle_local_change(id, c.id).unwrap(),
+        Some(LocalChangeState::Consolidated)
+    );
+    assert_eq!(
+        s.local_change(id, c.id).unwrap().unwrap().gerrit_number,
+        Some(ChangeNumber(42))
+    );
+}
+
+#[test]
+fn a_newer_version_not_on_gerrit_keeps_the_change_open() {
+    let (mut s, id, c, v1, _v2) = setup();
+    let mut rw = rewrite(&c, vec![]);
+    rw.moves = vec![PatchSetMove {
+        from: v1.number,
+        to: gerrit_ps(1),
+        exact: true,
+        drafts: vec![],
+        reviews: vec![],
+    }];
+    s.rewrite_local_change(id, &rw).unwrap().unwrap();
+    // v2, amended after the push, is on a branch and not on Gerrit yet.
+    assert_eq!(
+        s.settle_local_change(id, c.id).unwrap(),
+        Some(LocalChangeState::Checking)
+    );
+    // Taken off every branch: it never reaches Gerrit.
+    s.mark_local_versions_on_branch(id, "p", std::slice::from_ref(&v1.sha))
+        .unwrap();
+    assert_eq!(
+        s.settle_local_change(id, c.id).unwrap(),
+        Some(LocalChangeState::Consolidated)
+    );
+    // Without a Gerrit change nothing settles.
+    let other = add(&mut s, id, "IO", None);
+    assert_eq!(
+        s.settle_local_change(id, other.id).unwrap(),
+        Some(LocalChangeState::Checking)
+    );
+}
+
+#[test]
+fn a_closed_change_with_nothing_left_settles_as_a_tombstone() {
+    let (mut s, id, c, r, d) = held_setup();
+    s.hold_closed_local_change(id, c.id, ChangeNumber(42), "change merged")
+        .unwrap()
+        .unwrap();
+    assert!(s.drop_held_draft(id, d.local_id).unwrap());
+    assert_eq!(
+        s.settle_local_change(id, c.id).unwrap(),
+        Some(LocalChangeState::Closed)
+    );
+    s.drop_pending_review(id, r.id).unwrap();
+    assert_eq!(
+        s.settle_local_change(id, c.id).unwrap(),
+        Some(LocalChangeState::Consolidated)
+    );
+}
