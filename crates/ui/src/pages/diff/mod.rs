@@ -1598,18 +1598,9 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
         })
     };
     if !has_revisions(&detail) && can_sync && !route.change.is_local() {
-        match syncer.refresh_change(route.change).await {
-            Ok(d) => {
-                detail = Some(
-                    match change_detail::local_revisions(&syncer, route.change) {
-                        Ok(locals) => change_detail::merge(d, locals),
-                        Err(e) => {
-                            log::warn!("reading the local patch sets of {}: {e}", route.change);
-                            change_detail::carry_local(d, detail.as_ref())
-                        }
-                    },
-                )
-            }
+        let shown = change_detail::shown_locals(detail.as_ref(), route.change);
+        match change_detail::refreshed(&syncer, route.change, shown).await {
+            Ok(d) => detail = Some(d),
             Err(e) if is_unauthorized(&e) => {
                 return fail(detail, "unauthorized".into());
             }

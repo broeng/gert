@@ -793,26 +793,18 @@ impl ChangePage {
         }
         let syncer = self.session.syncer().clone();
         let number = self.number;
+        let shown = change_detail::shown_locals(self.detail.as_ref(), number);
         self.status = Status::Refreshing;
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    let detail = syncer.refresh_change(number).await?;
-                    let locals = change_detail::local_revisions(&syncer, number);
-                    Ok::<_, sync::Error>((detail, locals))
-                })
+                .background_spawn(
+                    async move { change_detail::refreshed(&syncer, number, shown).await },
+                )
                 .await;
             this.update(cx, |this, cx| {
                 let now = Timestamp::now();
                 match result {
-                    Ok((detail, locals)) => {
-                        let detail = match locals {
-                            Ok(locals) => change_detail::merge(detail, locals),
-                            Err(e) => {
-                                log::warn!("reading the local patch sets of {number}: {e}");
-                                change_detail::carry_local(detail, this.detail.as_ref())
-                            }
-                        };
+                    Ok(detail) => {
                         cx.emit(ChangeEvent::Refreshed);
                         this.track.success(now);
                         // A change that moved may have new comments.

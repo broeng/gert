@@ -107,17 +107,43 @@ pub fn merged(syncer: &Syncer, fresh: ChangeDetail) -> Result<ChangeDetail, sync
 /// the detail on screen, has: for the foreground, where the store is not
 /// read. The next refresh reads them from the store again.
 pub fn carry_local(fresh: ChangeDetail, old: Option<&ChangeDetail>) -> ChangeDetail {
-    let locals = old
-        .filter(|o| o.summary.number == fresh.summary.number)
-        .map(|o| {
-            o.revisions
+    let locals = shown_locals(old, fresh.summary.number);
+    merge(fresh, locals)
+}
+
+/// The local revisions of `shown` when it is a detail of change `number`,
+/// for [`carry_local`] and [`refreshed`].
+pub fn shown_locals(shown: Option<&ChangeDetail>, number: ChangeNumber) -> Vec<Revision> {
+    shown
+        .filter(|d| d.summary.number == number)
+        .map(|d| {
+            d.revisions
                 .iter()
                 .filter(|r| r.number.is_local())
                 .cloned()
                 .collect()
         })
-        .unwrap_or_default();
-    merge(fresh, locals)
+        .unwrap_or_default()
+}
+
+/// Gerrit change `number` fetched now (`Syncer::refresh_change` stores
+/// it) with its local patch sets from the store. When the store cannot
+/// be read, `shown` (the local revisions of the detail on screen, from
+/// [`shown_locals`]) are carried over instead, as in [`carry_local`].
+/// Blocking (network, SQLite): call from the background executor.
+pub async fn refreshed(
+    syncer: &Syncer,
+    number: ChangeNumber,
+    shown: Vec<Revision>,
+) -> Result<ChangeDetail, sync::Error> {
+    let fresh = syncer.refresh_change(number).await?;
+    Ok(match local_revisions(syncer, number) {
+        Ok(locals) => merge(fresh, locals),
+        Err(e) => {
+            log::warn!("reading the local patch sets of {number}: {e}");
+            merge(fresh, shown)
+        }
+    })
 }
 
 /// `detail` with `locals` (local revisions in first-seen order) placed
