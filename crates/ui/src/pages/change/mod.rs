@@ -1918,12 +1918,12 @@ impl ChangePage {
     }
 
     fn open_in_browser(&mut self, _: &OpenInBrowser, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(d) = &self.detail {
-            cx.open_url(&browser_url(
-                &self.session.base_url,
-                &d.summary.project,
-                self.number,
-            ));
+        if let Some(url) = self
+            .detail
+            .as_ref()
+            .and_then(|d| browser_url(&self.session.base_url, &d.summary.project, self.number))
+        {
+            cx.open_url(&url);
         }
     }
 }

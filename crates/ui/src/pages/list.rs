@@ -434,8 +434,9 @@ impl ChangeListPage {
             .flat_map(|i| self.visible_rows(i))
             .find(|c| c.number == n)
             .map(|c| c.project.clone());
-        if let Some(project) = project {
-            cx.open_url(&browser_url(&self.session.base_url, &project, n));
+        // A local change has no page on Gerrit (and is not among these rows).
+        if let Some(url) = project.and_then(|p| browser_url(&self.session.base_url, &p, n)) {
+            cx.open_url(&url);
         }
     }
 

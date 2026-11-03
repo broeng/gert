@@ -1,6 +1,6 @@
 //! View-model helpers for change rows. Pure functions of the model.
 
-use model::{ChangeStatus, ChangeSummary};
+use model::{ChangeNumber, ChangeStatus, ChangeSummary};
 
 /// Small status badges in front of a subject. Nothing is shown for an
 /// ordinary active change.
@@ -59,12 +59,16 @@ pub fn size_text(c: &ChangeSummary) -> (String, String) {
 }
 
 /// The change's page on the web UI: `{base}/c/{project}/+/{number}`.
-pub fn browser_url(base: &str, project: &str, number: model::ChangeNumber) -> String {
-    format!(
-        "{}/c/{}/+/{number}",
-        base.trim_end_matches('/'),
-        encode_path(project)
-    )
+/// `None` for a local change, which Gerrit does not have (its number is
+/// synthetic and must never reach the server).
+pub fn browser_url(base: &str, project: &str, number: ChangeNumber) -> Option<String> {
+    (!number.is_local()).then(|| {
+        format!(
+            "{}/c/{}/+/{number}",
+            base.trim_end_matches('/'),
+            encode_path(project)
+        )
+    })
 }
 
 /// Percent-encodes a project name for a URL path; `/` stays.
@@ -93,7 +97,6 @@ pub fn server_label(url: &str) -> String {
 mod tests {
     use super::*;
     use crate::testing::summary;
-    use model::ChangeNumber;
 
     #[test]
     fn chips_per_state() {
@@ -136,8 +139,14 @@ mod tests {
                 "platform/foo bar",
                 ChangeNumber(42)
             ),
-            "https://g.example.com/c/platform/foo%20bar/+/42"
+            Some("https://g.example.com/c/platform/foo%20bar/+/42".to_owned())
         );
+    }
+
+    #[test]
+    fn local_changes_have_no_browser_url() {
+        let local = ChangeNumber::local(3).expect("local number");
+        assert_eq!(browser_url("https://g.example.com", "p", local), None);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::{
     actions::*,
     diff_load::DiffSource,
     filters::{FileStyle, FilterAction},
-    local_source::local_marker,
+    local_source::{local_chip, local_marker},
     pages::list::Status,
     row::{browser_url, chips, has_merge_conflict},
     search_link::{account_query, person_query, project_query, search_link},
@@ -367,16 +367,20 @@ impl ChangePage {
                 pill(status_text, status_color)
             })
             .when(has_merge_conflict(c), |d| d.child(conflict_pill(cx)))
-            .child({
-                let url = browser_url(&self.session.base_url, &c.project, c.number);
-                div()
-                    .id("change-number-link")
-                    .text_color(muted)
-                    .cursor_pointer()
-                    .hover(|d| d.underline())
-                    .on_click(move |_, _, cx| cx.open_url(&url))
-                    .child(format!("#{}", c.number))
-            })
+            .child(
+                match browser_url(&self.session.base_url, &c.project, c.number) {
+                    Some(url) => div()
+                        .id("change-number-link")
+                        .text_color(muted)
+                        .cursor_pointer()
+                        .hover(|d| d.underline())
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                        .child(format!("#{}", c.number))
+                        .into_any_element(),
+                    // Gerrit has no page for it, and the number is synthetic.
+                    None => local_chip(cx).into_any_element(),
+                },
+            )
             .children(self.server_badge.as_ref().map(|b| b.pill(cx)))
             .children(
                 chips(c)

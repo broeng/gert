@@ -379,10 +379,17 @@ pub async fn local_file_list(
 /// The quiet "local" marker for a diff computed from the checkout at
 /// `path`. `id` must be unique on the page.
 pub fn local_marker(id: impl Into<ElementId>, path: &Path, cx: &App) -> Stateful<Div> {
-    let theme = cx.theme();
     let tip = format!("Computed from the local checkout at {}", path.display());
-    div()
+    local_chip(cx)
         .id(id)
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+}
+
+/// The small bordered "local" word that marks what comes from a checkout
+/// rather than from Gerrit: local diffs, and local changes in lists.
+pub fn local_chip(cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
         .flex_none()
         .px_1()
         .rounded_sm()
@@ -390,7 +397,6 @@ pub fn local_marker(id: impl Into<ElementId>, path: &Path, cx: &App) -> Stateful
         .border_color(theme.border)
         .text_xs()
         .text_color(theme.muted_foreground)
-        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
         .child("local")
 }
 

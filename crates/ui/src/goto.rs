@@ -132,7 +132,7 @@ pub fn parse_link(text: &str, base_url: &str) -> Result<ChangeLink, LinkError> {
     }
     if let Some(change) = number(text) {
         return Ok(ChangeLink {
-            change: ChangeNumber(change),
+            change: change_number(change)?,
             base: None,
             patch_set: None,
             path: None,
@@ -167,7 +167,7 @@ pub fn parse_link(text: &str, base_url: &str) -> Result<ChangeLink, LinkError> {
         .and_then(number)
         .ok_or(LinkError::NotAChange)?;
     let mut link = ChangeLink {
-        change: ChangeNumber(change),
+        change: change_number(change)?,
         base: None,
         patch_set: None,
         path: None,
@@ -183,6 +183,15 @@ pub fn parse_link(text: &str, base_url: &str) -> Result<ChangeLink, LinkError> {
             link.patch_set = number(target).and_then(patch_set);
         }
         None => link.patch_set = number(range).and_then(patch_set),
+    }
+    // Gerrit never hands out these; the app keeps them for local patch
+    // sets, which must not be reachable from a pasted link.
+    if [link.base, link.patch_set]
+        .into_iter()
+        .flatten()
+        .any(PatchSetNumber::is_local)
+    {
+        return Err(LinkError::NotAChange);
     }
     if link.patch_set.is_none() {
         link.base = None;
@@ -310,6 +319,17 @@ fn number(s: &str) -> Option<u64> {
         return None;
     }
     s.parse().ok().filter(|&n| n > 0)
+}
+
+/// The change `n`, unless it is in the range the app reserves for local
+/// changes ([`ChangeNumber::LOCAL_BASE`]): Gerrit never hands those out,
+/// and a link must not open a local change by its synthetic number.
+fn change_number(n: u64) -> Result<ChangeNumber, LinkError> {
+    let change = ChangeNumber(n);
+    if change.is_local() {
+        return Err(LinkError::NotAChange);
+    }
+    Ok(change)
 }
 
 fn patch_set(n: u64) -> Option<PatchSetNumber> {
@@ -634,6 +654,44 @@ mod tests {
         assert_eq!(
             ok("https://review.example.org/c/proj/+/123/4/COMMIT_MSG"),
             link(123, None, Some(4), Some("COMMIT_MSG"))
+        );
+    }
+
+    #[test]
+    fn numbers_reserved_for_local_changes_are_refused() {
+        let change = ChangeNumber::LOCAL_BASE;
+        let ps = PatchSetNumber::LOCAL_BASE;
+        let refused = [
+            format!("{change}"),
+            format!("{}", change + 7),
+            format!("{BASE}/c/proj/+/{change}"),
+            format!("{BASE}/{change}"),
+            format!("{BASE}/#/c/{change}/"),
+            format!("{BASE}/c/proj/+/123/{ps}"),
+            format!("{BASE}/c/proj/+/123/{ps}/a.rs"),
+            format!("{BASE}/c/proj/+/123/{ps}..4/a.rs"),
+            format!("{BASE}/c/proj/+/123/2..{}", ps + 1),
+        ];
+        for text in &refused {
+            assert_eq!(parse_link(text, BASE), Err(LinkError::NotAChange), "{text}");
+        }
+        // Through the resolver too: a number is for the active server.
+        let servers = [LinkServer {
+            key: ServerKey::new("a"),
+            base_url: BASE.into(),
+        }];
+        assert_eq!(
+            resolve_link(&format!("{change}"), &servers, None),
+            Err(LinkError::NotAChange)
+        );
+        // The largest numbers below the ranges still work.
+        assert_eq!(
+            ok(&format!("{}", change - 1)),
+            link(change - 1, None, None, None)
+        );
+        assert_eq!(
+            ok(&format!("{BASE}/c/proj/+/123/{}", ps - 1)),
+            link(123, None, Some(ps - 1), None)
         );
     }
 
