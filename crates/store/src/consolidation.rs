@@ -625,8 +625,9 @@ impl Store {
 
     /// Records a successful consolidation post claimed under `nonce`, in
     /// one transaction: removes the posted drafts (`(id, version)` as they
-    /// were sent) whose version is unchanged, and applies the review
-    /// states. The post's claim is cleared (see
+    /// were sent) and applies the review states. A claimed draft cannot be
+    /// edited or deleted ([`Error::DraftBeingSent`]), so the version check
+    /// that keeps a draft whose version changed is only a safeguard. The post's claim is cleared (see
     /// [`Store::claim_local_post`]), so its drafts that were not posted (on
     /// another revision) are free for the next post.
     /// Only the change's own drafts (reserved for it, its reviews' message

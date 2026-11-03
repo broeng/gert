@@ -33,6 +33,11 @@ pub enum Error {
     /// a Gerrit change and patch set.
     #[error("local data can only be moved onto a Gerrit change and patch set")]
     LocalTarget,
+    /// The draft is being sent to Gerrit with a local review right now
+    /// (claimed by a consolidation post); it can be edited or deleted
+    /// again once that is done.
+    #[error("the comment is being sent to Gerrit with your local review")]
+    DraftBeingSent,
     #[error("cached timestamp {0:?} is invalid")]
     BadTimestamp(String),
 }

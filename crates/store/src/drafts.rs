@@ -74,6 +74,9 @@ pub enum DeleteOutcome {
     /// The draft is a pending review's message; it goes with the review
     /// (see `Store::cancel_pending_review`), nothing was deleted.
     Sealed,
+    /// The draft is being sent with a local review right now (claimed by
+    /// a consolidation post); nothing was deleted.
+    BeingSent,
 }
 
 /// How many drafts of a server are not on it, for an indicator.
@@ -235,6 +238,17 @@ pub(crate) fn ordinary() -> String {
     )
 }
 
+/// Whether a consolidation post has claimed draft `id` (it carries the
+/// post's nonce).
+fn claimed(conn: &rusqlite::Connection, server: ServerId, id: LocalDraftId) -> Result<bool, Error> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM drafts
+             WHERE server_id = ?1 AND id = ?2 AND posting_nonce IS NOT NULL)",
+        params![server.0, id.0],
+        |r| r.get(0),
+    )?)
+}
+
 /// The drafts matching `cond` (with `?1` the server), in creation order.
 pub(crate) fn query(
     conn: &rusqlite::Connection,
@@ -356,10 +370,12 @@ impl Store {
     /// Changes the text and resolution of a draft; its place in the file
     /// does not change. Makes the draft pending again (`Synced` becomes
     /// `PendingUpdate`, `Failed` goes back to the operation that failed).
-    /// A draft reserved for a consolidation post stays reserved; the version
-    /// bump tells the post that it changed. `None` if there is no such
-    /// draft, it is being deleted, or it is a pending review's sealed
-    /// message (edit it through the review).
+    /// A draft reserved for a consolidation post stays reserved. `None` if
+    /// there is no such draft, it is being deleted, or it is a pending
+    /// review's sealed message (edit it through the review). Fails with
+    /// [`Error::DraftBeingSent`] while a consolidation post has claimed it:
+    /// the post sends the text it read, and an edit now would either be
+    /// lost or posted a second time.
     pub fn edit_draft(
         &mut self,
         server: ServerId,
@@ -373,6 +389,9 @@ impl Store {
         };
         if d.is_sealed() {
             return Ok(None);
+        }
+        if claimed(&self.conn, server, id)? {
+            return Err(Error::DraftBeingSent);
         }
         let state = match &d.sync {
             DraftSync::PendingDelete => return Ok(None),
@@ -402,7 +421,8 @@ impl Store {
     /// Deletes a draft locally. One the server never saw is removed at
     /// once; one it has stays as `PendingDelete` (hidden from threads)
     /// until the deletion was confirmed. A pending review's sealed message
-    /// is refused ([`DeleteOutcome::Sealed`]).
+    /// is refused ([`DeleteOutcome::Sealed`]), and so is a draft a
+    /// consolidation post has claimed ([`DeleteOutcome::BeingSent`]).
     pub fn delete_draft(
         &mut self,
         server: ServerId,
@@ -413,6 +433,9 @@ impl Store {
         };
         if d.is_sealed() {
             return Ok(DeleteOutcome::Sealed);
+        }
+        if claimed(&self.conn, server, id)? {
+            return Ok(DeleteOutcome::BeingSent);
         }
         if d.server_id.is_none() {
             self.remove_draft(server, id)?;

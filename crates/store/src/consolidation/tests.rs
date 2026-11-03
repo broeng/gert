@@ -453,11 +453,24 @@ fn finishing_the_post_removes_what_was_sent_and_then_it_consolidates() {
         .map(|d| (d.local_id, d.version))
         .collect();
     assert_eq!(post.len(), 3);
-    // `b` is edited while the post is in flight: it stays reserved.
-    let edited = s
-        .edit_draft(id, b.local_id, "b2", true, ts(T1))
-        .unwrap()
+    // While the post is in flight its drafts can be neither edited nor
+    // deleted.
+    assert!(matches!(
+        s.edit_draft(id, b.local_id, "b2", true, ts(T1)),
+        Err(Error::DraftBeingSent)
+    ));
+    assert_eq!(
+        s.delete_draft(id, b.local_id).unwrap(),
+        crate::DeleteOutcome::BeingSent
+    );
+    // As if `b` had changed meanwhile: it stays for the next post.
+    s.conn
+        .execute(
+            "UPDATE drafts SET version = version + 1 WHERE id = ?1",
+            [b.local_id.0],
+        )
         .unwrap();
+    let edited = s.load_draft(id, b.local_id).unwrap().unwrap();
     assert_eq!(edited.reserved_by, Some(c.id));
     let done = vec![ReviewStateChange::new(claimed.id, &[Sending], Sent, None)];
     let report = s
