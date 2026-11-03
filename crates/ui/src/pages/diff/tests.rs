@@ -2271,6 +2271,9 @@ mod local_versions {
         assert_eq!(hint.map(|h| h.0).as_deref(), Some(crate::reviewed::LOCAL));
         p.page
             .read_with(cx, |p, _| assert!(!p.is_reviewed_for_test()));
+        // `a` asks for the reply dialog: a local review of this version.
+        press(cx, p.window, &["a"]);
+        assert!(p.events.lock().expect("log").contains(&"reply".to_owned()));
         assert!(p.http.requested().is_empty(), "{:?}", p.http.requested());
     }
 
