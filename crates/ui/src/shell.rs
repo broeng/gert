@@ -2406,9 +2406,21 @@ impl Shell {
         }
         let owner = session.key.clone();
         let badge = self.servers.badge(&owner);
+        // The Submit warning asks the checkout, where the project is
+        // scanned for local changes.
+        let project = detail.summary.project.clone();
+        let scanned = self.checkouts(&owner, cx).is_some_and(|c| {
+            c.read(cx)
+                .local_change_projects()
+                .any(|p| p.name == project)
+        });
+        let scanner = scanned.then(|| self.local_scanner(&owner, cx)).flatten();
         let dialog = cx.new(|cx| {
             let mut dialog = ActionDialog::new(session, detail, window, cx);
             dialog.set_server_badge(badge, cx);
+            if let Some(scanner) = scanner {
+                dialog.set_local_scanner(scanner);
+            }
             if submit {
                 dialog.submit_now(window, cx);
             }

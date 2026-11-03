@@ -46,6 +46,7 @@
 pub mod actions;
 mod edit;
 mod reviewers;
+pub mod submit_check;
 mod tags;
 #[cfg(test)]
 mod tests;
@@ -64,6 +65,7 @@ use reviewers::Reviewers;
 use tags::Tags;
 
 use crate::{
+    local_scan::LocalScanner,
     reply::{Look, chip},
     servers::ServerBadge,
     session::{Session, is_unauthorized},
@@ -360,6 +362,17 @@ pub fn menu_entries(detail: &ChangeDetail) -> Vec<MenuEntry> {
         .collect()
 }
 
+/// What the Submit warning knows (see [`submit_check`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Newer {
+    /// Not asked, or asked again when Submit is picked next time.
+    Unasked,
+    Checking,
+    /// The answer: the name ("local 2": 2) of a newer version the checkout
+    /// has, or none.
+    Known(Option<u32>),
+}
+
 /// A checkbox of the rebase confirmation.
 #[derive(Clone, Copy)]
 enum RebaseFlag {
@@ -411,6 +424,14 @@ pub struct ActionDialog {
     _subs: Vec<Subscription>,
     /// The server this writes to, named when there are several.
     server_badge: Option<ServerBadge>,
+    /// The scanner to ask for the Submit warning: set when the change's
+    /// project is scanned for local changes.
+    local_scan: Option<Entity<LocalScanner>>,
+    newer: Newer,
+    check_task: Option<Task<()>>,
+    /// Submit was confirmed while the warning's check ran: it goes out
+    /// once the check finds nothing.
+    submit_waits: bool,
 }
 
 impl EventEmitter<ActionEvent> for ActionDialog {}
@@ -433,6 +454,16 @@ impl ActionDialog {
     #[cfg(test)]
     pub(crate) fn server_badge_for_test(&self) -> Option<&ServerBadge> {
         self.server_badge.as_ref()
+    }
+
+    /// Lets Submit ask `scanner` for a newer local version of the change
+    /// first (see [`submit_check`]). For a change whose project is scanned
+    /// for local changes; never needed for a local change, which has no
+    /// actions.
+    pub fn set_local_scanner(&mut self, scanner: Entity<LocalScanner>) {
+        if !self.number.is_local() {
+            self.local_scan = Some(scanner);
+        }
     }
 
     /// Opens the menu for `detail` with the focus in the dialog.
@@ -556,6 +587,10 @@ impl ActionDialog {
             pending_focus: None,
             task: None,
             server_badge: None,
+            local_scan: None,
+            newer: Newer::Unasked,
+            check_task: None,
+            submit_waits: false,
             _subs: subs,
         };
         window.focus(&this.focus, cx);
@@ -592,6 +627,9 @@ impl ActionDialog {
 
     /// Submits without the confirmation, if the menu offers Submit. The
     /// dialog stays up while it runs (and for a refusal), then closes.
+    /// With a scanner the confirmation shows while the checkout is asked
+    /// for a newer local version (see [`submit_check`]), and stays up with
+    /// the warning if it has one.
     pub(crate) fn submit_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.step == Step::Menu
             && self
@@ -599,7 +637,106 @@ impl ActionDialog {
                 .iter()
                 .any(|e| e.kind == Kind::Submit && e.enabled)
         {
-            self.run(Kind::Submit, Args::default(), window, cx);
+            if self.local_scan.is_some() {
+                self.step = Step::Confirm(Kind::Submit);
+                self.pending_focus = Some(self.confirm_focus.clone());
+                self.submit_waits = true;
+                self.check_newer(cx);
+                cx.notify();
+            } else {
+                self.run(Kind::Submit, Args::default(), window, cx);
+            }
+        }
+    }
+
+    /// Asks the checkout for a newer local version of the change, unless
+    /// that is under way or known (see [`submit_check`]).
+    fn check_newer(&mut self, cx: &mut Context<Self>) {
+        let Some(scanner) = self.local_scan.clone() else {
+            return;
+        };
+        if self.newer != Newer::Unasked {
+            return;
+        }
+        self.newer = Newer::Checking;
+        let scan = scanner.update(cx, |s, cx| s.scan_now(&self.detail.summary.project, cx));
+        let syncer = self.session.syncer().clone();
+        let change = self.number;
+        let since = self.detail.current().and_then(|r| r.created);
+        self.check_task = Some(cx.spawn(async move |this, cx| {
+            let found = submit_check::newer_local_version(
+                scan,
+                submit_check::WAIT,
+                syncer,
+                change,
+                since,
+                cx,
+            )
+            .await;
+            this.update(cx, |this, cx| this.newer_known(found, cx)).ok();
+        }));
+    }
+
+    /// The check's answer: shows the warning, or sends a Submit that was
+    /// confirmed meanwhile.
+    fn newer_known(&mut self, found: Option<u32>, cx: &mut Context<Self>) {
+        self.newer = Newer::Known(found);
+        self.check_task = None;
+        let waits = std::mem::take(&mut self.submit_waits);
+        if self.step != Step::Confirm(Kind::Submit) {
+            return;
+        }
+        if found.is_some() {
+            // Enter cancels; submitting anyway takes Ctrl-Enter or the
+            // button.
+            self.pending_focus = Some(self.cancel_focus.clone());
+        } else if waits {
+            self.start(Kind::Submit, Args::default(), cx);
+        }
+        cx.notify();
+    }
+
+    /// The Submit warning's question.
+    fn warning_text(&self, ordinal: u32) -> String {
+        let ps = self
+            .detail
+            .current()
+            .map(|r| format!("PS {}", r.number))
+            .unwrap_or_else(|| "the current patch set".to_owned());
+        format!(
+            "Your checkout has a newer version (local {ordinal}) that is not uploaded. \
+             Submit {ps} anyway?"
+        )
+    }
+
+    /// What the confirmation's button says for `kind`.
+    fn confirm_label(&self, kind: Kind) -> String {
+        if kind == Kind::Submit && self.warning().is_some() {
+            return "Submit anyway".to_owned();
+        }
+        self.entries
+            .iter()
+            .find(|e| e.kind == kind)
+            .map_or_else(|| kind.label().to_owned(), |e| e.label.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn warning_for_test(&self) -> Option<String> {
+        matches!(self.step, Step::Confirm(Kind::Submit))
+            .then(|| self.warning().map(|n| self.warning_text(n)))
+            .flatten()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checking_for_test(&self) -> bool {
+        self.newer == Newer::Checking
+    }
+
+    /// The newer local version the Submit warning is about, once known.
+    fn warning(&self) -> Option<u32> {
+        match self.newer {
+            Newer::Known(found) => found,
+            _ => None,
         }
     }
 
@@ -638,6 +775,9 @@ impl ActionDialog {
         }
         if kind.confirms() {
             self.step = Step::Confirm(kind);
+            if kind == Kind::Submit {
+                self.check_newer(cx);
+            }
             if matches!(kind, Kind::Revert | Kind::CherryPick) && self.prefilled != Some(kind) {
                 self.prefilled = Some(kind);
                 let text = self.default_message(kind);
@@ -715,6 +855,12 @@ impl ActionDialog {
     fn back(&mut self, cx: &mut Context<Self>) {
         if self.running() || self.step == Step::Menu {
             return;
+        }
+        if self.step == Step::Confirm(Kind::Submit) {
+            // Asked again next time: the checkout may move meanwhile.
+            self.newer = Newer::Unasked;
+            self.check_task = None;
+            self.submit_waits = false;
         }
         self.step = Step::Menu;
         self.error = None;
@@ -819,6 +965,11 @@ impl ActionDialog {
         let Step::Confirm(kind) = self.step else {
             return;
         };
+        if kind == Kind::Submit && self.newer == Newer::Checking {
+            self.submit_waits = true;
+            cx.notify();
+            return;
+        }
         let text = |s: &str| {
             let t = s.trim();
             (!t.is_empty()).then(|| t.to_owned())
@@ -887,6 +1038,10 @@ impl ActionDialog {
     }
 
     fn run(&mut self, kind: Kind, args: Args, _: &mut Window, cx: &mut Context<Self>) {
+        self.start(kind, args, cx);
+    }
+
+    fn start(&mut self, kind: Kind, args: Args, cx: &mut Context<Self>) {
         if self.running() {
             return;
         }
@@ -1251,11 +1406,29 @@ impl ActionDialog {
             Kind::CherryPick => "Copy this change onto another branch as a new change.",
             _ => "",
         };
+        let warning = (kind == Kind::Submit).then(|| self.warning()).flatten();
+        let checking = kind == Kind::Submit && self.newer == Newer::Checking && self.submit_waits;
         v_flex()
             .gap_1()
             .px_4()
             .py_2()
-            .child(div().child(intro))
+            .map(|d| match warning {
+                Some(ordinal) => d.child(
+                    div()
+                        .debug_selector(|| "submit-warning".into())
+                        .text_color(theme.warning)
+                        .child(self.warning_text(ordinal)),
+                ),
+                None => d.child(div().child(intro)),
+            })
+            .when(checking, |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Looking for newer local versions in your checkout\u{2026}"),
+                )
+            })
             .when(kind == Kind::Submit, |d| {
                 d.children(self.requirements(cx))
                     .when(self.detail.summary.work_in_progress, |d| {
@@ -1340,6 +1513,11 @@ impl Render for ActionDialog {
             "Cmd-Enter confirms, Esc goes back"
         } else {
             "Ctrl-Enter confirms, Esc goes back"
+        };
+        let warning_hint = if cfg!(target_os = "macos") {
+            "Cmd-Enter submits anyway, Enter or Esc cancels"
+        } else {
+            "Ctrl-Enter submits anyway, Enter or Esc cancels"
         };
         let body = match step {
             Step::Menu => self.render_menu(window, cx),
@@ -1426,6 +1604,8 @@ impl Render for ActionDialog {
                 .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(
                     if matches!(step, Step::Running(_)) {
                         "Working\u{2026}"
+                    } else if kind == Kind::Submit && self.warning().is_some() {
+                        warning_hint
                     } else {
                         confirm_hint
                     },
@@ -1448,10 +1628,7 @@ impl Render for ActionDialog {
                         if running {
                             "Working\u{2026}".to_owned()
                         } else {
-                            self.entries
-                                .iter()
-                                .find(|e| e.kind == kind)
-                                .map_or_else(|| kind.label().to_owned(), |e| e.label.clone())
+                            self.confirm_label(kind)
                         },
                         &self.confirm_focus,
                         Look::Primary,

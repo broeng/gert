@@ -74,9 +74,6 @@ pub enum LocalScanEvent {
 }
 
 /// Why [`LocalScanner::scan_now`] has no report.
-// Used by the Submit warning, which comes with local patch sets of Gerrit
-// changes; until then only the tests call `scan_now`.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ScanNowError {
     /// The server is anonymous or has no session: nothing is scanned.
@@ -223,7 +220,6 @@ impl LocalScanner {
     /// of one round at a time: it runs with the next round, after the one
     /// that may be running. A checkout that is still opening is waited
     /// for.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn scan_now(
         &mut self,
         project: &str,

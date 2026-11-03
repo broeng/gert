@@ -1197,3 +1197,4 @@ mod in_the_shell {
 }
 
 mod edit_tests;
+mod submit_check_tests;
