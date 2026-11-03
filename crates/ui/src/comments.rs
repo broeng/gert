@@ -2,14 +2,15 @@
 //!
 //! [`ChangeComments`] reads the cache first (so threads are there at once,
 //! also offline), then refreshes from the server. It holds the change's
-//! threads built from published comments and the user's drafts, and tells
-//! its observers when they changed. Pages hand the threads to their diff
-//! views; see `DiffView::set_threads`.
+//! threads built from published comments and the user's drafts, and the
+//! pending reviews given on its local versions, and tells its observers
+//! when they changed. Pages hand the threads to their diff views; see
+//! `DiffView::set_threads`.
 
 use std::sync::Arc;
 
 use gpui_kit::*;
-use model::{ChangeNumber, Draft, Thread};
+use model::{ChangeNumber, Draft, PendingReview, Thread};
 
 use crate::{
     outbox::{DraftOutbox, OutboxEvent},
@@ -36,7 +37,8 @@ pub fn local_note(d: &Draft) -> Option<String> {
 pub const LOCAL_DRAFT: &str = "Local: sent when this version is on Gerrit";
 
 pub enum CommentsEvent {
-    /// The threads changed (loaded from the cache, or refreshed).
+    /// The threads or the pending reviews changed (loaded from the cache,
+    /// or refreshed).
     Changed,
     /// The server answered 401: back to the login flow. (A 403 only logs.)
     Unauthorized,
@@ -46,6 +48,10 @@ pub struct ChangeComments {
     session: Session,
     change: ChangeNumber,
     threads: Arc<Vec<Thread>>,
+    /// The pending reviews of the change's local versions, in creation
+    /// order (sent ones included). Local data: read with the threads, never
+    /// fetched.
+    reviews: Arc<Vec<PendingReview>>,
     refreshing: bool,
     /// Another refresh was asked for while one was running.
     again: bool,
@@ -64,6 +70,7 @@ impl ChangeComments {
             session,
             change,
             threads: Arc::default(),
+            reviews: Arc::default(),
             refreshing: false,
             again: false,
             task: None,
@@ -75,8 +82,8 @@ impl ChangeComments {
     }
 
     /// Reloads from the cache (no network) whenever the outbox reports that
-    /// a draft of this change moved, so threads show a draft and its sync
-    /// state at once.
+    /// a draft or a pending review of this change moved, so threads show a
+    /// draft and its sync state at once.
     pub fn follow(&mut self, outbox: &Entity<DraftOutbox>, cx: &mut Context<Self>) {
         self._outbox = Some(cx.subscribe(outbox, |this, _, ev: &OutboxEvent, cx| {
             if matches!(ev, OutboxEvent::Changed(c) if *c == this.change) {
@@ -90,11 +97,12 @@ impl ChangeComments {
         let syncer = self.session.syncer().clone();
         let change = self.change;
         self.reload_task = Some(cx.spawn(async move |this, cx| {
-            let cached = cx
-                .background_spawn(async move { syncer.cached_comments(change) })
-                .await;
+            let cached = cx.background_spawn(read_cache(syncer, change)).await;
             this.update(cx, |this, cx| match cached {
-                Ok(view) => this.apply(view.threads(), cx),
+                Ok((threads, reviews)) => {
+                    this.apply(threads, cx);
+                    this.apply_reviews(reviews, cx);
+                }
                 Err(e) => log::warn!("reading cached comments of change {change}: {e}"),
             })
             .ok();
@@ -109,6 +117,12 @@ impl ChangeComments {
 
     pub fn threads(&self) -> Arc<Vec<Thread>> {
         self.threads.clone()
+    }
+
+    /// The pending reviews of the change's local versions, in creation
+    /// order, sent ones included.
+    pub fn reviews(&self) -> Arc<Vec<PendingReview>> {
+        self.reviews.clone()
     }
 
     /// Fetches the comments again (a refresh already running is followed by
@@ -156,12 +170,13 @@ impl ChangeComments {
         let change = self.change;
         self.refreshing = self.session.can_sync();
         self.task = Some(cx.spawn(async move |this, cx| {
-            let cached = cx
-                .background_spawn(async move { syncer.cached_comments(change) })
-                .await;
+            let cached = cx.background_spawn(read_cache(syncer, change)).await;
             this.update(cx, |this, cx| {
                 match cached {
-                    Ok(view) => this.apply(view.threads(), cx),
+                    Ok((threads, reviews)) => {
+                        this.apply(threads, cx);
+                        this.apply_reviews(reviews, cx);
+                    }
                     Err(e) => log::warn!("reading cached comments of change {change}: {e}"),
                 }
                 this.refreshing = false;
@@ -179,6 +194,24 @@ impl ChangeComments {
             cx.notify();
         }
     }
+
+    fn apply_reviews(&mut self, reviews: Vec<PendingReview>, cx: &mut Context<Self>) {
+        if *self.reviews != reviews {
+            self.reviews = Arc::new(reviews);
+            cx.emit(CommentsEvent::Changed);
+            cx.notify();
+        }
+    }
+}
+
+/// The cached threads and the pending reviews of `change`. Blocking
+/// (SQLite): for the background executor.
+async fn read_cache(
+    syncer: sync::Syncer,
+    change: ChangeNumber,
+) -> Result<(Vec<Thread>, Vec<PendingReview>), sync::Error> {
+    let threads = syncer.cached_comments(change)?.threads();
+    Ok((threads, syncer.pending_reviews(change)?))
 }
 
 #[cfg(test)]
@@ -315,6 +348,45 @@ mod tests {
         });
         cx.run_until_parked();
         *seen.lock().expect("flag")
+    }
+
+    #[gpui_kit::test]
+    fn pending_reviews_are_read_with_the_threads_and_follow_the_outbox(cx: &mut TestAppContext) {
+        let mut store = Store::open_in_memory().expect("store");
+        store.server_id(URL).expect("server");
+        let version = crate::testing::local_version(&mut store, Some(ChangeNumber(7)), "I7", "l1");
+        let review = |message: &str| store::NewPendingReview {
+            patch_set: version.number,
+            labels: [("Code-Review".to_owned(), 1)].into(),
+            strategy: model::LocalApproval::Exact,
+            message: message.into(),
+            unresolved: false,
+            created: jiff::Timestamp::now(),
+            replaces_draft: None,
+        };
+        let first = store
+            .create_pending_review(model::ServerId(1), &review("first"))
+            .expect("review");
+        let http = RouteHttpClient::new();
+        let env = env_with(store, &http);
+        let session = Session::new(&env, &setup(), None).expect("session");
+        let outbox = cx.new(|_| crate::outbox::DraftOutbox::new(session.clone()));
+        let c = cx.update(|cx| outbox.update(cx, |o, cx| o.comments(ChangeNumber(7), cx)));
+        cx.run_until_parked();
+        let reviews = |cx: &mut TestAppContext| cx.update(|cx| c.read(cx).reviews());
+        assert_eq!(*reviews(cx), std::slice::from_ref(&first));
+        // A review written elsewhere shows once the outbox says so.
+        let second = session
+            .syncer()
+            .create_pending_review(&review("second"))
+            .expect("review");
+        let changes = count_changes(cx, &c);
+        cx.update(|cx| outbox.update(cx, |o, cx| o.published(ChangeNumber(7), cx)));
+        cx.run_until_parked();
+        assert_eq!(*reviews(cx), [first, second]);
+        assert_eq!(*changes.lock().expect("count"), 1);
+        // The sealed messages are not threads.
+        assert!(cx.update(|cx| c.read(cx).threads().is_empty()));
     }
 
     #[gpui_kit::test]

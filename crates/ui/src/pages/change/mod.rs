@@ -39,7 +39,8 @@ use gpui_kit::*;
 use jiff::Timestamp;
 use model::{
     ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, DiffKey, DiffPair, FileCommentCounts,
-    FileEntry, FilesKey, LocalChange, PatchSetNumber, RelatedChange, RevisionId, Thread, ThreadId,
+    FileEntry, FilesKey, LocalApproval, LocalChange, PatchSetNumber, PendingReviewId,
+    RelatedChange, RevisionId, Thread, ThreadId,
 };
 use store::CachedFileList;
 use sync::{ChainCommit, PollPolicy};
@@ -100,8 +101,9 @@ pub enum ChangeEvent {
     OpenDiff(DiffRoute),
     /// A refresh succeeded: the server is reachable.
     Refreshed,
-    /// `a`: open the reply dialog for this change.
-    Reply(Box<ChangeDetail>),
+    /// `a`: open the reply dialog for this change (a local review when a
+    /// local version is shown).
+    Reply(Box<reply::ReplyRequest>),
     /// `m`: open the change action menu for this change.
     Actions(Box<ChangeDetail>),
     /// The Submit chain button: submits the change with its ancestors, without confirmation.
@@ -2190,22 +2192,43 @@ impl ChangePage {
         cx.notify();
     }
 
-    /// `a`: asks the shell for the reply dialog.
+    /// `a`: asks the shell for the reply dialog: a reply to Gerrit, or a
+    /// local review of the local version shown (which edits its pending
+    /// review if it has one).
     fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
-        if self.on_local_target() {
-            self.hint
-                .say(reply::LOCAL_LATER, false, cx, |p| &mut p.hint);
-            return;
-        }
+        self.open_reply(None, cx);
+    }
+
+    /// Asks the shell for the reply dialog, editing pending review `edit`
+    /// if given.
+    pub(super) fn open_reply(&mut self, edit: Option<PendingReviewId>, cx: &mut Context<Self>) {
         if let Some(why) = reply::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
         match &self.detail {
-            Some(d) if d.current().is_some() => cx.emit(ChangeEvent::Reply(Box::new(d.clone()))),
+            Some(d) if d.current().is_some() => {
+                let request = reply::ReplyRequest {
+                    detail: d.clone(),
+                    target: self.sel.target_number(d),
+                    edit,
+                    strategy: self.local_approval(cx),
+                };
+                cx.emit(ChangeEvent::Reply(Box::new(request)))
+            }
             _ => self
                 .hint
                 .say("The change is not loaded yet", false, cx, |p| &mut p.hint),
+        }
+    }
+
+    /// The project's `local_approval` mode (the strictest without a
+    /// checkout entry).
+    pub(super) fn local_approval(&self, cx: &App) -> LocalApproval {
+        let project = self.detail.as_ref().map(|d| d.summary.project.as_str());
+        match (&self.checkouts, project) {
+            (Some(c), Some(p)) => c.read(cx).local_approval(p),
+            _ => LocalApproval::Exact,
         }
     }
 
@@ -2259,9 +2282,9 @@ impl ChangePage {
     }
 
     /// Whether a reply or vote would be on a local version: a local change,
-    /// or a local patch set picked as the target. Until local reviews exist
-    /// (LC4a) neither may go out, since Gerrit would take it for the
-    /// current patch set, which the user may not have reviewed.
+    /// or a local patch set picked as the target. Neither may go to Gerrit,
+    /// which would take it for the current patch set: they become pending
+    /// reviews of the version.
     pub(super) fn on_local_target(&self) -> bool {
         self.number.is_local()
             || self

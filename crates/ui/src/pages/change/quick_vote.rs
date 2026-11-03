@@ -17,6 +17,9 @@ use crate::{
     session::is_unauthorized,
 };
 
+/// Why quick votes do nothing on a local version yet.
+const LOCAL_VOTES_LATER: &str = "Quick votes on local versions come in a later version";
+
 impl ChangePage {
     /// The buttons of the header bar.
     pub(super) fn quick_buttons(&self, cx: &App) -> Vec<QuickButton> {
@@ -50,8 +53,7 @@ impl ChangePage {
             return;
         }
         if self.on_local_target() {
-            self.hint
-                .say(reply::LOCAL_LATER, false, cx, |p| &mut p.hint);
+            self.hint.say(LOCAL_VOTES_LATER, false, cx, |p| &mut p.hint);
             return;
         }
         if let Some(why) = reply::unavailable(&self.session) {

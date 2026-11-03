@@ -39,7 +39,7 @@ use crate::{
         settings::{SettingsEvent, SettingsPage, SettingsTab},
     },
     project_dialog::{ProjectContext, ProjectDialog, ProjectEvent},
-    reply::{ReplyDialog, ReplyEvent, Sent},
+    reply::{ReplyDialog, ReplyEvent, ReplyRequest, Sent},
     row::server_label,
     servers::{ACTIVE_SERVER_STATE, Connection, Servers},
     session::{
@@ -1862,7 +1862,7 @@ impl Shell {
                     this.server_reachable(&owner, window, cx);
                     this.drain_notifications(&owner, cx);
                 }
-                ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
+                ChangeEvent::Reply(request) => this.open_reply((**request).clone(), window, cx),
                 ChangeEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 ChangeEvent::SubmitChain(detail) => {
                     this.open_menu_at((**detail).clone(), true, window, cx)
@@ -1944,7 +1944,7 @@ impl Shell {
             window,
             move |this, _, ev: &DiffPageEvent, window, cx| match ev {
                 DiffPageEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
-                DiffPageEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),
+                DiffPageEvent::Reply(request) => this.open_reply((**request).clone(), window, cx),
                 DiffPageEvent::Actions(detail) => this.open_menu((**detail).clone(), window, cx),
                 // Like PolyGerrit, stepping through files does not stack
                 // history entries: Back from any file leads to the change.
@@ -2305,8 +2305,8 @@ impl Shell {
 
     // ---- reply dialog ----
 
-    /// Opens the reply dialog for `detail` on top of the current page.
-    fn open_reply(&mut self, detail: ChangeDetail, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the reply dialog for `request` on top of the current page.
+    fn open_reply(&mut self, request: ReplyRequest, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(session), Some(outbox)) =
             (self.session().cloned(), self.active_outbox().cloned())
         else {
@@ -2323,7 +2323,7 @@ impl Shell {
         let owner = session.key.clone();
         let badge = self.servers.badge(&owner);
         let dialog = cx.new(|cx| {
-            let mut dialog = ReplyDialog::new(session, outbox, detail, window, cx);
+            let mut dialog = ReplyDialog::open(session, outbox, request, window, cx);
             dialog.set_server_badge(badge, cx);
             dialog
         });
@@ -2334,6 +2334,7 @@ impl Shell {
                 ReplyEvent::Close => this.close_reply(window, cx),
                 ReplyEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
                 ReplyEvent::Sent(sent) => this.reply_sent(sent, window, cx),
+                ReplyEvent::Saved(note) => this.reply_saved(note.clone(), window, cx),
             },
         ));
         self.reply = Some(dialog);
@@ -2364,6 +2365,16 @@ impl Shell {
         match &self.page {
             Page::Change(p) => p.update(cx, |p, cx| p.reply_sent(sent, cx)),
             Page::Diff(p) => p.update(cx, |p, cx| p.reply_sent(sent, cx)),
+            _ => {}
+        }
+    }
+
+    /// A local review was saved: close the dialog and let the page say so.
+    fn reply_saved(&mut self, note: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_reply(window, cx);
+        match &self.page {
+            Page::Change(p) => p.update(cx, |p, cx| p.say(note, cx)),
+            Page::Diff(p) => p.update(cx, |p, cx| p.say(note, cx)),
             _ => {}
         }
     }
@@ -2939,7 +2950,7 @@ impl Shell {
         if menu {
             self.open_menu(detail, window, cx);
         } else {
-            self.open_reply(detail, window, cx);
+            self.open_reply(ReplyRequest::gerrit(detail), window, cx);
         }
     }
 

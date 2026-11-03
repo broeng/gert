@@ -2062,13 +2062,10 @@ fn a_local_version_of_a_gerrit_change_is_named_in_the_header_and_cannot_be_repli
             .debug_bounds("diff-pair: PS 3 \u{2192} local 1")
             .is_some()
     );
-    // A reply would land on PS 3, not on what is shown.
+    // Signed out: no reply, and certainly none to PS 3.
     press(cx, p.window, &["a"]);
     let note = cx.update(|cx| p.page.read(cx).hint_for_test());
-    assert_eq!(
-        note.map(|n| n.0).as_deref(),
-        Some(crate::reply::LOCAL_LATER)
-    );
+    assert_eq!(note.map(|n| n.0).as_deref(), Some("Sign in to reply"));
     assert!(p.events.lock().expect("log").is_empty());
     for r in p.http.requested() {
         assert!(!r.contains(&sha), "{r}");

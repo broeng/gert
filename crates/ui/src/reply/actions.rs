@@ -11,7 +11,7 @@ actions!(
     [
         /// Esc: close the dialog, keeping the text as a draft.
         CloseReply,
-        /// Ctrl-Enter / Cmd-Enter: send the review.
+        /// Ctrl-Enter / Cmd-Enter: send the review (save a local one).
         SendReply,
         /// Tab / Shift-Tab: the next / previous control.
         ReplyNext,
@@ -55,14 +55,14 @@ pub fn entries() -> Vec<Entry> {
             "secondary-enter",
             SendReply,
             REPLY_DIALOG,
-            "Send the reply",
+            "Send the reply; on a local version, save the local review",
         ),
         e(
             "Esc",
             "escape",
             CloseReply,
             REPLY_DIALOG,
-            "Close; the text stays as a draft",
+            "Close; the text stays as a draft (editing a local review: the changes are dropped)",
         ),
         e(
             "Tab / Shift-Tab",

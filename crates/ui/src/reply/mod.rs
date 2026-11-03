@@ -34,6 +34,31 @@
 //! be sent the dialog says so and keeps everything; the text is a draft in
 //! the store anyway.
 //!
+//! # Local reviews
+//!
+//! When the page shows a local version (a local change, or a local patch
+//! set of a Gerrit change), nothing goes to Gerrit: Gerrit would take the
+//! reply for its current patch set, which is not what the user looked at.
+//! The dialog is then a *local review* ([`ReplyRequest::target`]): the
+//! labels are the ones the detail carries (borrowed for a local change),
+//! there is no attention set, and Save writes a pending review on that
+//! version (`store::pending_reviews`) with the votes, the text as its
+//! sealed message, and the project's `local_approval` mode as the
+//! snapshot. Consolidation sends it once the version is on Gerrit. Inline
+//! drafts stay drafts of their own and are listed as "local comments";
+//! each Save makes a new review that owns its message (B8).
+//!
+//! The text is still the patch-set-level draft of the version while the
+//! dialog is open and after it closes, so Esc loses nothing; Save turns it
+//! into the review's message in one transaction.
+//!
+//! Reopening the dialog on a version that has a `Pending` review edits
+//! the newest one in place: the title says "Edit local review", it starts
+//! with the review's votes and message, and Save replaces them. Esc drops
+//! the changes (the review is saved as it was), and "New review instead"
+//! turns the dialog into a fresh local review. The change page's list of
+//! pending reviews opens a particular one ([`ReplyRequest::edit`]).
+//!
 //! # Keys
 //!
 //! `Ctrl-Enter` (`Cmd-Enter` on macOS) sends from anywhere in the dialog,
@@ -57,9 +82,11 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use model::{
-    ChangeDetail, ChangeNumber, DraftInput, Location, PATCHSET_LEVEL_PATH, PatchSetNumber,
-    PatchSetRef, Side, Thread,
+    ChangeDetail, ChangeNumber, DraftInput, LocalApproval, LocalChangeState, Location,
+    PATCHSET_LEVEL_PATH, PatchSetNumber, PatchSetRef, PendingReview, PendingReviewId,
+    PendingReviewState, Side, Thread, Timestamp,
 };
+use store::{NewPendingReview, PendingReviewEdit};
 use sync::{DraftSave, PublishOutcome};
 
 use crate::{
@@ -72,6 +99,35 @@ use crate::{
 use actions::*;
 use plan::{DraftItem, Person, VoteRow, vote_text};
 
+/// What the dialog is opened on.
+#[derive(Clone, Debug)]
+pub struct ReplyRequest {
+    pub detail: ChangeDetail,
+    /// The patch set the page shows. A local one makes the dialog a local
+    /// review of it (see the module documentation); any other reply goes
+    /// to Gerrit's current patch set, as always.
+    pub target: Option<PatchSetNumber>,
+    /// The pending review to edit. `None` edits the newest pending review
+    /// of a local target, if it has one.
+    pub edit: Option<PendingReviewId>,
+    /// The project's `local_approval` mode now: the snapshot a local review
+    /// takes with its votes.
+    pub strategy: LocalApproval,
+}
+
+impl ReplyRequest {
+    /// A reply to Gerrit on `detail`'s current patch set.
+    #[cfg(test)]
+    pub fn gerrit(detail: ChangeDetail) -> Self {
+        Self {
+            detail,
+            target: None,
+            edit: None,
+            strategy: LocalApproval::Exact,
+        }
+    }
+}
+
 /// What the dialog tells the shell.
 pub enum ReplyEvent {
     /// The user closed it (their text is saved as a draft).
@@ -80,6 +136,8 @@ pub enum ReplyEvent {
     Unauthorized,
     /// The review was posted.
     Sent(Box<Sent>),
+    /// A local review was saved; the note says so, for the page.
+    Saved(String),
 }
 
 /// The outcome of a posted review.
@@ -119,9 +177,44 @@ impl Sent {
     }
 }
 
-/// Why the reply dialog and quick votes do nothing on a local change or a
-/// local patch set yet.
-pub const LOCAL_LATER: &str = "Replies and votes on local versions come in a later version";
+/// The dialog's note on a local version labelled `label` ("local 2").
+pub fn local_note(label: &str) -> String {
+    format!("Saved locally; sent automatically when {label} is on Gerrit")
+}
+
+/// The hint near the votes of a local review whose approvals wait for the
+/// exact commit: always for a local patch set of a Gerrit change (the
+/// strict rule), and for a local change unless its project follows
+/// amended commits. `None` when approvals follow.
+pub fn approval_hint(strategy: LocalApproval, gerrit_change: bool) -> Option<&'static str> {
+    (gerrit_change || strategy != LocalApproval::Follow)
+        .then_some("An approval is only sent on this exact commit")
+}
+
+/// A local review that could not be saved, in words for the dialog and
+/// the page.
+pub fn describe_local(e: &sync::Error) -> String {
+    match e {
+        sync::Error::Store(store::Error::NotReviewable(LocalChangeState::Consolidated)) => {
+            "Not saved: this version is on Gerrit by now. Reply on the Gerrit change.".into()
+        }
+        sync::Error::Store(store::Error::NotReviewable(_)) => {
+            "Not saved: the change is closed on Gerrit, so this version takes no new review.".into()
+        }
+        sync::Error::Store(store::Error::NotLocal) => {
+            "Not saved: this version is no longer known locally.".into()
+        }
+        other => format!("Not saved: {other}"),
+    }
+}
+
+/// The local review the dialog writes: the version and what it edits.
+struct LocalReview {
+    /// The project's mode now (see [`ReplyRequest::strategy`]).
+    strategy: LocalApproval,
+    /// The pending review being edited; `None` makes a new one.
+    editing: Option<PendingReview>,
+}
 
 /// Why the reply dialog cannot open now, as a note for the user.
 pub fn unavailable(session: &Session) -> Option<&'static str> {
@@ -148,8 +241,11 @@ pub struct ReplyDialog {
     number: ChangeNumber,
     /// The signed-in user's login name, to find their vote and account.
     me: Option<String>,
-    /// The patch set the review goes to: the current one.
+    /// The patch set the review goes to: the current one, or the local
+    /// version of a local review.
     current: Option<PatchSetRef>,
+    /// Set for a local review (see the module documentation).
+    local: Option<LocalReview>,
     input: Entity<TextareaState>,
     /// The text last put into the field by the dialog itself; the text is
     /// untouched while the field still holds it.
@@ -168,6 +264,8 @@ pub struct ReplyDialog {
     vote_focus: Vec<Vec<FocusHandle>>,
     people_focus: Vec<FocusHandle>,
     upload_focus: FocusHandle,
+    /// "New review instead", while a local review is edited.
+    fresh_focus: FocusHandle,
     cancel_focus: FocusHandle,
     send_focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -197,21 +295,67 @@ impl ReplyDialog {
         self.server_badge.as_ref()
     }
 
-    /// Opens the dialog for `detail` with the focus in the message field.
-    pub fn new(
+    /// Opens the dialog for `request`, with the focus in the message field:
+    /// a reply to Gerrit, or a local review when the target is a local
+    /// version.
+    pub fn open(
         session: Session,
         outbox: Entity<DraftOutbox>,
-        detail: ChangeDetail,
+        request: ReplyRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let ReplyRequest {
+            detail,
+            target,
+            edit,
+            strategy,
+        } = request;
         let number = detail.summary.number;
         let comments = outbox.update(cx, |o, cx| o.comments(number, cx));
         let me = session.username.clone();
-        let current = detail.current().map(|r| r.as_ref());
         let threads = comments.read(cx).threads();
-        let votes = plan::vote_rows(&detail, me.as_deref());
-        let people = plan::people(&detail, me.as_deref(), &threads);
+        let reviews = comments.read(cx).reviews();
+        let local_target = target
+            .filter(|n| n.is_local())
+            .or_else(|| detail.current_patch_set.filter(|_| number.is_local()))
+            .and_then(|n| detail.revision(n))
+            .map(|r| r.as_ref());
+        let editing = local_target.as_ref().and_then(|t| {
+            let mut pending = reviews
+                .iter()
+                .rev()
+                .filter(|r| r.state == PendingReviewState::Pending);
+            match edit {
+                Some(id) => pending.find(|r| r.id == id),
+                None => pending.find(|r| r.patch_set == t.number),
+            }
+            .cloned()
+        });
+        // The review edited is on its own version, which may not be the one
+        // shown.
+        let local_target = match &editing {
+            Some(r) => detail
+                .revision(r.patch_set)
+                .map(|r| r.as_ref())
+                .or(local_target),
+            None => local_target,
+        };
+        let local = local_target.is_some().then(|| LocalReview {
+            strategy,
+            editing: editing.clone(),
+        });
+        let current = local_target.or_else(|| detail.current().map(|r| r.as_ref()));
+        let mut votes = plan::vote_rows(&detail, me.as_deref());
+        if let Some(r) = &editing {
+            plan::select_votes(&mut votes, &r.labels);
+        }
+        // A local review moves no one in or out of the attention set.
+        let people = if local.is_some() {
+            Vec::new()
+        } else {
+            plan::people(&detail, me.as_deref(), &threads)
+        };
 
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -222,9 +366,10 @@ impl ReplyDialog {
         let draft = current
             .as_ref()
             .and_then(|c| plan::message_draft(&threads, c.number));
-        let (baseline, resolved) = match draft {
-            Some(d) => (d.message.clone(), !d.unresolved),
-            None => (String::new(), true),
+        let (baseline, resolved) = match (&editing, draft) {
+            (Some(r), _) => (r.message.clone().unwrap_or_default(), !r.unresolved),
+            (None, Some(d)) => (d.message.clone(), !d.unresolved),
+            (None, None) => (String::new(), true),
         };
         put_text(&input, &baseline, window, cx);
 
@@ -274,6 +419,7 @@ impl ReplyDialog {
             number,
             me,
             current,
+            local,
             input,
             baseline,
             resolved,
@@ -290,6 +436,7 @@ impl ReplyDialog {
             vote_focus,
             people_focus,
             upload_focus: cx.focus_handle(),
+            fresh_focus: cx.focus_handle(),
             cancel_focus: cx.focus_handle(),
             send_focus: cx.focus_handle(),
             _subs: subs,
@@ -315,6 +462,9 @@ impl ReplyDialog {
     /// still running when it opened): take its text if the user has not
     /// started writing.
     fn adopt_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing().is_some() {
+            return;
+        }
         let Some(current) = &self.current else {
             return;
         };
@@ -330,8 +480,12 @@ impl ReplyDialog {
         self.resolved = resolved;
     }
 
-    /// The draft the dialog's text belongs to, if there is one.
+    /// The draft the dialog's text belongs to, if there is one. None while
+    /// a local review is edited: its text is the review's message.
     fn message_draft(&self) -> Option<&model::Draft> {
+        if self.editing().is_some() {
+            return None;
+        }
         let current = self.current.as_ref()?;
         plan::message_draft(&self.threads, current.number)
     }
@@ -341,6 +495,10 @@ impl ReplyDialog {
     /// draft is stored first and uploaded afterwards, and it carries on
     /// after the dialog is gone.
     fn save_message(&mut self, cx: &mut Context<Self>) {
+        // An edited local review keeps its message until Save.
+        if self.editing().is_some() {
+            return;
+        }
         let Some(patch_set) = self.current.clone() else {
             return;
         };
@@ -364,18 +522,53 @@ impl ReplyDialog {
         self.phase == Phase::Sending
     }
 
+    /// Whether this is a local review (see the module documentation).
+    fn is_local(&self) -> bool {
+        self.local.is_some()
+    }
+
+    /// The pending review being edited.
+    fn editing(&self) -> Option<&PendingReview> {
+        self.local.as_ref()?.editing.as_ref()
+    }
+
+    /// The drafts the dialog lists: those a reply publishes, or a local
+    /// review's local comments.
     fn drafts(&self) -> Vec<DraftItem> {
         let current = self
             .current
             .as_ref()
             .map_or(PatchSetNumber(0), |c| c.number);
         let message = self.message_draft().map(|d| d.local_id);
-        plan::draft_items(&self.threads, plan::DraftKind::Ordinary, current, message)
+        let kind = if self.is_local() {
+            plan::DraftKind::Local
+        } else {
+            plan::DraftKind::Ordinary
+        };
+        plan::draft_items(&self.threads, kind, current, message)
     }
 
     /// Drafts the server does not have as they are; sending waits for them.
+    /// None for a local review: its drafts wait for their version.
     fn unuploaded(&self) -> usize {
+        if self.is_local() {
+            return 0;
+        }
         self.drafts().iter().filter(|d| d.pending()).count()
+    }
+
+    /// The votes of a local review: the changed ones, and those of the
+    /// review being edited that the dialog has no row for.
+    fn local_labels(&self) -> std::collections::BTreeMap<String, i32> {
+        let mut labels = plan::labels_to_send(&self.votes);
+        if let Some(r) = self.editing() {
+            for (label, value) in &r.labels {
+                if !self.votes.iter().any(|row| &row.label == label) {
+                    labels.insert(label.clone(), *value);
+                }
+            }
+        }
+        labels
     }
 
     fn review(&self) -> model::ReviewInput {
@@ -390,8 +583,12 @@ impl ReplyDialog {
         plan::review_input(&self.votes, add, remove)
     }
 
-    /// Whether the review would carry anything.
+    /// Whether the review would carry anything. A local review carries
+    /// its message and votes; its drafts wait for their version anyway.
     fn has_content(&self, cx: &App) -> bool {
+        if self.is_local() {
+            return !self.text(cx).is_empty() || !self.local_labels().is_empty();
+        }
         let review = self.review();
         !self.text(cx).is_empty()
             || !review.labels.is_empty()
@@ -440,6 +637,9 @@ impl ReplyDialog {
         );
         if self.unuploaded() > 0 {
             v.push(self.upload_focus.clone());
+        }
+        if self.editing().is_some() {
+            v.push(self.fresh_focus.clone());
         }
         v.extend(self.people_focus.iter().cloned());
         v.push(self.cancel_focus.clone());
@@ -522,6 +722,34 @@ impl ReplyDialog {
         }
     }
 
+    /// "New review instead": stops editing the pending review (it stays as
+    /// it was) and starts a new local review on the same version, from the
+    /// version's message draft and the user's votes as they are.
+    fn start_fresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending() {
+            return;
+        }
+        let Some(local) = self.local.as_mut() else {
+            return;
+        };
+        if local.editing.take().is_none() {
+            return;
+        }
+        self.votes = plan::vote_rows(&self.detail, self.me.as_deref());
+        let (text, resolved) = match self.message_draft() {
+            Some(d) => (d.message.clone(), !d.unresolved),
+            None => (String::new(), true),
+        };
+        self.input
+            .update(cx, |i, cx| i.set_value(text.clone(), window, cx));
+        put_text(&self.input, &text, window, cx);
+        self.baseline = text;
+        self.resolved = resolved;
+        self.error = None;
+        window.focus(&self.input_focus, cx);
+        cx.notify();
+    }
+
     /// Uploads the drafts that are not on the server (the title bar's
     /// retry); the list follows as they arrive.
     fn upload_drafts(&mut self, cx: &mut Context<Self>) {
@@ -530,10 +758,13 @@ impl ReplyDialog {
 
     // ---- sending ----
 
-    /// Posts the review.
+    /// Posts the review; for a local review, saves it.
     pub fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.sending() {
             return;
+        }
+        if self.is_local() {
+            return self.save_local(cx);
         }
         let Some(revision) = self.current.as_ref().map(|c| c.sha.clone()) else {
             return;
@@ -584,6 +815,103 @@ impl ReplyDialog {
                 .await;
             this.update(cx, |this, cx| this.sent(result, cx)).ok();
         }));
+    }
+
+    /// Saves the local review: a new pending review, or the one edited.
+    /// Store writes only, on the background executor.
+    fn save_local(&mut self, cx: &mut Context<Self>) {
+        let (Some(local), Some(target)) = (&self.local, self.current.clone()) else {
+            return;
+        };
+        if !self.has_content(cx) {
+            self.error = Some(if local.editing.is_some() {
+                "Nothing is left to save. To withdraw the review, cancel it on the change page."
+                    .into()
+            } else {
+                "There is nothing to save yet.".into()
+            });
+            cx.notify();
+            return;
+        }
+        let (message, unresolved) = (self.text(cx), !self.resolved);
+        let labels = self.local_labels();
+        let strategy = local.strategy;
+        let editing = local.editing.as_ref().map(|r| r.id);
+        let label = patch_set_label(&self.detail.revisions, target.number);
+        let syncer = self.session.syncer().clone();
+        let change = self.number;
+        self.phase = Phase::Sending;
+        self.error = None;
+        self.input.update(cx, |i, cx| i.set_disabled(true, cx));
+        cx.notify();
+        self.send_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    match editing {
+                        Some(id) => {
+                            let edit = PendingReviewEdit {
+                                labels,
+                                strategy,
+                                message,
+                                unresolved,
+                            };
+                            syncer.update_pending_review(id, &edit)
+                        }
+                        None => {
+                            // The text kept as the version's draft becomes
+                            // the review's message.
+                            let threads = syncer.cached_comments(change)?.threads();
+                            let replaces_draft =
+                                plan::message_draft(&threads, target.number).map(|d| d.local_id);
+                            let input = NewPendingReview {
+                                patch_set: target.number,
+                                labels,
+                                strategy,
+                                message,
+                                unresolved,
+                                created: Timestamp::now(),
+                                replaces_draft,
+                            };
+                            syncer.create_pending_review(&input).map(Some)
+                        }
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| this.saved(result, &label, cx))
+                .ok();
+        }));
+    }
+
+    fn saved(
+        &mut self,
+        result: Result<Option<PendingReview>, sync::Error>,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.phase = Phase::Editing;
+        self.input.update(cx, |i, cx| i.set_disabled(false, cx));
+        let edited = self.editing().is_some();
+        match result {
+            Ok(Some(_)) => {
+                // The review list and the drafts (the text left them) moved.
+                self.outbox.update(cx, |o, cx| o.published(self.number, cx));
+                let note = if edited {
+                    format!("Local review updated; sent when {label} is on Gerrit")
+                } else {
+                    local_note(label)
+                };
+                cx.emit(ReplyEvent::Saved(note));
+            }
+            Ok(None) => {
+                self.error = Some(
+                    "Not saved: the review is no longer pending (it is being sent, was sent, \
+                     or is held). Start a new review instead."
+                        .into(),
+                );
+            }
+            Err(e) => self.error = Some(describe_local(&e)),
+        }
+        cx.notify();
     }
 
     fn sent(&mut self, result: Result<PublishOutcome, sync::Error>, cx: &mut Context<Self>) {
@@ -704,6 +1032,27 @@ impl ReplyDialog {
     #[cfg(test)]
     pub(crate) fn upload_focus_for_test(&self) -> FocusHandle {
         self.upload_focus.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fresh_focus_for_test(&self) -> FocusHandle {
+        self.fresh_focus.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn editing_for_test(&self) -> Option<PendingReviewId> {
+        self.editing().map(|r| r.id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_local_for_test(&self) -> bool {
+        self.is_local()
+    }
+
+    /// The title, the local note and the approval hint, as drawn.
+    #[cfg(test)]
+    pub(crate) fn texts_for_test(&self) -> (String, Option<String>, Option<&'static str>) {
+        (self.title().to_owned(), self.note(), self.hint())
     }
 }
 
@@ -970,11 +1319,17 @@ impl Render for ReplyDialog {
         let muted = theme.muted_foreground;
         let sending = self.sending();
         let subject = self.detail.summary.subject.clone();
-        let send_hint = if cfg!(target_os = "macos") {
-            "Cmd-Enter sends, Esc closes"
-        } else {
-            "Ctrl-Enter sends, Esc closes"
+        let send_hint = match (cfg!(target_os = "macos"), &self.local, self.editing()) {
+            (true, None, _) => "Cmd-Enter sends, Esc closes",
+            (false, None, _) => "Ctrl-Enter sends, Esc closes",
+            (true, Some(_), None) => "Cmd-Enter saves, Esc closes",
+            (false, Some(_), None) => "Ctrl-Enter saves, Esc closes",
+            (true, Some(_), Some(_)) => "Cmd-Enter saves, Esc drops the changes",
+            (false, Some(_), Some(_)) => "Ctrl-Enter saves, Esc drops the changes",
         };
+        let local = self.is_local();
+        let hint = self.hint();
+        let note = self.note();
         let can_send = self.can_send(cx);
         let section = |title: &'static str| {
             div()
@@ -1018,16 +1373,30 @@ impl Render for ReplyDialog {
             v_flex()
                 .gap_1()
                 .child(section("VOTES"))
+                .children(hint.map(|h| {
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .debug_selector(move || format!("reply-hint: {h}"))
+                        .child(h)
+                }))
                 .children(rows)
                 .into_any_element()
         });
 
         let draft_list = (!drafts.is_empty()).then(|| {
             let revisions = &self.detail.revisions;
-            let rows: Vec<_> = drafts.iter().map(|d| draft_row(d, revisions, cx)).collect();
+            let rows: Vec<_> = drafts
+                .iter()
+                .map(|d| draft_row(d, revisions, local, cx))
+                .collect();
             v_flex()
                 .gap_0p5()
-                .child(section("DRAFTS TO PUBLISH"))
+                .child(section(if local {
+                    "LOCAL COMMENTS (SENT WITH THE VERSION)"
+                } else {
+                    "DRAFTS TO PUBLISH"
+                }))
                 .children(rows)
                 .when(unuploaded > 0, |d| {
                     d.child(
@@ -1073,18 +1442,13 @@ impl Render for ReplyDialog {
             .gap_2()
             .pt_3()
             .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(if sending {
-                        "Sending\u{2026}"
-                    } else {
-                        send_hint
-                    }),
-            )
+            .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(
+                match (sending, local) {
+                    (true, false) => "Sending\u{2026}",
+                    (true, true) => "Saving\u{2026}",
+                    (false, _) => send_hint,
+                },
+            ))
             .child(
                 chip(
                     "reply-cancel",
@@ -1100,7 +1464,12 @@ impl Render for ReplyDialog {
             .child(
                 chip(
                     "reply-send",
-                    if sending { "Sending\u{2026}" } else { "Send" },
+                    match (sending, local) {
+                        (true, false) => "Sending\u{2026}",
+                        (false, false) => "Send",
+                        (true, true) => "Saving\u{2026}",
+                        (false, true) => "Save",
+                    },
                     &self.send_focus,
                     Look::Primary,
                     !can_send,
@@ -1147,7 +1516,7 @@ impl Render for ReplyDialog {
                                 h_flex()
                                     .gap_2()
                                     .items_center()
-                                    .child(div().text_base().font_semibold().child("Reply"))
+                                    .child(div().text_base().font_semibold().child(self.title()))
                                     .children(self.server_badge.as_ref().map(|b| {
                                         h_flex()
                                             .gap_1()
@@ -1164,7 +1533,44 @@ impl Render for ReplyDialog {
                                     .text_color(muted)
                                     .truncate()
                                     .child(format!("{} {subject}", change_label(self.number))),
-                            ),
+                            )
+                            .children(note.map(|n| {
+                                h_flex()
+                                    .id("reply-local-note")
+                                    .pt_1()
+                                    .gap_2()
+                                    .items_center()
+                                    .flex_wrap()
+                                    .child(crate::local_source::local_chip(cx))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .debug_selector({
+                                                let n = n.clone();
+                                                move || format!("reply-note: {n}")
+                                            })
+                                            .child(n),
+                                    )
+                                    .when(self.editing().is_some(), |d| {
+                                        d.child(div().flex_1()).child(
+                                            chip(
+                                                "reply-fresh",
+                                                "New review instead",
+                                                &self.fresh_focus,
+                                                Look::Plain,
+                                                sending,
+                                                window,
+                                                cx,
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.start_fresh(window, cx)
+                                                }),
+                                            ),
+                                        )
+                                    })
+                            })),
                     )
                     .child(
                         v_flex()
@@ -1203,6 +1609,33 @@ impl Render for ReplyDialog {
 }
 
 impl ReplyDialog {
+    fn title(&self) -> &'static str {
+        match (&self.local, self.editing()) {
+            (None, _) => "Reply",
+            (Some(_), None) => "Local review",
+            (Some(_), Some(_)) => "Edit local review",
+        }
+    }
+
+    /// Where a local review stands: saved here, sent later.
+    fn note(&self) -> Option<String> {
+        self.local.as_ref()?;
+        let target = self.current.as_ref()?;
+        Some(local_note(&patch_set_label(
+            &self.detail.revisions,
+            target.number,
+        )))
+    }
+
+    /// The hint near a local review's votes (see [`approval_hint`]).
+    fn hint(&self) -> Option<&'static str> {
+        let local = self.local.as_ref()?;
+        if self.votes.is_empty() {
+            return None;
+        }
+        approval_hint(local.strategy, !self.number.is_local())
+    }
+
     fn vote_row(
         &self,
         r: usize,
@@ -1349,10 +1782,12 @@ impl ReplyDialog {
     }
 }
 
-/// `revisions` are the change's, to name the draft's patch set.
+/// `revisions` are the change's, to name the draft's patch set. A `local`
+/// review's drafts wait for their version: no upload state.
 fn draft_row(
     d: &DraftItem,
     revisions: &[model::Revision],
+    local: bool,
     cx: &mut Context<ReplyDialog>,
 ) -> AnyElement {
     let theme = cx.theme().clone();
@@ -1387,7 +1822,7 @@ fn draft_row(
                     .child(patch_set_label(revisions, d.patch_set)),
             )
         })
-        .children(d.problem().map(|p| {
+        .children(d.problem().filter(|_| !local).map(|p| {
             div()
                 .flex_none()
                 .max_w(px(220.))

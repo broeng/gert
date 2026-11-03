@@ -115,6 +115,16 @@ fn own_vote(detail: &ChangeDetail, label: &str, me: Option<&str>) -> i32 {
         .map_or(0, |v| v.value)
 }
 
+/// Selects the values `labels` has (a pending review being edited) in the
+/// rows of those labels.
+pub fn select_votes(rows: &mut [VoteRow], labels: &BTreeMap<String, i32>) {
+    for row in rows {
+        if let Some(v) = labels.get(&row.label) {
+            row.selected = *v;
+        }
+    }
+}
+
 /// The votes to send: only the labels whose value the user changed. Labels
 /// that are left out keep the current vote.
 pub fn labels_to_send(rows: &[VoteRow]) -> BTreeMap<String, i32> {
@@ -401,7 +411,6 @@ pub enum DraftKind {
     /// The drafts on local versions that wait with a local review (not the
     /// sealed messages of pending reviews, and none that consolidation
     /// reserved or held).
-    #[allow(dead_code)] // listed by the local review dialog (next commit)
     Local,
 }
 

@@ -137,6 +137,16 @@ impl Checkouts {
         self.projects().filter(|p| p.local_changes)
     }
 
+    /// The `local_approval` mode of project `name`: what a pending review
+    /// given now takes as its snapshot. The strictest mode when the project
+    /// has no entry (any more). With the same name configured twice, the
+    /// first entry wins.
+    pub fn local_approval(&self, name: &str) -> LocalApproval {
+        self.projects()
+            .find(|p| p.name == name)
+            .map_or(LocalApproval::Exact, |p| p.local_approval)
+    }
+
     /// The checkout of Gerrit project `name`, or `None` when none is
     /// configured for it. Starts opening it on the first call and reports
     /// [`CheckoutState::Opening`] until the result is in; the entity
@@ -463,6 +473,11 @@ mod tests {
         c.read_with(cx, |c, _| {
             let names: Vec<_> = c.local_change_projects().map(|p| p.name.as_str()).collect();
             assert_eq!(names, ["a"]);
+            // A pending review takes the project's mode, the strictest for
+            // a project without an entry.
+            assert_eq!(c.local_approval("a"), LocalApproval::Follow);
+            assert_eq!(c.local_approval("b"), LocalApproval::Exact);
+            assert_eq!(c.local_approval("gone"), LocalApproval::Exact);
         });
         // A removed project is gone.
         c.update(cx, |c, cx| c.set_projects(vec![project("a", &a)], cx));

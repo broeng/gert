@@ -81,7 +81,7 @@ pub enum DiffPageEvent {
     /// The breadcrumb was clicked: same as `u`.
     UpToChange,
     /// `a`: open the reply dialog for this change.
-    Reply(Box<ChangeDetail>),
+    Reply(Box<reply::ReplyRequest>),
     /// `shift-a`: open the change action menu for this change.
     Actions(Box<ChangeDetail>),
 }
@@ -850,21 +850,29 @@ impl DiffPage {
 
     // ---- reply ----
 
-    /// `a`: asks the shell for the reply dialog.
+    /// `a`: asks the shell for the reply dialog: a reply to Gerrit, or for
+    /// a local version shown a local review of it (see [`reply`]).
     fn reply(&mut self, _: &Reply, _: &mut Window, cx: &mut Context<Self>) {
-        // A reply would go to Gerrit's current patch set, not the local
-        // version shown.
-        if self.route.change.is_local() || self.route.target.is_local() {
-            self.hint
-                .say(reply::LOCAL_LATER, false, cx, |p| &mut p.hint);
-            return;
-        }
         if let Some(why) = reply::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
         match &self.detail {
-            Some(d) if d.current().is_some() => cx.emit(DiffPageEvent::Reply(Box::new(d.clone()))),
+            Some(d) if d.current().is_some() => {
+                let strategy = self
+                    .checkouts
+                    .as_ref()
+                    .map_or(model::LocalApproval::Exact, |c| {
+                        c.read(cx).local_approval(&d.summary.project)
+                    });
+                let request = reply::ReplyRequest {
+                    detail: d.clone(),
+                    target: Some(self.route.target),
+                    edit: None,
+                    strategy,
+                };
+                cx.emit(DiffPageEvent::Reply(Box::new(request)))
+            }
             _ => self
                 .hint
                 .say("The change is not loaded yet", false, cx, |p| &mut p.hint),

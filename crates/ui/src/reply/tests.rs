@@ -13,7 +13,7 @@ use model::{
 use serde_json::{Value, json};
 use store::{DraftFailure, Store};
 
-use super::{ReplyDialog, ReplyEvent};
+use super::{ReplyDialog, ReplyEvent, ReplyRequest};
 use crate::{
     outbox::DraftOutbox,
     session::Session,
@@ -168,6 +168,10 @@ struct Fx {
     http: RouteHttpClient,
     session: Session,
     events: Arc<Mutex<Vec<String>>>,
+    outbox: Entity<DraftOutbox>,
+    store: Arc<Mutex<Store>>,
+    /// Kept alive like the page that opened the dialog keeps it.
+    _comments: Entity<crate::comments::ChangeComments>,
 }
 
 /// Opens the dialog as bob. `prepare` fills the store; `routes` the fake
@@ -187,6 +191,17 @@ fn dialog_for(
     prepare: impl FnOnce(&mut Store),
     routes: impl FnOnce(&RouteHttpClient),
 ) -> Fx {
+    dialog_on(cx, prepare, |_, _| ReplyRequest::gerrit(detail), routes)
+}
+
+/// Opens the dialog as bob for the request `request` makes once the store
+/// is prepared and the session is open.
+fn dialog_on(
+    cx: &mut TestAppContext,
+    prepare: impl FnOnce(&mut Store),
+    request: impl FnOnce(&Session, &Mutex<Store>) -> ReplyRequest,
+    routes: impl FnOnce(&RouteHttpClient),
+) -> Fx {
     let mut store = Store::open_in_memory().expect("store");
     assert_eq!(store.server_id(URL).expect("server"), setup().server);
     prepare(&mut store);
@@ -195,6 +210,7 @@ fn dialog_for(
     // refresh fails and leaves the cache as seeded.
     routes(&http);
     let env = env_with(store, &http);
+    let store = env.store.clone();
     let mut server = setup();
     server.username = Some("bob".into());
     let auth = Auth::Basic {
@@ -202,19 +218,23 @@ fn dialog_for(
         password: "p".into(),
     };
     let session = Session::new(&env, &server, Some(auth)).expect("session");
+    let request = request(&session, &store);
+    let number = request.detail.summary.number;
     let events = Arc::new(Mutex::new(Vec::new()));
     let log = events.clone();
     let outbox = cx.new(|_| DraftOutbox::new(session.clone()));
     // The page that opens the dialog has the comments loaded already.
-    cx.update(|cx| outbox.update(cx, |o, cx| o.comments(CHANGE, cx)));
+    let comments = cx.update(|cx| outbox.update(cx, |o, cx| o.comments(number, cx)));
     cx.run_until_parked();
     let dialog_session = session.clone();
     let (window, dialog) = open(cx, |window, cx| {
-        let dialog = cx.new(|cx| ReplyDialog::new(dialog_session, outbox, detail, window, cx));
+        let dialog =
+            cx.new(|cx| ReplyDialog::open(dialog_session, outbox.clone(), request, window, cx));
         cx.subscribe(&dialog, move |_, ev: &ReplyEvent, _| {
             let text = match ev {
                 ReplyEvent::Close => "close".to_owned(),
                 ReplyEvent::Unauthorized => "unauthorized".to_owned(),
+                ReplyEvent::Saved(note) => format!("saved: {note}"),
                 ReplyEvent::Sent(s) => format!(
                     "sent detail={} unapplied={:?} warning={:?}{}",
                     s.detail.is_some(),
@@ -239,6 +259,9 @@ fn dialog_for(
         http,
         session,
         events,
+        outbox,
+        store,
+        _comments: comments,
     }
 }
 
@@ -1106,33 +1129,7 @@ fn the_upload_hint_names_the_button_only_when_the_list_has_the_drafts() {
 fn seed_local_version(store: &mut Store) -> PatchSetNumber {
     let server = setup().server;
     let now: jiff::Timestamp = "2024-06-15T10:00:00Z".parse().expect("ts");
-    let upsert = store::LocalChangeUpsert {
-        seen: None,
-        branch: Some("main".into()),
-        change_id: "I7".into(),
-        gerrit_number: Some(CHANGE),
-        subject: "local".into(),
-        author_name: "Bob".into(),
-        author_email: "bob@example.com".into(),
-        updated: now,
-        state: Some(model::LocalChangeState::Local),
-        patch_sets: vec![store::NewLocalPatchSet {
-            sha: "localsha".into(),
-            parent_sha: None,
-            seen_at: now,
-        }],
-    };
-    store
-        .reconcile_local(server, "p", &[store::LocalOp::Upsert(upsert)], now)
-        .expect("reconcile");
-    let row = store
-        .local_changes_by_change_id(server, "I7")
-        .expect("rows")
-        .remove(0);
-    let version = store
-        .local_patch_sets(server, row.id)
-        .expect("versions")
-        .remove(0);
+    let version = crate::testing::local_version(store, Some(CHANGE), "I7", "localsha");
     let on = PatchSetRef {
         number: version.number,
         sha: version.sha.clone(),
@@ -1199,4 +1196,407 @@ fn local_drafts_neither_block_nor_join_a_reply_to_gerrit(cx: &mut TestAppContext
         .map(|d| (d.message.clone(), d.is_local()))
         .collect();
     assert_eq!(left, [("on my local version".to_owned(), true)]);
+}
+
+// ---- local reviews ----
+
+/// A local change with one version (`local 1`, commit `l1`) in the store.
+fn seed_local_change(store: &mut Store) {
+    crate::testing::local_version(store, None, "I1", "l1");
+}
+
+/// The local review of the version `sha` (of change `change_id`), the way
+/// the change page asks for it, with the project's mode `strategy`.
+fn local_request(
+    session: &Session,
+    store: &Mutex<Store>,
+    change_id: &str,
+    sha: &str,
+    strategy: model::LocalApproval,
+) -> ReplyRequest {
+    let syncer = session.syncer();
+    let row = store
+        .lock()
+        .expect("store")
+        .local_changes_by_change_id(setup().server, change_id)
+        .expect("rows")
+        .remove(0);
+    let number = row.gerrit_number.unwrap_or(row.number);
+    let detail = crate::change_detail::cached(syncer, number)
+        .expect("store")
+        .expect("a detail")
+        .detail;
+    let target = detail
+        .revisions
+        .iter()
+        .find(|r| r.sha.as_str() == sha)
+        .map(|r| r.number);
+    ReplyRequest {
+        detail,
+        target,
+        edit: None,
+        strategy,
+    }
+}
+
+/// A pending review on `local 1` of the local change, as Save makes it.
+fn seed_pending_review(store: &mut Store, message: &str) {
+    let server = setup().server;
+    let row = store
+        .local_changes_by_change_id(server, "I1")
+        .expect("rows")
+        .remove(0);
+    let version = store
+        .local_patch_sets(server, row.id)
+        .expect("versions")
+        .remove(0);
+    store
+        .create_pending_review(
+            server,
+            &store::NewPendingReview {
+                patch_set: version.number,
+                labels: [("Code-Review".to_owned(), 1)].into(),
+                strategy: model::LocalApproval::Exact,
+                message: message.into(),
+                unresolved: true,
+                created: jiff::Timestamp::now(),
+                replaces_draft: None,
+            },
+        )
+        .expect("review");
+}
+
+#[gpui_kit::test]
+fn new_review_instead_is_on_the_keyboard_while_a_review_is_edited(cx: &mut TestAppContext) {
+    let f = local_dialog(cx, |store| seed_pending_review(store, "Saved before"));
+    cx.update(|cx| {
+        let d = f.dialog.read(cx);
+        assert!(d.editing_for_test().is_some());
+        assert_eq!(d.text_for_test(cx), "Saved before");
+        // The message asked for something to be done.
+        assert!(!d.resolved_for_test());
+    });
+    // Tab from the message: Resolved, the vote, then the chip.
+    press(cx, &f, &["tab", "tab", "tab"]);
+    let fresh = cx.update(|cx| f.dialog.read(cx).fresh_focus_for_test());
+    assert!(focused(cx, &f, fresh));
+    press(cx, &f, &["space"]);
+    cx.update(|cx| {
+        let d = f.dialog.read(cx);
+        assert_eq!(d.editing_for_test(), None);
+        assert_eq!(d.text_for_test(cx), "");
+    });
+}
+
+fn local_dialog(cx: &mut TestAppContext, prepare: impl FnOnce(&mut Store)) -> Fx {
+    dialog_on(
+        cx,
+        |store| {
+            seed_local_change(store);
+            prepare(store);
+        },
+        |s, st| local_request(s, st, "I1", "l1", model::LocalApproval::ExactOrManual),
+        |_| {},
+    )
+}
+
+fn local_number(f: &Fx) -> ChangeNumber {
+    f.store
+        .lock()
+        .expect("store")
+        .local_changes_by_change_id(setup().server, "I1")
+        .expect("rows")[0]
+        .number
+}
+
+fn reviews_of(f: &Fx, change: ChangeNumber) -> Vec<model::PendingReview> {
+    f.session.syncer().pending_reviews(change).expect("reviews")
+}
+
+/// Runs `f` on a dialog that is not the window's root (one reopened with
+/// [`reopen`]): keys do not reach it, so the tests call it directly.
+fn on_dialog(
+    cx: &mut TestAppContext,
+    f: &Fx,
+    dialog: &Entity<ReplyDialog>,
+    act: impl FnOnce(&mut ReplyDialog, &mut gpui_kit::Window, &mut gpui_kit::Context<ReplyDialog>),
+) {
+    cx.update_window(f.window, |_, window, cx| {
+        dialog.update(cx, |d, cx| act(d, window, cx))
+    })
+    .expect("window");
+    cx.run_until_parked();
+}
+
+/// Reopens the dialog on the same store, like `a` again on the page.
+fn reopen(cx: &mut TestAppContext, f: &Fx, request: ReplyRequest) -> Entity<ReplyDialog> {
+    let (session, outbox) = (f.session.clone(), f.outbox.clone());
+    let dialog = cx
+        .update_window(f.window, |_, window, cx| {
+            cx.new(|cx| ReplyDialog::open(session, outbox, request, window, cx))
+        })
+        .expect("window");
+    cx.run_until_parked();
+    dialog
+}
+
+const NOTE: &str = "Saved locally; sent automatically when local 1 is on Gerrit";
+
+#[gpui_kit::test]
+fn a_local_review_is_saved_as_a_pending_review_with_the_borrowed_labels(cx: &mut TestAppContext) {
+    let f = local_dialog(cx, |_| {});
+    let number = local_number(&f);
+    cx.update(|cx| {
+        let d = f.dialog.read(cx);
+        assert!(d.is_local_for_test());
+        assert_eq!(
+            d.texts_for_test(),
+            (
+                "Local review".to_owned(),
+                Some(NOTE.to_owned()),
+                Some("An approval is only sent on this exact commit"),
+            )
+        );
+        // Nothing borrowed from a cached change: Code-Review -2..+2. And no
+        // attention set: a local review moves no one.
+        let rows = d.votes_for_test();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Code-Review");
+        assert!(d.people_for_test().is_empty());
+        assert!(!d.can_send_for_test(cx), "nothing to save yet");
+    });
+    let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
+    visual.run_until_parked();
+    assert!(
+        visual
+            .debug_bounds("reply-note: Saved locally; sent automatically when local 1 is on Gerrit")
+            .is_some()
+    );
+    assert!(
+        visual
+            .debug_bounds("reply-hint: An approval is only sent on this exact commit")
+            .is_some()
+    );
+    type_text(cx, &f, "Looks good");
+    pick_vote(cx, &f, 0, 4);
+    press(cx, &f, &[SEND]);
+    assert_eq!(events(&f), [format!("saved: {NOTE}")]);
+    let reviews = reviews_of(&f, number);
+    assert_eq!(reviews.len(), 1);
+    let r = &reviews[0];
+    assert_eq!(r.labels, [("Code-Review".to_owned(), 2)].into());
+    assert_eq!(r.message.as_deref(), Some("Looks good"));
+    assert_eq!(r.strategy, model::LocalApproval::ExactOrManual);
+    assert_eq!(r.given_on_sha.as_str(), "l1");
+    assert!(!r.unresolved);
+    // The text became the review's message: no draft is left over.
+    assert!(
+        f.session
+            .syncer()
+            .cached_comments(number)
+            .expect("cache")
+            .drafts
+            .is_empty()
+    );
+    assert!(f.http.requested().is_empty(), "{:?}", f.http.requested());
+
+    // `a` again edits it; "New review instead" makes a second one with a
+    // message of its own (B8).
+    let request = local_request(
+        &f.session,
+        &f.store,
+        "I1",
+        "l1",
+        model::LocalApproval::Follow,
+    );
+    let again = reopen(cx, &f, request);
+    cx.update(|cx| {
+        let d = again.read(cx);
+        assert_eq!(d.editing_for_test(), Some(r.id));
+        assert_eq!(d.texts_for_test().0, "Edit local review");
+        assert_eq!(d.text_for_test(cx), "Looks good");
+        assert_eq!(d.votes_for_test()[0].selected, 2);
+    });
+    on_dialog(cx, &f, &again, |d, window, cx| d.start_fresh(window, cx));
+    cx.update(|cx| {
+        let d = again.read(cx);
+        assert_eq!(d.editing_for_test(), None);
+        assert_eq!(d.texts_for_test().0, "Local review");
+        assert_eq!(d.text_for_test(cx), "");
+        assert_eq!(d.votes_for_test()[0].selected, 0);
+    });
+    on_dialog(cx, &f, &again, |d, window, cx| {
+        d.set_text_for_test("One more thing", window, cx);
+        d.send(window, cx)
+    });
+    let reviews = reviews_of(&f, number);
+    assert_eq!(reviews.len(), 2);
+    assert_eq!(reviews[0].message.as_deref(), Some("Looks good"));
+    assert_eq!(reviews[1].message.as_deref(), Some("One more thing"));
+    // No vote changed: the second review carries none, and takes the
+    // project's mode of the moment.
+    assert!(reviews[1].labels.is_empty());
+    assert_eq!(reviews[1].strategy, model::LocalApproval::Follow);
+    assert!(f.http.requested().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_pending_review_is_edited_in_place_and_escape_drops_the_changes(cx: &mut TestAppContext) {
+    let f = local_dialog(cx, |_| {});
+    let number = local_number(&f);
+    type_text(cx, &f, "First thoughts");
+    pick_vote(cx, &f, 0, 3);
+    press(cx, &f, &[SEND]);
+    let id = reviews_of(&f, number)[0].id;
+
+    // Escape while editing leaves the review as it was, and writes no draft.
+    let request = local_request(
+        &f.session,
+        &f.store,
+        "I1",
+        "l1",
+        model::LocalApproval::Exact,
+    );
+    let edit = reopen(cx, &f, request.clone());
+    on_dialog(cx, &f, &edit, |d, window, cx| {
+        d.set_text_for_test("First thoughts and more", window, cx);
+        d.close(cx)
+    });
+    assert_eq!(
+        reviews_of(&f, number)[0].message.as_deref(),
+        Some("First thoughts")
+    );
+    assert!(cx.update(|cx| edit.read(cx).editing_for_test()) == Some(id));
+    let drafts = f.session.syncer().cached_comments(number).expect("cache");
+    assert!(drafts.drafts.is_empty());
+
+    // Saving replaces votes and message; it stays one review.
+    let edit = reopen(cx, &f, request);
+    on_dialog(cx, &f, &edit, |d, window, cx| {
+        d.set_text_for_test("Second thoughts", window, cx);
+        d.select_vote(0, 4, cx);
+        d.send(window, cx)
+    });
+    let reviews = reviews_of(&f, number);
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].id, id);
+    assert_eq!(reviews[0].message.as_deref(), Some("Second thoughts"));
+    assert_eq!(reviews[0].labels, [("Code-Review".to_owned(), 2)].into());
+    // The new vote takes the project's mode now.
+    assert_eq!(reviews[0].strategy, model::LocalApproval::Exact);
+    assert!(f.http.requested().is_empty());
+}
+
+#[gpui_kit::test]
+fn the_text_of_a_closed_local_review_waits_as_a_local_draft(cx: &mut TestAppContext) {
+    let f = local_dialog(cx, |_| {});
+    let number = local_number(&f);
+    type_text(cx, &f, "half a thought");
+    press(cx, &f, &["escape"]);
+    assert_eq!(events(&f), ["close"]);
+    cx.run_until_parked();
+    let drafts = f
+        .session
+        .syncer()
+        .cached_comments(number)
+        .expect("cache")
+        .drafts;
+    assert_eq!(drafts.len(), 1);
+    assert!(drafts[0].is_local() && drafts[0].message == "half a thought");
+    assert!(reviews_of(&f, number).is_empty());
+    // Opened again it is the text, and saving makes it the message.
+    let request = local_request(
+        &f.session,
+        &f.store,
+        "I1",
+        "l1",
+        model::LocalApproval::Exact,
+    );
+    let again = reopen(cx, &f, request);
+    assert_eq!(
+        cx.update(|cx| again.read(cx).text_for_test(cx)),
+        "half a thought"
+    );
+    on_dialog(cx, &f, &again, |d, window, cx| d.send(window, cx));
+    let reviews = reviews_of(&f, number);
+    assert_eq!(reviews[0].message.as_deref(), Some("half a thought"));
+    let left = f.session.syncer().cached_comments(number).expect("cache");
+    assert!(left.drafts.is_empty(), "{:?}", left.drafts);
+    assert!(f.http.requested().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_local_version_of_a_gerrit_change_gets_a_local_review_with_the_strict_hint(
+    cx: &mut TestAppContext,
+) {
+    let f = dialog_on(
+        cx,
+        |store| {
+            let server = setup().server;
+            store
+                .save_change_detail(server, &change(), jiff::Timestamp::now())
+                .expect("detail");
+            crate::testing::local_version(store, Some(CHANGE), "I7", "l7");
+            seed(
+                store,
+                3,
+                draft_input("b.rs", Some(1), "pending ordinary", true),
+                Seed::Pending,
+            );
+        },
+        |s, st| local_request(s, st, "I7", "l7", model::LocalApproval::Follow),
+        |_| {},
+    );
+    cx.update(|cx| {
+        let d = f.dialog.read(cx);
+        // The project follows amended commits, but this is a Gerrit change:
+        // the strict rule applies.
+        assert_eq!(
+            d.texts_for_test().2,
+            Some("An approval is only sent on this exact commit")
+        );
+        // Bob's +1 on Gerrit is where the row starts.
+        assert_eq!(d.votes_for_test()[0].current, 1);
+        assert!(d.people_for_test().is_empty());
+        // The ordinary draft waiting for its upload is no local comment and
+        // holds nothing up.
+        assert!(d.drafts_for_test().is_empty());
+    });
+    pick_vote(cx, &f, 0, 4);
+    press(cx, &f, &[SEND]);
+    assert_eq!(events(&f).len(), 1, "{:?}", events(&f));
+    let reviews = reviews_of(&f, CHANGE);
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].labels, [("Code-Review".to_owned(), 2)].into());
+    assert_eq!(reviews[0].strategy, model::LocalApproval::Follow);
+    assert!(writes(&f).is_empty(), "{:?}", writes(&f));
+}
+
+#[gpui_kit::test]
+fn a_version_already_on_gerrit_takes_no_local_review(cx: &mut TestAppContext) {
+    for (state, words) in [
+        (model::LocalChangeState::Closed, "closed on Gerrit"),
+        (model::LocalChangeState::Consolidated, "on Gerrit by now"),
+    ] {
+        let f = local_dialog(cx, |_| {});
+        // The change was found on Gerrit while the dialog was open.
+        {
+            let mut store = f.store.lock().expect("store");
+            let row = store
+                .local_changes_by_change_id(setup().server, "I1")
+                .expect("rows")
+                .remove(0);
+            store
+                .set_local_change_state(setup().server, row.id, state)
+                .expect("state");
+        }
+        type_text(cx, &f, "late");
+        press(cx, &f, &[SEND]);
+        let error = cx
+            .update(|cx| f.dialog.read(cx).error_for_test().map(str::to_owned))
+            .expect("an error");
+        assert!(error.contains(words), "{error}");
+        assert!(events(&f).is_empty());
+        assert!(f.http.requested().is_empty());
+    }
 }

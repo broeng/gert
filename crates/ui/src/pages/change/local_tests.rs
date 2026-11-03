@@ -384,10 +384,11 @@ fn a_local_change_shows_its_header_files_and_message_without_the_network(cx: &mu
     visual.run_until_parked();
     assert!(visual.debug_bounds("local-note-checking").is_some());
 
-    // Neither a reply nor the action menu (both would go to Gerrit), nor
-    // reviewed marks.
+    // A reply is a local review (the shell opens it); neither the action
+    // menu (it would go to Gerrit) nor reviewed marks.
     f.press(cx, "a");
-    assert_eq!(f.hint(cx).as_deref(), Some(crate::reply::LOCAL_LATER));
+    assert_eq!(f.events.lock().expect("log").clone(), ["reply"]);
+    f.events.lock().expect("log").clear();
     f.press(cx, "m");
     assert_eq!(f.hint(cx).as_deref(), Some(crate::action_menu::LOCAL));
     f.press(cx, "r");
@@ -490,13 +491,13 @@ fn a_gerrit_change_lists_its_local_version_and_shows_its_files_from_the_checkout
     // The local version as the target: its files come from the checkout.
     let local = f.local_patch_set(cx, 1);
     f.pick(cx, |s, d| s.set_target(d, local));
-    // A vote or reply now would land on PS 3, which is not what is shown.
+    // A vote now would land on PS 3, which is not what is shown; a reply
+    // is a local review of the version.
     assert_eq!(quick(cx), 0);
     f.press(cx, "shift-v");
-    assert_eq!(f.hint(cx).as_deref(), Some(crate::reply::LOCAL_LATER));
+    assert!(f.hint(cx).is_some_and(|h| h.contains("later")));
     f.press(cx, "a");
-    assert_eq!(f.hint(cx).as_deref(), Some(crate::reply::LOCAL_LATER));
-    assert!(!f.events.lock().expect("log").contains(&"reply".to_owned()));
+    assert!(f.events.lock().expect("log").contains(&"reply".to_owned()));
     cx.update(|cx| {
         let p = f.page.read(cx);
         assert_eq!(p.selection_for_test(), (None, Some(local)));

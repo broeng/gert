@@ -79,6 +79,49 @@ pub fn detail(number: u64, n: u32, current: u32) -> ChangeDetail {
     }
 }
 
+/// One local version (commit `sha`, seen at 10:00 on 2024-06-15) of the
+/// change with `change_id` in project `p` of the store's first server: a
+/// local patch set of Gerrit change `gerrit`, or with `None` a local change
+/// in the `local` state. Written the way a reconcile would.
+pub fn local_version(
+    store: &mut store::Store,
+    gerrit: Option<ChangeNumber>,
+    change_id: &str,
+    sha: &str,
+) -> model::LocalPatchSet {
+    let server = model::ServerId(1);
+    let now: model::Timestamp = "2024-06-15T10:00:00Z".parse().expect("timestamp");
+    let upsert = store::LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: change_id.into(),
+        gerrit_number: gerrit,
+        subject: "local".into(),
+        author_name: "Bob".into(),
+        author_email: "bob@example.com".into(),
+        updated: now,
+        state: Some(model::LocalChangeState::Local),
+        patch_sets: vec![store::NewLocalPatchSet {
+            sha: sha.into(),
+            parent_sha: None,
+            seen_at: now,
+        }],
+    };
+    store
+        .reconcile_local(server, "p", &[store::LocalOp::Upsert(upsert)], now)
+        .expect("reconcile");
+    let row = store
+        .local_changes_by_change_id(server, change_id)
+        .expect("rows")
+        .remove(0);
+    store
+        .local_patch_sets(server, row.id)
+        .expect("versions")
+        .into_iter()
+        .find(|v| v.sha.as_str() == sha)
+        .expect("the version")
+}
+
 pub fn file(path: &str, status: FileStatus) -> FileEntry {
     FileEntry {
         path: path.into(),
