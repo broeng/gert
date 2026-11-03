@@ -37,6 +37,8 @@ pub fn unavailable(session: &Session) -> Option<&'static str> {
 pub struct Answer {
     /// The server answered 401: back to the login flow.
     pub unauthorized: bool,
+    /// Why the request failed otherwise.
+    pub error: Option<String>,
     pub settled: Option<sync::MarkSettled>,
 }
 
@@ -51,8 +53,14 @@ pub async fn send(
     let sent = syncer
         .set_reviewed(change, &revision, &path, reviewed)
         .await;
+    let (unauthorized, error) = match &sent.result {
+        Ok(()) => (false, None),
+        Err(e) if is_unauthorized(e) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
     Answer {
-        unauthorized: sent.result.as_ref().is_err_and(is_unauthorized),
+        unauthorized,
+        error,
         settled: sent.settled,
     }
 }

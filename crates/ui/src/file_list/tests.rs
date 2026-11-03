@@ -432,7 +432,7 @@ fn a_failed_first_toggle_does_not_undo_the_third(cx: &mut TestAppContext) {
         .iter()
         .filter(|e| e.starts_with("failed: "))
         .count();
-    assert_eq!(failed, 1);
+    assert_eq!(failed, 1, "{:?}", s.events());
 }
 
 #[gpui_kit::test]

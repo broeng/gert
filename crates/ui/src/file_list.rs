@@ -19,7 +19,7 @@
 //! changed (the change page reads the list in many places without a `cx`).
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -178,6 +178,18 @@ pub struct FileList {
     /// Making the list in the checkout.
     listing_task: Option<Task<()>>,
     fetch_task: Option<Task<()>>,
+    /// This list's mark requests not answered yet, per pair and path. The
+    /// executor may run them one after another, or start them in another
+    /// order than they were asked, so the syncer can settle an earlier one
+    /// on its own: only the last answer decides what the mark shows.
+    unanswered: HashMap<(FilesKey, String), Unanswered>,
+}
+
+#[derive(Default)]
+struct Unanswered {
+    count: u32,
+    /// Why the last of them that failed did.
+    failure: Option<String>,
 }
 
 impl EventEmitter<FileListEvent> for FileList {}
@@ -195,6 +207,7 @@ impl FileList {
             local_task: None,
             listing_task: None,
             fetch_task: None,
+            unanswered: HashMap::new(),
         }
     }
 
@@ -476,6 +489,10 @@ impl FileList {
         };
         let reviewed = !self.files.is_reviewed(path);
         set_mark(Arc::make_mut(&mut self.files.reviewed), path, reviewed);
+        self.unanswered
+            .entry((key.clone(), path.to_owned()))
+            .or_default()
+            .count += 1;
         cx.emit(FileListEvent::MarksChanged);
         let syncer = self.session.syncer().clone();
         let (change, sha, path) = (key.change, key.target.sha.clone(), path.to_owned());
@@ -491,8 +508,10 @@ impl FileList {
         Ok(())
     }
 
-    /// The answer to a mark request: a 401 goes to the login flow, and once
-    /// the mark settled it shows that, with a note if it went back.
+    /// The answer to a mark request: a 401 goes to the login flow. The
+    /// answer to the last of this list's requests for the mark shows what
+    /// it settled to, with a note when that is not what the user last
+    /// asked for.
     fn answered(
         &mut self,
         key: &FilesKey,
@@ -500,15 +519,28 @@ impl FileList {
         answer: reviewed::Answer,
         cx: &mut Context<Self>,
     ) {
-        let login = answer.unauthorized;
-        if login {
+        if answer.unauthorized {
             cx.emit(FileListEvent::Unauthorized);
         }
+        let slot = (key.clone(), path.to_owned());
+        let open = self.unanswered.entry(slot.clone()).or_default();
+        open.count = open.count.saturating_sub(1);
+        if answer.error.is_some() {
+            open.failure = answer.error;
+        }
+        if open.count > 0 {
+            return;
+        }
+        let failure = self.unanswered.remove(&slot).and_then(|o| o.failure);
         let Some(settled) = answer.settled else {
             return;
         };
-        if self.files.key.as_ref() != Some(key) || self.files.is_reviewed(path) == settled.reviewed
-        {
+        if self.files.key.as_ref() != Some(key) {
+            return;
+        }
+        // What the mark shows is what the user last asked for.
+        let asked = self.files.is_reviewed(path);
+        if asked == settled.reviewed {
             return;
         }
         set_mark(
@@ -517,8 +549,9 @@ impl FileList {
             settled.reviewed,
         );
         cx.emit(FileListEvent::MarksChanged);
-        if let Some((asked, e)) = settled.refused
-            && !login
+        let why = settled.refused.map(|(_, e)| e).or(failure);
+        if let Some(e) = why
+            && !answer.unauthorized
         {
             let note = reviewed::failure_note(path, asked, &e);
             cx.emit(FileListEvent::ReviewedFailed(note));
