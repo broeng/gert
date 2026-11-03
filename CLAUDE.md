@@ -344,13 +344,20 @@ dashboard sections, and packaging beyond cargo and Nix.
 - `sync`: tests over the fake client and an in-memory store.
 - `local-git`: tests against temporary repos built with the git CLI (the
   helpers are exported behind its `test-support` feature for `ui`'s tests).
-- `ui`: GPUI's `TestAppContext` for view logic.
+- `ui`: GPUI's `TestAppContext` for view logic. The slowest tests (whole
+  pages and shell flows, temporary git repos) are ignored unless the
+  `slow-tests` feature is on: per-commit runs (`cargo test -p ui`) skip them,
+  and every batch of work ends with
+  `cargo test --workspace --features ui/slow-tests`, which runs them all.
+  Mark a new test that takes more than about 0.3 s with
+  `#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]`.
 - **Opt-in, ignored by default:** `tests/dev_gerrit.rs` in `gerrit-api`,
   `sync` and `local-git` (which compares its diffs with Gerrit's; see its
   header for the setup), and a test in `app`, run against the dev Gerrit
   (`GERT_TEST_GERRIT=http://127.0.0.1:8080 cargo test -- --ignored`, refusing
   anything but localhost); `gerrit-api/tests/live.rs` reads a public server
-  with `GERT_LIVE_TESTS=1`.
+  with `GERT_LIVE_TESTS=1`. Run these per crate and test target: a
+  workspace-wide `--ignored` also runs `ui`'s slow tests.
 
 ## Conventions
 
@@ -369,7 +376,8 @@ dashboard sections, and packaging beyond cargo and Nix.
 cargo build                      # build everything
 cargo run -p gert                # run the client
 cargo run -p ui --example review # the whole UI against a fake server
-cargo test --workspace           # all tests (no network)
+cargo test -p ui                 # per commit: ui without the slow tests
+cargo test --workspace --features ui/slow-tests  # end of a batch: all tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo xtask gen-fixtures         # regenerate tests/fixtures from the spec
