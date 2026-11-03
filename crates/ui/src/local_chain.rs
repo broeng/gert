@@ -9,10 +9,14 @@
 //! the first Gerrit patch set: the chain below it is that change's own,
 //! which its page shows from Gerrit. Up, it takes what was built on the
 //! commit on the local branches that contain it.
+//!
+//! The chain of a Gerrit patch set is Gerrit's, but the checkout may have
+//! local work built on it: [`read_stack`] reads that, for the change page
+//! to put above the patch set in Gerrit's chain.
 
 use gpui_kit::{AppContext as _, AsyncApp, Entity};
 use local_git::{Local, Series};
-use model::{CommitInfo, RevisionId};
+use model::{ChangeNumber, CommitInfo, RevisionId};
 use sync::{ChainCommit, Syncer};
 
 use crate::checkouts::{CheckoutState, Checkouts};
@@ -91,6 +95,78 @@ pub async fn read(
             more_above: more_descendants,
             more_below,
         })
+    })
+    .await
+}
+
+/// The local commits the checkout built on a Gerrit patch set, for the
+/// relation chain Gerrit gives of it (see [`read_stack`]).
+#[derive(Clone, Debug, Default)]
+pub struct Stack {
+    /// The local changes and local versions of Gerrit changes among the
+    /// commits built on the patch set, newest first.
+    pub entries: Vec<ChainEntry>,
+    /// The Gerrit changes whose patch sets are among those commits: the
+    /// local ones go above them.
+    pub on_gerrit: Vec<ChangeNumber>,
+    /// More commits were built on the patch set than were read (the ones
+    /// nearest the branch tips are left out).
+    pub more: bool,
+}
+
+/// What the checkout of `project` built on Gerrit patch set `sha` on its
+/// local branches, as far as it is local work: local changes and local
+/// versions of Gerrit changes ([`Stack`]). `None` when the project does
+/// not have the `local_changes` option, there is no open checkout, it does
+/// not have the commit, or git or the store failed (logged). Git and
+/// SQLite run on the background executor; no network.
+pub async fn read_stack(
+    checkouts: Option<Entity<Checkouts>>,
+    project: String,
+    sha: RevisionId,
+    syncer: Syncer,
+    cx: &mut AsyncApp,
+) -> Option<Stack> {
+    let checkout = Checkouts::opened(&checkouts?, &project, cx).await?;
+    if !checkout.local_changes {
+        return None;
+    }
+    let CheckoutState::Open(repo) = checkout.state else {
+        return None;
+    };
+    cx.background_spawn(async move {
+        let series = match repo.series(&sha, LIMIT) {
+            Ok(Local::Available(s)) => s,
+            Ok(Local::NotLocal(why)) => {
+                log::debug!("no local commits on {sha}: {why}");
+                return None;
+            }
+            Err(e) => {
+                log::warn!("reading the local commits on {sha}: {e}");
+                return None;
+            }
+        };
+        let kinds = match syncer.classify_chain(&project, &series.descendants) {
+            Ok(k) => k,
+            Err(e) => {
+                log::warn!("naming the local commits on {sha}: {e}");
+                return None;
+            }
+        };
+        let mut stack = Stack {
+            more: series.more_descendants,
+            ..Stack::default()
+        };
+        for (commit, kind) in series.descendants.into_iter().zip(kinds) {
+            match kind {
+                ChainCommit::Local { .. } | ChainCommit::LocalVersion { .. } => {
+                    stack.entries.push(ChainEntry { commit, kind })
+                }
+                ChainCommit::Gerrit { change, .. } => stack.on_gerrit.push(change),
+                ChainCommit::Unknown => {}
+            }
+        }
+        Some(stack)
     })
     .await
 }

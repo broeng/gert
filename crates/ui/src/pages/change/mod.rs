@@ -206,6 +206,18 @@ fn row_change(open: Option<ChainOpen>) -> Option<ChangeNumber> {
     }
 }
 
+/// The row that stands for commits a chain read from the checkout leaves
+/// out.
+fn more_row() -> ChainRow {
+    ChainRow {
+        label: "\u{2026}".to_owned(),
+        subject: "more commits not shown".to_owned(),
+        this: false,
+        open: None,
+        related: None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Queued,
@@ -300,6 +312,10 @@ pub struct ChangePage {
     task: Option<Task<()>>,
     files_task: Option<Task<()>>,
     related_task: Option<Task<()>>,
+    /// The local commits the checkout built on the Gerrit patch set on
+    /// show, for its relation chain, and the patch set's commit.
+    local_stack: Option<(RevisionId, local_chain::Stack)>,
+    stack_task: Option<Task<()>>,
     summaries_task: Option<Task<()>>,
     /// A quick vote is on its way.
     voting: Option<Task<()>>,
@@ -413,6 +429,8 @@ impl ChangePage {
             task: None,
             files_task: None,
             related_task: None,
+            local_stack: None,
+            stack_task: None,
             summaries_task: None,
             voting: None,
             comments: comments.clone(),
@@ -876,6 +894,10 @@ impl ChangePage {
         {
             self.related = None;
         }
+        if self.local_stack.as_ref().map(|s| &s.0) != sha.as_ref() {
+            self.local_stack = None;
+            self.stack_task = None;
+        }
         self.read_threads(cx);
         // Gerrit knows no relation chain of a local change or version: the
         // checkout does.
@@ -887,7 +909,8 @@ impl ChangePage {
             if self.number.is_local() || target_local {
                 self.load_git_chain(sha, cx);
             } else {
-                self.load_related(sha, network, cx);
+                self.load_related(sha.clone(), network, cx);
+                self.load_stack(sha, cx);
             }
         }
     }
@@ -1136,13 +1159,14 @@ impl ChangePage {
         if current.as_ref() != Some(sha) {
             return;
         }
+        let rows = self.gerrit_chain_rows(sha, &changes);
         // Rows that come and go move the current one; a refresh of the
         // same rows leaves the chain where the user scrolled it.
         let moved = self.related.as_ref().is_none_or(|r| {
-            !r.changes
+            !r.rows
                 .iter()
-                .map(|c| c.number)
-                .eq(changes.iter().map(|c| c.number))
+                .map(|row| (&row.label, row.this))
+                .eq(rows.iter().map(|row| (&row.label, row.this)))
         });
         let summaries = match self.related.take() {
             Some(r) if &r.sha == sha && !r.adopted && !r.from_git => r.summaries,
@@ -1166,16 +1190,6 @@ impl ChangePage {
             .filter(|c| matches!(c.status, Some(ChangeStatus::New)))
             .map(|c| c.number)
             .collect();
-        let rows = changes
-            .iter()
-            .map(|c| ChainRow {
-                label: change_detail::change_label(c.number),
-                subject: view::related_subject(c),
-                this: c.number == self.number,
-                open: (c.number != self.number).then_some(ChainOpen::Change(c.number)),
-                related: Some(c.clone()),
-            })
-            .collect();
         self.related = Some(Related {
             sha: sha.clone(),
             changes,
@@ -1192,6 +1206,144 @@ impl ChangePage {
         if self.session.can_sync() {
             self.load_related_summaries(sha.clone(), open, cx);
         }
+    }
+
+    /// The rows of Gerrit's relation chain `changes` of patch set `sha`,
+    /// with the local commits the checkout built on it (once read, see
+    /// [`ChangePage::load_stack`]) above it, or above the highest change
+    /// of the chain that they are built on. Without a chain from Gerrit
+    /// but with local commits, the chain is them and this change.
+    fn gerrit_chain_rows(&self, sha: &RevisionId, changes: &[RelatedChange]) -> Vec<ChainRow> {
+        let mut rows: Vec<ChainRow> = changes
+            .iter()
+            .map(|c| ChainRow {
+                label: change_detail::change_label(c.number),
+                subject: view::related_subject(c),
+                this: c.number == self.number,
+                open: (c.number != self.number).then_some(ChainOpen::Change(c.number)),
+                related: Some(c.clone()),
+            })
+            .collect();
+        let Some((_, stack)) = self
+            .local_stack
+            .as_ref()
+            .filter(|(at, s)| at == sha && !s.entries.is_empty())
+        else {
+            return rows;
+        };
+        if rows.is_empty() {
+            rows.push(ChainRow {
+                label: change_detail::change_label(self.number),
+                subject: self
+                    .detail
+                    .as_ref()
+                    .map(|d| d.summary.subject.clone())
+                    .unwrap_or_default(),
+                this: true,
+                open: None,
+                related: None,
+            });
+        }
+        let at = rows
+            .iter()
+            .position(|r| {
+                r.this
+                    || r.related
+                        .as_ref()
+                        .is_some_and(|c| stack.on_gerrit.contains(&c.number))
+            })
+            .unwrap_or(0);
+        let mut ignored = HashMap::new();
+        let local: Vec<ChainRow> = stack
+            .more
+            .then(more_row)
+            .into_iter()
+            .chain(
+                stack
+                    .entries
+                    .iter()
+                    .map(|e| self.git_chain_row(sha, e, &mut ignored)),
+            )
+            .collect();
+        rows.splice(at..at, local);
+        rows
+    }
+
+    /// Reads the local commits the checkout built on Gerrit patch set
+    /// `sha` (see [`local_chain::read_stack`]) and puts them in its
+    /// relation chain; until they arrive, the ones read before stay. No
+    /// network; nothing when the project does not have the
+    /// `local_changes` option or no open checkout.
+    fn load_stack(&mut self, sha: RevisionId, cx: &mut Context<Self>) {
+        let Some(project) = self.detail.as_ref().map(|d| d.summary.project.clone()) else {
+            return;
+        };
+        let (syncer, checkouts) = (self.session.syncer().clone(), self.checkouts.clone());
+        self.stack_task = Some(cx.spawn(async move |this, cx| {
+            let read = local_chain::read_stack(checkouts, project, sha.clone(), syncer, cx).await;
+            if let Some(stack) = read {
+                this.update(cx, |this, cx| this.apply_stack(sha, stack, cx))
+                    .ok();
+            }
+        }));
+    }
+
+    fn apply_stack(&mut self, sha: RevisionId, stack: local_chain::Stack, cx: &mut Context<Self>) {
+        let current = self
+            .detail
+            .as_ref()
+            .and_then(|d| self.sel.target_ref(d))
+            .map(|t| t.sha);
+        if current.as_ref() != Some(&sha) {
+            return;
+        }
+        // Gerrit's chain on show, if any, is drawn again without the local
+        // commits that went.
+        let gerrit = self
+            .related
+            .as_ref()
+            .is_some_and(|r| r.sha == sha && !r.from_git);
+        let empty = stack.entries.is_empty();
+        self.local_stack = Some((sha.clone(), stack));
+        // A chain handed over by the previous page stays until Gerrit's own
+        // list arrives, which takes the stack in.
+        let adopted = self.related.as_ref().is_some_and(|r| r.adopted);
+        if !gerrit && (empty || adopted) {
+            return;
+        }
+        let old = self.related.take();
+        let old_rows: Vec<(String, bool)> = old
+            .as_ref()
+            .map(|r| {
+                r.rows
+                    .iter()
+                    .map(|row| (row.label.clone(), row.this))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (changes, summaries) = match old {
+            Some(r) if r.sha == sha && !r.from_git => (r.changes, r.summaries),
+            _ => (Vec::new(), HashMap::new()),
+        };
+        let rows = self.gerrit_chain_rows(&sha, &changes);
+        // The same rows again stay where the user scrolled them.
+        let moved = !old_rows
+            .iter()
+            .map(|(label, this)| (label, *this))
+            .eq(rows.iter().map(|row| (&row.label, row.this)));
+        self.related = Some(Related {
+            sha,
+            changes,
+            rows,
+            from_git: false,
+            summaries,
+            adopted: false,
+        });
+        if moved {
+            self.reveal_current_related();
+        }
+        self.rebuild_blocks();
+        cx.notify();
     }
 
     /// Reads the relation chain of the commit `sha` from the checkout and
@@ -1226,97 +1378,17 @@ impl ChangePage {
             return;
         }
         let mut summaries = HashMap::new();
-        let more = || ChainRow {
-            label: "\u{2026}".to_owned(),
-            subject: "more commits not shown".to_owned(),
-            this: false,
-            open: None,
-            related: None,
-        };
         let rows: Vec<ChainRow> = chain
             .entries
             .iter()
-            .map(|e| {
-                let this = e.commit.sha == *sha;
-                let (open, related) = match &e.kind {
-                    // An older version (something may be built on it) at
-                    // that version; the newest is what the page shows anyway.
-                    ChainCommit::Local {
-                        change,
-                        patch_set,
-                        newest,
-                        ..
-                    } => {
-                        let open = if *newest {
-                            ChainOpen::Change(*change)
-                        } else {
-                            ChainOpen::At(*change, *patch_set)
-                        };
-                        (Some(open), None)
-                    }
-                    ChainCommit::LocalVersion {
-                        change, patch_set, ..
-                    } => (Some(ChainOpen::At(*change, *patch_set)), None),
-                    ChainCommit::Gerrit {
-                        change,
-                        patch_set,
-                        current,
-                        summary,
-                    } => {
-                        let open = if *current == Some(*patch_set) {
-                            ChainOpen::Change(*change)
-                        } else {
-                            ChainOpen::At(*change, *patch_set)
-                        };
-                        let related = summary.as_deref().map(|s| {
-                            summaries.insert(*change, s.clone());
-                            RelatedChange {
-                                project: s.project.clone(),
-                                change_id: s.change_id.clone(),
-                                number: *change,
-                                patch_set: *patch_set,
-                                current_patch_set: None,
-                                status: Some(s.status.clone()),
-                                submittable: s.submittable,
-                                work_in_progress: s.work_in_progress,
-                                commit: None,
-                            }
-                        });
-                        (Some(open), related)
-                    }
-                    ChainCommit::Unknown => (None, None),
-                };
-                // A version of the change on show is picked on this page.
-                let open = open
-                    .map(|o| match o {
-                        ChainOpen::Change(n) | ChainOpen::At(n, _) if n == self.number => {
-                            match e.kind {
-                                ChainCommit::Local { patch_set, .. }
-                                | ChainCommit::LocalVersion { patch_set, .. }
-                                | ChainCommit::Gerrit { patch_set, .. } => {
-                                    ChainOpen::Here(patch_set)
-                                }
-                                ChainCommit::Unknown => o,
-                            }
-                        }
-                        o => o,
-                    })
-                    .filter(|_| !this);
-                ChainRow {
-                    label: local_chain::label(e),
-                    subject: e.commit.subject(),
-                    this,
-                    open,
-                    related,
-                }
-            })
+            .map(|e| self.git_chain_row(sha, e, &mut summaries))
             .collect();
         let rows: Vec<ChainRow> = chain
             .more_above
-            .then(more)
+            .then(more_row)
             .into_iter()
             .chain(rows)
-            .chain(chain.more_below.then(more))
+            .chain(chain.more_below.then(more_row))
             .collect();
         // As for Gerrit's chain: the same rows again stay where the user
         // scrolled them.
@@ -1339,6 +1411,86 @@ impl ChangePage {
         }
         self.rebuild_blocks();
         cx.notify();
+    }
+
+    /// The row of a commit of a chain read from the checkout, `sha` being
+    /// the commit on show: where a click goes (a version of this change is
+    /// picked on this page), and for a Gerrit patch set the status pills
+    /// from its cached summary, which also goes into `summaries`.
+    fn git_chain_row(
+        &self,
+        sha: &RevisionId,
+        e: &local_chain::ChainEntry,
+        summaries: &mut HashMap<ChangeNumber, ChangeSummary>,
+    ) -> ChainRow {
+        let this = e.commit.sha == *sha;
+        let (open, related) = match &e.kind {
+            // An older version (something may be built on it) at that
+            // version; the newest is what the page shows anyway.
+            ChainCommit::Local {
+                change,
+                patch_set,
+                newest,
+                ..
+            } => {
+                let open = if *newest {
+                    ChainOpen::Change(*change)
+                } else {
+                    ChainOpen::At(*change, *patch_set)
+                };
+                (Some(open), None)
+            }
+            ChainCommit::LocalVersion {
+                change, patch_set, ..
+            } => (Some(ChainOpen::At(*change, *patch_set)), None),
+            ChainCommit::Gerrit {
+                change,
+                patch_set,
+                current,
+                summary,
+            } => {
+                let open = if *current == Some(*patch_set) {
+                    ChainOpen::Change(*change)
+                } else {
+                    ChainOpen::At(*change, *patch_set)
+                };
+                let related = summary.as_deref().map(|s| {
+                    summaries.insert(*change, s.clone());
+                    RelatedChange {
+                        project: s.project.clone(),
+                        change_id: s.change_id.clone(),
+                        number: *change,
+                        patch_set: *patch_set,
+                        current_patch_set: None,
+                        status: Some(s.status.clone()),
+                        submittable: s.submittable,
+                        work_in_progress: s.work_in_progress,
+                        commit: None,
+                    }
+                });
+                (Some(open), related)
+            }
+            ChainCommit::Unknown => (None, None),
+        };
+        // A version of the change on show is picked on this page.
+        let open = open
+            .map(|o| match o {
+                ChainOpen::Change(n) | ChainOpen::At(n, _) if n == self.number => match e.kind {
+                    ChainCommit::Local { patch_set, .. }
+                    | ChainCommit::LocalVersion { patch_set, .. }
+                    | ChainCommit::Gerrit { patch_set, .. } => ChainOpen::Here(patch_set),
+                    ChainCommit::Unknown => o,
+                },
+                o => o,
+            })
+            .filter(|_| !this);
+        ChainRow {
+            label: local_chain::label(e),
+            subject: e.commit.subject(),
+            this,
+            open,
+            related,
+        }
     }
 
     /// Goes where relation chain row `ix` leads: another change (a new

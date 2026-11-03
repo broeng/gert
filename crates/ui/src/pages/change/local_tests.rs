@@ -1081,6 +1081,189 @@ fn a_long_chain_keeps_the_commits_nearest_and_says_there_are_more(cx: &mut TestA
     assert_eq!(rows[rows.len() - 1].0, "\u{2026}");
 }
 
+/// The relation chain of `f`'s page once it has `rows` rows (git runs on
+/// the background executor), as drawn.
+fn chain_of(cx: &mut TestAppContext, f: &Fixture, rows: usize) -> Vec<(String, String, bool)> {
+    for _ in 0..100 {
+        if cx.update(|cx| f.page.read(cx).chain_for_test()).len() >= rows {
+            break;
+        }
+        cx.executor().allow_parking();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+    cx.update(|cx| f.page.read(cx).chain_for_test())
+}
+
+/// Gerrit change 7, whose patch set 3 is in the checkout on `main` with
+/// two local commits on top: a local change (I1), then a local version
+/// of Gerrit change 9 (I9). Gerrit's chain of PS 3, cached, is 7 on 6.
+struct Stacked {
+    repo: TestRepo,
+    ps3: String,
+    first: String,
+    second: String,
+}
+
+fn stacked() -> Stacked {
+    let repo = TestRepo::new();
+    repo.write("README", b"one\n");
+    repo.commit("Base");
+    repo.write("README", b"two\n");
+    let ps3 = repo.commit(&format!("On Gerrit\n\nChange-Id: {}", id_of_7()));
+    repo.write("a", b"a\n");
+    let first = repo.commit("First local\n\nChange-Id: I1");
+    repo.write("b", b"b\n");
+    let second = repo.commit("Second, a version of 9\n\nChange-Id: I9");
+    Stacked {
+        repo,
+        ps3,
+        first,
+        second,
+    }
+}
+
+impl Stacked {
+    fn store(&self) -> Store {
+        let rows = [
+            row(
+                "I1",
+                None,
+                LocalChangeState::Local,
+                &[&self.first],
+                &self.ps3,
+            ),
+            row(
+                "I9",
+                Some(ChangeNumber(9)),
+                LocalChangeState::Local,
+                &[&self.second],
+                &self.first,
+            ),
+        ];
+        store_with(&rows, |store| {
+            let mut d = detail(7, 3, 3);
+            d.summary.project = "p".into();
+            d.summary.change_id = Some(id_of_7());
+            d.revisions[2].sha = self.ps3.clone().into();
+            d.current_revision = Some(self.ps3.clone().into());
+            store
+                .save_change_detail(SERVER, &d, Timestamp::now())
+                .expect("detail");
+            let mut d9 = detail(9, 1, 1);
+            d9.summary.project = "p".into();
+            d9.summary.change_id = Some("I9".into());
+            store
+                .save_change_detail(SERVER, &d9, Timestamp::now())
+                .expect("detail");
+            let related = |n: u64, ps: u32| model::RelatedChange {
+                project: "p".into(),
+                change_id: None,
+                number: ChangeNumber(n),
+                patch_set: PatchSetNumber(ps),
+                current_patch_set: Some(PatchSetNumber(ps)),
+                status: Some(model::ChangeStatus::New),
+                submittable: None,
+                work_in_progress: false,
+                commit: None,
+            };
+            store
+                .save_related(
+                    SERVER,
+                    ChangeNumber(7),
+                    &self.ps3.clone().into(),
+                    &[related(7, 3), related(6, 1)],
+                    Timestamp::now(),
+                )
+                .expect("related");
+        })
+    }
+
+    fn project(&self, local_changes: bool) -> ProjectSettings {
+        ProjectSettings {
+            local_changes,
+            ..ProjectSettings::new("p", self.repo.path().to_string_lossy())
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn local_commits_on_a_gerrit_patch_set_join_its_relation_chain(cx: &mut TestAppContext) {
+    let s = stacked();
+    let store = s.store();
+    let first = store
+        .local_changes_by_change_id(SERVER, "I1")
+        .expect("rows")
+        .remove(0)
+        .number;
+    let version_of_9 = store
+        .local_patch_sets_by_sha(SERVER, &s.second.clone().into())
+        .expect("versions")[0]
+        .number;
+    let f = page_in(cx, store, ChangeNumber(7), s.project(true), |_| {});
+    let row = |label: &str, subject: &str, this: bool| (label.to_owned(), subject.to_owned(), this);
+    // Above PS 3 in Gerrit's chain, newest first, named as local.
+    let chain = chain_of(cx, &f, 4);
+    assert_eq!(chain.len(), 4, "{chain:?}");
+    assert_eq!(chain[0], row("#9 local 1", "Second, a version of 9", false));
+    assert_eq!(chain[1], row("local", "First local", false));
+    assert!(chain[2].0 == "#7" && chain[2].2, "{chain:?}");
+    assert_eq!(chain[3].0, "#6");
+    let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("chain-row: #9 local 1").is_some());
+
+    // Clicks open each at the right version; Shift-K steps up to the
+    // local change, then to the version of 9; Shift-J back down to 6.
+    f.page.update(cx, |p, cx| p.open_chain_row(0, false, cx));
+    f.page.update(cx, |p, cx| p.open_chain_row(1, false, cx));
+    f.press(cx, "shift-k");
+    f.press(cx, "shift-j");
+    let v9 = format!("{:?}", Some(version_of_9));
+    assert_eq!(
+        *f.events.lock().expect("log"),
+        [
+            format!("change 9 at {v9}"),
+            format!("change {first}"),
+            format!("replace {first}"),
+            "replace 6".to_owned(),
+        ]
+    );
+    let labels: Vec<String> = chain_of(cx, &f, 4).into_iter().map(|r| r.0).collect();
+    assert_no_synthetic(&labels, &[first.0, u64::from(version_of_9.0)]);
+    f.assert_nothing_local_sent(&[&s.first, &s.second]);
+
+    // Without the option the chain is Gerrit's alone.
+    let f = page_in(cx, s.store(), ChangeNumber(7), s.project(false), |_| {});
+    // Give a read the time it would take.
+    chain_of(cx, &f, 3);
+    let labels: Vec<String> = chain_of(cx, &f, 2).into_iter().map(|r| r.0).collect();
+    assert_eq!(labels, ["#7", "#6"]);
+}
+
+#[gpui_kit::test]
+fn local_commits_make_a_chain_of_a_change_gerrit_has_none_for(cx: &mut TestAppContext) {
+    let s = stacked();
+    let mut store = s.store();
+    store
+        .save_related(
+            SERVER,
+            ChangeNumber(7),
+            &s.ps3.clone().into(),
+            &[],
+            Timestamp::now(),
+        )
+        .expect("related");
+    let f = page_in(cx, store, ChangeNumber(7), s.project(true), |_| {});
+    let chain = chain_of(cx, &f, 3);
+    let labels: Vec<&str> = chain.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(labels, ["#9 local 1", "local", "#7"], "{chain:?}");
+    assert!(chain[2].2);
+    f.press(cx, "shift-k");
+    assert_eq!(f.events.lock().expect("log").len(), 1);
+    f.assert_nothing_local_sent(&[&s.first, &s.second]);
+}
+
 /// Reviews on local versions: drafts, the reply dialog's pending reviews,
 /// quick votes and the list of pending reviews.
 mod review;
