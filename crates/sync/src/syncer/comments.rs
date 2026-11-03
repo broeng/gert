@@ -35,10 +35,11 @@
 //! # Reviewed marks
 //!
 //! [`Syncer::set_reviewed`] updates the cached file lists first (the file
-//! list shows the new state at once), then sends the request. If it fails,
-//! for any reason including being offline, the cache is put back and the
-//! error returned: marks are cheap to set again, so there is no queue for
-//! them.
+//! list shows the new state at once), then sends the request. Once no
+//! request for the mark is open, the cache holds what the server has (see
+//! [`super::marks`]): a failure, for any reason including being offline,
+//! puts back the latest mark that worked. Marks are cheap to set again, so
+//! there is no queue for them.
 
 use futures::future::join;
 use gerrit_api::Error as ApiError;
@@ -556,42 +557,66 @@ impl Syncer {
 
     // ---- reviewed marks ----
 
-    /// Marks a file reviewed (or not): updates the cached file lists of the
-    /// patch set first, then asks the server, and puts the cache back if
-    /// the request fails.
+    /// Marks a file reviewed (or not): writes the mark into the cached file
+    /// lists of the patch set at once, then asks the server. Once no request
+    /// for the mark is open (see [`super::marks`]), the cache holds what the
+    /// server has, which the answer says.
     pub async fn set_reviewed(
         &self,
         change: ChangeNumber,
         revision: &RevisionId,
         path: &str,
         reviewed: bool,
-    ) -> Result<(), Error> {
-        self.ensure_on_server(revision)?;
-        let changed =
-            self.store()
-                .set_reviewed_path(self.server, change, revision, path, reviewed)?;
-        match self
+    ) -> MarkSent {
+        let unsent = |e: Error| MarkSent {
+            result: Err(e),
+            settled: None,
+        };
+        if let Err(e) = self.ensure_on_server(revision) {
+            return unsent(e);
+        }
+        let number = {
+            let mut marks = self.marks();
+            let mut store = self.store();
+            let before = match store.reviewed_path(self.server, change, revision, path) {
+                Ok(before) => before.unwrap_or(!reviewed),
+                Err(e) => return unsent(e.into()),
+            };
+            if let Err(e) = store.set_reviewed_path(self.server, change, revision, path, reviewed) {
+                return unsent(e.into());
+            }
+            marks.begin(revision, path, reviewed, before)
+        };
+        let result = self
             .client
             .set_reviewed(change, revision, path, reviewed)
             .await
-        {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                if changed > 0
-                    && let Err(revert) = self.store().set_reviewed_path(
-                        self.server,
-                        change,
-                        revision,
-                        path,
-                        !reviewed,
-                    )
-                {
-                    log::warn!("reverting the reviewed mark of {path}: {revert}");
-                }
-                Err(e.into())
+            .map_err(Error::from);
+        let settled = {
+            let mut marks = self.marks();
+            let answer = result.as_ref().map(|_| ()).map_err(ToString::to_string);
+            let settled = marks.end(revision, path, number, reviewed, answer);
+            if let Some(s) = &settled
+                && let Err(e) =
+                    self.store()
+                        .set_reviewed_path(self.server, change, revision, path, s.reviewed)
+            {
+                log::warn!("settling the reviewed mark of {path}: {e}");
             }
-        }
+            settled
+        };
+        MarkSent { result, settled }
     }
+}
+
+/// The answer to [`Syncer::set_reviewed`].
+#[must_use]
+#[derive(Debug)]
+pub struct MarkSent {
+    /// This request's own answer.
+    pub result: Result<(), Error>,
+    /// What the mark came to, when no request for it is open any more.
+    pub settled: Option<super::MarkSettled>,
 }
 
 #[cfg(test)]

@@ -3,21 +3,15 @@
 //!
 //! The pages flip the mark in memory at once, then send the request on the
 //! background executor with [`send`]. `Syncer::set_reviewed` keeps the cache
-//! in step and puts it back when the request fails; for what the pages
-//! show, `FileList` does (to what the server has, with several requests
-//! for one mark on their way). A 401 goes to the login flow, any other failure (a 403
-//! included, which must not log the user out) becomes a short note.
+//! in step and, once no request for the mark is open, holds what the server
+//! has; `FileList` shows that. A 401 goes to the login flow, any other
+//! failure (a 403 included, which must not log the user out) becomes a
+//! short note.
 
 use model::{ChangeNumber, RevisionId};
 use sync::Syncer;
 
 use crate::session::{Session, is_unauthorized};
-
-pub enum Outcome {
-    Done,
-    Unauthorized,
-    Failed(String),
-}
 
 /// Why `r` does nothing on a local version: the marks are Gerrit's, and
 /// it has no place for them until the version is uploaded.
@@ -38,6 +32,14 @@ pub fn unavailable(session: &Session) -> Option<&'static str> {
     }
 }
 
+/// What a mark request came to: its own answer, and what the mark settled
+/// to once no request for it is open (see `Syncer::set_reviewed`).
+pub struct Answer {
+    /// The server answered 401: back to the login flow.
+    pub unauthorized: bool,
+    pub settled: Option<sync::MarkSettled>,
+}
+
 /// Sets or clears the mark on the server and in the cache.
 pub async fn send(
     syncer: Syncer,
@@ -45,14 +47,13 @@ pub async fn send(
     revision: RevisionId,
     path: String,
     reviewed: bool,
-) -> Outcome {
-    match syncer
+) -> Answer {
+    let sent = syncer
         .set_reviewed(change, &revision, &path, reviewed)
-        .await
-    {
-        Ok(()) => Outcome::Done,
-        Err(e) if is_unauthorized(&e) => Outcome::Unauthorized,
-        Err(e) => Outcome::Failed(e.to_string()),
+        .await;
+    Answer {
+        unauthorized: sent.result.as_ref().is_err_and(is_unauthorized),
+        settled: sent.settled,
     }
 }
 

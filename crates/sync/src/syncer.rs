@@ -61,6 +61,8 @@ pub struct Syncer {
     /// could not be opened, `git` failing): consolidation tries again only
     /// after its slow re-check, not on every run.
     port_failed: Arc<Mutex<std::collections::HashMap<model::LocalChangeId, Timestamp>>>,
+    /// The reviewed mark requests on their way (see [`marks`]).
+    marks: Arc<Mutex<marks::MarkLedger>>,
 }
 
 impl Syncer {
@@ -73,6 +75,7 @@ impl Syncer {
             app_name: DEFAULT_APP_NAME.into(),
             consolidation_timing: ConsolidationTiming::default(),
             port_failed: Arc::default(),
+            marks: Arc::default(),
         }
     }
 
@@ -80,6 +83,11 @@ impl Syncer {
         // Every store write is a transaction, so a panic in another thread
         // cannot leave half-written data; ignore poisoning.
         self.store.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The mark ledger. Taken before the store when both are needed.
+    fn marks(&self) -> MutexGuard<'_, marks::MarkLedger> {
+        self.marks.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Fails with [`Error::Local`] if `sha` is a commit that exists only in
@@ -277,6 +285,17 @@ impl Syncer {
         } else {
             None
         };
+        // Gerrit's marks were read before the requests still on their way
+        // are done: the cache keeps what they ask for until they settle.
+        let reviewed = reviewed.map(|mut paths| {
+            for (path, asked) in self.marks().asked(&key.target.sha) {
+                paths.retain(|p| *p != path);
+                if asked {
+                    paths.push(path);
+                }
+            }
+            paths
+        });
         let now = Timestamp::now();
 
         let mut store = self.store();
@@ -431,11 +450,12 @@ mod comments;
 mod consolidate;
 mod edits;
 mod local;
+mod marks;
 mod pending;
 mod watch;
 
 pub use actions::NewChange;
-pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
+pub use comments::{CommentsView, DraftSave, MarkSent, PublishOutcome, RetryReport};
 pub use consolidate::{
     CLAIM_STALE, ConsolidateOptions, ConsolidateReport, ConsolidationTiming, FoundChange, HeldItem,
     HeldPublished, POST_DEADLINE, Ported, PostOutcome, PostReport, SLOW_RECHECK, StopFlag,
@@ -443,6 +463,7 @@ pub use consolidate::{
 };
 pub use edits::ReviewerAdded;
 pub use local::ChainCommit;
+pub use marks::MarkSettled;
 pub use store::DraftCounts;
 pub use watch::WatchOptions;
 

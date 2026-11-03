@@ -874,10 +874,14 @@ fn setting_a_reviewed_mark_updates_the_cache_and_the_server() {
     let f = fx();
     cache_files(&f, &["a.rs"]);
     f.http.push_response(201, "");
-    block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true)).unwrap();
+    block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true))
+        .result
+        .unwrap();
     assert_eq!(reviewed(&f), ["a.rs", "b.rs"]);
     f.http.push_response(204, "");
-    block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "a.rs", false)).unwrap();
+    block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "a.rs", false))
+        .result
+        .unwrap();
     assert_eq!(reviewed(&f), ["b.rs"]);
     assert_eq!(
         uris(&f.http),
@@ -894,19 +898,64 @@ fn a_failed_reviewed_mark_is_put_back() {
     cache_files(&f, &["a.rs"]);
     // Rejected, offline and logged out all revert.
     f.http.push_response(403, "no");
-    assert!(block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true)).is_err());
+    assert!(
+        block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true))
+            .result
+            .is_err()
+    );
     assert_eq!(reviewed(&f), ["a.rs"]);
     f.http.push_error("offline");
-    let err = block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "a.rs", false)).unwrap_err();
+    let err = block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "a.rs", false))
+        .result
+        .unwrap_err();
     assert!(matches!(err, Error::Api(ref e) if e.is_retryable()));
     assert_eq!(reviewed(&f), ["a.rs"]);
     f.http.push_response(401, "");
     assert!(
         block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true))
+            .result
             .unwrap_err()
             .is_unauthorized()
     );
     assert_eq!(reviewed(&f), ["a.rs"]);
+}
+
+#[test]
+fn a_mark_settles_to_what_the_server_has() {
+    let f = fx();
+    cache_files(&f, &["a.rs"]);
+    f.http.push_response(201, "");
+    let sent = block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true));
+    assert_eq!(
+        sent.settled,
+        Some(crate::MarkSettled {
+            reviewed: true,
+            refused: None,
+        })
+    );
+    f.http.push_response(403, "no");
+    let sent = block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", false));
+    let settled = sent.settled.expect("settled");
+    assert!(settled.reviewed);
+    assert!(matches!(settled.refused, Some((false, _))));
+    assert_eq!(reviewed(&f), ["a.rs", "b.rs"]);
+}
+
+#[test]
+fn a_list_fetched_while_a_mark_is_on_its_way_keeps_it() {
+    let f = fx();
+    cache_files(&f, &["a.rs"]);
+    // A request for b.rs is open (sent, not answered).
+    f.syncer.marks().begin(&sha2(), "b.rs", true, false);
+    f.http
+        .push_response(200, ")]}'\n{\"a.rs\": {}, \"b.rs\": {}}");
+    f.http.push_response(200, ")]}'\n[\"a.rs\"]");
+    let list = block_on(f.syncer.refresh_files(&files_key())).unwrap();
+    assert_eq!(
+        list.reviewed.as_deref(),
+        Some(&["a.rs".to_owned(), "b.rs".to_owned()][..])
+    );
+    assert_eq!(reviewed(&f), ["a.rs", "b.rs"]);
 }
 
 #[test]
@@ -915,7 +964,11 @@ fn a_redundant_failed_mark_does_not_flip_the_cache() {
     cache_files(&f, &["a.rs"]);
     // Already marked: the cache does not change, so nothing to put back.
     f.http.push_error("offline");
-    assert!(block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "a.rs", true)).is_err());
+    assert!(
+        block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "a.rs", true))
+            .result
+            .is_err()
+    );
     assert_eq!(reviewed(&f), ["a.rs"]);
 }
 
@@ -1157,7 +1210,9 @@ fn replies_and_reviewed_marks_on_a_local_commit_are_refused() {
     )
     .unwrap_err();
     assert!(matches!(err, Error::Local(s) if s == sha2()));
-    let err = block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true)).unwrap_err();
+    let err = block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true))
+        .result
+        .unwrap_err();
     assert!(matches!(err, Error::Local(_)));
     assert_eq!(reviewed(&f), ["a.rs"]);
     assert!(f.http.requests().is_empty());

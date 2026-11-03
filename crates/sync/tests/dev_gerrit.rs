@@ -335,16 +335,24 @@ fn offline_drafts_sync_publish_and_reviewed_marks() {
     };
     let files = block_on(c.refresh_files(&key)).unwrap();
     assert_eq!(files.reviewed.as_deref(), Some(&[][..]));
-    block_on(c.set_reviewed(n, &ps.sha, "probe.txt", true)).unwrap();
+    block_on(c.set_reviewed(n, &ps.sha, "probe.txt", true))
+        .result
+        .unwrap();
     assert_eq!(
         c.cached_files(&key).unwrap().unwrap().reviewed,
         Some(vec!["probe.txt".to_owned()])
     );
     let reconciled = block_on(c.refresh_files(&key)).unwrap();
     assert_eq!(reconciled.reviewed, Some(vec!["probe.txt".to_owned()]));
-    block_on(c.set_reviewed(n, &ps.sha, "probe.txt", false)).unwrap();
+    block_on(c.set_reviewed(n, &ps.sha, "probe.txt", false))
+        .result
+        .unwrap();
     f.offline.store(true, Ordering::SeqCst);
-    assert!(block_on(c.set_reviewed(n, &ps.sha, "probe.txt", true)).is_err());
+    assert!(
+        block_on(c.set_reviewed(n, &ps.sha, "probe.txt", true))
+            .result
+            .is_err()
+    );
     f.offline.store(false, Ordering::SeqCst);
     assert_eq!(
         c.cached_files(&key).unwrap().unwrap().reviewed,

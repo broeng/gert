@@ -12,16 +12,14 @@
 //!
 //! It also resolves the comparison in the checkout as soon as it has a key
 //! and a project ([`LocalState`]), for the diffs and the syntax worker, and
-//! owns the reviewed marks: `r` flips one at once and sends it, and a
-//! failed request puts it back. A list that arrives while a mark is on its
-//! way (a poll, Gerrit's answer to a miss) keeps the mark as sent, since
-//! the list was made before it.
+//! shows the reviewed marks: `r` flips one at once and sends it, and once
+//! the mark settled (`Syncer::set_reviewed`) it shows what the server has.
 //!
 //! Pages read a [`Files`] snapshot, which they copy when an event says it
 //! changed (the change page reads the list in many places without a `cx`).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -180,36 +178,6 @@ pub struct FileList {
     /// Making the list in the checkout.
     listing_task: Option<Task<()>>,
     fetch_task: Option<Task<()>>,
-    /// The marks on their way, per comparison and path. Kept when another
-    /// pair is picked, so that coming back finds them.
-    sending: HashMap<(FilesKey, String), Sending>,
-    /// Numbers the mark requests in the order they are sent, the order
-    /// Gerrit applies them in as far as we can tell.
-    sent_count: u64,
-}
-
-/// A reviewed mark on its way.
-struct Sending {
-    /// The value last sent, and its request's number.
-    reviewed: bool,
-    last: u64,
-    /// How many requests for the path are open.
-    open: u32,
-    /// What the server has, as far as we know: the mark before the first
-    /// of these requests, then the value of the latest sent that worked
-    /// (`confirmed_by`, 0 for none).
-    confirmed: bool,
-    confirmed_by: u64,
-    /// Why the last request sent failed, if it did.
-    failure: Option<String>,
-}
-
-/// A mark request just started: what [`FileList::sent`] gets back.
-struct MarkRequest {
-    key: FilesKey,
-    path: String,
-    reviewed: bool,
-    number: u64,
 }
 
 impl EventEmitter<FileListEvent> for FileList {}
@@ -227,8 +195,6 @@ impl FileList {
             local_task: None,
             listing_task: None,
             fetch_task: None,
-            sending: HashMap::new(),
-            sent_count: 0,
         }
     }
 
@@ -446,12 +412,6 @@ impl FileList {
         }
         self.files.renames = renames_of(&files);
         self.files.list = Arc::new(files);
-        let mut reviewed = reviewed;
-        for ((k, path), s) in &self.sending {
-            if k == key {
-                set_mark(&mut reviewed, path, s.reviewed);
-            }
-        }
         self.files.reviewed = Arc::new(reviewed);
         self.files.loaded = true;
         self.files.checkout = checkout;
@@ -499,116 +459,68 @@ impl FileList {
     /// why not now ([`Files::marks_wait`]). The caller has checked the
     /// local rules and the session ([`crate::local_rules::refusal`]). The
     /// request is detached, so it ends also when the page goes (the diff
-    /// page is made anew for each file); a failure puts the mark back.
+    /// page is made anew for each file). `Syncer::set_reviewed` keeps the
+    /// cache, and so every list read meanwhile, in step with the marks on
+    /// their way; once none for this one is open, the mark shows what it
+    /// settled to.
     pub fn toggle_reviewed(
         &mut self,
         path: &str,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        let request = self.start_mark(path, cx)?;
-        let syncer = self.session.syncer().clone();
-        let (change, sha) = (request.key.change, request.key.target.sha.clone());
-        let (sent, reviewed) = (request.path.clone(), request.reviewed);
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_spawn(reviewed::send(syncer, change, sha, sent, reviewed))
-                .await;
-            this.update(cx, |this, cx| this.sent(request, outcome, cx))
-                .ok();
-        })
-        .detach();
-        Ok(())
-    }
-
-    /// The part of [`Self::toggle_reviewed`] before the request: the mark
-    /// flips and is counted as on its way.
-    fn start_mark(
-        &mut self,
-        path: &str,
-        cx: &mut Context<Self>,
-    ) -> Result<MarkRequest, &'static str> {
         if self.files.marks_wait() {
             return Err(reviewed::WAITS);
         }
         let Some(key) = self.files.key.clone() else {
             return Err(reviewed::WAITS);
         };
-        let was = self.files.is_reviewed(path);
-        let reviewed = !was;
+        let reviewed = !self.files.is_reviewed(path);
         set_mark(Arc::make_mut(&mut self.files.reviewed), path, reviewed);
-        self.sent_count += 1;
-        let number = self.sent_count;
-        let sending = self
-            .sending
-            .entry((key.clone(), path.to_owned()))
-            .or_insert(Sending {
-                reviewed,
-                last: number,
-                open: 0,
-                confirmed: was,
-                confirmed_by: 0,
-                failure: None,
-            });
-        sending.reviewed = reviewed;
-        sending.last = number;
-        sending.open += 1;
-        sending.failure = None;
         cx.emit(FileListEvent::MarksChanged);
-        Ok(MarkRequest {
-            key,
-            path: path.to_owned(),
-            reviewed,
-            number,
+        let syncer = self.session.syncer().clone();
+        let (change, sha, path) = (key.change, key.target.sha.clone(), path.to_owned());
+        let sent = path.clone();
+        cx.spawn(async move |this, cx| {
+            let answer = cx
+                .background_spawn(reviewed::send(syncer, change, sha, sent, reviewed))
+                .await;
+            this.update(cx, |this, cx| this.answered(&key, &path, answer, cx))
+                .ok();
         })
+        .detach();
+        Ok(())
     }
 
-    /// A mark request ended, in whatever order the answers come. Once none
-    /// for the path is open, the mark shows what the server has, which is
-    /// the last request sent if it worked; if not, the latest sent before
-    /// it that worked (or the mark before them all) is put back, with the
-    /// last request's failure as the note.
-    fn sent(&mut self, request: MarkRequest, outcome: reviewed::Outcome, cx: &mut Context<Self>) {
-        let failure = match outcome {
-            reviewed::Outcome::Done => None,
-            reviewed::Outcome::Unauthorized => {
-                cx.emit(FileListEvent::Unauthorized);
-                Some(None)
-            }
-            reviewed::Outcome::Failed(e) => Some(Some(e)),
-        };
-        let slot = (request.key, request.path);
-        let Some(sending) = self.sending.get_mut(&slot) else {
-            return;
-        };
-        sending.open -= 1;
-        match failure {
-            None if request.number > sending.confirmed_by => {
-                sending.confirmed = request.reviewed;
-                sending.confirmed_by = request.number;
-            }
-            None => {}
-            Some(e) if request.number == sending.last => sending.failure = e,
-            Some(_) => {}
+    /// The answer to a mark request: a 401 goes to the login flow, and once
+    /// the mark settled it shows that, with a note if it went back.
+    fn answered(
+        &mut self,
+        key: &FilesKey,
+        path: &str,
+        answer: reviewed::Answer,
+        cx: &mut Context<Self>,
+    ) {
+        let login = answer.unauthorized;
+        if login {
+            cx.emit(FileListEvent::Unauthorized);
         }
-        if sending.open > 0 {
-            return;
-        }
-        let Some(done) = self.sending.remove(&slot) else {
+        let Some(settled) = answer.settled else {
             return;
         };
-        let (key, path) = slot;
-        if self.files.key.as_ref() != Some(&key) || self.files.is_reviewed(&path) == done.confirmed
+        if self.files.key.as_ref() != Some(key) || self.files.is_reviewed(path) == settled.reviewed
         {
             return;
         }
         set_mark(
             Arc::make_mut(&mut self.files.reviewed),
-            &path,
-            done.confirmed,
+            path,
+            settled.reviewed,
         );
         cx.emit(FileListEvent::MarksChanged);
-        if let Some(e) = done.failure {
-            let note = reviewed::failure_note(&path, done.reviewed, &e);
+        if let Some((asked, e)) = settled.refused
+            && !login
+        {
+            let note = reviewed::failure_note(path, asked, &e);
             cx.emit(FileListEvent::ReviewedFailed(note));
         }
     }

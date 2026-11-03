@@ -393,26 +393,6 @@ fn a_401_on_the_mark_puts_it_back_and_goes_to_the_login_flow(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-fn a_list_that_arrives_while_a_mark_is_sent_keeps_the_mark(cx: &mut TestAppContext) {
-    let http = RouteHttpClient::new();
-    http.route(PUT_A, 204, "");
-    let s = setup_with(cx, empty_store(), http, Some(signed_in()), None);
-    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
-    cx.update(|cx| {
-        s.list.update(cx, |l, cx| {
-            l.toggle_reviewed("src/a.rs", cx).expect("toggled")
-        })
-    });
-    // A poll brings a list made before the mark.
-    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
-    assert!(s.files(cx).is_reviewed("src/a.rs"));
-    cx.run_until_parked();
-    // Once the request is done, a list is taken as it is.
-    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
-    assert!(!s.files(cx).is_reviewed("src/a.rs"));
-}
-
-#[gpui_kit::test]
 fn a_mark_waits_for_gerrits_list(cx: &mut TestAppContext) {
     let s = setup_with(
         cx,
@@ -470,65 +450,6 @@ fn a_refusal_that_a_later_mark_covers_says_nothing(cx: &mut TestAppContext) {
     toggle(cx, &s, 2);
     cx.run_until_parked();
     assert!(!s.files(cx).is_reviewed("src/a.rs"));
-    assert!(!s.events().iter().any(|e| e.starts_with("failed: ")));
-}
-
-#[gpui_kit::test]
-fn the_last_mark_sent_wins_whatever_order_the_answers_come_in(cx: &mut TestAppContext) {
-    let s = setup_with(
-        cx,
-        empty_store(),
-        RouteHttpClient::new(),
-        Some(signed_in()),
-        None,
-    );
-    s.load(cx, key(), Seed::Hit(cached(&["src/a.rs"], &[])), Ask::Never);
-    cx.update(|cx| {
-        s.list.update(cx, |l, cx| {
-            // On, then off; both work, and off's answer comes first.
-            let on = l.start_mark("src/a.rs", cx).expect("on");
-            let off = l.start_mark("src/a.rs", cx).expect("off");
-            l.sent(off, reviewed::Outcome::Done, cx);
-            l.sent(on, reviewed::Outcome::Done, cx);
-        })
-    });
-    assert!(!s.files(cx).is_reviewed("src/a.rs"));
-    assert!(!s.events().iter().any(|e| e.starts_with("failed: ")));
-}
-
-#[gpui_kit::test]
-fn an_earlier_visits_late_failure_does_not_undo_a_later_mark(cx: &mut TestAppContext) {
-    let s = setup_with(
-        cx,
-        empty_store(),
-        RouteHttpClient::new(),
-        Some(signed_in()),
-        None,
-    );
-    let list = || Seed::Hit(cached(&["src/a.rs"], &[]));
-    s.load(cx, key(), list(), Ask::Never);
-    let first = cx.update(|cx| s.list.update(cx, |l, cx| l.start_mark("src/a.rs", cx)));
-    // Away and back: the open request is still known.
-    let mut other = key();
-    other.target.sha = "sha2".into();
-    s.load(cx, other, list(), Ask::Never);
-    s.load(cx, key(), list(), Ask::Never);
-    assert!(s.files(cx).is_reviewed("src/a.rs"), "the mark on its way");
-    cx.update(|cx| {
-        s.list.update(cx, |l, cx| {
-            let off = l.start_mark("src/a.rs", cx).expect("off");
-            let on = l.start_mark("src/a.rs", cx).expect("on");
-            l.sent(off, reviewed::Outcome::Done, cx);
-            l.sent(on, reviewed::Outcome::Done, cx);
-            // The first visit's request fails last.
-            l.sent(
-                first.expect("first"),
-                reviewed::Outcome::Failed("late".into()),
-                cx,
-            );
-        })
-    });
-    assert!(s.files(cx).is_reviewed("src/a.rs"));
     assert!(!s.events().iter().any(|e| e.starts_with("failed: ")));
 }
 
