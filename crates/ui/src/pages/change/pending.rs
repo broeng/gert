@@ -367,6 +367,8 @@ mod tests {
             message: None,
             unresolved: false,
             message_draft: None,
+            author: None,
+            author_name: None,
         }
     }
 

@@ -291,11 +291,14 @@ impl Store {
         }
 
         let at = crate::review_cache::millis(p.at);
-        tx.execute(
+        // By the account that publishes it: the signed-in one.
+        let inserted = tx.execute(
             "INSERT INTO pending_reviews (server_id, local_change_id, change_number, patch_set,
                  revision_sha, given_on_sha, labels, strategy, state, created_ms, voted_at_ms,
-                 nonce)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, 'sending', ?8, ?8, ?9)",
+                 nonce, author_id, author_name)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, 'sending', ?8, ?8, ?9, account_id,
+                 account_username
+             FROM servers WHERE id = ?1",
             params![
                 server.0,
                 p.local_change.0,
@@ -308,6 +311,9 @@ impl Store {
                 nonce
             ],
         )?;
+        if inserted == 0 {
+            return Ok(None);
+        }
         let review = PendingReviewId(tx.last_insert_rowid());
         for (id, label) in &p.votes {
             if let Some(mut r) = pending_reviews::load(&tx, server, *id)? {

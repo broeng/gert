@@ -1503,6 +1503,14 @@ impl Syncer {
                     && !r.patch_set.is_local()
             })
             .collect();
+        // Only the account the run is signed in as speaks for its reviews:
+        // one written under another account is held for the user.
+        let (reviews, foreign): (Vec<PendingReview>, Vec<PendingReview>) = reviews
+            .into_iter()
+            .partition(|r| r.author.is_none_or(|a| a == run.me));
+        for r in &foreign {
+            self.hold_foreign(row, number, r, run)?;
+        }
         self.supersede(row, number, detail, &reviews, current, run.options)?;
         let mut revisions: BTreeSet<PatchSetNumber> = reviews.iter().map(|r| r.patch_set).collect();
         revisions.extend(
@@ -1577,6 +1585,44 @@ impl Syncer {
                     .await?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Holds pending review `r`, written while another account was signed
+    /// in: the run's account does not send it on its own. The user may
+    /// publish it from the held card (then as the account signed in now),
+    /// or drop it.
+    fn hold_foreign(
+        &self,
+        row: &LocalChange,
+        number: ChangeNumber,
+        r: &PendingReview,
+        run: &mut Run<'_>,
+    ) -> Result<(), Problem> {
+        let reason = foreign_reason(r);
+        let held = self.store().set_pending_review_state(
+            self.server,
+            r.id,
+            &[PendingReviewState::Pending],
+            PendingReviewState::Held,
+            Some(&reason),
+        )?;
+        if held {
+            run.report.posts.push(PostReport {
+                local_change: row.id,
+                change: number,
+                patch_set: r.patch_set,
+                review: Some(r.id),
+                comments: 0,
+                votes: Vec::new(),
+                recovered: false,
+                outcome: PostOutcome::VotesHeld {
+                    votes: r.labels.clone().into_iter().collect(),
+                    drop_only: Vec::new(),
+                    reason,
+                },
+            });
         }
         Ok(())
     }
@@ -1971,6 +2017,24 @@ impl Syncer {
             // Never posted: nothing is claimed without a Gerrit change.
             return self.give_up(&row, &post, nonce, PendingReviewState::Pending, None, None);
         };
+        if let Some(r) = post
+            .review
+            .as_ref()
+            .filter(|r| r.author.is_some_and(|a| a != run.me))
+        {
+            // Claimed while another account was signed in: not this
+            // account's to post (nor to look for among its messages). The
+            // post's comments are held with it.
+            let reason = foreign_reason(r);
+            return self.give_up(
+                &row,
+                &post,
+                nonce,
+                PendingReviewState::Held,
+                Some(reason.clone()),
+                Some(&reason),
+            );
+        }
         let detail = match self.refresh_change(number).await {
             Ok(d) => d,
             Err(Error::Api(ApiError::NotFound)) => {
@@ -2590,6 +2654,19 @@ fn refusal_text(e: &ApiError) -> String {
         }
         _ => e.to_string(),
     }
+}
+
+/// Why a review written under another account is held.
+fn foreign_reason(r: &PendingReview) -> String {
+    let who = match (&r.author_name, r.author) {
+        (Some(name), _) => name.clone(),
+        (None, Some(id)) => format!("account {}", id.0),
+        (None, None) => "another account".to_owned(),
+    };
+    format!(
+        "written while signed in as {who}; it is sent only by that account, or published from \
+         here"
+    )
 }
 
 /// The labels of `votes` that may only be dropped when held: approvals

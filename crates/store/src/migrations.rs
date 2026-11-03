@@ -478,6 +478,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE local_changes ADD COLUMN consolidated_ms INTEGER;
     ",
+    // v18 -> v19: who wrote a pending review: the signed-in account (id
+    // and username) when it was created. Consolidation sends only the
+    // reviews of the account it runs as and holds the others. NULL for
+    // reviews written before this step (or before the account was ever
+    // fetched), which are sent as before.
+    "
+    ALTER TABLE pending_reviews ADD COLUMN author_id INTEGER;
+    ALTER TABLE pending_reviews ADD COLUMN author_name TEXT;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

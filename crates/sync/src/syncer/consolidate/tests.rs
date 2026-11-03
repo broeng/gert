@@ -789,6 +789,92 @@ fn an_exact_match_on_the_current_patch_set_is_sent_in_one_post() {
 }
 
 #[test]
+fn a_review_written_under_another_account_is_held() {
+    let f = fx();
+    let (row, v) = f.local(CID, Some("main"), None, &["s1"]);
+    let mine = f.review(&v[0], &[("Code-Review", 1)], "mine");
+    // Written after another account signed in on this server.
+    let server = f.syncer.server;
+    f.syncer
+        .store()
+        .set_account(server, AccountId(2000), Some("other"), None)
+        .unwrap();
+    let theirs = f.review(&v[0], &[("Verified", 1)], "theirs");
+    assert_eq!(theirs.author, Some(AccountId(2000)));
+    f.syncer
+        .store()
+        .set_account(server, AccountId(ME), Some("me"), None)
+        .unwrap();
+    f.query_finds(&[(7, "main", "NEW")]);
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.posts_apply(json!({"Code-Review": 1}), 1);
+    let report = f.run();
+    // Only the run's own review is posted.
+    let posts = f.http.posts();
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    assert_eq!(posts[0]["labels"], json!({"Code-Review": 1}));
+    assert_eq!(
+        posts[0]["comments"][PATCHSET_LEVEL_PATH][0]["message"],
+        "mine"
+    );
+    assert_eq!(f.reloaded(&mine).state, PendingReviewState::Sent);
+    let theirs = f.reloaded(&theirs);
+    assert_eq!(theirs.state, PendingReviewState::Held);
+    let reason = theirs.held_reason.unwrap();
+    assert!(
+        reason.starts_with("written while signed in as other"),
+        "{reason}"
+    );
+    assert!(report.posts.iter().any(
+        |p| p.review == Some(theirs.id) && matches!(&p.outcome, PostOutcome::VotesHeld { .. })
+    ));
+    // Held, it keeps the change open, for the held card.
+    assert_eq!(f.row(&row).state, LocalChangeState::Local);
+    assert_eq!(
+        f.syncer.held_items(CHANGE).unwrap().reviews[0].id,
+        theirs.id
+    );
+}
+
+#[test]
+fn a_post_claimed_under_another_account_is_not_recovered_by_this_one() {
+    let f = fx();
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let server = f.syncer.server;
+    f.syncer
+        .store()
+        .set_account(server, AccountId(2000), Some("other"), None)
+        .unwrap();
+    let d = f.draft(&row, &v[0], "a comment");
+    let r = f.review(&v[0], &[("Code-Review", 1)], "theirs");
+    // Moved and claimed by the other account's run, which died.
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.http
+        .queue("POST /changes/7/revisions/", 0, "connection reset");
+    f.run_with(&ConsolidateOptions::default());
+    assert_eq!(f.reloaded(&r).state, PendingReviewState::Sending);
+    f.syncer
+        .store()
+        .set_account(server, AccountId(ME), Some("me"), None)
+        .unwrap();
+    let posts = f.http.posts().len();
+    f.run();
+    assert_eq!(f.http.posts().len(), posts, "not posted again");
+    let r = f.reloaded(&r);
+    assert_eq!(r.state, PendingReviewState::Held);
+    assert!(r.held_reason.unwrap().contains("signed in as other"));
+    // Its comment is held with it, not posted under this account.
+    assert!(f.load_draft(&d).unwrap().held_reason.is_some());
+    assert!(
+        f.syncer
+            .store()
+            .unfinished_local_posts(server)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn the_app_name_starts_the_tag() {
     let f = fx();
     let syncer = f.syncer.clone().with_app_name("gertish");

@@ -647,3 +647,24 @@ fn an_unknown_strategy_reads_as_the_strictest() {
         LocalApproval::Exact
     );
 }
+
+#[test]
+fn a_review_records_the_account_signed_in_when_it_was_written() {
+    let mut f = fx();
+    let v = f.versions[0].number;
+    // Before the account was ever fetched: not known.
+    let unknown = f.s.create_pending_review(f.id, &new_review(v, "")).unwrap();
+    assert_eq!((unknown.author, unknown.author_name), (None, None));
+    f.s.set_account(f.id, model::AccountId(7), Some("ann"), None)
+        .unwrap();
+    let mine = f.s.create_pending_review(f.id, &new_review(v, "")).unwrap();
+    assert_eq!(
+        (mine.author, mine.author_name.as_deref()),
+        (Some(model::AccountId(7)), Some("ann"))
+    );
+    // It is kept when the account changes.
+    f.s.set_account(f.id, model::AccountId(8), Some("bob"), None)
+        .unwrap();
+    let again = f.s.load_pending_review(f.id, mine.id).unwrap().unwrap();
+    assert_eq!(again.author, Some(model::AccountId(7)));
+}

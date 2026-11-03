@@ -82,7 +82,8 @@ pub struct PendingReviewEdit {
 
 const COLUMNS: &str = "r.id, r.local_change_id, r.change_number, r.patch_set, r.revision_sha, \
      r.given_on_sha, r.labels, r.strategy, r.state, r.error, r.held_reason, r.created_ms, \
-     r.voted_at_ms, r.nonce, d.message, d.id, d.unresolved, r.drop_only";
+     r.voted_at_ms, r.nonce, d.message, d.id, d.unresolved, r.drop_only, r.author_id, \
+     r.author_name";
 
 const FROM: &str = "pending_reviews r LEFT JOIN drafts d ON d.pending_review_id = r.id";
 
@@ -119,6 +120,11 @@ fn review_from_row(r: &Row<'_>) -> rusqlite::Result<PendingReview> {
             Some(json) => serde_json::from_str(&json).map_err(|_| bad(17, &json))?,
             None => Default::default(),
         },
+        author: r
+            .get::<_, Option<i64>>(18)?
+            .and_then(|id| u64::try_from(id).ok())
+            .map(model::AccountId),
+        author_name: r.get(19)?,
     })
 }
 
@@ -323,10 +329,14 @@ impl Store {
                 .number()
                 .map_or(i64::MAX, number),
         };
-        tx.execute(
+        // Written by the signed-in account as last fetched.
+        let inserted = tx.execute(
             "INSERT INTO pending_reviews (server_id, local_change_id, change_number, patch_set,
-                 revision_sha, given_on_sha, labels, strategy, state, created_ms, voted_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, 'pending', ?8, ?8)",
+                 revision_sha, given_on_sha, labels, strategy, state, created_ms, voted_at_ms,
+                 author_id, author_name)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, 'pending', ?8, ?8, account_id,
+                 account_username
+             FROM servers WHERE id = ?1",
             params![
                 server.0,
                 local_change,
@@ -338,6 +348,9 @@ impl Store {
                 millis(input.created)
             ],
         )?;
+        if inserted == 0 {
+            return Err(Error::NoSuchServer);
+        }
         let id = PendingReviewId(tx.last_insert_rowid());
         if let Some(old) = input.replaces_draft {
             tx.execute(

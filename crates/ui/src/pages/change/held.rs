@@ -660,6 +660,8 @@ mod tests {
             message: Some("LGTM".into()),
             unresolved: false,
             message_draft: Some(LocalDraftId(9)),
+            author: None,
+            author_name: None,
         }
     }
 

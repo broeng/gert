@@ -265,6 +265,13 @@ pub struct PendingReview {
     pub unresolved: bool,
     /// Its message draft, if it has one.
     pub message_draft: Option<crate::LocalDraftId>,
+    /// The account signed in when it was written, with its username if
+    /// known; `None` if that was not known (an older review). Only that
+    /// account's consolidation sends it.
+    #[serde(default)]
+    pub author: Option<crate::AccountId>,
+    #[serde(default)]
+    pub author_name: Option<String>,
 }
 
 impl PendingReview {
