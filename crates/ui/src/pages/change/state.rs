@@ -223,6 +223,67 @@ pub fn step(cursor: usize, len: usize, delta: isize) -> usize {
     cursor.saturating_add_signed(delta).min(len - 1)
 }
 
+/// What a card or list has selected, kept by id so that it stays on the
+/// same item while the list changes. Nothing selected means the card's
+/// default: its first or newest item, or no cursor at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Selection<T>(Option<T>);
+
+impl<T> Default for Selection<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T: Clone + PartialEq> Selection<T> {
+    pub fn get(&self) -> Option<&T> {
+        self.0.as_ref()
+    }
+
+    pub fn select(&mut self, id: T) {
+        self.0 = Some(id);
+    }
+
+    pub fn is(&self, id: &T) -> bool {
+        self.0.as_ref() == Some(id)
+    }
+
+    /// Where the selected item is in `ids`, if it is there.
+    pub fn position_in<'a>(&self, ids: impl IntoIterator<Item = &'a T>) -> Option<usize>
+    where
+        T: 'a,
+    {
+        let id = self.0.as_ref()?;
+        ids.into_iter().position(|i| i == id)
+    }
+
+    /// Forgets the selection when its item is gone from `ids`.
+    pub fn retain<'a>(&mut self, ids: impl IntoIterator<Item = &'a T>)
+    where
+        T: 'a,
+    {
+        if self.0.is_some() && self.position_in(ids).is_none() {
+            self.0 = None;
+        }
+    }
+
+    /// Selects the next (`forward`) or previous item of `ids`, around the
+    /// ends, from the selected one or else from position `default`.
+    /// Nothing happens when `ids` is empty.
+    pub fn cycle(&mut self, ids: &[T], forward: bool, default: usize) {
+        if ids.is_empty() {
+            return;
+        }
+        let at = self.position_in(ids).unwrap_or(default.min(ids.len() - 1));
+        let next = if forward {
+            (at + 1) % ids.len()
+        } else {
+            (at + ids.len() - 1) % ids.len()
+        };
+        self.0 = Some(ids[next].clone());
+    }
+}
+
 /// Compact byte size: `512 B`, `4.0 KiB`, `1.2 MiB`.
 pub fn size_text(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
@@ -544,5 +605,27 @@ mod tests {
         assert_eq!(size_text(512), "512 B");
         assert_eq!(size_text(4096), "4.0 KiB");
         assert_eq!(size_text(3 * 1024 * 1024 / 2), "1.5 MiB");
+    }
+
+    #[test]
+    fn a_selection_keeps_its_item_and_cycles_around_the_ends() {
+        let ids = ["a", "b", "c"];
+        let mut s = Selection::default();
+        assert_eq!(s.position_in(&ids), None);
+        // From the default: the newest (last) item, forward wraps to the
+        // first.
+        s.cycle(&ids, true, 2);
+        assert_eq!(s.get(), Some(&"a"));
+        s.cycle(&ids, false, 2);
+        assert_eq!(s.get(), Some(&"c"));
+        // The list changes around it: the item stays selected.
+        assert_eq!(s.position_in(&["c", "a"]), Some(0));
+        s.retain(&["c", "a"]);
+        assert!(s.is(&"c"));
+        // Gone: back to the default.
+        s.retain(&["a"]);
+        assert_eq!(s.get(), None);
+        s.cycle(&[], true, 0);
+        assert_eq!(s.get(), None);
     }
 }

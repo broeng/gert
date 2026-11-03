@@ -184,7 +184,7 @@ impl ChangePage {
         let rows = self.held_rows();
         let at = |item: &HeldItem| rows.iter().find(|r| r.item().as_ref() == Some(item));
         self.held_cursor
-            .as_ref()
+            .get()
             .and_then(at)
             .or_else(|| rows.iter().find(|r| r.item().is_some()))
             .cloned()
@@ -194,13 +194,7 @@ impl ChangePage {
     /// one that is gone.
     pub(super) fn held_changed(&mut self) {
         let items: Vec<HeldItem> = self.held_rows().iter().filter_map(HeldRow::item).collect();
-        if self
-            .held_cursor
-            .as_ref()
-            .is_some_and(|i| !items.contains(i))
-        {
-            self.held_cursor = None;
-        }
+        self.held_cursor.retain(&items);
         if self
             .confirm_held
             .as_ref()
@@ -237,17 +231,8 @@ impl ChangePage {
         if items.is_empty() {
             return self.no_held(cx);
         }
-        let at = self
-            .selected_held()
-            .and_then(|r| r.item())
-            .and_then(|i| items.iter().position(|x| *x == i))
-            .unwrap_or(0);
-        let next = if forward {
-            (at + 1) % items.len()
-        } else {
-            (at + items.len() - 1) % items.len()
-        };
-        self.held_cursor = Some(items[next].clone());
+        // From the first when nothing is selected.
+        self.held_cursor.cycle(&items, forward, 0);
         self.disarm_held(cx);
     }
 

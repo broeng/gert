@@ -54,11 +54,8 @@ impl ChangePage {
         self.remeasure(Block::PendingReviews);
         self.remeasure(Block::Held);
         self.listed = threads::listed(&self.threads, self.filter());
-        if let Some(id) = &self.thread_cursor
-            && !self.listed.iter().any(|&i| &self.threads[i].id == id)
-        {
-            self.thread_cursor = None;
-        }
+        self.thread_cursor
+            .retain(self.listed.iter().map(|&i| &self.threads[i].id));
         self.recount();
         self.sync_ps_view(cx);
         self.rebuild_blocks();
@@ -170,8 +167,8 @@ impl ChangePage {
 
     /// The position of the thread cursor in the list.
     fn thread_pos(&self) -> Option<usize> {
-        let id = self.thread_cursor.as_ref()?;
-        self.listed.iter().position(|&i| &self.threads[i].id == id)
+        self.thread_cursor
+            .position_in(self.listed.iter().map(|&i| &self.threads[i].id))
     }
 
     fn move_thread(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -183,7 +180,8 @@ impl ChangePage {
             None if delta > 0 => 0,
             None => self.listed.len() - 1,
         };
-        self.thread_cursor = Some(self.threads[self.listed[n]].id.clone());
+        self.thread_cursor
+            .select(self.threads[self.listed[n]].id.clone());
         if let Some(ix) = self.block_index(Block::Thread(n)) {
             self.list.scroll_to_reveal_item(ix);
         }
@@ -204,7 +202,7 @@ impl ChangePage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.thread_cursor.clone() {
+        if let Some(id) = self.thread_cursor.get().cloned() {
             self.open_thread(&id, window, cx);
         }
     }
@@ -214,7 +212,7 @@ impl ChangePage {
         let Some(thread) = self.threads.iter().find(|t| &t.id == id).cloned() else {
             return;
         };
-        self.thread_cursor = Some(id.clone());
+        self.thread_cursor.select(id.clone());
         if thread.path == PATCHSET_LEVEL_PATH {
             if let Some(view) = self.ps_view.clone() {
                 view.update(cx, |v, cx| v.focus_thread(id, cx));
@@ -327,7 +325,7 @@ impl ChangePage {
         let thread = thread.clone();
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
-        let selected = self.thread_cursor.as_ref() == Some(&thread.id);
+        let selected = self.thread_cursor.is(&thread.id);
         let (cursor_bg, cursor_bar) = if self.has_focus {
             (theme.list_active, theme.list_active_border)
         } else {

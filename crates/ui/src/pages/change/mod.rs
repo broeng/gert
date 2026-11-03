@@ -74,7 +74,7 @@ use crate::{
     tracker::Tracker,
 };
 use chain::{ChainEvent, ChainOpen, ChainSource, Related, RelationChain, advance_row, row_change};
-use state::{Block, Content, PatchSel, step};
+use state::{Block, Content, PatchSel, Selection, step};
 use threads::ThreadFilter;
 
 /// Rows an inline diff shows before it scrolls inside.
@@ -225,8 +225,9 @@ pub struct ChangePage {
     /// The pending reviews of the change's local versions, as last read
     /// from `comments` (see [`pending`]).
     reviews: Arc<Vec<model::PendingReview>>,
-    /// The review the local reviews card has selected; `None` is the newest.
-    review_cursor: Option<model::PendingReviewId>,
+    /// The review the local reviews card has selected; by default the
+    /// newest.
+    review_cursor: Selection<model::PendingReviewId>,
     /// A cancel on its way to the store.
     reviews_task: Option<Task<()>>,
     /// The comments held from local reviews, as last read from `comments`
@@ -235,8 +236,8 @@ pub struct ChangePage {
     /// The project's `local_approval` as the held card last read it, for
     /// which held votes may only be dropped.
     held_setting: LocalApproval,
-    /// The item the held card has selected; `None` is the first.
-    held_cursor: Option<sync::HeldItem>,
+    /// The item the held card has selected; by default the first.
+    held_cursor: Selection<sync::HeldItem>,
     /// The held item a first "send" or "drop" asked about.
     confirm_held: Option<(sync::HeldItem, held::HeldAsk)>,
     /// Ends the drop question after a while.
@@ -249,7 +250,7 @@ pub struct ChangePage {
     /// Indexes into `threads` of those the list shows.
     listed: Vec<usize>,
     /// The thread under the thread cursor (`shift-n` / `shift-p`).
-    thread_cursor: Option<ThreadId>,
+    thread_cursor: Selection<ThreadId>,
     /// Comment numbers per file for the pair being compared.
     counts: BTreeMap<String, FileCommentCounts>,
     /// The patch-set level threads, as cards (made once the change is
@@ -341,17 +342,17 @@ impl ChangePage {
             outbox,
             threads: Arc::default(),
             reviews: Arc::default(),
-            review_cursor: None,
+            review_cursor: Selection::default(),
             reviews_task: None,
             held_drafts: Arc::default(),
             held_setting: LocalApproval::Exact,
-            held_cursor: None,
+            held_cursor: Selection::default(),
             confirm_held: None,
             held_timer: None,
             held_task: None,
             thread_filter: None,
             listed: Vec::new(),
-            thread_cursor: None,
+            thread_cursor: Selection::default(),
             counts: BTreeMap::new(),
             ps_view: None,
             ps_sub: None,
@@ -560,7 +561,7 @@ impl ChangePage {
 
     #[cfg(test)]
     pub(crate) fn thread_cursor_for_test(&self) -> Option<ThreadId> {
-        self.thread_cursor.clone()
+        self.thread_cursor.get().cloned()
     }
 
     #[cfg(test)]

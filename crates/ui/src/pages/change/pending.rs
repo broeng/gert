@@ -83,7 +83,8 @@ impl ChangePage {
     fn selected_review(&self) -> Option<PendingReview> {
         let listed = self.listed_reviews();
         self.review_cursor
-            .and_then(|id| listed.iter().find(|r| r.id == id))
+            .get()
+            .and_then(|id| listed.iter().find(|r| r.id == *id))
             .or(listed.last())
             .map(|r| (*r).clone())
     }
@@ -93,16 +94,8 @@ impl ChangePage {
         if ids.is_empty() {
             return self.no_reviews(cx);
         }
-        let at = self
-            .selected_review()
-            .and_then(|r| ids.iter().position(|id| *id == r.id))
-            .unwrap_or(ids.len() - 1);
-        let next = if forward {
-            (at + 1) % ids.len()
-        } else {
-            (at + ids.len() - 1) % ids.len()
-        };
-        self.review_cursor = Some(ids[next]);
+        // From the newest when nothing is selected.
+        self.review_cursor.cycle(&ids, forward, ids.len() - 1);
         self.remeasure(super::state::Block::PendingReviews);
         cx.notify();
     }
