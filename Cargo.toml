@@ -68,6 +68,14 @@ unsafe_code = "deny"
 unwrap_used = "deny"
 expect_used = "warn"
 
+# Dev builds keep only line tables (file:line in backtraces) for our crates
+# and no debug info for dependencies: much less to generate, save and link.
+# For a debugger, build with CARGO_PROFILE_DEV_DEBUG=full.
+[profile.dev]
+debug = "line-tables-only"
+[profile.dev.package."*"]
+debug = false
+
 # Syntax highlighting runs the regex engines over whole files; at opt-level 0
 # a 10k-line file takes seconds. Optimise just those crates in dev builds.
 [profile.dev.package.syntect]

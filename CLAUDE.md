@@ -472,6 +472,7 @@ cargo run -p gert                # run the client
 cargo run -p ui --example review # the whole UI against a fake server
 cargo test -p ui                 # per commit: ui without the slow tests
 cargo test --workspace --features ui/slow-tests  # end of a batch: all tests
+CARGO_PROFILE_DEV_DEBUG=full cargo build  # full debug info, for a debugger
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cargo xtask gen-fixtures         # regenerate tests/fixtures from the spec
