@@ -88,9 +88,13 @@ impl LocalQuery {
     }
 
     /// Whether `change` fits every term; never for a row that is not in
-    /// the `Local` state (see the module comment).
+    /// the `Local` state (see the module comment), nor for one with a
+    /// Gerrit change.
     pub fn matches(&self, change: &LocalChange) -> bool {
+        // A row with a Gerrit change (listed on the dashboard for its held
+        // items) is found by Gerrit's own search.
         change.state == LocalChangeState::Local
+            && change.gerrit_number.is_none()
             && self.terms.iter().all(|t| match t {
                 Term::Project(p) => change.project == *p,
                 Term::Branch(b) => change.branch.as_deref() == Some(b.as_str()),
@@ -446,7 +450,11 @@ mod tests {
             );
         }
         c.state = LocalChangeState::Local;
-        assert_eq!(matching("fix", vec![c.clone()]), vec![c]);
+        assert_eq!(matching("fix", vec![c.clone()]), vec![c.clone()]);
+        // Versions of a Gerrit change (on the dashboard for their held
+        // items) are Gerrit's to find.
+        c.gerrit_number = Some(model::ChangeNumber(42));
+        assert!(matching("fix", vec![c]).is_empty());
     }
 
     #[test]

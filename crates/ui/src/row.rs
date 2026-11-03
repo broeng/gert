@@ -1,6 +1,6 @@
 //! View-model helpers for change rows. Pure functions of the model.
 
-use model::{ChangeNumber, ChangeStatus, ChangeSummary, LocalChangeState};
+use model::{ChangeNumber, ChangeStatus, ChangeSummary, LocalChange, LocalChangeState};
 
 /// Small status badges in front of a subject. Nothing is shown for an
 /// ordinary active change.
@@ -82,6 +82,16 @@ pub fn local_state_note(state: LocalChangeState) -> Option<&'static str> {
         }
         LocalChangeState::Ambiguous => Some("several Gerrit changes match"),
         LocalChangeState::Closed => Some("closed on Gerrit; review held"),
+    }
+}
+
+/// What the dashboard row of local change `c` says about it: its state
+/// (see [`local_state_note`]), or, for a row with a Gerrit change (listed
+/// for its held review), that its review is held.
+pub fn local_row_note(c: &LocalChange) -> Option<&'static str> {
+    match (c.gerrit_number, c.state) {
+        (Some(_), LocalChangeState::Closed) | (None, _) => local_state_note(c.state),
+        (Some(_), _) => Some("review held"),
     }
 }
 

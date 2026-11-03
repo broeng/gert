@@ -544,13 +544,29 @@ impl Store {
     /// The local changes the dashboard lists, the most recently updated
     /// first: changes of their own (not versions of a Gerrit change, and
     /// not yet found on Gerrit) that are checking, local, ambiguous or
-    /// vanished. Closed and consolidated rows belong to their Gerrit change
-    /// and show there.
+    /// vanished; and rows with a Gerrit change that need the user: closed
+    /// ones (found merged or abandoned, their review held) and any other
+    /// with held items (held drafts on its versions or reserved for its
+    /// post, held or failed reviews). Those open their Gerrit change, whose
+    /// held card shows the items. Tombstones are never listed.
     pub fn dashboard_local_changes(&self, server: ServerId) -> Result<Vec<LocalChange>, Error> {
+        let numbers = patch_set_numbers("local_changes.id");
         query_changes(
             &self.conn,
-            "server_id = ?1 AND gerrit_number IS NULL
-               AND state IN ('checking', 'local', 'ambiguous', 'vanished')",
+            &format!(
+                "server_id = ?1 AND (
+                     (gerrit_number IS NULL
+                      AND state IN ('checking', 'local', 'ambiguous', 'vanished'))
+                     OR (gerrit_number IS NOT NULL AND state <> 'consolidated' AND (
+                         state = 'closed'
+                         OR EXISTS (SELECT 1 FROM pending_reviews r
+                             WHERE r.server_id = ?1 AND r.local_change_id = local_changes.id
+                               AND r.state IN ('held', 'failed'))
+                         OR EXISTS (SELECT 1 FROM drafts d
+                             WHERE d.server_id = ?1 AND d.held_reason IS NOT NULL
+                               AND (d.reserved_by = local_changes.id
+                                    OR d.patch_set IN {numbers})))))"
+            ),
             [server.0],
         )
     }

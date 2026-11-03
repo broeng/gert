@@ -1184,3 +1184,65 @@ fn a_tombstone_records_when_it_was_made() {
         .unwrap();
     assert_eq!(entry(&s).consolidated_at, None);
 }
+
+#[test]
+fn the_dashboard_lists_closed_rows_and_rows_with_held_items() {
+    let (mut s, id) = setup();
+    let gerrit_row = |s: &mut Store, change_id: &str, n: u64, state| {
+        let mut u = upsert(change_id, None, &[&format!("{change_id}-1")]);
+        u.gerrit_number = Some(ChangeNumber(n));
+        u.state = Some(state);
+        add(s, id, u)
+    };
+    let closed = gerrit_row(&mut s, "IC", 41, LocalChangeState::Closed);
+    let held = gerrit_row(&mut s, "IH", 42, LocalChangeState::Local);
+    let plain = gerrit_row(&mut s, "IP", 43, LocalChangeState::Local);
+    gerrit_row(&mut s, "IT", 44, LocalChangeState::Consolidated);
+    let names = |s: &Store| -> Vec<String> {
+        let mut v: Vec<String> = s
+            .dashboard_local_changes(id)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.change_id)
+            .collect();
+        v.sort();
+        v
+    };
+    // A local patch set of a Gerrit change with nothing held belongs to
+    // its change only.
+    assert_eq!(names(&s), ["IC"]);
+    // A held draft on a version.
+    let v = s.local_patch_sets(id, held.id).unwrap().remove(0);
+    let d = s
+        .create_draft(id, ChangeNumber(42), &psref(&v), &draft_input("x"), ts(T1))
+        .unwrap();
+    assert_eq!(names(&s), ["IC"]);
+    s.hold_closed_local_change(id, held.id, ChangeNumber(42), "change merged")
+        .unwrap()
+        .unwrap();
+    s.set_local_change_state(id, held.id, LocalChangeState::Local)
+        .unwrap();
+    assert_eq!(names(&s), ["IC", "IH"]);
+    assert!(s.drop_held_draft(id, d.local_id).unwrap());
+    assert_eq!(names(&s), ["IC"]);
+    // A held review.
+    let v = s.local_patch_sets(id, plain.id).unwrap().remove(0);
+    let r = s.create_pending_review(id, &review(&v)).unwrap();
+    assert_eq!(names(&s), ["IC"]);
+    s.set_pending_review_state(
+        id,
+        r.id,
+        &[PendingReviewState::Pending],
+        PendingReviewState::Held,
+        Some("not exact"),
+    )
+    .unwrap();
+    assert_eq!(names(&s), ["IC", "IP"]);
+    assert_eq!(
+        s.local_change(id, closed.id)
+            .unwrap()
+            .unwrap()
+            .gerrit_number,
+        Some(ChangeNumber(41))
+    );
+}

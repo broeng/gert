@@ -683,6 +683,144 @@ fn every_state_renders_and_j_k_cross_into_the_queries(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn closed_and_held_rows_show_their_gerrit_number_and_open_that_change(cx: &mut TestAppContext) {
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server id");
+    store
+        .save_query_page(server, "status:open", &[summary(1)], false, ts())
+        .expect("save query");
+    let with_gerrit = |change_id: &str, subject: &str, n: u64, state| {
+        let mut op = upsert(change_id, subject, Some("main"), state);
+        if let LocalOp::Upsert(u) = &mut op {
+            u.gerrit_number = Some(ChangeNumber(n));
+        }
+        op
+    };
+    let ops = [
+        upsert("I1", "Purely local", Some("main"), LocalChangeState::Local),
+        with_gerrit("I2", "Closed", 41, LocalChangeState::Closed),
+        with_gerrit("I3", "Held", 42, LocalChangeState::Local),
+        with_gerrit("I4", "Nothing held", 43, LocalChangeState::Local),
+    ];
+    store
+        .reconcile_local(server, "p", &ops, ts())
+        .expect("reconcile");
+    // I3 has a held review.
+    let held = store
+        .local_changes_by_change_id(server, "I3")
+        .expect("rows")
+        .remove(0);
+    let v = store
+        .local_patch_sets(server, held.id)
+        .expect("versions")
+        .remove(0);
+    let r = store
+        .create_pending_review(
+            server,
+            &store::NewPendingReview {
+                patch_set: v.number,
+                labels: [("Code-Review".to_owned(), 1)].into(),
+                strategy: model::LocalApproval::Exact,
+                message: String::new(),
+                unresolved: false,
+                created: ts(),
+                replaces_draft: None,
+            },
+        )
+        .expect("review");
+    store
+        .set_pending_review_state(
+            server,
+            r.id,
+            &[model::PendingReviewState::Pending],
+            model::PendingReviewState::Held,
+            Some("not current"),
+        )
+        .expect("held");
+    let env = env_with(store, &RouteHttpClient::new());
+    let session = Session::new(&env, &setup(), None).expect("session");
+    let specs = vec![SavedQuery {
+        name: "Open".into(),
+        query: "status:open".into(),
+    }];
+    let (window, page) = open(cx, |window, cx| {
+        let checkouts = cx.new(|_| Checkouts::new(Vec::new()));
+        let scanner = cx.new(|cx| LocalScanner::new(checkouts, cx));
+        let page = cx.new(|cx| {
+            let mut page = ChangeListPage::new(session, ListKind::Dashboard, specs, None, true, cx);
+            page.set_local_scanner(scanner, cx);
+            page
+        });
+        let focus = page.read(cx).focus_handle_for_test();
+        window.focus(&focus, cx);
+        page
+    });
+    cx.run_until_parked();
+    let rows = cx.update(|cx| {
+        page.read(cx)
+            .local_rows()
+            .iter()
+            .map(|c| (c.subject.clone(), c.number, c.gerrit_number))
+            .collect::<Vec<_>>()
+    });
+    let mut subjects: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    subjects.sort();
+    assert_eq!(subjects, ["Closed", "Held", "Purely local"]);
+    // Drawn with the Gerrit number and the note.
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.run_until_parked();
+    let row_of = |subject: &str| rows.iter().position(|r| r.0 == subject).expect("row");
+    for (subject, n) in [("Closed", 41), ("Held", 42)] {
+        let selector: &'static str =
+            Box::leak(format!("local-gerrit-{}: #{n}", row_of(subject)).into_boxed_str());
+        assert!(visual.debug_bounds(selector).is_some(), "{selector}");
+    }
+    assert!(visual.debug_bounds("local-note-closed").is_some());
+    assert_eq!(
+        crate::row::local_row_note(
+            &cx.update(|cx| { page.read(cx).local_rows()[row_of("Held")].clone() })
+        ),
+        Some("review held")
+    );
+
+    // Enter on a held row opens the Gerrit change, not the local number.
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = events.clone();
+    let _sub = cx.update(|cx| {
+        cx.subscribe(&page, move |_, ev: &ListEvent, _| {
+            if let ListEvent::Open(n) = ev {
+                seen.borrow_mut().push(*n);
+            }
+        })
+    });
+    let press = |cx: &mut TestAppContext, key: &str| {
+        cx.update_window(window, |_, window, cx| {
+            use gpui_kit::test::TestWindowExt as _;
+            window.press(key, cx)
+        })
+        .expect("press");
+    };
+    for _ in 0..5 {
+        press(cx, "k");
+    }
+    for _ in 0..row_of("Held") {
+        press(cx, "j");
+    }
+    let selected = cx.update(|cx| page.read(cx).selected_number());
+    assert_eq!(selected, Some(rows[row_of("Held")].1));
+    press(cx, "enter");
+    assert_eq!(*events.borrow(), [ChangeNumber(42)]);
+    // A held row opens its change in the browser too.
+    let i = row_of("Closed") as i64 - row_of("Held") as i64;
+    for _ in 0..i.abs() {
+        press(cx, if i > 0 { "j" } else { "k" });
+    }
+    press(cx, "shift-o");
+    let url = cx.opened_url().expect("a web UI page");
+    assert!(url.ends_with("/c/p/+/41"), "{url}");
+}
+
+#[gpui_kit::test]
 fn scan_now_scans_whatever_the_skip_key_says_and_answers(cx: &mut TestAppContext) {
     use futures::FutureExt as _;
     let f = fixture();

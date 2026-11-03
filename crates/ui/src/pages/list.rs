@@ -22,12 +22,13 @@ use sync::{PollPolicy, PollState, local::search::LocalQuery};
 
 use crate::{
     actions::*,
+    change_detail::change_label,
     labels::{label_columns, mark, short_name},
     list_model::{DASHBOARD_ROWS, ListModel, PAGE_SIZE, Pager},
     local_scan::{LocalScanEvent, LocalScanner},
     local_source::local_chip,
     pages::settings::validate,
-    row::{browser_url, chips, local_state_note, size_text},
+    row::{browser_url, chips, local_row_note, size_text},
     search_link::{account_query, project_query, search_link},
     session::{SavedQuery, Session, is_unauthorized},
     theme::{chip_colors, mark_color},
@@ -542,18 +543,36 @@ impl ChangeListPage {
 
     fn open_selected(&mut self, _: &OpenSelected, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(n) = self.model.selected_number() {
-            cx.emit(ListEvent::Open(n));
+            cx.emit(ListEvent::Open(self.opens(n)));
         }
     }
 
+    /// The change that selecting row `n` opens: a local row with a Gerrit
+    /// change (closed, or with a held review) opens that change, where the
+    /// held card is; any other row its own number.
+    fn opens(&self, n: ChangeNumber) -> ChangeNumber {
+        self.local
+            .iter()
+            .find(|c| c.number == n)
+            .and_then(|c| c.gerrit_number)
+            .unwrap_or(n)
+    }
+
     fn open_in_browser(&mut self, _: &OpenInBrowser, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(n) = self.model.selected_number() else {
+        let Some(selected) = self.model.selected_number() else {
             return;
         };
+        let n = self.opens(selected);
         let project = (0..self.sections.len())
             .flat_map(|i| self.visible_rows(i))
             .find(|c| c.number == n)
-            .map(|c| c.project.clone());
+            .map(|c| c.project.clone())
+            .or_else(|| {
+                self.local
+                    .iter()
+                    .find(|c| c.number == selected && c.gerrit_number.is_some())
+                    .map(|c| c.project.clone())
+            });
         // A local change has no page on Gerrit (and is not among these rows).
         if let Some(url) = project.and_then(|p| browser_url(&self.session.base_url, &p, n)) {
             cx.open_url(&url);
@@ -958,7 +977,9 @@ impl ChangeListPage {
     /// A local change: "local" where the number would be (its number is
     /// synthetic and never shown), the subject with a note on its state,
     /// the author, project, target branch ("?" when unknown) and the
-    /// committer time of its newest version.
+    /// committer time of its newest version. A row with a Gerrit change
+    /// (closed, or with a held review) shows that change's `#number` and
+    /// opens it.
     fn render_local_row(
         &self,
         row: usize,
@@ -969,12 +990,14 @@ impl ChangeListPage {
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
         let number = c.number;
+        let opens = c.gerrit_number.unwrap_or(number);
         let tz = TimeZone::system();
         let cell = |w: f32| div().w(px(w)).flex_none().truncate();
         let shrinking = |w: f32| div().w(px(w)).flex_shrink(1.).min_w_0().truncate();
         let muted = theme.muted_foreground;
         let note_color = match c.state {
             LocalChangeState::Ambiguous | LocalChangeState::Closed => theme.warning,
+            _ if c.gerrit_number.is_some() => theme.warning,
             _ => muted,
         };
         h_flex()
@@ -993,13 +1016,17 @@ impl ChangeListPage {
             .hover(|d| d.bg(theme.list_hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.model.select_number(number);
-                cx.emit(ListEvent::Open(number));
+                cx.emit(ListEvent::Open(opens));
             }))
-            .child(
-                cell(W_NUM)
+            .child(match c.gerrit_number {
+                Some(n) => cell(W_NUM)
+                    .debug_selector(move || format!("local-gerrit-{row}: #{n}"))
+                    .text_color(muted)
+                    .child(change_label(n)),
+                None => cell(W_NUM)
                     .debug_selector(|| format!("local-chip-{row}"))
                     .child(local_chip(cx)),
-            )
+            })
             .child(
                 h_flex()
                     .flex_1()
@@ -1007,7 +1034,7 @@ impl ChangeListPage {
                     .gap_2()
                     .overflow_hidden()
                     .child(div().min_w_0().truncate().child(c.subject.clone()))
-                    .children(local_state_note(c.state).map(|note| {
+                    .children(local_row_note(c).map(|note| {
                         let state = c.state.as_str();
                         div()
                             .debug_selector(|| format!("local-note-{state}"))
