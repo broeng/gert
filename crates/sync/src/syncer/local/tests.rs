@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use futures::executor::block_on;
 use gerrit_api::{Auth, GerritClient, fake::FakeHttpClient};
 use model::{
-    BranchTargets, ChangeNumber, CommitInfo, LocalChangeState, LocalCommit, Signature, Upstream,
+    AccountId, BranchTargets, ChangeNumber, CommitInfo, LocalChangeState, LocalCommit, Signature,
+    Upstream,
 };
 use serde_json::json;
 use store::Store;
@@ -290,9 +291,14 @@ fn the_account_email_is_kept_when_the_account_is_read() {
         syncer.account_email().unwrap().as_deref(),
         Some("me@example.com")
     );
-    http.push_response(200, ")]}'\n{\"_account_id\": 1}");
+    assert_eq!(syncer.account().unwrap(), Some((AccountId(1), None)));
+    http.push_response(200, ")]}'\n{\"_account_id\": 2, \"username\": \"u\"}");
     block_on(syncer.account_self()).unwrap();
     assert_eq!(syncer.account_email().unwrap(), None);
+    assert_eq!(
+        syncer.account().unwrap(),
+        Some((AccountId(2), Some("u".into())))
+    );
 }
 
 #[test]
@@ -407,4 +413,70 @@ fn labels_are_borrowed_from_the_branch_else_the_project() {
     );
     assert!(syncer.labels_to_borrow("p", None).unwrap().is_some());
     assert_eq!(syncer.labels_to_borrow("q", Some("main")).unwrap(), None);
+}
+
+#[test]
+fn local_versions_keep_their_names_when_one_is_pushed_and_across_rows() {
+    let (http, syncer) = syncer();
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    let ordinals = |syncer: &Syncer| -> Vec<(String, u32)> {
+        syncer
+            .local_patch_sets_of(ChangeNumber(42))
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.sha.0, v.ordinal))
+            .collect()
+    };
+    // Two versions of 42 (I2), seen one after the other.
+    let sc = scan(vec![commit("v1", "I2")]);
+    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
+    let sc = scan(vec![commit("v2", "I2")]);
+    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
+    assert_eq!(ordinals(&syncer), [("v1".into(), 1), ("v2".into(), 2)]);
+
+    // v1 is pushed as patch set 2: v2 is still "local 2".
+    let mut detail = syncer
+        .cached_change(ChangeNumber(42))
+        .unwrap()
+        .unwrap()
+        .detail;
+    let mut ps2 = detail.revisions[0].clone();
+    ps2.number = model::PatchSetNumber(2);
+    ps2.sha = "v1".into();
+    detail.revisions.push(ps2);
+    syncer
+        .store()
+        .save_change_detail(syncer.server, &detail, Timestamp::UNIX_EPOCH)
+        .unwrap();
+    assert_eq!(ordinals(&syncer), [("v2".into(), 2)]);
+
+    // A second row of 42 (as a change of target branch leaves it) with a
+    // later version: the versions of both rows are numbered together.
+    let op = store::LocalOp::Upsert(store::LocalChangeUpsert {
+        seen: None,
+        branch: None,
+        change_id: "I2".into(),
+        gerrit_number: Some(ChangeNumber(42)),
+        subject: "s".into(),
+        author_name: "Me".into(),
+        author_email: "me@example.com".into(),
+        updated: Timestamp::now(),
+        state: Some(LocalChangeState::Local),
+        patch_sets: vec![store::NewLocalPatchSet {
+            sha: "v3".into(),
+            parent_sha: None,
+            seen_at: Timestamp::now(),
+        }],
+    });
+    syncer
+        .store()
+        .reconcile_local(syncer.server, "p", &[op], Timestamp::now())
+        .unwrap();
+    let rows = syncer
+        .store()
+        .local_changes_of_gerrit_change(syncer.server, ChangeNumber(42))
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(ordinals(&syncer), [("v2".into(), 2), ("v3".into(), 3)]);
 }

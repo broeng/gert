@@ -16,7 +16,7 @@
 //! everything and reports nothing.
 
 use jiff::Timestamp;
-use model::{Account, Event};
+use model::{Account, AccountId, Event};
 use store::{EVENT_RETENTION, NewInboxItem};
 
 use super::Syncer;
@@ -121,15 +121,23 @@ impl Syncer {
     /// scanner) answers for both, also after an offline start.
     pub async fn account_self(&self) -> Result<Account, Error> {
         let account = self.client.account_self().await?;
-        let email = account
-            .email
-            .as_deref()
-            .map(str::trim)
-            .filter(|e| !e.is_empty());
-        if let Err(e) = self.store().set_account_email(self.server, email) {
-            log::warn!("keeping the account email: {e}");
+        let stored = self.store().set_account(
+            self.server,
+            account.id,
+            account.username.as_deref(),
+            account.email.as_deref(),
+        );
+        if let Err(e) = stored {
+            log::warn!("keeping the account: {e}");
         }
         Ok(account)
+    }
+
+    /// The signed-in account's id and username as
+    /// [`Syncer::account_self`] last fetched them; `None` if never
+    /// fetched. Blocking (SQLite).
+    pub fn account(&self) -> Result<Option<(AccountId, Option<String>)>, Error> {
+        Ok(self.store().account(self.server)?)
     }
 
     /// The signed-in account's email as [`Syncer::account_self`] last

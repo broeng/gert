@@ -158,26 +158,38 @@ impl Syncer {
     /// (yet) a Gerrit patch set, in the order they were first seen. Rows
     /// that were consolidated are left out (what was on their versions has
     /// moved to the Gerrit change). Empty for a local change's number.
-    /// Blocking (SQLite).
+    ///
+    /// `ordinal` names the version ("local 2") and never changes, also
+    /// when an earlier version reaches Gerrit and drops out: with one row
+    /// it is the row's own; with several (the target branch changed, and
+    /// so the key) all versions of all the rows, pushed and consolidated
+    /// ones included, are numbered in the order (first seen, row id) from
+    /// 1. Blocking (SQLite).
     pub fn local_patch_sets_of(&self, number: ChangeNumber) -> Result<Vec<LocalPatchSet>, Error> {
         if number.is_local() {
             return Ok(Vec::new());
         }
         let store = self.store();
-        let mut out = Vec::new();
-        for row in store.local_changes_of_gerrit_change(self.server, number)? {
-            if row.state == LocalChangeState::Consolidated {
-                continue;
+        let rows = store.local_changes_of_gerrit_change(self.server, number)?;
+        let several = rows.len() > 1;
+        let mut all = Vec::new();
+        for row in rows {
+            let shown = row.state != LocalChangeState::Consolidated;
+            for v in store.local_patch_sets(self.server, row.id)? {
+                all.push((shown, v));
             }
-            let versions = store.local_patch_sets(self.server, row.id)?;
-            out.extend(
-                versions
-                    .into_iter()
-                    .filter(|v| v.gerrit_patch_set.is_none()),
-            );
         }
-        out.sort_by_key(|v| (v.seen_at, v.id));
-        Ok(out)
+        all.sort_by_key(|(_, v)| (v.seen_at, v.id));
+        Ok(all
+            .into_iter()
+            .zip(1..)
+            .filter_map(|((shown, mut v), n)| {
+                if several {
+                    v.ordinal = n;
+                }
+                (shown && v.gerrit_patch_set.is_none()).then_some(v)
+            })
+            .collect())
     }
 
     /// The labels a local change of `project` borrows (see
