@@ -40,6 +40,10 @@ pub trait RefreshSource: Send + Sync {
     fn refresh_change(&self, number: ChangeNumber) -> BoxFuture<'_, Result<ChangeDetail, Error>>;
 }
 
+/// The tag prefix of consolidation posts until [`Syncer::with_app_name`]
+/// sets the application's name.
+const DEFAULT_APP_NAME: &str = "client";
+
 /// Fetches from one server and writes into the shared [`Store`].
 #[derive(Clone)]
 pub struct Syncer {
@@ -50,6 +54,10 @@ pub struct Syncer {
     /// (uploads, publishing, refreshing the draft list), so that a refresh
     /// never sees a draft that is uploaded but not yet recorded as such.
     drafts_lock: Arc<futures::lock::Mutex<()>>,
+    /// Lets one consolidation run at a time (see [`Syncer::consolidate`]).
+    consolidate_lock: Arc<futures::lock::Mutex<()>>,
+    /// Starts the tag of the reviews consolidation posts.
+    app_name: Arc<str>,
 }
 
 impl Syncer {
@@ -59,6 +67,8 @@ impl Syncer {
             store,
             server,
             drafts_lock: Arc::default(),
+            consolidate_lock: Arc::default(),
+            app_name: DEFAULT_APP_NAME.into(),
         }
     }
 
@@ -414,6 +424,7 @@ fn first_page_unchanged(cached: &CachedQuery, fresh: &[ChangeSummary], more: boo
 
 mod actions;
 mod comments;
+mod consolidate;
 mod edits;
 mod local;
 mod pending;
@@ -421,6 +432,9 @@ mod watch;
 
 pub use actions::NewChange;
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
+pub use consolidate::{
+    ConsolidateOptions, ConsolidateReport, FoundChange, PostOutcome, PostReport,
+};
 pub use edits::ReviewerAdded;
 pub use local::ChainCommit;
 pub use store::DraftCounts;
