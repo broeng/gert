@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use futures::StreamExt as _;
 use gpui_kit::*;
-use model::ChangeNumber;
 use sync::notify::{Notification, NotificationSettings, Screen};
 
 use crate::{
@@ -19,7 +18,15 @@ use crate::{
     watching::{self, Inputs, Ran},
 };
 
-use super::{Shell, WatchStep};
+use super::Shell;
+
+/// What the notification watch does after a pass.
+enum WatchStep {
+    Done,
+    Failed,
+    /// The credentials are refused; the watch ends.
+    Stop,
+}
 
 impl Shell {
     /// Turns on desktop notifications: every signed-in server is watched
@@ -382,16 +389,6 @@ impl Shell {
             .ok();
         })
         .detach();
-    }
-
-    /// The server and change of the change or diff page on screen.
-    pub(super) fn current_change(&self) -> Option<(ServerKey, ChangeNumber)> {
-        let key = self.nav.current_server()?.clone();
-        match self.nav.current() {
-            Route::Change(n) => Some((key, *n)),
-            Route::Diff(d) => Some((key, d.change)),
-            _ => None,
-        }
     }
 
     /// The task that polls the attention count of server `key` until it is

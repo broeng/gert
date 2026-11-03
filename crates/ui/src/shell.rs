@@ -185,14 +185,6 @@ pub struct Shell {
     _subs: Vec<Subscription>,
 }
 
-/// What the notification watch does after a pass.
-enum WatchStep {
-    Done,
-    Failed,
-    /// The credentials are refused; the watch ends.
-    Stop,
-}
-
 impl Shell {
     pub fn new(startup: Startup, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let Startup {
@@ -1110,6 +1102,16 @@ impl Shell {
     }
 
     // ---- navigation ----
+
+    /// The server and change of the change or diff page on screen.
+    fn current_change(&self) -> Option<(ServerKey, ChangeNumber)> {
+        let key = self.nav.current_server()?.clone();
+        match self.nav.current() {
+            Route::Change(n) => Some((key, *n)),
+            Route::Diff(d) => Some((key, d.change)),
+            _ => None,
+        }
+    }
 
     /// Builds the page for the current route and focuses it.
     fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
