@@ -600,6 +600,40 @@ fn a_superseded_label_is_removed_without_revoting() {
 }
 
 #[test]
+fn a_withdrawn_local_vote_leaves_every_pending_review_of_the_version() {
+    use PendingReviewState::*;
+    let Fx {
+        mut s,
+        id,
+        versions,
+        ..
+    } = fx();
+    let (v1, v2) = (versions[0].number, versions[1].number);
+    // An older review with a message and two votes, a newer one with only
+    // the vote, one on the other version, and one being sent.
+    let mut input = new_review(v1, "m");
+    input.labels.insert("Verified".into(), 1);
+    let older = s.create_pending_review(id, &input).unwrap();
+    let newer = s.create_pending_review(id, &new_review(v1, "")).unwrap();
+    let other = s.create_pending_review(id, &new_review(v2, "")).unwrap();
+    let sending = s.create_pending_review(id, &new_review(v1, "s")).unwrap();
+    s.mark_pending_review_sending(id, sending.id, &[Pending], "n")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(s.withdraw_local_vote(id, v1, "Code-Review").unwrap(), 2);
+    let older = s.load_pending_review(id, older.id).unwrap().unwrap();
+    assert_eq!(older.labels, BTreeMap::from([("Verified".to_owned(), 1)]));
+    assert_eq!(older.message.as_deref(), Some("m"));
+    assert_eq!(s.load_pending_review(id, newer.id).unwrap(), None, "empty");
+    for kept in [other.id, sending.id] {
+        let r = s.load_pending_review(id, kept).unwrap().unwrap();
+        assert_eq!(r.labels, labels(2));
+    }
+    assert_eq!(s.withdraw_local_vote(id, v1, "Code-Review").unwrap(), 0);
+}
+
+#[test]
 fn reviews_list_per_change_in_creation_order() {
     let Fx {
         mut s,

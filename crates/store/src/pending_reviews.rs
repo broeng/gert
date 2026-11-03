@@ -765,6 +765,44 @@ impl Store {
         tx.commit()?;
         Ok(Some(review))
     }
+
+    /// Takes the user's vote on `label` back on local version `patch_set`
+    /// (the trash button of a local vote): removes the label from every
+    /// `Pending` review of the version, as [`Store::remove_review_label`]
+    /// does, so no older review brings the vote back. A review left with
+    /// neither votes nor a message is deleted. Reviews being sent, held or
+    /// failed are left alone. Returns how many reviews had the label.
+    pub fn withdraw_local_vote(
+        &mut self,
+        server: ServerId,
+        patch_set: PatchSetNumber,
+        label: &str,
+    ) -> Result<usize, Error> {
+        let tx = self.conn.transaction()?;
+        let reviews = query(
+            &tx,
+            "r.server_id = ?1 AND r.patch_set = ?2 AND r.state = ?3",
+            &[
+                &server.0,
+                &patch_set.0,
+                &PendingReviewState::Pending.as_str(),
+            ],
+        )?;
+        let mut changed = 0;
+        for mut r in reviews {
+            if r.labels.remove(label).is_none() {
+                continue;
+            }
+            tx.execute(
+                "UPDATE pending_reviews SET labels = ?3 WHERE server_id = ?1 AND id = ?2",
+                params![server.0, r.id.0, serde_json::to_string(&r.labels)?],
+            )?;
+            drop_if_empty(&tx, server, r.id)?;
+            changed += 1;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,9 @@
 //! `store::pending_reviews`). No network: nothing here talks to the
 //! server; consolidation sends them later.
 
-use model::{ChangeNumber, LocalApproval, PendingReview, PendingReviewId, Timestamp};
+use model::{
+    ChangeNumber, LocalApproval, PatchSetNumber, PendingReview, PendingReviewId, Timestamp,
+};
 use store::{NewPendingReview, PendingReviewEdit};
 
 use super::Syncer;
@@ -59,6 +61,19 @@ impl Syncer {
             offline,
             Timestamp::now(),
         )?)
+    }
+
+    /// Takes the user's vote on `label` back on local version `patch_set`
+    /// (see [`store::Store::withdraw_local_vote`]). Returns how many pending
+    /// reviews had it. Blocking (SQLite).
+    pub fn withdraw_local_vote(
+        &self,
+        patch_set: PatchSetNumber,
+        label: &str,
+    ) -> Result<usize, Error> {
+        Ok(self
+            .store()
+            .withdraw_local_vote(self.server, patch_set, label)?)
     }
 
     /// Withdraws a pending review; its message stays as an ordinary draft.
