@@ -9,6 +9,10 @@
 //! It writes (drafts, a review, reviewed marks) to a throwaway change of
 //! its own, as `alice`. Per `CLAUDE.md` it refuses to run against anything
 //! but 127.0.0.1 or localhost.
+//!
+//! The consolidation tests also write as `bob` (a reply, for the attention
+//! set) and as `admin` (a project with Gerrit's default permissions, where
+//! `alice` may not vote Code-Review +2).
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -27,10 +31,12 @@ use store::Store;
 use sync::{DraftSave, Syncer};
 
 /// Blocking `ureq` behind the async trait, with a switch that makes every
-/// request fail like a dead network.
+/// request fail like a dead network, and one that loses the answer to the
+/// next review post after the server took it (a crash mid-post).
 struct Ureq {
     agent: ureq::Agent,
     offline: Arc<AtomicBool>,
+    lose_review_answer: Arc<AtomicBool>,
 }
 
 impl HttpClient for Ureq {
@@ -38,6 +44,9 @@ impl HttpClient for Ureq {
         &self,
         req: http::Request<Vec<u8>>,
     ) -> BoxFuture<'static, Result<http::Response<Vec<u8>>, HttpError>> {
+        let lose = req.method() == http::Method::POST
+            && req.uri().path().ends_with("/review")
+            && self.lose_review_answer.swap(false, Ordering::SeqCst);
         let res = if self.offline.load(Ordering::SeqCst) {
             Err(HttpError("network is unreachable (simulated)".into()))
         } else {
@@ -49,6 +58,11 @@ impl HttpClient for Ureq {
                     let bytes = body.read_to_vec().map_err(|e| HttpError(e.to_string()))?;
                     Ok(http::Response::from_parts(parts, bytes))
                 })
+        };
+        let res = if lose {
+            Err(HttpError("connection reset (simulated)".into()))
+        } else {
+            res
         };
         async move { res }.boxed()
     }
@@ -82,13 +96,18 @@ fn agent() -> ureq::Agent {
 struct Fx {
     syncer: Syncer,
     offline: Arc<AtomicBool>,
+    lose_review_answer: Arc<AtomicBool>,
+    store: Arc<Mutex<Store>>,
+    server: store::ServerId,
 }
 
 fn alice() -> Fx {
     let offline = Arc::new(AtomicBool::new(false));
+    let lose_review_answer = Arc::new(AtomicBool::new(false));
     let http = Ureq {
         agent: agent(),
         offline: offline.clone(),
+        lose_review_answer: lose_review_answer.clone(),
     };
     let client = GerritClient::new(
         Arc::new(http),
@@ -101,14 +120,23 @@ fn alice() -> Fx {
     .unwrap();
     let mut store = Store::open_in_memory().unwrap();
     let server = store.server_id(&base_url()).unwrap();
+    let store = Arc::new(Mutex::new(store));
     Fx {
-        syncer: Syncer::new(client, Arc::new(Mutex::new(store)), server),
+        syncer: Syncer::new(client, store.clone(), server),
         offline,
+        lose_review_answer,
+        store,
+        server,
     }
 }
 
 fn raw(method: &str, path: &str, body: serde_json::Value) -> (u16, String) {
-    let token = base64::engine::general_purpose::STANDARD.encode("alice:alice-dev-password");
+    raw_as("alice", method, path, body)
+}
+
+fn raw_as(user: &str, method: &str, path: &str, body: serde_json::Value) -> (u16, String) {
+    let token =
+        base64::engine::general_purpose::STANDARD.encode(format!("{user}:{user}-dev-password"));
     let req = http::Request::builder()
         .method(method)
         .uri(format!("{}/a{path}", base_url()))
@@ -119,6 +147,7 @@ fn raw(method: &str, path: &str, body: serde_json::Value) -> (u16, String) {
     let client = Ureq {
         agent: agent(),
         offline: Arc::default(),
+        lose_review_answer: Arc::default(),
     };
     let resp = block_on(client.send(req)).expect("raw request");
     (
@@ -129,6 +158,12 @@ fn raw(method: &str, path: &str, body: serde_json::Value) -> (u16, String) {
 
 /// A new change by alice with the file `probe.txt`.
 fn new_change() -> ChangeNumber {
+    new_change_in("demo/scheduler", "main")
+}
+
+/// A new change by alice in `project` on `branch`: patch set 1 is empty,
+/// patch set 2 adds `probe.txt` (three lines).
+fn new_change_in(project: &str, branch: &str) -> ChangeNumber {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -136,7 +171,7 @@ fn new_change() -> ChangeNumber {
     let (code, body) = raw(
         "POST",
         "/changes/",
-        serde_json::json!({"project": "demo/scheduler", "branch": "main", "status": "NEW",
+        serde_json::json!({"project": project, "branch": branch, "status": "NEW",
                            "subject": format!("Dev test sync {stamp}")}),
     );
     assert_eq!(code, 201, "{body}");
@@ -433,4 +468,435 @@ fn reviewer_topic_and_hashtag_edits_refresh_the_cached_change() {
         .unwrap();
     assert!(d.summary.hashtags.is_empty());
     assert_eq!(c.cached_change(n).unwrap().unwrap().detail, d);
+}
+
+// ---- consolidation (LC5a) ----
+//
+// What these pin about Gerrit 3.14 (the dev Gerrit):
+//
+// * A review with inline `comments`, a `tag` and `drafts: KEEP` posts
+//   exactly those comments, each with the review's tag, and leaves the
+//   user's other drafts alone.
+// * `ignore_automatic_attention_set_rules` leaves the attention set as it
+//   was (a reply by the owner would otherwise take the owner out).
+// * The posted review's change message carries the tag and the author, and
+//   its `_revision_number` is the patch set posted to: what recovery after
+//   a lost answer looks for.
+// * Votes on a patch set that is not current are accepted (200), listed as
+//   applied in `labels`, and kept on that patch set; the answer's
+//   `change_info.current_revision_number` names the current one.
+// * An unknown label or a value the label does not have: 200, the vote
+//   silently left out of `labels`. There is no `unapplied_labels` field.
+// * A vote the account may not give: 403 `Applying label "Code-Review": 2
+//   is restricted`.
+
+fn json_of(body: &str) -> serde_json::Value {
+    serde_json::from_str(body.trim_start_matches(")]}'")).unwrap()
+}
+
+/// `GET` as alice, as JSON.
+fn get(path: &str) -> serde_json::Value {
+    let (code, body) = raw("GET", path, serde_json::Value::Null);
+    assert_eq!(code, 200, "{path}: {body}");
+    json_of(&body)
+}
+
+impl Fx {
+    /// A local change row whose only version is `ps` of change `n`, as if
+    /// the user had reviewed the commit before pushing it: a local draft on
+    /// line 2 of `probe.txt` and a pending review with `labels` and an
+    /// unresolved message.
+    fn local_review_of(
+        &self,
+        n: ChangeNumber,
+        ps: &PatchSetRef,
+        labels: &[(&str, i32)],
+    ) -> (model::LocalChange, model::PendingReview) {
+        let detail = self.syncer.cached_change(n).unwrap().unwrap().detail;
+        let change_id = detail.summary.change_id.clone().unwrap();
+        let row = {
+            let mut store = self.store.lock().unwrap();
+            let upsert = store::LocalChangeUpsert {
+                seen: None,
+                branch: Some(detail.summary.branch.clone()),
+                change_id: change_id.clone(),
+                gerrit_number: Some(n),
+                subject: "local".into(),
+                author_name: "Alice".into(),
+                author_email: "alice@example.com".into(),
+                updated: model::Timestamp::now(),
+                state: None,
+                patch_sets: vec![store::NewLocalPatchSet {
+                    sha: ps.sha.clone(),
+                    parent_sha: None,
+                    seen_at: model::Timestamp::now(),
+                }],
+            };
+            store
+                .reconcile_local(
+                    self.server,
+                    &detail.summary.project,
+                    &[store::LocalOp::Upsert(upsert)],
+                    model::Timestamp::now(),
+                )
+                .unwrap();
+            store
+                .local_changes_by_change_id(self.server, &change_id)
+                .unwrap()
+                .remove(0)
+        };
+        let version = self.syncer.local_change_versions(&row);
+        self.syncer
+            .save_draft_local(DraftSave::Create {
+                change: n,
+                patch_set: PatchSetRef {
+                    number: version.number,
+                    sha: version.sha.clone(),
+                },
+                input: input("local inline"),
+            })
+            .unwrap()
+            .unwrap();
+        let review = self
+            .syncer
+            .create_pending_review(&store::NewPendingReview {
+                patch_set: version.number,
+                labels: labels.iter().map(|(l, v)| ((*l).to_owned(), *v)).collect(),
+                strategy: model::LocalApproval::Exact,
+                message: "local review message".into(),
+                unresolved: true,
+                created: model::Timestamp::now(),
+                replaces_draft: None,
+            })
+            .unwrap();
+        (row, review)
+    }
+
+    fn review_now(&self, r: &model::PendingReview) -> model::PendingReview {
+        self.store
+            .lock()
+            .unwrap()
+            .load_pending_review(self.server, r.id)
+            .unwrap()
+            .unwrap()
+    }
+}
+
+/// The local change's only version.
+trait Versions {
+    fn local_change_versions(&self, row: &model::LocalChange) -> model::LocalPatchSet;
+}
+
+impl Versions for Syncer {
+    fn local_change_versions(&self, row: &model::LocalChange) -> model::LocalPatchSet {
+        let gerrit = row.gerrit_number.unwrap();
+        self.local_patch_sets_of(gerrit)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.local_change == row.id)
+            .unwrap()
+    }
+}
+
+fn attention(n: ChangeNumber) -> Vec<String> {
+    let c = get(&format!("/changes/{n}"));
+    let mut ids: Vec<String> = c["attention_set"]
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// The change messages with `tag`.
+fn tagged(n: ChangeNumber, tag: &str) -> Vec<serde_json::Value> {
+    get(&format!("/changes/{n}?o=MESSAGES"))["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["tag"] == tag)
+        .cloned()
+        .collect()
+}
+
+fn current_ps(f: &Fx, n: ChangeNumber) -> PatchSetRef {
+    let detail = block_on(f.syncer.refresh_change(n)).expect("detail");
+    detail.current().expect("current").as_ref()
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn consolidation_posts_one_tagged_review_and_keeps_other_drafts() {
+    let f = alice();
+    let syncer = f.syncer.clone().with_app_name("devtest");
+    let n = new_change();
+    let ps = current_ps(&f, n);
+    // Bob replies, which gives alice (the owner) the attention.
+    let (code, body) = raw_as(
+        "bob",
+        "POST",
+        &format!("/changes/{n}/revisions/current/review"),
+        serde_json::json!({"message": "over to you"}),
+    );
+    assert_eq!(code, 200, "{body}");
+    let before = attention(n);
+    assert!(!before.is_empty());
+    // A draft alice wrote in the web UI.
+    let (code, body) = raw(
+        "PUT",
+        &format!("/changes/{n}/revisions/current/drafts"),
+        serde_json::json!({"path": "probe.txt", "line": 1, "message": "web ui draft"}),
+    );
+    assert_eq!(code, 201, "{body}");
+    let (row, review) = f.local_review_of(n, &ps, &[("Code-Review", 1)]);
+
+    let report = block_on(syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    assert!(
+        report.stopped.is_none() && report.errors.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(report.posts.len(), 1, "{report:?}");
+    assert_eq!(report.posts[0].outcome, sync::PostOutcome::Sent);
+    assert_eq!(report.consolidated, [(row.id, n)]);
+    assert_eq!(f.review_now(&review).state, model::PendingReviewState::Sent);
+
+    // One message, tagged, by alice, on the patch set posted to.
+    let messages = get(&format!("/changes/{n}?o=MESSAGES"))["messages"].clone();
+    let ours: Vec<&serde_json::Value> = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| {
+            m["tag"]
+                .as_str()
+                .is_some_and(|t| t.starts_with(&format!("devtest-local-{}-", row.id.0)))
+        })
+        .collect();
+    assert_eq!(ours.len(), 1, "{messages}");
+    let tag = ours[0]["tag"].as_str().unwrap();
+    println!("posted message: {}", ours[0]);
+    let me = get("/accounts/self")["_account_id"].clone();
+    assert_eq!(ours[0]["author"]["_account_id"], me);
+    assert_eq!(ours[0]["_revision_number"], ps.number.0);
+
+    // Exactly the local comments, with the tag; the web UI draft is still
+    // a draft.
+    let comments = get(&format!("/changes/{n}/comments"));
+    println!("comments: {comments}");
+    let inline = comments["probe.txt"].as_array().unwrap();
+    assert_eq!(inline.len(), 1);
+    assert_eq!(inline[0]["message"], "local inline");
+    assert_eq!(inline[0]["line"], 2);
+    assert_eq!(inline[0]["unresolved"], true);
+    assert_eq!(inline[0]["tag"], tag);
+    let top = comments["/PATCHSET_LEVEL"].as_array().unwrap();
+    assert_eq!(top.len(), 1);
+    assert_eq!(top[0]["message"], "local review message");
+    assert_eq!(top[0]["unresolved"], true);
+    let drafts = get(&format!("/changes/{n}/drafts"));
+    assert_eq!(drafts["probe.txt"][0]["message"], "web ui draft");
+
+    // The attention set is as it was; the vote is there.
+    assert_eq!(attention(n), before);
+    let labels = get(&format!("/changes/{n}?o=DETAILED_LABELS"))["labels"].clone();
+    assert!(
+        labels["Code-Review"]["all"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["_account_id"] == me && v["value"] == 1),
+        "{labels}"
+    );
+
+    // Nothing left to send: the next run posts nothing.
+    let report = block_on(syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    assert!(report.posts.is_empty(), "{report:?}");
+    assert_eq!(tagged(n, tag).len(), 1);
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn a_post_whose_answer_was_lost_is_found_by_its_tag_and_not_sent_again() {
+    let f = alice();
+    let n = new_change();
+    let ps = current_ps(&f, n);
+    let (_, review) = f.local_review_of(n, &ps, &[("Code-Review", 1)]);
+    f.lose_review_answer.store(true, Ordering::SeqCst);
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    assert!(report.stopped.is_some(), "{report:?}");
+    let sending = f.review_now(&review);
+    assert_eq!(sending.state, model::PendingReviewState::Sending);
+    let nonce = sending.nonce.unwrap();
+
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    assert!(report.stopped.is_none(), "{report:?}");
+    assert_eq!(report.posts.len(), 1);
+    assert!(report.posts[0].recovered, "{report:?}");
+    assert_eq!(f.review_now(&review).state, model::PendingReviewState::Sent);
+    let messages = get(&format!("/changes/{n}?o=MESSAGES"))["messages"].clone();
+    let ours = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["tag"].as_str().is_some_and(|t| t.ends_with(&nonce)))
+        .count();
+    assert_eq!(ours, 1, "posted once: {messages}");
+    let comments = get(&format!("/changes/{n}/comments"));
+    assert_eq!(comments["probe.txt"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn gerrit_takes_votes_on_an_older_patch_set_and_drops_unknown_labels() {
+    let f = alice();
+    let n = new_change();
+    let detail = block_on(f.syncer.refresh_change(n)).unwrap();
+    let ps1 = detail
+        .revision(model::PatchSetNumber(1))
+        .unwrap()
+        .sha
+        .clone();
+    let ps2 = detail
+        .revision(model::PatchSetNumber(2))
+        .unwrap()
+        .sha
+        .clone();
+    let mut old = ReviewInput {
+        drafts: model::DraftHandling::Keep,
+        ..ReviewInput::default()
+    };
+    old.labels.insert("Code-Review".into(), 1);
+    let out = block_on(f.syncer.publish_review(n, &ps1, &old)).expect("accepted");
+    println!("vote on PS 1 of 2: {:?}", out.result);
+    assert_eq!(out.result.labels.get("Code-Review"), Some(&1));
+    assert_eq!(out.result.current_patch_set, Some(model::PatchSetNumber(2)));
+    assert!(out.unapplied_labels.is_empty());
+
+    let mut odd = ReviewInput {
+        drafts: model::DraftHandling::Keep,
+        ..ReviewInput::default()
+    };
+    odd.labels.insert("No-Such-Label".into(), 1);
+    odd.labels.insert("Code-Review".into(), 3);
+    let out = block_on(f.syncer.publish_review(n, &ps2, &odd)).expect("accepted");
+    println!("unknown label and value: {:?}", out.result);
+    assert_eq!(
+        out.unapplied_labels,
+        [
+            ("Code-Review".to_owned(), 3),
+            ("No-Such-Label".to_owned(), 1)
+        ]
+    );
+
+    // Consolidation on a non-current exact match: comments and message go
+    // out, the votes are held.
+    let m = new_change();
+    let detail = block_on(f.syncer.refresh_change(m)).unwrap();
+    let older = detail.revision(model::PatchSetNumber(1)).unwrap().as_ref();
+    // PS 1 has no probe.txt: comment on the commit message instead.
+    let (row, review) = f.local_review_of_commit_message(m, &older, &[("Code-Review", 2)]);
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    assert!(report.stopped.is_none(), "{report:?}");
+    let held = f.review_now(&review);
+    assert_eq!(held.state, model::PendingReviewState::Held, "{report:?}");
+    println!("held: {:?}", held.held_reason);
+    let comments = get(&format!("/changes/{m}/comments"));
+    assert_eq!(comments["/PATCHSET_LEVEL"][0]["patch_set"], 1);
+    let labels = get(&format!("/changes/{m}?o=DETAILED_LABELS"))["labels"].clone();
+    assert!(
+        !labels["Code-Review"]["all"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|v| v["value"] == 2),
+        "{labels}"
+    );
+    let _ = row;
+}
+
+impl Fx {
+    /// [`Fx::local_review_of`] with the local draft on the commit message
+    /// (which every patch set has).
+    fn local_review_of_commit_message(
+        &self,
+        n: ChangeNumber,
+        ps: &PatchSetRef,
+        labels: &[(&str, i32)],
+    ) -> (model::LocalChange, model::PendingReview) {
+        let (row, review) = self.local_review_of(n, ps, labels);
+        // Move the probe.txt draft to the commit message.
+        let drafts = self.syncer.cached_comments(n).unwrap().drafts;
+        for d in drafts.iter().filter(|d| d.path == "probe.txt") {
+            self.syncer.delete_draft_local(d.local_id).unwrap();
+        }
+        let version = self.syncer.local_change_versions(&row);
+        self.syncer
+            .save_draft_local(DraftSave::Create {
+                change: n,
+                patch_set: PatchSetRef {
+                    number: version.number,
+                    sha: version.sha.clone(),
+                },
+                input: DraftInput {
+                    path: "/COMMIT_MSG".into(),
+                    location: Location::Line(1),
+                    ..input("on the subject")
+                },
+            })
+            .unwrap()
+            .unwrap();
+        (row, review)
+    }
+}
+
+#[test]
+#[ignore = "needs GERT_TEST_GERRIT"]
+fn a_restricted_vote_is_refused_and_the_comments_still_go_out() {
+    let f = alice();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    // Gerrit's default permissions: registered users vote -1..+1.
+    let project = format!("dev-test/perm-{stamp}");
+    let (code, body) = raw_as(
+        "admin",
+        "PUT",
+        &format!("/projects/{}", project.replace('/', "%2F")),
+        serde_json::json!({"create_empty_commit": true}),
+    );
+    assert_eq!(code, 201, "{body}");
+    let n = new_change_in(&project, "master");
+    let ps = current_ps(&f, n);
+    let mut plus2 = ReviewInput {
+        drafts: model::DraftHandling::Keep,
+        ..ReviewInput::default()
+    };
+    plus2.labels.insert("Code-Review".into(), 2);
+    let err = block_on(f.syncer.publish_review(n, &ps.sha, &plus2)).unwrap_err();
+    println!("restricted vote: {err}");
+    assert!(
+        matches!(&err, sync::Error::Api(gerrit_api::Error::Forbidden { message })
+            if message.contains("label")),
+        "{err}"
+    );
+
+    let (_, review) = f.local_review_of(n, &ps, &[("Code-Review", 2)]);
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    assert!(report.stopped.is_none(), "{report:?}");
+    let failed = f.review_now(&review);
+    assert_eq!(
+        failed.state,
+        model::PendingReviewState::Failed,
+        "{report:?}"
+    );
+    println!("failed votes: {:?}", failed.error);
+    assert!(failed.error.unwrap().contains("restricted"));
+    assert_eq!(failed.labels.get("Code-Review"), Some(&2));
+    let comments = get(&format!("/changes/{n}/comments"));
+    assert_eq!(comments["probe.txt"][0]["message"], "local inline");
+    assert_eq!(
+        comments["/PATCHSET_LEVEL"][0]["message"],
+        "local review message"
+    );
 }
