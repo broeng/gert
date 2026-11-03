@@ -194,6 +194,7 @@ fn revision(sha: &str, r: &RevisionInfo) -> Result<Revision, ConversionError> {
         ref_name: r.ref_name.clone(),
         description: r.description.clone().filter(|d| !d.is_empty()),
         commit: r.commit.as_ref().map(commit).transpose()?,
+        local_ordinal: None,
     })
 }
 

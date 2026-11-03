@@ -34,6 +34,7 @@ fn local(id: i64, sha: &str, seen: u32) -> Revision {
         ref_name: None,
         description: None,
         commit: None,
+        local_ordinal: None,
     }
 }
 

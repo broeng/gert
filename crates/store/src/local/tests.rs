@@ -641,6 +641,7 @@ fn revision(n: u32) -> Revision {
         ref_name: None,
         description: None,
         commit: None,
+        local_ordinal: None,
     }
 }
 

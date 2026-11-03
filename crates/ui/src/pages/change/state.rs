@@ -246,6 +246,7 @@ mod tests {
                     ref_name: None,
                     description: None,
                     commit: None,
+                    local_ordinal: None,
                 })
                 .collect(),
             messages: vec![],

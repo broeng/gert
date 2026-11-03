@@ -64,6 +64,7 @@ pub fn detail(number: u64, n: u32, current: u32) -> ChangeDetail {
                 ref_name: None,
                 description: None,
                 commit: None,
+                local_ordinal: None,
             })
             .collect(),
         messages: vec![],

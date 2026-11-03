@@ -76,6 +76,12 @@ pub struct Revision {
     pub description: Option<String>,
     /// Present with `ALL_COMMITS` / `CURRENT_COMMIT`.
     pub commit: Option<Commit>,
+    /// For a local patch set (a version that exists only in the checkout,
+    /// with a synthetic `number`): its name among the change's local
+    /// versions, 2 for "local 2". `None` for Gerrit's patch sets, so it
+    /// is never in a stored detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_ordinal: Option<u32>,
 }
 
 impl Revision {
@@ -122,6 +128,7 @@ mod tests {
             ref_name: None,
             description: None,
             commit: None,
+            local_ordinal: None,
         };
         assert_eq!(
             r.as_ref(),
@@ -130,5 +137,11 @@ mod tests {
                 sha: "abc".into()
             }
         );
+        // A Gerrit patch set's JSON (what the cache stores) has no local
+        // name, and JSON without one reads as none.
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json.get("local_ordinal").is_none());
+        let back: Revision = serde_json::from_value(json).unwrap();
+        assert_eq!(back, r);
     }
 }

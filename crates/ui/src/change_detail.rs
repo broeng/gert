@@ -168,6 +168,7 @@ fn local_revision(v: &LocalPatchSet) -> Revision {
         ref_name: None,
         description: None,
         commit: None,
+        local_ordinal: None,
     }
 }
 
