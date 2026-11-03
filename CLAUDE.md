@@ -168,9 +168,8 @@ crates/
                 view, reply dialog, action menu, file filters, settings,
                 themes, project checkouts (`ui::checkouts`), the local
                 diff source (`ui::local_source`) and local changes
-                (`ui::local_scan`, `ui::consolidation`, `ui::local_port`,
-                `ui::change_detail`, `ui::local_chain`, the change page's
-                pending and held cards). `examples/review.rs` runs
+                (`ui::local_scan`, `ui::consolidation`, ...).
+                `examples/review.rs` runs
                 the whole UI against a fake server; `examples/diff_viewer.rs`
                 shows the diff view alone.
   gert/         (directory `crates/app`) binary: wiring, config, keyring,
@@ -185,6 +184,8 @@ Dependency direction: `app → ui → sync → store, gerrit-api → model` and
 `ui → local-git → model` (`ui` also uses `store` and `gerrit-api` types
 directly). `model`, `gerrit-api`, `store`, `sync` and `local-git` must not
 depend on GPUI, so they are testable without a UI. (`sync` exposes plain async/channels; `ui` adapts that to GPUI entities.)
+`sync` reaches git only through `PortSource` (implemented in `ui`);
+`local-git` is only a dev-dependency of `sync`, for its end-to-end test.
 
 ### Data flow and caching
 
@@ -235,17 +236,14 @@ sent there automatically once pushed (the app never pushes).
 
 - **Discovery.** Per project: `local_changes = true` and `local_approval`
   in `[[servers.projects]]` (project dialog; not for anonymous servers).
-  `ui::local_scan` (one scanner per signed-in server, off the UI thread,
-  skipped while refs and store are unchanged) takes commits on named local
-  branches and on no remote-tracking branch, with a `Change-Id` trailer and
-  the account's or checkout's author email, newest 200.
-  `Syncer::reconcile_local` makes one local change per Change-Id (project,
-  target branch) and a local patch set ("local 1", "local 2", ...) per SHA
-  seen; an unknown SHA of an open Gerrit change is a local patch set of
-  that change. A row is `Checking` until a lookup. A change gone from the
-  branches goes with its data, unless it has unsent data: then it stays
-  dimmed until a lookup settles it. Turning the option off removes rows
-  without unsent data.
+  `ui::local_scan` takes commits on named local branches and on no
+  remote-tracking branch, with a `Change-Id` trailer and the account's or
+  checkout's author email. `Syncer::reconcile_local` makes one local
+  change per Change-Id (project, target branch) and a local patch set
+  ("local 1", ...) per SHA seen; an unknown SHA of an open Gerrit change
+  is a local patch set of that change. A change gone from the branches
+  goes with its data, unless it has unsent data: then it stays until a
+  lookup settles it.
 - **Synthetic numbers.** Local changes and patch sets get numbers from
   reserved ranges (`ChangeNumber::LOCAL_BASE`, `PatchSetNumber::LOCAL_BASE`)
   so pages, drafts and history work on them. They never reach a server:
@@ -255,48 +253,59 @@ sent there automatically once pushed (the app never pushes).
   the store (`ui::change_detail`; labels borrowed from a cached change of
   the project and branch) and never stored as change details.
 - **Local reviews are store-first.** A comment on a local version is a
-  draft on its local numbers. The reply dialog ("Local review", Save) and
-  quick votes write a `pending_reviews` row whose message is a sealed
-  draft; it can be edited or cancelled until sent.
+  draft on its local numbers. The reply dialog ("Local review", Save)
+  writes a `pending_reviews` row whose message is a sealed draft; quick
+  votes join the newest pending review or start one without a message.
+  It can be edited or cancelled until sent.
 - **The "ordinary draft" rule.** Only ordinary drafts (`Draft::is_ordinary`,
   `drafts::ordinary()` in SQL: not on local numbers, not sealed, not
   reserved for a consolidation post, not held) take part in upload, retry,
   `publish_review`, merging server drafts and the counts. Every new draft
-  path must keep to it.
+  path must keep to it. A reply to a Gerrit thread is an ordinary draft
+  on the thread's own patch set, also while a local version is shown.
 - **Consolidation** (`Syncer::consolidate`, run per server by
   `ui::consolidation::Consolidator` while online with a known account: on
   the poll, after a scan that changed rows, after a saved review). A
-  batched lookup by `project~branch~Change-Id`; on an exact SHA match the
-  drafts and reviews move onto the Gerrit patch set and go out as one post
-  per review (comments inline, the message as a patch-set comment, Gerrit's
-  default notify, attention set rules off), tagged
-  `<app>-local-<change>-r<review>-<nonce>` so a lost answer is recovered,
-  not resent. A version amended before upload is **ported** through the
-  checkout (`ui::local_port`): comments on unchanged lines move, anything
-  else is **held** with a reason. A change found merged or abandoned has
-  everything held. Held items are on the Gerrit change's held card
-  (publish or drop, `w` keys). With nothing left the row is a
-  `Consolidated` tombstone (its local number redirects) until its commits
-  have been off the branches for a week. One run per server (a store
-  lease) and a claim per post; only the account that wrote an item sends
-  it.
+  batched lookup (`project~branch~Change-Id` when the branch is known,
+  else the Change-Id); on an exact SHA match the drafts and reviews move
+  onto the Gerrit patch set and go out as one post per review (comments
+  inline, the message as a patch-set comment, Gerrit's default notify,
+  attention set rules off), tagged `<app>-local-<change>-r<review>-<nonce>`
+  so a lost answer is recovered, not resent. A version amended before
+  upload is **ported** through the checkout (`ui::local_port`): comments
+  on unchanged lines move, anything else is **held** with a reason. A
+  change found merged or abandoned has everything held. Held items are on
+  the Gerrit change's held card (publish or drop). With nothing left the
+  row is a `Consolidated` tombstone (its local number redirects) until its
+  commits have been off the branches for a week. One run per server (a
+  store lease) and a claim per post; only the account that wrote an item
+  sends it.
 - **Approval rules.** An approval is a label's highest positive value.
-  Votes are cast only on the current patch set. On a local patch set of a
-  Gerrit change the **strict rule** holds: an approval goes only onto its
-  exact SHA, else it is held and may only be dropped. A purely local
-  change (votes given more than 5 minutes before Gerrit created the change)
-  takes the stricter of the review's snapshot and the project's
-  `local_approval` for a ported review: `follow` casts its votes, also when
-  comments were held; `exact-or-manual` holds them for a manual publish;
-  `exact` (default) holds approvals drop-only. An exact match is cast
-  under all three.
-- **In the UI:** a "Local changes" dashboard section (also closed and held
-  rows, opening the Gerrit change); "local N" entries in the patch set
-  dropdowns; local commits in relation chains (`ui::local_chain`); local
-  results first in free search (`sync::local::search`, a strict subset of
-  the query language); the "Local reviews" card (`l` keys); Submit warns
-  when the checkout has a newer local version that is not on Gerrit.
-  Consolidation results show as quiet page hints, not OS notifications.
+  Votes are cast only on the current patch set, all of a review together
+  or none. An exact SHA match casts them. A review ported from an amended
+  version follows the **strict rule** unless its votes are **purely
+  local**: nothing is cast, approvals are held drop-only and other votes
+  held to publish by hand. Purely local (`sync::purely_local`) means that
+  when the votes were given the change was not on Gerrit, or Gerrit was
+  unreachable: the review was not on a local patch set of a Gerrit change,
+  and its votes were saved offline or before a lookup that found no such
+  change started (local clock only; no time window). A review is judged by
+  its latest vote, not per label. Purely local votes then follow the
+  stricter of the `local_approval` saved with the review and the
+  project's now: `follow` casts them (also when comments were held),
+  `exact-or-manual` holds them all to publish by hand, `exact` (the
+  default) holds approvals drop-only and the others to publish. For the
+  user: votes saved online and pushed before any lookup ran (a push right
+  after saving) are held by the strict rule, since Gerrit could not
+  confirm the change was not there yet; saving starts a lookup at once,
+  so this takes a very quick push.
+- **In the UI:** closed and held rows on the dashboard open the Gerrit
+  change; free search lists local results first, from a strict subset of
+  the query language; consolidation shows quiet page hints, not OS
+  notifications.
+- **Known gaps:** the change page's `l` and `p s` chords don't fire while
+  an inline diff has focus; only versions seen while the app runs are
+  known; closed-on-arrival is tested against the fake server only.
 
 ### Notifications
 
