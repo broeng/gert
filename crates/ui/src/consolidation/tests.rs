@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use store::{NewPendingReview, ServerId, Store};
 use sync::{ConsolidateReport, FoundChange, PostOutcome, PostReport};
 
-use super::{Consolidator, note, options};
+use super::{Consolidator, Request, affected, note, options};
 use crate::{
     checkouts::Checkouts,
     nav::{ChangeView, DiffRoute, Route},
@@ -231,10 +231,14 @@ impl Started {
         cx.update(|cx| c.read(cx).runs())
     }
 
-    /// Asks for a run as a refresh that worked does, and waits.
+    /// Asks for a run at once (as a saved review does), and waits.
     fn trigger(&self, cx: &mut TestAppContext) {
+        self.ask(cx, Request::Now);
+    }
+
+    fn ask(&self, cx: &mut TestAppContext, kind: Request) {
         self.shell
-            .update(cx, |s, cx| s.consolidate_for_test("test", cx));
+            .update(cx, |s, cx| s.consolidate_for_test("test", kind, cx));
         cx.run_until_parked();
     }
 
@@ -933,4 +937,214 @@ fn the_note_stays_off_other_pages(cx: &mut TestAppContext) {
     assert_eq!(f.http.posts().len(), 1);
     assert_eq!(s.page_hint(cx), None);
     assert_eq!(s.route(cx), Route::Change(ChangeNumber(8)));
+}
+
+#[gpui_kit::test]
+fn polls_ask_at_most_once_per_interval_and_do_not_queue(cx: &mut TestAppContext) {
+    let f = fixture();
+    let s = start(cx, &f, Some("u"));
+    // The start's refreshes asked: one run, the others waited.
+    let runs = s.runs(cx);
+    assert!(runs >= 1);
+    s.ask(cx, Request::Poll);
+    s.ask(cx, Request::Poll);
+    assert_eq!(s.runs(cx), runs, "within the poll interval");
+    // A saved review does not wait.
+    s.ask(cx, Request::Now);
+    assert_eq!(s.runs(cx), runs + 1);
+
+    // A poll during a run makes no second run; a saved review does.
+    let review = s.review();
+    f.pushed();
+    f.http.hold_posts();
+    s.ask(cx, Request::Now);
+    assert_eq!(s.review_state(review.id), PendingReviewState::Sending);
+    s.ask(cx, Request::Poll);
+    f.http.release();
+    cx.run_until_parked();
+    assert_eq!(s.runs(cx), runs + 2);
+}
+
+#[test]
+fn only_rows_whose_state_moved_count_as_affected() {
+    let row = LocalChangeId(5);
+    let number = row.number().expect("number");
+    let looked_up = ConsolidateReport {
+        ran: true,
+        not_found: vec![row],
+        ..Default::default()
+    };
+    assert!(affected(&looked_up).is_empty());
+    let moved = ConsolidateReport {
+        state_changed: vec![row],
+        ..looked_up
+    };
+    assert_eq!(affected(&moved), [number]);
+}
+
+#[gpui_kit::test]
+fn signing_out_mid_run_stops_it_without_a_rerun(cx: &mut TestAppContext) {
+    let f = fixture();
+    let s = start(cx, &f, Some("u"));
+    let first = s.review();
+    let second = s.review();
+    f.pushed();
+    f.http.hold_posts();
+    let runs = s.runs(cx);
+    s.trigger(cx);
+    cx.update_window(s.window, |_, window, cx| {
+        s.shell
+            .update(cx, |s, cx| s.unauthorized_for_test("test", window, cx))
+    })
+    .expect("window");
+    f.http.release();
+    cx.run_until_parked();
+    // The post in flight went through; the run stopped before the next.
+    assert_eq!(f.http.posts().len(), 1);
+    assert_eq!(s.review_state(first.id), PendingReviewState::Sent);
+    assert_eq!(s.review_state(second.id), PendingReviewState::Pending);
+    assert_eq!(s.runs(cx), runs + 1, "no rerun");
+    let c = s.consolidator(cx);
+    assert!(!cx.update(|cx| c.read(cx).is_running()));
+    // Signed out: nothing runs.
+    c.update(cx, |c, cx| c.request(Request::Now, cx));
+    assert_eq!(s.runs(cx), runs + 1);
+}
+
+#[gpui_kit::test]
+fn another_user_mid_run_gets_one_run_of_their_own(cx: &mut TestAppContext) {
+    let f = fixture();
+    let s = start(cx, &f, Some("u"));
+    let first = s.review();
+    s.review();
+    f.pushed();
+    f.http.hold_posts();
+    let runs = s.runs(cx);
+    s.trigger(cx);
+    let account_reads = || {
+        f.http
+            .routes
+            .requested()
+            .iter()
+            .filter(|r| r.contains("/accounts/self"))
+            .count()
+    };
+    let reads = account_reads();
+    cx.update_window(s.window, |_, window, cx| {
+        s.shell
+            .update(cx, |s, cx| s.sign_in_for_test("test", "v", window, cx))
+    })
+    .expect("window");
+    f.http.release();
+    cx.run_until_parked();
+    // The old run finished its post and stopped, and nothing runs for the
+    // new user before their account is read ...
+    assert_eq!(s.review_state(first.id), PendingReviewState::Sent);
+    assert_eq!(s.runs(cx), runs + 1);
+    s.trigger(cx);
+    assert_eq!(s.runs(cx), runs + 1);
+    // ... which the next refresh does; then exactly one run follows.
+    s.press(cx, "shift-r");
+    assert!(account_reads() > reads, "the new user's account was read");
+    assert_eq!(s.runs(cx), runs + 2);
+    let c = s.consolidator(cx);
+    assert!(!cx.update(|cx| c.read(cx).is_running()));
+}
+
+#[gpui_kit::test]
+fn a_refused_login_mid_run_signs_the_server_out(cx: &mut TestAppContext) {
+    let f = fixture();
+    let s = start(cx, &f, Some("u"));
+    let review = s.review();
+    f.pushed();
+    f.http
+        .routes
+        .route("POST /changes/42/revisions/", 401, "Unauthorized");
+    let runs = s.runs(cx);
+    s.trigger(cx);
+    assert_eq!(s.runs(cx), runs + 1);
+    assert_eq!(
+        cx.update(|cx| s.shell.read(cx).connection_for_test("test")),
+        Some(Connection::Unauthorized)
+    );
+    // Gerrit did not take it: the review waits for the next login.
+    assert_eq!(s.review_state(review.id), PendingReviewState::Pending);
+    let c = s.consolidator(cx);
+    c.update(cx, |c, cx| c.request(Request::Now, cx));
+    assert_eq!(s.runs(cx), runs + 1, "no session, no run");
+}
+
+#[gpui_kit::test]
+fn the_note_stays_off_another_servers_page(cx: &mut TestAppContext) {
+    use crate::session::ServerKey;
+
+    let f = fixture();
+    let mut store = Store::open_in_memory().expect("store");
+    assert_eq!(store.server_id(URL).expect("server id"), SERVER);
+    let other_url = "https://other.example.com";
+    let other_id = store.server_id(other_url).expect("server id");
+    let mut env = env_with(store, &f.http);
+    env.backend = Arc::new(crate::login::tests::FakeBackend {
+        password: Some("pw".into()),
+        ..Default::default()
+    });
+    let store = env.store.clone();
+    let startup = Startup {
+        env,
+        diff: Default::default(),
+        start_page: Default::default(),
+        filters: Vec::new(),
+        servers: vec![
+            ServerSetup {
+                username: Some("u".into()),
+                queries: vec![SavedQuery {
+                    name: "Open".into(),
+                    query: "status:open".into(),
+                }],
+                projects: vec![f.project()],
+                ..setup()
+            },
+            ServerSetup {
+                key: ServerKey::new("other"),
+                name: "Other".into(),
+                base_url: other_url.into(),
+                server: other_id,
+                ..setup()
+            },
+        ],
+        active: None,
+    };
+    let (window, shell) = open(cx, |window, cx| {
+        cx.new(|cx| Shell::new(startup, window, cx))
+    });
+    cx.run_until_parked();
+    let s = Started {
+        window,
+        shell,
+        store,
+    };
+    s.review();
+    // Change 42 of the other server is shown.
+    cx.update_window(window, |_, window, cx| {
+        s.shell.update(cx, |s, cx| {
+            s.go_to(
+                &ServerKey::new("other"),
+                Route::Change(GERRIT),
+                None,
+                window,
+                cx,
+            )
+        })
+    })
+    .expect("window");
+    cx.run_until_parked();
+    f.pushed();
+    s.trigger(cx);
+    assert_eq!(f.http.posts().len(), 1);
+    assert_eq!(s.page_hint(cx), None);
+    assert_eq!(s.route(cx), Route::Change(GERRIT));
+    assert_eq!(
+        cx.update(|cx| s.shell.read(cx).active_for_test().cloned()),
+        Some(ServerKey::new("other"))
+    );
 }

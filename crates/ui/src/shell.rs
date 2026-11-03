@@ -21,7 +21,7 @@ use crate::{
     actions::{self, *},
     attention::{self, Polled},
     checkouts::Checkouts,
-    consolidation::{self, ConsolidationEvent, Consolidator},
+    consolidation::{self, ConsolidationEvent, Consolidator, Request},
     filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
     goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, LinkServer, resolve_link},
     inbox::{self, InboxOp},
@@ -459,7 +459,7 @@ impl Shell {
         // to send.
         let owner = key.clone();
         let sub = cx.subscribe(&scanner, move |this, _, ev: &LocalScanEvent, cx| match ev {
-            LocalScanEvent::Changed => this.consolidate(&owner, cx),
+            LocalScanEvent::Changed => this.consolidate(&owner, Request::Now, cx),
         });
         let entry = self.servers.get_mut(key)?;
         scanner.update(cx, |s, _| s.set_session(entry.session.as_ref()));
@@ -477,8 +477,13 @@ impl Shell {
             return;
         };
         let session = entry.session.clone();
+        // `install_session` forgot `me` if another user signed in.
+        let known = entry.me.is_some();
         if let Some(c) = entry.consolidation.clone() {
-            c.update(cx, |c, _| c.set_session(session.as_ref()));
+            c.update(cx, |c, cx| {
+                c.set_session(session.as_ref());
+                c.set_account_known(known, cx);
+            });
             return;
         }
         if !session.as_ref().is_some_and(|s| s.username.is_some()) {
@@ -487,9 +492,10 @@ impl Shell {
         let Some(checkouts) = self.checkouts(key, cx) else {
             return;
         };
-        let consolidator = cx.new(|_| {
+        let consolidator = cx.new(|cx| {
             let mut c = Consolidator::new(checkouts);
             c.set_session(session.as_ref());
+            c.set_account_known(known, cx);
             c
         });
         let owner = key.clone();
@@ -506,10 +512,18 @@ impl Shell {
         }
     }
 
+    /// The account of server `key`'s user is read (and cached): its
+    /// consolidator may run.
+    fn account_known(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        if let Some(c) = self.servers.get(key).and_then(|e| e.consolidation.clone()) {
+            c.update(cx, |c, cx| c.set_account_known(true, cx));
+        }
+    }
+
     /// Asks the consolidator of server `key` for a run, if the server is
     /// online (see `consolidation`): after a refresh or poll that worked, a
     /// scan round that changed rows, a saved local review.
-    fn consolidate(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+    fn consolidate(&mut self, key: &ServerKey, kind: Request, cx: &mut Context<Self>) {
         let Some(entry) = self.servers.get(key) else {
             return;
         };
@@ -517,7 +531,7 @@ impl Shell {
             return;
         }
         if let Some(c) = entry.consolidation.clone() {
-            c.update(cx, |c, cx| c.request(cx));
+            c.update(cx, |c, cx| c.request(kind, cx));
         }
     }
 
@@ -538,13 +552,19 @@ impl Shell {
         for (row, e) in &report.errors {
             log::warn!("consolidating local change {} of {key}: {e}", row.0);
         }
+        let unauthorized = report
+            .stopped
+            .as_ref()
+            .is_some_and(sync::Error::is_unauthorized);
         match &report.stopped {
             Some(e) if e.is_unauthorized() => {
-                self.unauthorized_for(key, window, cx);
-                return;
+                log::warn!("consolidating the local changes of {key}: {e}");
             }
             Some(sync::Error::LeaseLost) => {
                 log::debug!("consolidation of {key}: another run took over");
+            }
+            Some(sync::Error::Stopped) => {
+                log::debug!("consolidation of {key}: stopped for another session");
             }
             Some(e) => {
                 log::warn!("consolidating the local changes of {key}: {e}");
@@ -555,23 +575,26 @@ impl Shell {
             }
             None => {}
         }
-        if !report.ran {
-            return;
-        }
-        if self.nav.current_server() == Some(key) {
-            self.retry_redirect(window, cx);
-        }
+        // What the run did before a refused login still shows; then the
+        // login goes the usual way.
         let affected = consolidation::affected(report);
-        if affected.is_empty() {
+        if report.ran && !affected.is_empty() {
+            if let Some(outbox) = self.servers.get(key).and_then(|e| e.outbox.clone()) {
+                outbox.update(cx, |o, cx| o.consolidated(&affected, cx));
+            }
+            if consolidation::rows_changed(report) {
+                self.scan_local(key, cx);
+            }
+        }
+        if unauthorized {
+            self.unauthorized_for(key, window, cx);
             return;
         }
-        if let Some(outbox) = self.servers.get(key).and_then(|e| e.outbox.clone()) {
-            outbox.update(cx, |o, cx| o.consolidated(&affected, cx));
+        if !report.ran || self.nav.current_server() != Some(key) {
+            return;
         }
-        if consolidation::rows_changed(report) {
-            self.scan_local(key, cx);
-        }
-        if self.nav.current_server() != Some(key) {
+        self.retry_redirect(window, cx);
+        if affected.is_empty() {
             return;
         }
         let shown = self.current_change().map(|(_, n)| n);
@@ -1166,6 +1189,7 @@ impl Shell {
                 entry.me = Some(me.clone());
             }
             self.scan_local(key, cx);
+            self.account_known(key, cx);
         }
         let Some(entry) = self.servers.get_mut(key) else {
             return;
@@ -1358,7 +1382,7 @@ impl Shell {
             outbox.update(cx, |o, cx| o.retry_all(cx));
         }
         self.fetch_account(key, window, cx);
-        self.consolidate(key, cx);
+        self.consolidate(key, Request::Poll, cx);
         if self.nav.current_server() == Some(key) {
             self.retry_redirect(window, cx);
         }
@@ -1409,6 +1433,7 @@ impl Shell {
                         entry.account_failures = 0;
                         entry.account_retry = None;
                         this.scan_local(&owner, cx);
+                        this.account_known(&owner, cx);
                     }
                     Err(e) if e.is_unauthorized() => this.unauthorized_for(&owner, window, cx),
                     Err(e) => {
@@ -1655,10 +1680,38 @@ impl Shell {
             .clone()
     }
 
-    /// Asks for a consolidation run of server `key` as a refresh does.
+    /// Asks for a consolidation run of server `key`.
     #[cfg(test)]
-    pub(crate) fn consolidate_for_test(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.consolidate(&ServerKey::new(key), cx);
+    pub(crate) fn consolidate_for_test(
+        &mut self,
+        key: &str,
+        kind: Request,
+        cx: &mut Context<Self>,
+    ) {
+        self.consolidate(&ServerKey::new(key), kind, cx);
+    }
+
+    /// Signs server `key` in as `username` (the password `pw`).
+    #[cfg(test)]
+    pub(crate) fn sign_in_for_test(
+        &mut self,
+        key: &str,
+        username: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = ServerKey::new(key);
+        let Some(entry) = self.servers.get_mut(&key) else {
+            return;
+        };
+        entry.setup.username = Some(username.to_owned());
+        let setup = entry.setup.clone();
+        let auth = Auth::Basic {
+            username: username.to_owned(),
+            password: "pw".into(),
+        };
+        let session = Session::new(&self.env, &setup, Some(auth)).expect("session");
+        self.install_session(&key, Some(session), window, cx);
     }
 
     #[cfg(test)]
@@ -2174,7 +2227,7 @@ impl Shell {
                     this.open_project_settings(project, window, cx)
                 }
                 ChangeEvent::Search(q) => this.search(q.clone(), window, cx),
-                ChangeEvent::LocalReviewSaved => this.consolidate(&owner, cx),
+                ChangeEvent::LocalReviewSaved => this.consolidate(&owner, Request::Now, cx),
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 ChangeEvent::OpenChangeAt(n, view) => {
                     this.remember_selection(cx);
@@ -2670,7 +2723,7 @@ impl Shell {
             _ => {}
         }
         if let Some(key) = self.servers.active_key().cloned() {
-            self.consolidate(&key, cx);
+            self.consolidate(&key, Request::Now, cx);
         }
     }
 

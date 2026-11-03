@@ -11,11 +11,16 @@
 //! # When
 //!
 //! The shell asks for a run ([`Consolidator::request`]) while the server
-//! is online, on the poll cadence: after every refresh or poll of the
-//! server that worked, after a scan round that changed local change rows,
-//! and after the user saved a local review. An anonymous session, or one
-//! whose password is still being read, never runs
-//! ([`Consolidator::set_session`]).
+//! is online: after a refresh or poll of the server that worked
+//! ([`Request::Poll`], at most once per poll interval, since every
+//! dashboard section's refresh asks), and at once after a scan round that
+//! changed local change rows or after the user saved a local review
+//! ([`Request::Now`]). An anonymous session, or one whose password is
+//! still being read, never runs ([`Consolidator::set_session`]). Nor does
+//! a signed-in user before the shell has read their account
+//! ([`Consolidator::set_account_known`]), so that the cache's account,
+//! which a run checks posts against, is never the previous user's; the
+//! first run follows at once.
 //!
 //! # One run at a time
 //!
@@ -26,7 +31,13 @@
 //! a lost one (see `sync`'s `consolidate` module). So there is one task per
 //! server, it is never dropped while the server is configured (a new
 //! session only changes the syncer of the *next* run), and requests while
-//! it runs collapse into one more run after it.
+//! it runs collapse into one more run after it. When the user signs out or
+//! another account signs in, the run is asked to stop before its next post
+//! (`sync::StopFlag`) instead.
+//!
+//! The lease is in the store, so a run cut short by quitting the app holds
+//! it until it expires (`sync::CLAIM_STALE`, 15 minutes): the next start
+//! does not consolidate on that server before then.
 //!
 //! # Redirects
 //!
@@ -44,20 +55,34 @@
 //! login refused, the store failing, a post timed out) counts as a failure,
 //! and requests are ignored until the poll interval has passed, doubled
 //! per failure in a row, like the other polls back off. A run that found
-//! another one holding the lease is no failure. A new session may try at
-//! once.
+//! another one holding the lease, or was asked to stop, is no failure. A
+//! new session may try at once.
 
 use std::{sync::Arc, time::Instant};
 
 use gpui_kit::{AppContext as _, Context, Entity, EventEmitter, Task};
 use model::{ChangeNumber, LocalChangeId, PatchSetNumber};
-use sync::{ConsolidateOptions, ConsolidateReport, PollPolicy, PollState, PostOutcome, Syncer};
+use sync::{
+    ConsolidateOptions, ConsolidateReport, PollPolicy, PollState, PostOutcome, StopFlag, Syncer,
+};
 
 use crate::{
     checkouts::Checkouts,
     nav::{ChangeView, DiffRoute, Route},
     session::Session,
 };
+
+/// Why a run is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// A refresh or poll worked: at most once per poll interval, and not
+    /// again after a run that is going on.
+    Poll,
+    /// Something to send may have appeared (a scan round changed rows, a
+    /// local review was saved): at once, or once more after the run going
+    /// on.
+    Now,
+}
 
 /// What a [`Consolidator`] tells the shell.
 #[derive(Clone)]
@@ -75,8 +100,19 @@ pub struct Consolidator {
     /// The run going on, if any. Never dropped while it lives (see the
     /// module comment).
     task: Option<Task<()>>,
-    /// A request came while a run was going on.
+    /// A request that may not wait ([`Request::Now`]) came while a run was
+    /// going on, or another account signed in: one more run after it.
     again: bool,
+    /// The signed-in user of `syncer`.
+    username: Option<String>,
+    /// Stops the run going on (see [`Consolidator::set_session`]).
+    stop: StopFlag,
+    /// The shell read the account of `username` since it signed in, so the
+    /// cache's account (whose id a run checks posts against) is theirs:
+    /// until then nothing runs.
+    account_known: bool,
+    /// When the last run started: poll requests wait the poll interval.
+    last_run: Option<Instant>,
     /// Runs in a row that ended early, and when the next may start.
     failures: u32,
     retry_at: Option<Instant>,
@@ -93,6 +129,10 @@ impl Consolidator {
             syncer: None,
             task: None,
             again: false,
+            username: None,
+            stop: StopFlag::default(),
+            account_known: false,
+            last_run: None,
             failures: 0,
             retry_at: None,
             runs: 0,
@@ -102,29 +142,68 @@ impl Consolidator {
     /// Takes the server's current session for the next run. A run going on
     /// keeps its own (see the module comment); a signed-in session may try
     /// at once.
+    ///
+    /// When the user signs out or another account signs in, the run going
+    /// on is asked to stop before its next post (a post in flight is never
+    /// dropped); another account's first run follows once the shell has
+    /// read their account.
     pub fn set_session(&mut self, session: Option<&Session>) {
-        self.syncer = session
-            .filter(|s| s.can_sync() && s.username.is_some())
-            .map(|s| s.syncer().clone());
+        let session = session.filter(|s| s.can_sync() && s.username.is_some());
+        let username = session.and_then(|s| s.username.clone());
+        if username != self.username {
+            self.stop.stop();
+            self.account_known = false;
+            self.again = false;
+            self.username = username;
+        }
+        self.syncer = session.map(|s| s.syncer().clone());
         if self.syncer.is_some() {
             self.failures = 0;
             self.retry_at = None;
+        } else {
+            self.again = false;
+        }
+    }
+
+    /// The shell read the account of the session's user (or not, for a
+    /// new user): runs wait for it, and the first one goes at once.
+    pub fn set_account_known(&mut self, known: bool, cx: &mut Context<Self>) {
+        let first = known && !self.account_known;
+        self.account_known = known;
+        if first {
+            if self.task.is_some() {
+                self.again = true;
+            } else {
+                self.request(Request::Now, cx);
+            }
         }
     }
 
     /// Asks for a run (see the module comment). Never blocks.
-    pub fn request(&mut self, cx: &mut Context<Self>) {
-        let Some(syncer) = self.syncer.clone() else {
+    pub fn request(&mut self, kind: Request, cx: &mut Context<Self>) {
+        let Some(syncer) = self.syncer.clone().filter(|_| self.account_known) else {
             return;
         };
         if self.task.is_some() {
-            self.again = true;
+            // The run going on covers a poll's request.
+            self.again |= kind == Request::Now;
             return;
         }
-        if self.retry_at.is_some_and(|t| Instant::now() < t) {
+        let now = Instant::now();
+        if self.retry_at.is_some_and(|t| now < t) {
             return;
         }
-        let options = options(self.checkouts.read(cx));
+        if kind == Request::Poll
+            && self
+                .last_run
+                .is_some_and(|t| now < t + PollPolicy::default().focused)
+        {
+            return;
+        }
+        self.last_run = Some(now);
+        let mut options = options(self.checkouts.read(cx));
+        self.stop = StopFlag::default();
+        options.stop = self.stop.clone();
         self.runs += 1;
         self.task = Some(cx.spawn(async move |this, cx| {
             let report = cx
@@ -154,7 +233,7 @@ impl Consolidator {
         }
         cx.emit(ConsolidationEvent::Ran(Arc::new(report)));
         if std::mem::take(&mut self.again) {
-            self.request(cx);
+            self.request(Request::Now, cx);
         }
     }
 
@@ -201,7 +280,7 @@ fn failed(report: &ConsolidateReport) -> bool {
     report
         .stopped
         .as_ref()
-        .is_some_and(|e| !matches!(e, sync::Error::LeaseLost))
+        .is_some_and(|e| !matches!(e, sync::Error::LeaseLost | sync::Error::Stopped))
 }
 
 /// The synthetic number of local change `id`.
@@ -221,21 +300,22 @@ pub fn affected(report: &ConsolidateReport) -> Vec<ChangeNumber> {
         .chain(report.closed.iter().map(|c| c.0))
         .chain(report.reopened.iter().map(|c| c.0))
         .chain(report.consolidated.iter().map(|c| c.0))
-        .chain(report.not_found.iter().copied())
-        .chain(report.ambiguous.iter().copied());
+        // Not every row looked up and not found: only those whose state
+        // moved (checking became local, or ambiguous).
+        .chain(report.state_changed.iter().copied());
     out.extend(rows.filter_map(local_number));
     out.into_iter().collect()
 }
 
 /// Whether a run changed the state of local change rows (found, closed,
-/// reopened, consolidated, ambiguous) or sent something: the scanner then
-/// looks again, since what it reconciles against moved.
+/// reopened, consolidated, newly local or ambiguous) or sent something:
+/// the scanner then looks again, since what it reconciles against moved.
 pub fn rows_changed(report: &ConsolidateReport) -> bool {
     !(report.found.is_empty()
         && report.closed.is_empty()
         && report.reopened.is_empty()
         && report.consolidated.is_empty()
-        && report.ambiguous.is_empty()
+        && report.state_changed.is_empty()
         && report.posts.is_empty())
 }
 
