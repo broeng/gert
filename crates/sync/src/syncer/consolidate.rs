@@ -88,7 +88,8 @@
 //!    review's message (its sealed patch-set-level draft, posted as a
 //!    `/PATCHSET_LEVEL` comment with its `unresolved` flag, as an ordinary
 //!    reply posts it), the votes the rules allow, the tag
-//!    `<app>-local-<local change id>-<nonce>`,
+//!    `<app>-local-<local change id>-r<review id>-<nonce>` (a comment-only
+//!    post leaves out `-r<review id>`),
 //!    `ignore_automatic_attention_set_rules`, `notify` left to Gerrit
 //!    (ALL), and `drafts: KEEP`, so that no other draft of the user (a
 //!    web UI draft, say) is ever published. Reserved comments left on a
@@ -645,8 +646,8 @@ impl RowData {
 
 impl Syncer {
     /// The application's name, which starts the tag of every review that
-    /// consolidation posts (`<name>-local-<id>-<nonce>`): the app passes
-    /// its `APP_NAME`. Tests may leave the default.
+    /// consolidation posts (`<name>-local-<id>-r<review>-<nonce>`): the
+    /// app passes its `APP_NAME`. Tests may leave the default.
     pub fn with_app_name(mut self, name: &str) -> Self {
         self.app_name = name.into();
         self
@@ -2944,7 +2945,10 @@ fn ported_held_reason(
         rev.number.0
     );
     if !purely_local(detail, review) {
-        reason.push_str(" The change was on Gerrit when they were given, so they are not moved.");
+        reason.push_str(
+            " The change was on Gerrit when they were given, or reached it within five minutes \
+             of them (allowed for clock differences), so they are not moved.",
+        );
     } else {
         match strategy(row, review, options) {
             LocalApproval::Follow if current != Some(rev.number) => {
