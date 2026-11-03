@@ -1124,7 +1124,7 @@ impl ChangePage {
 
     /// The relation chain, `None` when there is nothing but this change.
     /// The box is capped in height and scrolls, so a long stack does not
-    /// push the files down; the current change has an arrow and a tint. As
+    /// push the files down; the current change has an arrow, a tint and bold text. As
     /// the `panel` it fills the height of its column instead.
     pub(super) fn related_block(
         &mut self,
@@ -1167,6 +1167,7 @@ impl ChangePage {
                         .flex_none()
                         .whitespace_nowrap()
                         .text_color(muted)
+                        .when(this_change, |d| d.font_weight(FontWeight::BOLD))
                         .child(label.clone())
                         .debug_selector(move || format!("chain-row: {label}"))
                 })
@@ -1174,7 +1175,7 @@ impl ChangePage {
                     div()
                         .min_w_0()
                         .truncate()
-                        .when(this_change, |d| d.font_semibold())
+                        .when(this_change, |d| d.font_weight(FontWeight::BOLD))
                         .child(row.subject.clone()),
                 )
                 .child(div().flex_1())
