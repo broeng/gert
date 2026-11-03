@@ -371,9 +371,9 @@ fn a_local_change_shows_its_header_files_and_message_without_the_network(cx: &mu
         assert_eq!(p.file_paths(), ["/COMMIT_MSG", "README", "src/new.rs"]);
         assert_eq!(p.files_local_for_test(), Some(ck.repo.path()));
         assert_eq!(p.files_error_for_test(), None);
-        // No log, no votes.
+        // No log; a quick vote on the borrowed Code-Review.
         assert!(!p.blocks_for_test().contains(&Block::LogHeader));
-        assert!(p.quick_buttons_for_test(cx).is_empty());
+        assert_eq!(p.quick_buttons_for_test(cx).len(), 1);
         assert_eq!(*p.status_for_test(), crate::pages::list::Status::Idle);
     });
     let target = f.target_choices(cx);
@@ -491,11 +491,9 @@ fn a_gerrit_change_lists_its_local_version_and_shows_its_files_from_the_checkout
     // The local version as the target: its files come from the checkout.
     let local = f.local_patch_set(cx, 1);
     f.pick(cx, |s, d| s.set_target(d, local));
-    // A vote now would land on PS 3, which is not what is shown; a reply
-    // is a local review of the version.
-    assert_eq!(quick(cx), 0);
-    f.press(cx, "shift-v");
-    assert!(f.hint(cx).is_some_and(|h| h.contains("later")));
+    // A vote or a reply now is a local review of the version shown, never
+    // a request for PS 3 (the tests in `review` say more).
+    assert_eq!(quick(cx), 1);
     f.press(cx, "a");
     assert!(f.events.lock().expect("log").contains(&"reply".to_owned()));
     cx.update(|cx| {

@@ -2,14 +2,24 @@
 //! value of a label with one key (Code-Review's lowest while the user's
 //! drafts object), publishing the drafts with it, and moving on to the next change of the
 //! relation chain after a vote (also after a vote in the reply dialog).
+//!
+//! On a local version (a local change, or a local patch set of a Gerrit
+//! change shown as the target) a quick vote is never sent: it goes into
+//! the newest `Pending` review of that version, replacing that label's
+//! vote and keeping the rest, or into a new pending review with only that
+//! vote when there is none. So pressing `Shift-V` twice does not make two
+//! reviews, and a vote added after a reply joins it, as it would on
+//! Gerrit. The buttons show the votes of that review as the user's.
 
 use gpui_kit::*;
-use model::{ChangeNumber, ReviewInput};
+use model::{ChangeNumber, PatchSetRef, PendingReview, PendingReviewState, ReviewInput, Timestamp};
+use store::{NewPendingReview, PendingReviewEdit};
 use sync::PublishOutcome;
 
 use super::{ChangeEvent, ChangePage};
 use crate::{
     actions::QuickVote,
+    change_detail::patch_set_label,
     reply::{
         self,
         plan::{self, QuickButton},
@@ -17,20 +27,45 @@ use crate::{
     session::is_unauthorized,
 };
 
-/// Why quick votes do nothing on a local version yet.
-const LOCAL_VOTES_LATER: &str = "Quick votes on local versions come in a later version";
-
 impl ChangePage {
     /// The buttons of the header bar.
     pub(super) fn quick_buttons(&self, cx: &App) -> Vec<QuickButton> {
-        // Votes on a local version wait for local reviews (later).
-        if self.on_local_target() {
-            return Vec::new();
-        }
         let objections = plan::drafts_object(&self.comments.read(cx).threads());
-        self.detail.as_ref().map_or_else(Vec::new, |d| {
-            plan::quick_votes(d, self.session.username.as_deref(), objections)
-        })
+        let Some(d) = &self.detail else {
+            return Vec::new();
+        };
+        let me = self.session.username.as_deref();
+        match self.local_target() {
+            Some(target) => {
+                let own = self
+                    .newest_pending(&target, cx)
+                    .map(|r| r.labels)
+                    .unwrap_or_default();
+                plan::local_quick_votes(d, me, objections, &own)
+            }
+            None => plan::quick_votes(d, me, objections),
+        }
+    }
+
+    /// The local version a reply or vote would be on, if it is one (see
+    /// [`ChangePage::on_local_target`]).
+    pub(super) fn local_target(&self) -> Option<PatchSetRef> {
+        if !self.on_local_target() {
+            return None;
+        }
+        let d = self.detail.as_ref()?;
+        self.sel.target_ref(d)
+    }
+
+    /// The newest pending review of version `target` that can still change.
+    fn newest_pending(&self, target: &PatchSetRef, cx: &App) -> Option<PendingReview> {
+        self.comments
+            .read(cx)
+            .reviews()
+            .iter()
+            .rev()
+            .find(|r| r.patch_set == target.number && r.state == PendingReviewState::Pending)
+            .cloned()
     }
 
     /// Whether a quick vote is on its way to the server.
@@ -52,10 +87,6 @@ impl ChangePage {
         if self.voting() {
             return;
         }
-        if self.on_local_target() {
-            self.hint.say(LOCAL_VOTES_LATER, false, cx, |p| &mut p.hint);
-            return;
-        }
         if let Some(why) = reply::unavailable(&self.session) {
             self.hint
                 .say(why.replace("reply", "vote"), false, cx, |p| &mut p.hint);
@@ -75,6 +106,9 @@ impl ChangePage {
             let text = format!("You already voted {}", button.text());
             self.hint.say(text, false, cx, |p| &mut p.hint);
             return;
+        }
+        if let Some(target) = self.local_target() {
+            return self.quick_vote_local(button.clone(), target, cx);
         }
         let Some(revision) = self
             .detail
@@ -104,6 +138,73 @@ impl ChangePage {
                 .await;
             this.update(cx, |this, cx| this.vote_sent(&review, result, cx))
                 .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Saves the vote of `button` on local version `target` (see the module
+    /// documentation). Store writes only, on the background executor.
+    fn quick_vote_local(
+        &mut self,
+        button: QuickButton,
+        target: PatchSetRef,
+        cx: &mut Context<Self>,
+    ) {
+        let newest = self.newest_pending(&target, cx);
+        let strategy = self.local_approval(cx);
+        let syncer = self.session.syncer().clone();
+        let label = self.detail.as_ref().map_or_else(String::new, |d| {
+            patch_set_label(&d.revisions, target.number)
+        });
+        let vote = (button.label.clone(), button.value);
+        self.voting = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if let Some(r) = newest {
+                        let mut labels = r.labels.clone();
+                        labels.insert(vote.0.clone(), vote.1);
+                        let edit = PendingReviewEdit {
+                            labels,
+                            strategy,
+                            message: r.message.clone().unwrap_or_default(),
+                            unresolved: r.unresolved,
+                        };
+                        // Gone or claimed for sending meanwhile: a new one.
+                        if let Some(r) = syncer.update_pending_review(r.id, &edit)? {
+                            return Ok(r);
+                        }
+                    }
+                    syncer.create_pending_review(&NewPendingReview {
+                        patch_set: target.number,
+                        labels: [vote].into(),
+                        strategy,
+                        message: String::new(),
+                        unresolved: false,
+                        created: Timestamp::now(),
+                        replaces_draft: None,
+                    })
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.voting = None;
+                match result {
+                    Ok(_) => {
+                        let change = this.number;
+                        this.outbox.update(cx, |o, cx| o.published(change, cx));
+                        let text = format!(
+                            "Saved {} locally; sent when {label} is on Gerrit",
+                            button.text()
+                        );
+                        this.hint.say(text, false, cx, |p| &mut p.hint);
+                    }
+                    Err(e) => {
+                        let text = reply::describe_local(&e);
+                        this.hint.say(text, true, cx, |p| &mut p.hint);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
         }));
         cx.notify();
     }

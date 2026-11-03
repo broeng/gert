@@ -152,3 +152,119 @@ fn a_reply_to_a_gerrit_thread_while_a_local_version_is_shown_uploads_normally(
     );
     f.assert_nothing_local_sent(&[&ck.local]);
 }
+
+impl Fixture {
+    fn reviews(&self, change: ChangeNumber) -> Vec<model::PendingReview> {
+        self.store
+            .lock()
+            .expect("store")
+            .pending_reviews(SERVER, change)
+            .expect("reviews")
+    }
+}
+
+#[gpui_kit::test]
+fn a_quick_vote_on_a_local_version_goes_into_its_pending_review(cx: &mut TestAppContext) {
+    let ck = checkout();
+    let (f, number) = local_change(cx, &ck);
+    let version = f.local_patch_set(cx, 1);
+    let buttons =
+        |cx: &mut TestAppContext| cx.update(|cx| f.page.read(cx).quick_buttons_for_test(cx));
+    assert_eq!(buttons(cx)[0].text(), "Code-Review +2");
+    assert!(!buttons(cx)[0].applied);
+    f.press(cx, "shift-v");
+    assert_eq!(
+        f.hint(cx).as_deref(),
+        Some("Saved Code-Review +2 locally; sent when local 1 is on Gerrit")
+    );
+    let reviews = f.reviews(number);
+    assert_eq!(reviews.len(), 1);
+    let r = &reviews[0];
+    assert_eq!(
+        (r.patch_set, &r.labels, r.message.as_deref()),
+        (version, &[("Code-Review".to_owned(), 2)].into(), None)
+    );
+    // The project's mode, from its checkout entry (the default).
+    assert_eq!(r.strategy, model::LocalApproval::Exact);
+    // The button knows the vote now; pressing again changes nothing.
+    assert!(buttons(cx)[0].applied);
+    f.press(cx, "shift-v");
+    assert_eq!(f.reviews(number).len(), 1);
+
+    // After a reply with a message, a vote joins that review.
+    f.store
+        .lock()
+        .expect("store")
+        .cancel_pending_review(SERVER, r.id)
+        .expect("cancel");
+    let replied = f
+        .store
+        .lock()
+        .expect("store")
+        .create_pending_review(
+            SERVER,
+            &store::NewPendingReview {
+                patch_set: version,
+                labels: [("Code-Review".to_owned(), 1)].into(),
+                strategy: model::LocalApproval::Follow,
+                message: "Nearly".into(),
+                unresolved: true,
+                created: Timestamp::now(),
+                replaces_draft: None,
+            },
+        )
+        .expect("review");
+    f.page.update(cx, |p, cx| {
+        p.outbox.update(cx, |o, cx| o.published(number, cx))
+    });
+    cx.run_until_parked();
+    assert!(!buttons(cx)[0].applied, "+1 is the vote now");
+    f.press(cx, "shift-v");
+    let reviews = f.reviews(number);
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].id, replied.id);
+    assert_eq!(reviews[0].labels, [("Code-Review".to_owned(), 2)].into());
+    assert_eq!(
+        (reviews[0].message.as_deref(), reviews[0].unresolved),
+        (Some("Nearly"), true)
+    );
+    assert!(f.http.requested().is_empty(), "{:?}", f.http.requested());
+}
+
+#[gpui_kit::test]
+fn a_quick_vote_on_a_local_patch_set_of_a_gerrit_change_stays_local(cx: &mut TestAppContext) {
+    let ck = checkout();
+    let store = store_with(
+        &[row(
+            "I7",
+            Some(ChangeNumber(7)),
+            LocalChangeState::Local,
+            &[&ck.local],
+            &ck.base,
+        )],
+        seed_gerrit_change,
+    );
+    let project = ProjectSettings {
+        local_approval: model::LocalApproval::Follow,
+        ..ck.project()
+    };
+    let f = page_in(cx, store, ChangeNumber(7), project, |_| {});
+    let local = f.local_patch_set(cx, 1);
+    f.pick(cx, |s, d| s.set_target(d, local));
+    // Change 7 lets the user give Code-Review +1.
+    f.press(cx, "shift-v");
+    let reviews = f.reviews(ChangeNumber(7));
+    assert_eq!(reviews.len(), 1, "{:?}", f.hint(cx));
+    assert_eq!(reviews[0].labels, [("Code-Review".to_owned(), 1)].into());
+    assert_eq!(reviews[0].patch_set, local);
+    assert_eq!(reviews[0].strategy, model::LocalApproval::Follow);
+    // PS 3 shown again: a quick vote goes to Gerrit as always.
+    f.pick(cx, |s, d| s.set_target(d, PatchSetNumber(3)));
+    cx.update(|cx| assert!(!f.page.read(cx).quick_buttons_for_test(cx)[0].applied));
+    assert!(
+        !f.http.requested().iter().any(|r| r.contains("/review")),
+        "{:?}",
+        f.http.requested()
+    );
+    f.assert_nothing_local_sent(&[&ck.local]);
+}

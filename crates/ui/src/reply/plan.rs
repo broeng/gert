@@ -158,11 +158,28 @@ impl QuickButton {
 /// `objections` (see [`drafts_object`]), Code-Review is cast at its lowest
 /// permitted value instead: comments on a change say it is not ready yet.
 pub fn quick_votes(detail: &ChangeDetail, me: Option<&str>, objections: bool) -> Vec<QuickButton> {
+    local_quick_votes(detail, me, objections, &BTreeMap::new())
+}
+
+/// [`quick_votes`] for a local version, where the user's vote is the one
+/// of their newest pending review on it (`own`) where that has the label,
+/// else their vote on Gerrit (none on a local change).
+pub fn local_quick_votes(
+    detail: &ChangeDetail,
+    me: Option<&str>,
+    objections: bool,
+    own: &BTreeMap<String, i32>,
+) -> Vec<QuickButton> {
     if me.is_none() || detail.summary.status != ChangeStatus::New {
         return Vec::new();
     }
-    vote_rows(detail, me)
-        .into_iter()
+    let mut rows = vote_rows(detail, me);
+    for row in &mut rows {
+        if let Some(v) = own.get(&row.label) {
+            row.current = *v;
+        }
+    }
+    rows.into_iter()
         .filter_map(|row| {
             let max = row.choices.iter().map(|c| c.value).max()?;
             let min = row.choices.iter().map(|c| c.value).min()?;
