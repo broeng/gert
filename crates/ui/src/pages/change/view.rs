@@ -116,14 +116,14 @@ impl ChangePage {
     pub(super) fn render_block(
         &mut self,
         ix: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(block) = self.blocks.get(ix).copied() else {
             return div().into_any_element();
         };
         let inner = match block {
-            Block::Header => self.header(cx),
+            Block::Header => self.header(window, cx),
             Block::PatchSets => self.patch_sets(cx),
             Block::FilterBar => self.filter_bar(cx),
             Block::FilesNotice => self.files_notice(cx),
@@ -221,7 +221,7 @@ impl ChangePage {
         }
     }
 
-    fn header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         if self.detail.is_none() {
             let status = self.status_line(cx);
@@ -247,7 +247,7 @@ impl ChangePage {
         let info = self.change_info(cx);
         let commit = self.commit(cx);
         let related = (!self.panel_shown)
-            .then(|| self.related_block(false, cx))
+            .then(|| self.related_block(false, window, cx))
             .flatten();
         // Wrapping columns: each grows from a basis, so a narrow window
         // stacks them instead of squeezing the text.
@@ -1040,9 +1040,14 @@ impl ChangePage {
     pub(super) fn related_block(
         &mut self,
         panel: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let r = self.related.as_ref().filter(|r| r.changes.len() > 1)?;
+        if !self.has_chain() {
+            return None;
+        }
+        self.settle_related_scroll(panel, window, cx);
+        let r = self.related.as_ref()?;
         let own = self.detail.as_ref().map(|d| &d.summary);
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -1420,6 +1425,27 @@ fn wheel_stays_in_box(offset: Pixels, delta: Pixels, max: Pixels) -> bool {
     max > px(0.) && delta != px(0.) && !(delta > px(0.) && at_start) && !(delta < px(0.) && at_end)
 }
 
+/// The scroll offset (at most 0, down to `-max`) that brings `item` into
+/// view in the scroll box at `viewport`, both as laid out unscrolled, from
+/// `offset`: scrolled just far enough to show it whole.
+pub(super) fn reveal_offset(
+    offset: Pixels,
+    viewport: Bounds<Pixels>,
+    item: Bounds<Pixels>,
+    max: Pixels,
+) -> Pixels {
+    let top = item.top() - viewport.top();
+    let (height, view) = (item.size.height, viewport.size.height);
+    let y = if top + offset < px(0.) || height > view {
+        -top
+    } else if top + height + offset > view {
+        view - top - height
+    } else {
+        offset
+    };
+    y.clamp(-max.max(px(0.)), px(0.))
+}
+
 fn related_subject(c: &RelatedChange) -> String {
     c.commit
         .as_ref()
@@ -1512,7 +1538,9 @@ impl Render for ChangePage {
                 .size_full(),
             )
             .vertical_scrollbar(&self.list);
-        let panel = shown.then(|| self.related_block(true, cx)).flatten();
+        let panel = shown
+            .then(|| self.related_block(true, window, cx))
+            .flatten();
         let bar = shown.then(|| self.header_bar(cx)).flatten();
         let theme = cx.theme().clone();
         v_flex()
@@ -1578,8 +1606,30 @@ impl Render for ChangePage {
 
 #[cfg(test)]
 mod wheel_tests {
-    use super::wheel_stays_in_box;
-    use gpui_kit::px;
+    use super::{reveal_offset, wheel_stays_in_box};
+    use gpui_kit::{Bounds, point, px, size};
+
+    /// A box 100 high at y 50 over rows 20 high: row `ix` of the content
+    /// as laid out unscrolled.
+    fn reveal(offset: f32, ix: usize, rows: usize) -> f32 {
+        let viewport = Bounds::new(point(px(0.), px(50.)), size(px(200.), px(100.)));
+        let item = Bounds::new(
+            point(px(0.), px(50. + 20. * ix as f32)),
+            size(px(200.), px(20.)),
+        );
+        let max = px((20. * rows as f32 - 100.).max(0.));
+        reveal_offset(px(offset), viewport, item, max).as_f32()
+    }
+
+    #[test]
+    fn revealing_scrolls_only_as_far_as_needed() {
+        // Visible already: stays.
+        assert_eq!(reveal(-100., 6, 30), -100.);
+        // Below: its bottom meets the box's bottom.
+        assert_eq!(reveal(0., 10, 30), -120.);
+        // Above: its top meets the box's top.
+        assert_eq!(reveal(-300., 4, 30), -80.);
+    }
 
     #[test]
     fn the_wheel_stays_in_the_box_until_it_pushes_against_an_end() {
