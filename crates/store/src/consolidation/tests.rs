@@ -1289,3 +1289,63 @@ fn a_post_claims_only_the_drafts_of_its_revision() {
     assert_eq!(other.drafts.len(), 1);
     assert_eq!(other.drafts[0].local_id, on1.local_id);
 }
+
+#[test]
+fn a_draft_written_on_a_closed_changes_version_is_held_at_once() {
+    let (mut s, id, c, v1, _v2) = setup();
+    let before = draft(&mut s, id, &c, &v1, "before");
+    assert_eq!(before.held_reason, None);
+    s.hold_closed_local_change(id, c.id, ChangeNumber(42), "change merged")
+        .unwrap()
+        .unwrap();
+    let after = s
+        .create_draft(
+            id,
+            ChangeNumber(42),
+            &psref(&v1),
+            &DraftInput {
+                path: "src/a.rs".into(),
+                side: Side::Revision,
+                parent: None,
+                location: Location::Line(3),
+                in_reply_to: None,
+                message: "after".into(),
+                unresolved: false,
+            },
+            ts(T1),
+        )
+        .unwrap();
+    assert_eq!(
+        after.held_reason.as_deref(),
+        Some(Store::CLOSED_HELD_REASON)
+    );
+    // Restored on Gerrit: the row is open again, the draft stays held.
+    s.set_local_change_state(id, c.id, LocalChangeState::Local)
+        .unwrap();
+    assert!(
+        s.load_draft(id, after.local_id)
+            .unwrap()
+            .unwrap()
+            .held_reason
+            .is_some()
+    );
+    // Drafts on Gerrit's own patch sets are not affected.
+    let ordinary = s
+        .create_draft(
+            id,
+            ChangeNumber(42),
+            &gerrit_ps(1),
+            &DraftInput {
+                path: "src/a.rs".into(),
+                side: Side::Revision,
+                parent: None,
+                location: Location::Line(3),
+                in_reply_to: None,
+                message: "ordinary".into(),
+                unresolved: false,
+            },
+            ts(T1),
+        )
+        .unwrap();
+    assert_eq!(ordinary.held_reason, None);
+}

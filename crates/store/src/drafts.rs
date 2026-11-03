@@ -327,7 +327,15 @@ impl Store {
 
     // ---- drafts: local edits ----
 
-    /// Writes a new draft as `PendingCreate`.
+    /// The held reason a new draft on a closed local change's version gets
+    /// ([`Store::create_draft`]).
+    pub const CLOSED_HELD_REASON: &'static str = "the change is closed on Gerrit";
+
+    /// Writes a new draft as `PendingCreate`. A draft on a local patch set
+    /// of a local change whose Gerrit change is closed is held at once
+    /// ([`Store::CLOSED_HELD_REASON`]): like everything else of that change
+    /// it is never sent automatically, also if the change is restored; the
+    /// user publishes it from the held card.
     pub fn create_draft(
         &mut self,
         server: ServerId,
@@ -363,6 +371,15 @@ impl Store {
             ],
         )?;
         let id = LocalDraftId(self.conn.last_insert_rowid());
+        if let Some(local) = patch_set.number.local_id() {
+            self.conn.execute(
+                "UPDATE drafts SET held_reason = ?3 WHERE server_id = ?1 AND id = ?2
+                   AND EXISTS (SELECT 1 FROM local_patch_sets p
+                       JOIN local_changes c ON c.id = p.local_change_id
+                       WHERE p.server_id = ?1 AND p.id = ?4 AND c.state = 'closed')",
+                params![server.0, id.0, Self::CLOSED_HELD_REASON, local],
+            )?;
+        }
         self.load_draft(server, id)?
             .ok_or_else(|| Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))
     }
