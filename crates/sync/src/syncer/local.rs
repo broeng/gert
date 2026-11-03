@@ -7,8 +7,8 @@ use std::{
 };
 
 use jiff::Timestamp;
-use model::{LocalChange, LocalScan};
-use store::{LocalChangeEntry, ReconcileReport, Store};
+use model::{ChangeNumber, LocalChange, LocalChangeState, LocalPatchSet, LocalScan};
+use store::{BorrowedLabels, LocalChangeEntry, ReconcileReport, Store};
 
 use super::Syncer;
 use crate::{
@@ -136,6 +136,66 @@ impl Syncer {
     /// updated first. Blocking (SQLite).
     pub fn dashboard_local_changes(&self) -> Result<Vec<LocalChange>, Error> {
         Ok(self.store().dashboard_local_changes(self.server)?)
+    }
+
+    /// The local change with synthetic number `number` and its versions in
+    /// the order they were first seen; `None` for a server's change number
+    /// or a row that is gone. Blocking (SQLite).
+    pub fn local_change(
+        &self,
+        number: ChangeNumber,
+    ) -> Result<Option<(LocalChange, Vec<LocalPatchSet>)>, Error> {
+        let store = self.store();
+        let Some(change) = store.local_change_by_number(self.server, number)? else {
+            return Ok(None);
+        };
+        let versions = store.local_patch_sets(self.server, change.id)?;
+        Ok(Some((change, versions)))
+    }
+
+    /// The versions of Gerrit change `number` that exist only in the
+    /// checkout: the local patch sets of its local change rows that are not
+    /// (yet) a Gerrit patch set, in the order they were first seen. Rows
+    /// that were consolidated are left out (what was on their versions has
+    /// moved to the Gerrit change). Empty for a local change's number.
+    /// Blocking (SQLite).
+    pub fn local_patch_sets_of(&self, number: ChangeNumber) -> Result<Vec<LocalPatchSet>, Error> {
+        if number.is_local() {
+            return Ok(Vec::new());
+        }
+        let store = self.store();
+        let mut out = Vec::new();
+        for row in store.local_changes_of_gerrit_change(self.server, number)? {
+            if row.state == LocalChangeState::Consolidated {
+                continue;
+            }
+            let versions = store.local_patch_sets(self.server, row.id)?;
+            out.extend(
+                versions
+                    .into_iter()
+                    .filter(|v| v.gerrit_patch_set.is_none()),
+            );
+        }
+        out.sort_by_key(|v| (v.seen_at, v.id));
+        Ok(out)
+    }
+
+    /// The labels a local change of `project` borrows (see
+    /// [`store::Store::labels_to_borrow`]): those of the newest cached
+    /// change of the same branch, else of the project. `None` when no
+    /// cached change of the project has labels. Blocking (SQLite).
+    pub fn labels_to_borrow(
+        &self,
+        project: &str,
+        branch: Option<&str>,
+    ) -> Result<Option<BorrowedLabels>, Error> {
+        let store = self.store();
+        if let Some(branch) = branch
+            && let Some(labels) = store.labels_to_borrow(self.server, project, Some(branch))?
+        {
+            return Ok(Some(labels));
+        }
+        Ok(store.labels_to_borrow(self.server, project, None)?)
     }
 
     /// The projects that have local change rows on this server, in any

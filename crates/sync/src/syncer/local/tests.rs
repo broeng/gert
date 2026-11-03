@@ -306,3 +306,105 @@ fn dashboard_rows_and_projects_with_rows() {
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|c| c.number.is_local()));
 }
+
+#[test]
+fn local_versions_of_a_gerrit_change_and_of_a_local_change() {
+    let (http, syncer) = syncer();
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    // `amended` is a local version of 42 (I2); I1 is a change of its own.
+    let sc = scan(vec![commit("amended", "I2"), commit("c1", "I1")]);
+    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
+
+    let versions = syncer.local_patch_sets_of(ChangeNumber(42)).unwrap();
+    assert_eq!(
+        versions.iter().map(|v| v.sha.as_str()).collect::<Vec<_>>(),
+        ["amended"]
+    );
+    assert!(versions[0].number.is_local());
+    assert!(
+        syncer
+            .local_patch_sets_of(ChangeNumber(7))
+            .unwrap()
+            .is_empty()
+    );
+
+    let own = syncer
+        .store()
+        .local_changes_by_change_id(syncer.server, "I1")
+        .unwrap()
+        .remove(0);
+    let (row, versions) = syncer.local_change(own.number).unwrap().expect("the row");
+    assert_eq!(row.change_id, "I1");
+    assert_eq!(versions.len(), 1);
+    assert!(syncer.local_patch_sets_of(own.number).unwrap().is_empty());
+    assert!(syncer.local_change(ChangeNumber(42)).unwrap().is_none());
+
+    // Pushed: the version is a Gerrit patch set now and drops out.
+    let mut detail = syncer
+        .cached_change(ChangeNumber(42))
+        .unwrap()
+        .unwrap()
+        .detail;
+    let mut ps2 = detail.revisions[0].clone();
+    ps2.number = model::PatchSetNumber(2);
+    ps2.sha = "amended".into();
+    detail.revisions.push(ps2);
+    syncer
+        .store()
+        .save_change_detail(syncer.server, &detail, Timestamp::UNIX_EPOCH)
+        .unwrap();
+    assert!(
+        syncer
+            .local_patch_sets_of(ChangeNumber(42))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(http.requests().len(), 1);
+}
+
+#[test]
+fn labels_are_borrowed_from_the_branch_else_the_project() {
+    let (_http, syncer) = syncer();
+    assert_eq!(syncer.labels_to_borrow("p", Some("main")).unwrap(), None);
+    let mut d: model::ChangeDetail = serde_json::from_value(json!({
+            "summary": {
+                "number": 9, "change_id": null, "project": "p", "branch": "stable",
+                "subject": "s", "status": "New",
+                "owner": {"id": 1, "name": null, "email": null, "username": null,
+                          "display_name": null},
+                "created": "2024-01-01T00:00:00Z", "updated": "2024-01-01T00:00:00Z",
+                "insertions": 0, "deletions": 0, "labels": {}, "work_in_progress": false,
+                "is_private": false, "unresolved_comment_count": 0,
+                "total_comment_count": 0, "topic": null, "hashtags": [],
+                "attention_set": [], "submittable": null
+            },
+            "current_revision": null, "current_patch_set": null, "commit_message": null,
+            "reviewers": [], "cc": []
+    }))
+    .unwrap();
+    d.permitted_labels = [("Verified".to_owned(), vec![-1, 0, 1])].into();
+    d.label_values = [(
+        "Verified".to_owned(),
+        vec![model::LabelValue {
+            value: 1,
+            description: "Works".into(),
+        }],
+    )]
+    .into();
+    syncer
+        .store()
+        .save_change_detail(syncer.server, &d, Timestamp::UNIX_EPOCH)
+        .unwrap();
+    // No change of `main` cached: the project's.
+    let b = syncer.labels_to_borrow("p", Some("main")).unwrap().unwrap();
+    assert_eq!(b.permitted["Verified"], [-1, 0, 1]);
+    assert!(
+        syncer
+            .labels_to_borrow("p", Some("stable"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(syncer.labels_to_borrow("p", None).unwrap().is_some());
+    assert_eq!(syncer.labels_to_borrow("q", Some("main")).unwrap(), None);
+}
