@@ -2,7 +2,10 @@
 
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use gerrit_api::{Auth, GerritClient, HttpClient};
@@ -305,6 +308,10 @@ pub struct Session {
     backend: Arc<dyn ServerBackend>,
     syncer: Syncer,
     can_sync: bool,
+    /// Whether the server is known to be unreachable now (the shell's
+    /// connection state; see [`Session::offline`]). Shared by every clone,
+    /// so pages see it change.
+    unreachable: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -329,6 +336,7 @@ impl Session {
             syncer: Syncer::new(client, env.store.clone(), setup.server)
                 .with_app_name(&env.app_name),
             can_sync,
+            unreachable: Arc::default(),
         })
     }
 
@@ -357,6 +365,22 @@ impl Session {
     pub fn can_sync(&self) -> bool {
         self.can_sync
     }
+
+    /// Whether the server cannot be reached now: the last request failed
+    /// to reach it or was refused for the credentials, or this session
+    /// cannot sync at all. What a local review records when its votes are
+    /// saved (`PendingReview::offline`): Gerrit could not have been
+    /// asked whether it had the change then. Not while the state is
+    /// unknown (connecting).
+    pub fn offline(&self) -> bool {
+        !self.can_sync || self.unreachable.load(Ordering::Relaxed)
+    }
+
+    /// Records whether the server is unreachable now (the shell does, with
+    /// its connection state).
+    pub fn set_unreachable(&self, unreachable: bool) {
+        self.unreachable.store(unreachable, Ordering::Relaxed);
+    }
 }
 
 /// True if `e` means the credentials were refused (401). A 403 (logged in,
@@ -377,5 +401,28 @@ mod tests {
             message: "no".into()
         })));
         assert!(!is_unauthorized(&api(gerrit_api::Error::NotFound)));
+    }
+
+    #[test]
+    fn a_session_is_offline_when_it_cannot_sync_or_the_server_is_unreachable() {
+        use crate::tests::{env_with, setup};
+        let env = env_with(
+            Store::open_in_memory().unwrap(),
+            &gerrit_api::fake::FakeHttpClient::new(),
+        );
+        // No credentials (yet): Gerrit cannot be asked.
+        assert!(Session::new(&env, &setup(), None).unwrap().offline());
+        let auth = Auth::Basic {
+            username: "u".into(),
+            password: "p".into(),
+        };
+        let session = Session::new(&env, &setup(), Some(auth)).unwrap();
+        assert!(!session.offline(), "unknown is not offline");
+        // Every clone (the pages') sees the shell's state.
+        let page = session.clone();
+        session.set_unreachable(true);
+        assert!(page.offline());
+        session.set_unreachable(false);
+        assert!(!page.offline());
     }
 }

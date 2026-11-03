@@ -1400,6 +1400,8 @@ fn a_local_review_is_saved_as_a_pending_review_with_the_borrowed_labels(cx: &mut
     assert_eq!(r.strategy, model::LocalApproval::ExactOrManual);
     assert_eq!(r.given_on_sha.as_str(), "l1");
     assert!(!r.unresolved);
+    // Gerrit was not known to be unreachable, and the change is not on it.
+    assert!(!r.offline && !r.known_on_gerrit);
     // The text became the review's message: no draft is left over.
     assert!(
         f.session
@@ -1436,12 +1438,15 @@ fn a_local_review_is_saved_as_a_pending_review_with_the_borrowed_labels(cx: &mut
         assert_eq!(d.text_for_test(cx), "");
         assert_eq!(d.votes_for_test()[0].selected, 0);
     });
+    // Saved while the server cannot be reached: recorded as offline.
+    f.session.set_unreachable(true);
     on_dialog(cx, &f, &again, |d, window, cx| {
         d.set_text_for_test("One more thing", window, cx);
         d.send(window, cx)
     });
     let reviews = reviews_of(&f, number);
     assert_eq!(reviews.len(), 2);
+    assert!(reviews[1].offline);
     assert_eq!(reviews[0].message.as_deref(), Some("Looks good"));
     assert_eq!(reviews[1].message.as_deref(), Some("One more thing"));
     // No vote changed: the second review carries none, and takes the

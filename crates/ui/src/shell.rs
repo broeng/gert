@@ -1022,6 +1022,11 @@ impl Shell {
             entry.account_failures = 0;
             entry.account_retry = None;
             entry.session = session;
+            // Unreachable as far as the shell knows; a refusal of the old
+            // session's credentials says nothing about the new one.
+            if let Some(s) = &entry.session {
+                s.set_unreachable(entry.connection == Connection::Offline);
+            }
             entry.outbox = outbox;
             entry.outbox_subs = subs;
             if let Some(scanner) = &entry.local_scan {

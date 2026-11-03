@@ -893,6 +893,9 @@ impl ReplyDialog {
         let editing = local.editing.as_ref().map(|r| r.id);
         let label = patch_set_label(&self.detail.revisions, target.number);
         let syncer = self.session.syncer().clone();
+        // Whether Gerrit could be asked about the change now: votes saved
+        // offline count as given before the change was there.
+        let offline = self.session.offline();
         let change = self.number;
         self.phase = Phase::Sending;
         self.error = None;
@@ -907,7 +910,7 @@ impl ReplyDialog {
                             strategy,
                             message: message.clone(),
                             unresolved,
-                            offline: false,
+                            offline,
                         };
                         if let Some(r) = syncer.update_pending_review(id, &edit)? {
                             return Ok((r, false));
@@ -922,7 +925,7 @@ impl ReplyDialog {
                             message,
                             unresolved,
                             created: Timestamp::now(),
-                            offline: false,
+                            offline,
                             replaces_draft: None,
                         };
                         return syncer.create_pending_review(&input).map(|r| (r, true));
@@ -939,7 +942,7 @@ impl ReplyDialog {
                         message,
                         unresolved,
                         created: Timestamp::now(),
-                        offline: false,
+                        offline,
                         replaces_draft,
                     };
                     syncer.create_pending_review(&input).map(|r| (r, false))

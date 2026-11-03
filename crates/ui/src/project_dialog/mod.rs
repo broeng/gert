@@ -72,7 +72,8 @@ pub(crate) struct LocalOptions {
 }
 
 /// The note next to `follow`: when votes follow an amended commit.
-pub(crate) const FOLLOW_NOTE: &str = "(votes saved more than 5 minutes before the upload)";
+pub(crate) const FOLLOW_NOTE: &str =
+    "(votes given before the change was on Gerrit, or while Gerrit was unreachable)";
 
 /// What the choice says for each strategy.
 pub(crate) fn approval_label(a: LocalApproval) -> &'static str {
@@ -464,8 +465,8 @@ impl ProjectDialog {
                     }),
             )
             .child(approval_label(approval))
-            // "Purely local" allows five minutes of clock skew: votes saved
-            // closer to the upload count as given on Gerrit (strict rule).
+            // Only "purely local" votes follow (`sync::purely_local`); the
+            // strict rule holds the others.
             .when(approval == LocalApproval::Follow, |d| {
                 d.child(
                     div()

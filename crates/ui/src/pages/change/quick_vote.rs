@@ -153,6 +153,9 @@ impl ChangePage {
         let newest = self.newest_pending(&target, cx);
         let strategy = self.local_approval(cx);
         let syncer = self.session.syncer().clone();
+        // Whether Gerrit could be asked about the change now: an offline
+        // vote counts as given before the change was there.
+        let offline = self.session.offline();
         let label = self.detail.as_ref().map_or_else(String::new, |d| {
             patch_set_label(&d.revisions, target.number)
         });
@@ -165,7 +168,7 @@ impl ChangePage {
                     // a new review.
                     if let Some(r) = newest
                         && let Some(r) = syncer
-                            .set_pending_review_label(r.id, &vote.0, vote.1, strategy, false)?
+                            .set_pending_review_label(r.id, &vote.0, vote.1, strategy, offline)?
                     {
                         return Ok(r);
                     }
@@ -176,7 +179,7 @@ impl ChangePage {
                         message: String::new(),
                         unresolved: false,
                         created: Timestamp::now(),
-                        offline: false,
+                        offline,
                         replaces_draft: None,
                     })
                 })

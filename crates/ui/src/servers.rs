@@ -391,9 +391,17 @@ impl Servers {
         self.get(key).map(|e| e.connection)
     }
 
+    /// Records the server's connection state, also for its session's
+    /// pages ([`Session::offline`]).
     pub fn set_connection(&mut self, key: &ServerKey, connection: Connection) {
         if let Some(e) = self.get_mut(key) {
             e.connection = connection;
+            if let Some(s) = &e.session {
+                s.set_unreachable(matches!(
+                    connection,
+                    Connection::Offline | Connection::Unauthorized
+                ));
+            }
         }
     }
 }
