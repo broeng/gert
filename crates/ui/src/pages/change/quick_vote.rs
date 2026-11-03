@@ -9,10 +9,14 @@
 //! vote and keeping the rest, or into a new pending review with only that
 //! vote when there is none. So pressing `Shift-V` twice does not make two
 //! reviews, and a vote added after a reply joins it, as it would on
-//! Gerrit. The buttons show the votes of that review as the user's.
+//! Gerrit. The buttons show the votes of that review as the user's, and
+//! a saved vote moves on along the relation chain as a cast one does.
 
 use gpui_kit::*;
-use model::{ChangeNumber, PatchSetRef, PendingReview, PendingReviewState, ReviewInput, Timestamp};
+use model::{
+    ChangeNumber, PatchSetNumber, PatchSetRef, PendingReview, PendingReviewState, ReviewInput,
+    Timestamp,
+};
 use store::NewPendingReview;
 use sync::PublishOutcome;
 
@@ -160,9 +164,11 @@ impl ChangePage {
             patch_set_label(&d.revisions, target.number)
         });
         let vote = (button.label.clone(), button.value);
+        let saved = vote.clone();
         self.voting = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
+                    let vote = saved;
                     // Only the label: the message may have changed since the
                     // list was read. Gone or claimed for sending meanwhile:
                     // a new review.
@@ -190,12 +196,12 @@ impl ChangePage {
                     Ok(_) => {
                         let change = this.number;
                         this.outbox.update(cx, |o, cx| o.published(change, cx));
+                        cx.emit(ChangeEvent::LocalReviewSaved);
                         let text = format!(
                             "Saved {} locally; sent when {label} is on Gerrit",
                             button.text()
                         );
-                        this.hint.say(text, false, cx, |p| &mut p.hint);
-                        cx.emit(ChangeEvent::LocalReviewSaved);
+                        this.after_vote(&[vote], text, cx);
                     }
                     Err(e) => {
                         let text = reply::describe_local(&e);
@@ -260,22 +266,56 @@ impl ChangePage {
     ) {
         let target = self.advance_target(voted, cx);
         match target {
-            Some(n) => cx.emit(ChangeEvent::Advance(
-                n,
-                format!("{note}, moved to change {n}"),
-            )),
+            Some((n, at)) => {
+                let name = self.chain_name(n, at);
+                cx.emit(ChangeEvent::Advance(
+                    n,
+                    at,
+                    format!("{note}, moved to {name}"),
+                ))
+            }
             None => self.hint.say(note, false, cx, |p| &mut p.hint),
         }
     }
 
     /// Where a vote that cast `voted` leads: nowhere if it changed no vote,
-    /// the setting is off, or there is no open child.
-    pub(super) fn advance_target(&self, voted: &[(String, i32)], cx: &App) -> Option<ChangeNumber> {
+    /// the setting is off, or there is no open child (see
+    /// [`super::advance_row`]). The chain may be Gerrit's or the
+    /// checkout's, so a vote on a local version moves on as well.
+    pub(super) fn advance_target(
+        &self,
+        voted: &[(String, i32)],
+        cx: &App,
+    ) -> Option<(ChangeNumber, Option<PatchSetNumber>)> {
         if voted.is_empty() || !self.layout.read(cx).advance_after_vote() {
             return None;
         }
-        let chain = &self.related.as_ref()?.changes;
-        plan::advance_target(chain, self.number)
+        super::advance_row(&self.related.as_ref()?.rows)
+    }
+
+    /// How the note names the change a vote moved on to: `change 123`, or
+    /// as its chain row does (`local`, `#7 local 2`), since a local
+    /// change's number is synthetic.
+    fn chain_name(&self, n: ChangeNumber, at: Option<PatchSetNumber>) -> String {
+        if !n.is_local() && at.is_none_or(|ps| !ps.is_local()) {
+            return format!("change {n}");
+        }
+        self.related
+            .as_ref()
+            .and_then(|r| {
+                r.rows.iter().find(|row| match row.open {
+                    Some(super::ChainOpen::Change(c)) => c == n && at.is_none(),
+                    Some(super::ChainOpen::At(c, ps)) => c == n && at == Some(ps),
+                    _ => false,
+                })
+            })
+            .map_or_else(
+                || "the next change".to_owned(),
+                |row| match n.is_local() {
+                    true => format!("local change \u{201c}{}\u{201d}", row.subject),
+                    false => row.label.clone(),
+                },
+            )
     }
 }
 

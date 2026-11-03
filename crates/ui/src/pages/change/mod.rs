@@ -96,9 +96,10 @@ pub enum ChangeEvent {
     OpenChangeAt(ChangeNumber, ChangeView),
     /// Like `ReplaceChange`, at a patch set.
     ReplaceChangeAt(ChangeNumber, ChangeView),
-    /// A vote went through and the next change of the chain is open: like
-    /// `ReplaceChange`, and the new page shows the note.
-    Advance(ChangeNumber, String),
+    /// A vote went through (or was saved on a local version) and the next
+    /// change of the chain is open: like `ReplaceChange`, at the patch set
+    /// if given (a local version), and the new page shows the note.
+    Advance(ChangeNumber, Option<PatchSetNumber>, String),
     /// A file's diff page was chosen.
     OpenDiff(DiffRoute),
     /// A refresh succeeded: the server is reachable.
@@ -205,6 +206,29 @@ enum ChainOpen {
 fn row_change(open: Option<ChainOpen>) -> Option<ChangeNumber> {
     match open? {
         ChainOpen::Change(n) | ChainOpen::At(n, _) => Some(n),
+        ChainOpen::Here(_) => None,
+    }
+}
+
+/// Where a vote moves on to in the chain `rows` (newest first): the row
+/// above the change on show, its child, when it is another change (or a
+/// local version of one) and open. A row with Gerrit's status must be
+/// `New`; a local commit without one is open while it is on a branch.
+/// `None` at the tip, for a closed child, the row for commits left out, or
+/// when the change is not in the chain.
+fn advance_row(rows: &[ChainRow]) -> Option<(ChangeNumber, Option<PatchSetNumber>)> {
+    let at = rows.iter().position(|r| r.this)?;
+    let child = rows.get(at.checked_sub(1)?)?;
+    if child
+        .related
+        .as_ref()
+        .is_some_and(|c| c.status != Some(ChangeStatus::New))
+    {
+        return None;
+    }
+    match child.open? {
+        ChainOpen::Change(n) => Some((n, None)),
+        ChainOpen::At(n, ps) => Some((n, Some(ps))),
         ChainOpen::Here(_) => None,
     }
 }
@@ -2490,6 +2514,18 @@ impl ChangePage {
             return;
         }
         self.hint.say(note, warning, cx, |p| &mut p.hint);
+    }
+
+    /// A local review was saved from the dialog: move on along the chain
+    /// if it changed a vote (see [`ChangePage::after_vote`]), else say
+    /// `note`.
+    pub fn local_review_saved(
+        &mut self,
+        note: String,
+        voted: &[(String, i32)],
+        cx: &mut Context<Self>,
+    ) {
+        self.after_vote(voted, note, cx);
     }
 
     /// Takes the change as the server has it after a write, or fetches it

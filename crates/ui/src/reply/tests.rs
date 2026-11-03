@@ -234,7 +234,7 @@ fn dialog_on(
             let text = match ev {
                 ReplyEvent::Close => "close".to_owned(),
                 ReplyEvent::Unauthorized => "unauthorized".to_owned(),
-                ReplyEvent::Saved(note) => format!("saved: {note}"),
+                ReplyEvent::Saved { note, .. } => format!("saved: {note}"),
                 ReplyEvent::Sent(s) => format!(
                     "sent detail={} unapplied={:?} warning={:?}{}",
                     s.detail.is_some(),

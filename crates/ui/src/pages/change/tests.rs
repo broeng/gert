@@ -209,7 +209,10 @@ fn page_in_with(
                 ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
                 ChangeEvent::OpenChangeAt(n, v) => format!("change {n} at {:?}", v.target),
                 ChangeEvent::ReplaceChangeAt(n, v) => format!("replace {n} at {:?}", v.target),
-                ChangeEvent::Advance(n, note) => format!("advance {n}: {note}"),
+                ChangeEvent::Advance(n, None, note) => format!("advance {n}: {note}"),
+                ChangeEvent::Advance(n, Some(ps), note) => {
+                    format!("advance {n} at {ps}: {note}")
+                }
                 ChangeEvent::OpenDiff(d) => format!(
                     "diff {} {:?}..{} {}{}",
                     d.change,
@@ -1921,4 +1924,86 @@ fn r_waits_while_the_list_is_the_local_one(cx: &mut TestAppContext) {
     let hint = cx.update(|cx| f.page.read(cx).hint_for_test());
     assert!(hint.expect("a hint").0.contains("Gerrit's file list"));
     assert!(!f.http.sent().iter().any(|r| r.method == "PUT"));
+}
+
+// ---- moving on after a vote ----
+
+fn chain_row(
+    this: bool,
+    open: Option<super::ChainOpen>,
+    status: Option<model::ChangeStatus>,
+) -> super::ChainRow {
+    let related = status.map(|status| model::RelatedChange {
+        project: "p".into(),
+        change_id: None,
+        number: ChangeNumber(1),
+        patch_set: PatchSetNumber(1),
+        current_patch_set: None,
+        status: Some(status),
+        submittable: None,
+        work_in_progress: false,
+        commit: None,
+    });
+    super::ChainRow {
+        label: String::new(),
+        subject: String::new(),
+        this,
+        open,
+        related,
+    }
+}
+
+#[test]
+fn a_vote_moves_on_to_the_open_child_in_the_chain() {
+    use super::{ChainOpen::*, advance_row};
+    use model::ChangeStatus::*;
+    let n = ChangeNumber;
+    // Newest first: the row above this change's is its child.
+    let rows = [
+        chain_row(false, Some(Change(n(3))), Some(New)),
+        chain_row(false, Some(Change(n(2))), Some(New)),
+        chain_row(true, None, Some(New)),
+    ];
+    assert_eq!(advance_row(&rows), Some((n(2), None)));
+    assert_eq!(advance_row(&rows[..1]), None, "not in the chain");
+    assert_eq!(advance_row(&rows[2..]), None, "the tip");
+    assert_eq!(advance_row(&[]), None);
+    // A local version of another change, and a local change: no status
+    // from Gerrit, open while on a branch.
+    let v = PatchSetNumber(PatchSetNumber::LOCAL_BASE + 1);
+    let rows = [
+        chain_row(false, Some(At(n(9), v)), None),
+        chain_row(true, None, None),
+    ];
+    assert_eq!(advance_row(&rows), Some((n(9), Some(v))));
+    let rows = [
+        chain_row(false, Some(Change(n(5))), None),
+        chain_row(true, None, None),
+    ];
+    assert_eq!(advance_row(&rows), Some((n(5), None)));
+}
+
+#[test]
+fn a_vote_does_not_move_on_to_a_closed_child_or_what_is_no_change() {
+    use super::{ChainOpen::*, advance_row, more_row};
+    use model::ChangeStatus::*;
+    let n = ChangeNumber;
+    for status in [Merged, Abandoned, model::ChangeStatus::Unknown("X".into())] {
+        let rows = [
+            chain_row(false, Some(Change(n(2))), Some(status)),
+            chain_row(true, None, None),
+        ];
+        assert_eq!(advance_row(&rows), None);
+    }
+    // Another version of this change, a commit that is no change, and the
+    // row for commits left out.
+    let rows = [
+        chain_row(false, Some(Here(PatchSetNumber(2))), None),
+        chain_row(true, None, None),
+    ];
+    assert_eq!(advance_row(&rows), None);
+    let rows = [chain_row(false, None, None), chain_row(true, None, None)];
+    assert_eq!(advance_row(&rows), None);
+    let rows = [more_row(), chain_row(true, None, None)];
+    assert_eq!(advance_row(&rows), None);
 }

@@ -212,6 +212,8 @@ fn page_in(
                 ChangeEvent::ReplaceChange(n) => format!("replace {n}"),
                 ChangeEvent::OpenChangeAt(n, v) => format!("change {n} at {:?}", v.target),
                 ChangeEvent::ReplaceChangeAt(n, v) => format!("replace {n} at {:?}", v.target),
+                ChangeEvent::Advance(n, at, note) => format!("advance {n} at {at:?}: {note}"),
+                ChangeEvent::LocalReviewSaved => "local review saved".to_owned(),
                 _ => "other".to_owned(),
             };
             log.lock().expect("log").push(text);
@@ -1038,6 +1040,81 @@ fn a_chain_opens_an_older_version_at_that_version_and_steps_past_plain_commits(
         ]
     );
     assert!(f.http.requested().is_empty());
+}
+
+#[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
+fn a_vote_on_a_local_version_moves_on_along_the_chain_from_the_checkout(cx: &mut TestAppContext) {
+    let s = series();
+    let store = s.store();
+    let number = |id: &str| {
+        store
+            .local_changes_by_change_id(SERVER, id)
+            .expect("rows")
+            .remove(0)
+            .number
+    };
+    let (first, third) = (number("I1"), number("I3"));
+    let version_of_9 = store
+        .local_patch_sets_by_sha(SERVER, &s.second.clone().into())
+        .expect("versions")[0]
+        .number;
+    let wait_for_chain = |cx: &mut TestAppContext, f: &Fixture| {
+        for _ in 0..100 {
+            if !cx.update(|cx| f.page.read(cx).chain_for_test()).is_empty() {
+                break;
+            }
+            cx.executor().allow_parking();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+    };
+
+    // A local change: on to the local version of Gerrit change 9 built on
+    // it, at that version.
+    let f = page_in(cx, store, first, s.project(), |_| {});
+    wait_for_chain(cx, &f);
+    f.press(cx, "shift-v");
+    assert_eq!(
+        *f.events.lock().expect("log"),
+        [
+            "local review saved".to_owned(),
+            format!(
+                "advance 9 at {:?}: Saved Code-Review +2 locally; sent when local 1 is on \
+                 Gerrit, moved to #9 local 1",
+                Some(version_of_9)
+            )
+        ]
+    );
+
+    // That version: on to the local change built on it, named by its
+    // subject (its number is synthetic).
+    let mut store = s.store();
+    let mut nine = store
+        .load_change_detail(SERVER, ChangeNumber(9))
+        .expect("load")
+        .expect("cached")
+        .detail;
+    nine.permitted_labels = [("Code-Review".to_owned(), vec![-2, -1, 0, 1, 2])].into();
+    store
+        .save_change_detail(SERVER, &nine, Timestamp::now())
+        .expect("detail");
+    let f = page_in(cx, store, ChangeNumber(9), s.project(), |_| {});
+    let local = f.local_patch_set(cx, 1);
+    f.pick(cx, |sel, d| sel.set_target(d, local));
+    wait_for_chain(cx, &f);
+    f.press(cx, "shift-v");
+    let events = f.events.lock().expect("log").clone();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(
+        events[1].starts_with(&format!("advance {third} at None: Saved ")),
+        "{events:?}"
+    );
+    assert!(
+        events[1].ends_with("moved to local change \u{201c}Third local\u{201d}"),
+        "{events:?}"
+    );
+    f.assert_nothing_local_sent(&[&s.first, &s.second, &s.third]);
 }
 
 #[gpui_kit::test]

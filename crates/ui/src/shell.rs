@@ -2290,8 +2290,14 @@ impl Shell {
                     this.show(window, cx)
                 }
                 // A vote moved on to the next change of the chain.
-                ChangeEvent::Advance(n, note) => {
+                ChangeEvent::Advance(n, at, note) => {
                     this.nav.replace(Route::Change(*n));
+                    if let Some(ps) = at {
+                        this.nav.set_change_view(Some(ChangeView {
+                            target: Some(*ps),
+                            ..ChangeView::default()
+                        }));
+                    }
                     this.show(window, cx);
                     if let Page::Change(p) = &this.page {
                         let note = note.clone();
@@ -2721,7 +2727,9 @@ impl Shell {
                 ReplyEvent::Close => this.close_reply(window, cx),
                 ReplyEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
                 ReplyEvent::Sent(sent) => this.reply_sent(sent, window, cx),
-                ReplyEvent::Saved(note) => this.reply_saved(note.clone(), window, cx),
+                ReplyEvent::Saved { note, voted } => {
+                    this.reply_saved(note.clone(), voted, window, cx)
+                }
             },
         ));
         self.reply = Some(dialog);
@@ -2759,10 +2767,16 @@ impl Shell {
 
     /// A local review was saved: close the dialog, let the page say so,
     /// and send it if its version is on Gerrit by now.
-    fn reply_saved(&mut self, note: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn reply_saved(
+        &mut self,
+        note: String,
+        voted: &[(String, i32)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_reply(window, cx);
         match &self.page {
-            Page::Change(p) => p.update(cx, |p, cx| p.say(note, cx)),
+            Page::Change(p) => p.update(cx, |p, cx| p.local_review_saved(note, voted, cx)),
             Page::Diff(p) => p.update(cx, |p, cx| p.say(note, cx)),
             _ => {}
         }

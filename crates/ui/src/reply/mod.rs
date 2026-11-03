@@ -147,8 +147,13 @@ pub enum ReplyEvent {
     Unauthorized,
     /// The review was posted.
     Sent(Box<Sent>),
-    /// A local review was saved; the note says so, for the page.
-    Saved(String),
+    /// A local review was saved; the note says so, for the page. `voted`
+    /// are the votes it changed, which move the page on along the chain
+    /// as a sent vote does.
+    Saved {
+        note: String,
+        voted: Vec<(String, i32)>,
+    },
 }
 
 /// The outcome of a posted review.
@@ -976,7 +981,8 @@ impl ReplyDialog {
                 } else {
                     local_note(label)
                 };
-                cx.emit(ReplyEvent::Saved(note));
+                let voted = plan::labels_to_send(&self.votes).into_iter().collect();
+                cx.emit(ReplyEvent::Saved { note, voted });
             }
             Err(e) => self.error = Some(describe_local(&e)),
         }
