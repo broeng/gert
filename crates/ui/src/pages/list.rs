@@ -973,7 +973,9 @@ impl ChangeListPage {
                     .overflow_hidden()
                     .child(div().min_w_0().truncate().child(c.subject.clone()))
                     .children(local_state_note(c.state).map(|note| {
+                        let state = c.state.as_str();
                         div()
+                            .debug_selector(|| format!("local-note-{state}"))
                             .flex_none()
                             .text_xs()
                             .text_color(note_color)
@@ -1001,7 +1003,9 @@ impl ChangeListPage {
                     .child(relative(now, c.updated, &tz)),
             )
             // A vanished change is kept only for its unsent data.
-            .when(c.state == LocalChangeState::Vanished, |d| d.opacity(0.55))
+            .when(c.state == LocalChangeState::Vanished, |d| {
+                d.opacity(0.55).debug_selector(|| "local-dimmed".into())
+            })
     }
 
     /// The bookmark buttons, on the dashboard and on search results; the one

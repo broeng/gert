@@ -626,10 +626,25 @@ fn every_state_renders_and_j_k_cross_into_the_queries(cx: &mut TestAppContext) {
             LocalChangeState::Vanished,
         ]
     );
-    // Drawn (the window renders on every update) without trouble.
-    cx.update_window(window, |_, window, _| window.refresh())
-        .expect("refresh");
-    cx.run_until_parked();
+    // Drawn: each state's note, and the vanished row dimmed.
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.run_until_parked();
+    for note in [
+        "local-note-checking",
+        "local-note-ambiguous",
+        "local-note-vanished",
+    ] {
+        assert!(visual.debug_bounds(note).is_some(), "{note}");
+    }
+    assert!(visual.debug_bounds("local-note-local").is_none());
+    let dimmed = visual.debug_bounds("local-dimmed").expect("a dimmed row");
+    let note = visual
+        .debug_bounds("local-note-vanished")
+        .expect("vanished note");
+    assert!(
+        dimmed.contains(&note.center()),
+        "the note is in the dimmed row"
+    );
 
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = events.clone();
