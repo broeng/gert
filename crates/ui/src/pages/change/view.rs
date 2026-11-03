@@ -798,8 +798,7 @@ impl ChangePage {
                                         .items_center()
                                         .children(
                                             self.files
-                                                .local
-                                                .as_ref()
+                                                .checkout()
                                                 .map(|p| local_marker("files-local", p, cx)),
                                         )
                                         .child(format!("{count} files"))

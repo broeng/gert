@@ -189,7 +189,7 @@ fn page_in_with(
                 outbox,
                 cx,
             );
-            page.set_checkouts(Some(checkouts));
+            page.set_checkouts(Some(checkouts), cx);
             page
         });
         cx.subscribe(&page, move |_, ev: &ChangeEvent, _| {
@@ -1887,8 +1887,17 @@ fn a_late_local_list_does_not_replace_gerrits(cx: &mut TestAppContext) {
     };
     // The local list is asked for, then Gerrit's arrives before git is done.
     f.page.update(cx, |p, cx| {
-        p.start_local_files(&key, cx);
-        p.apply_files(&key, gerrit, cx);
+        p.file_list.update(cx, |l, cx| {
+            use crate::file_list::{Ask, Seed};
+            l.load(
+                Some(key.clone()),
+                "platform/foo",
+                Seed::Miss,
+                Ask::Never,
+                cx,
+            );
+            l.load(Some(key), "platform/foo", Seed::Hit(gerrit), Ask::Never, cx);
+        })
     });
     settle_git(cx);
     assert_eq!(list_of(cx, &f), ["/COMMIT_MSG", "gerrit/only.rs"]);

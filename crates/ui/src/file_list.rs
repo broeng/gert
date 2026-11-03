@@ -18,9 +18,6 @@
 //! Pages read a [`Files`] snapshot, which they copy when an event says it
 //! changed (the change page reads the list in many places without a `cx`).
 
-// The pages move onto it in the next commits.
-#![allow(dead_code)]
-
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -41,10 +38,10 @@ use crate::{
     session::{Session, is_unauthorized},
 };
 
-/// What the files block says when the checkout cannot list a local
-/// version, which Gerrit does not have.
+/// The files notice of a local version the checkout cannot list, which
+/// Gerrit does not have.
 pub const LOCAL_FILES_UNAVAILABLE: &str =
-    "The local checkout cannot list the files of this version.";
+    "the project's checkout does not have this version (the files of local versions come from it)";
 
 /// What the caller already knows of the store's list for a key.
 pub enum Seed {

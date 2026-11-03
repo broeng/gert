@@ -41,10 +41,9 @@ use gpui_kit::*;
 use jiff::Timestamp;
 use model::{
     ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, DiffKey, DiffPair, FileCommentCounts,
-    FileEntry, FilesKey, LocalApproval, LocalChange, PatchSetNumber, PendingReviewId,
-    RelatedChange, RevisionId, Thread, ThreadId,
+    LocalApproval, LocalChange, PatchSetNumber, PendingReviewId, RelatedChange, RevisionId, Thread,
+    ThreadId,
 };
-use store::CachedFileList;
 use sync::{ChainCommit, PollPolicy};
 
 use crate::{
@@ -58,14 +57,11 @@ use crate::{
         actions::{NextFile, PrevFile},
     },
     diff_load::{DiffSource, LoadError, load_diff},
+    file_list::{Ask, FileList, FileListEvent, Files, Seed},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
     local_chain,
     local_rules::{self, Op, Target},
-    local_source::{
-        LocalLazy, LocalSource, LocalState, Lookup, Renames, Resolved, Unserved, local_file_list,
-        lookup, renames_of,
-    },
     nav::{ChangeView, DiffRoute},
     outbox::{self, DraftOutbox},
     pages::list::Status,
@@ -124,24 +120,6 @@ pub enum ChangeEvent {
     Search(String),
     /// A quick vote on a local version was saved as a local review.
     LocalReviewSaved,
-}
-
-/// The files notice of a local version the checkout cannot list.
-const LOCAL_FILES_UNAVAILABLE: &str =
-    "the project's checkout does not have this version (the files of local versions come from it)";
-
-/// The file list of the current patch set pair.
-#[derive(Default)]
-struct Files {
-    key: Option<FilesKey>,
-    list: Vec<FileEntry>,
-    reviewed: HashSet<String>,
-    /// A list (possibly empty) has arrived for `key`.
-    loaded: bool,
-    /// The checkout the list was made in, while it is the local list (no
-    /// reviewed marks, never stored) that Gerrit's has not replaced yet.
-    local: Option<std::path::PathBuf>,
-    error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -290,15 +268,12 @@ pub struct ChangePage {
     syntax: Entity<SyntaxCache>,
     /// What this page last asked the syntax worker to do.
     queued: Vec<DiffKey>,
-    /// The server's local checkouts, when it has any.
+    /// The server's local checkouts, when it has any (the file list has
+    /// them too).
     checkouts: Option<Entity<Checkouts>>,
-    /// The local source for the file list in use (see `update_local`).
-    local: LocalState,
-    local_task: Option<Task<()>>,
-    /// Making the file list in the checkout after a cache miss.
-    local_files_task: Option<Task<()>>,
-    /// The renames of the file list, for the local source.
-    renames: Arc<Renames>,
+    /// The file list of the pair picked, its local source and reviewed
+    /// marks; `files` is what it last said.
+    file_list: Entity<FileList>,
     /// The filter style of each entry of `files.list`.
     styles: Vec<FileStyle>,
     /// Indexes into `files.list` of the files the filters do not hide. The
@@ -324,7 +299,6 @@ pub struct ChangePage {
     policy: PollPolicy,
     ticks: u32,
     task: Option<Task<()>>,
-    files_task: Option<Task<()>>,
     related_task: Option<Task<()>>,
     /// The local commits the checkout built on the Gerrit patch set on
     /// show, for its relation chain, and the patch set's commit.
@@ -405,6 +379,7 @@ impl ChangePage {
         cx: &mut Context<Self>,
     ) -> Self {
         let comments = outbox.update(cx, |o, cx| o.comments(number, cx));
+        let file_list = cx.new(|_| FileList::new(session.clone()));
         let mut this = Self {
             session,
             settings: settings.clone(),
@@ -413,10 +388,7 @@ impl ChangePage {
             syntax,
             queued: Vec::new(),
             checkouts: None,
-            local: LocalState::Unknown,
-            local_task: None,
-            local_files_task: None,
-            renames: Arc::default(),
+            file_list: file_list.clone(),
             styles: Vec::new(),
             visible: Vec::new(),
             number,
@@ -452,7 +424,6 @@ impl ChangePage {
             policy: PollPolicy::default(),
             ticks: 0,
             task: None,
-            files_task: None,
             related_task: None,
             local_stack: None,
             stack_task: None,
@@ -491,6 +462,8 @@ impl ChangePage {
                 CommentsEvent::Changed => this.apply_threads(cx),
                 CommentsEvent::Unauthorized => cx.emit(ChangeEvent::Unauthorized),
             }));
+        this._subs
+            .push(cx.subscribe(&file_list, |this, _, ev, cx| this.files_changed(ev, cx)));
         // A held publish (it runs on the outbox) says how it went here.
         let outbox_entity = this.outbox.clone();
         this._subs
@@ -597,7 +570,7 @@ impl ChangePage {
     }
 
     #[cfg(test)]
-    pub(crate) fn files_key(&self) -> Option<&FilesKey> {
+    pub(crate) fn files_key(&self) -> Option<&model::FilesKey> {
         self.files.key.as_ref()
     }
 
@@ -618,7 +591,7 @@ impl ChangePage {
     /// The checkout the file list was made in, while it is the local one.
     #[cfg(test)]
     pub(crate) fn files_local_for_test(&self) -> Option<&std::path::Path> {
-        self.files.local.as_deref()
+        self.files.checkout()
     }
 
     #[cfg(test)]
@@ -924,18 +897,19 @@ impl ChangePage {
         };
         let key = self.sel.files_key(d);
         let sha = self.sel.target_ref(d).map(|t| t.sha);
-        if key != self.files.key {
-            if self.want_file.is_none() {
-                self.want_file = self.cursor_path().map(str::to_owned);
-            }
-            self.files = Files {
-                key: key.clone(),
-                ..Default::default()
-            };
+        let project = d.summary.project.clone();
+        if key != self.files.key && self.want_file.is_none() {
+            self.want_file = self.cursor_path().map(str::to_owned);
+        }
+        // From the store, and the checkout on a miss; Gerrit too (for fresh
+        // reviewed marks) if `network`.
+        let ask = if network { Ask::Always } else { Ask::Never };
+        let restarted = self.file_list.update(cx, |f, cx| {
+            f.load(key.clone(), &project, Seed::Unread, ask, cx)
+        });
+        if restarted {
+            self.files = self.file_list.read(cx).files();
             self.inline.clear();
-            self.local = LocalState::Unknown;
-            self.local_task = None;
-            self.local_files_task = None;
             self.styles.clear();
             self.visible.clear();
             self.cursor = 0;
@@ -959,9 +933,6 @@ impl ChangePage {
         // Gerrit knows no relation chain of a local change or version: the
         // checkout does.
         let target_local = key.as_ref().is_some_and(|k| k.target.number.is_local());
-        if let Some(key) = key {
-            self.load_files(key, network, cx);
-        }
         if let Some(sha) = sha {
             if self.number.is_local() || target_local {
                 self.load_git_chain(sha, cx);
@@ -972,201 +943,57 @@ impl ChangePage {
         }
     }
 
-    fn load_files(&mut self, key: FilesKey, network: bool, cx: &mut Context<Self>) {
-        let syncer = self.session.syncer().clone();
-        // Gerrit cannot list a local version: the checkout does.
-        let sync = network && self.session.can_sync() && !key.is_local();
-        self.files_task = Some(cx.spawn(async move |this, cx| {
-            let cached = {
-                let (syncer, key) = (syncer.clone(), key.clone());
-                cx.background_spawn(async move { syncer.cached_files(&key) })
-                    .await
-            };
-            this.update(cx, |this, cx| match cached {
-                Ok(Some(list)) => this.apply_files(&key, list, cx),
-                // Nothing stored: the checkout, if it has the commits,
-                // gives a list until Gerrit's arrives.
-                Ok(None) => this.start_local_files(&key, cx),
-                Err(e) => log::warn!("reading cached files: {e}"),
-            })
-            .ok();
-            if !sync {
-                return;
+    /// The file list said something changed: take its snapshot, and redo
+    /// what depends on it.
+    fn files_changed(&mut self, ev: &FileListEvent, cx: &mut Context<Self>) {
+        // The file to keep the cursor on, from the list before the new one.
+        let keep = matches!(ev, FileListEvent::Listed).then(|| {
+            self.want_file
+                .take()
+                .or_else(|| self.cursor_path().map(str::to_owned))
+        });
+        self.files = self.file_list.read(cx).files();
+        match ev {
+            FileListEvent::Listed => {
+                self.compute_styles(cx);
+                self.queue_syntax(cx);
+                self.cursor = self.cursor_on(keep.flatten().as_deref());
+                let paths: HashSet<_> = self.files.list.iter().map(|f| f.path.as_str()).collect();
+                self.inline.retain(|p, _| paths.contains(p.as_str()));
+                self.recount();
+                self.rebuild_blocks();
+                self.restore_scroll();
             }
-            let fetched = {
-                let key = key.clone();
-                cx.background_spawn(async move { syncer.refresh_files(&key).await })
-                    .await
-            };
-            this.update(cx, |this, cx| match fetched {
-                Ok(list) => this.apply_files(&key, list, cx),
-                Err(e) if is_unauthorized(&e) => cx.emit(ChangeEvent::Unauthorized),
-                Err(e) => {
-                    log::warn!("fetching files of change {}: {e}", key.change);
-                    if this.files.key.as_ref() == Some(&key) && !this.files.loaded {
-                        this.files.error = Some(e.to_string());
-                        this.rebuild_blocks();
-                        cx.notify();
-                    }
+            // An error, nothing left to ask, or the notice of a comparison
+            // nobody can show.
+            FileListEvent::Changed => self.rebuild_blocks(),
+            FileListEvent::MarksChanged => {}
+            FileListEvent::LocalResolved => {
+                if self.parents_differ() {
+                    self.remeasure(Block::FilesNotice);
                 }
-            })
-            .ok();
-        }));
-    }
-
-    fn apply_files(&mut self, key: &FilesKey, list: CachedFileList, cx: &mut Context<Self>) {
-        let reviewed = list.reviewed.unwrap_or_default().into_iter().collect();
-        self.apply_list(key, list.files, reviewed, None, cx);
-    }
-
-    /// Makes the file list in the checkout when there is no stored one and
-    /// none is on screen. Never stored; Gerrit's list replaces it. The
-    /// shared local resolve is the one the diffs use.
-    fn start_local_files(&mut self, key: &FilesKey, cx: &mut Context<Self>) {
-        if self.files.key.as_ref() != Some(key) || self.files.loaded {
-            return;
+            }
+            FileListEvent::ReviewedFailed(note) => {
+                self.hint.say(note.clone(), true, cx, |p| &mut p.hint);
+            }
+            FileListEvent::Unauthorized => cx.emit(ChangeEvent::Unauthorized),
         }
-        self.update_local(cx);
-        if matches!(&self.local, LocalState::Ready(_, Err(_))) {
-            // No checkout, or it cannot serve this comparison.
-            self.no_local_list(key, cx);
-            return;
-        }
-        let lazy = self.local.lazy(key, &Arc::default());
-        let key = key.clone();
-        self.local_files_task = Some(cx.spawn(async move |this, cx| {
-            let made = local_file_list(lazy, cx).await;
-            this.update(cx, |this, cx| match made {
-                // Gerrit's list (or a stored one) may have come first, or
-                // another pair been picked.
-                Some((path, files)) => {
-                    if this.files.key.as_ref() == Some(&key) && !this.files.loaded {
-                        this.apply_list(&key, files, HashSet::new(), Some(path), cx);
-                    }
-                }
-                None => this.no_local_list(&key, cx),
-            })
-            .ok();
-        }));
-    }
-
-    /// The checkout cannot list `key`. Gerrit's list comes instead, except
-    /// for a local version, which Gerrit does not have: then the notice
-    /// says so (never one of Gerrit's errors).
-    fn no_local_list(&mut self, key: &FilesKey, cx: &mut Context<Self>) {
-        if self.parents_differ() {
-            // The notice says so, in place of an error.
-            self.rebuild_blocks();
-            cx.notify();
-            return;
-        }
-        if key.is_local() && self.files.key.as_ref() == Some(key) && !self.files.loaded {
-            self.files.error = Some(LOCAL_FILES_UNAVAILABLE.to_owned());
-            self.rebuild_blocks();
-            cx.notify();
-        }
-    }
-
-    /// Shows `files`. `local` is the checkout they were made in, `None` for
-    /// the stored list or Gerrit's.
-    fn apply_list(
-        &mut self,
-        key: &FilesKey,
-        files: Vec<FileEntry>,
-        reviewed: HashSet<String>,
-        local: Option<std::path::PathBuf>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.files.key.as_ref() != Some(key) {
-            return; // the user picked another pair meanwhile
-        }
-        if local.is_none() {
-            // The local list is not needed any more, and must not land late.
-            self.local_files_task = None;
-        }
-        let keep = self
-            .want_file
-            .take()
-            .or_else(|| self.cursor_path().map(str::to_owned));
-        self.files.list = files;
-        self.files.reviewed = reviewed;
-        self.files.loaded = true;
-        self.files.local = local;
-        self.files.error = None;
-        self.renames = renames_of(&self.files.list);
-        self.update_local(cx);
-        self.compute_styles(cx);
-        self.queue_syntax(cx);
-        self.cursor = self.cursor_on(keep.as_deref());
-        let paths: HashSet<_> = self.files.list.iter().map(|f| f.path.as_str()).collect();
-        self.inline.retain(|p, _| paths.contains(p.as_str()));
-        self.recount();
-        self.rebuild_blocks();
-        self.restore_scroll();
         cx.notify();
     }
 
     /// Names the server's checkouts, so diffs can come from the project's
     /// local checkout. Set right after the page is made, before anything
     /// has loaded.
-    pub fn set_checkouts(&mut self, checkouts: Option<Entity<Checkouts>>) {
-        self.checkouts = checkouts;
-    }
-
-    /// Starts finding the local source for the file list's comparison
-    /// unless that is done or under way. Nothing waits for it: stored
-    /// diffs are read first, and a diff that has to be computed awaits it
-    /// in `load_diff`.
-    fn update_local(&mut self, cx: &mut Context<Self>) {
-        let (Some(files), Some(project)) = (
-            self.files.key.clone(),
-            self.detail.as_ref().map(|d| d.summary.project.clone()),
-        ) else {
-            return;
-        };
-        if self.local.is_for(&files) {
-            return;
-        }
-        self.local_task = None;
-        self.local = match lookup(&self.checkouts, &project, &files, cx) {
-            Lookup::Unconfigured => LocalState::Ready(files, Err(Unserved::NoCheckout)),
-            Lookup::Ready(s) => LocalState::Ready(files, Ok(s)),
-            Lookup::Pending(p) => {
-                let (key, shared) = (files.clone(), p.clone());
-                self.local_task = Some(cx.spawn(async move |this, cx| {
-                    let source = shared.await;
-                    this.update(cx, |this, cx| this.local_resolved(&key, source, cx))
-                        .ok();
-                }));
-                LocalState::Resolving(files, p)
-            }
-        };
-    }
-
-    fn local_resolved(&mut self, files: &FilesKey, source: Resolved, cx: &mut Context<Self>) {
-        if !matches!(&self.local, LocalState::Resolving(k, _) if k == files) {
-            return;
-        }
-        self.local = LocalState::Ready(files.clone(), source);
-        self.local_task = None;
-        if self.parents_differ() {
-            // Not the checkout's fault, whatever the list's request said.
-            self.files.error = None;
-            self.remeasure(Block::FilesNotice);
-        }
-        cx.notify(); // the "local" marker
+    pub fn set_checkouts(&mut self, checkouts: Option<Entity<Checkouts>>, cx: &mut App) {
+        self.checkouts = checkouts.clone();
+        self.file_list.update(cx, |f, _| f.set_checkouts(checkouts));
     }
 
     /// Whether the file list in use is a comparison with a local version
-    /// whose two sides have different parents (a rebase), which nobody can
-    /// show: the checkout leaves it to Gerrit, which marks the edits a
-    /// rebase brings, and Gerrit does not have the local version.
+    /// whose two sides have different parents (see
+    /// [`Files::parents_differ`]), which nobody can show.
     pub(super) fn parents_differ(&self) -> bool {
-        self.files.key.as_ref().is_some_and(|k| {
-            k.is_local()
-                && !self.files.loaded
-                && self.local.unserved(k) == Some(Unserved::ParentsDiffer)
-        })
+        self.files.parents_differ()
     }
 
     fn load_related(&mut self, sha: RevisionId, network: bool, cx: &mut Context<Self>) {
@@ -1806,29 +1633,14 @@ impl ChangePage {
         }
         self.queued = keys.clone();
         let session = self.session.clone();
-        let local = self.local_lazy();
+        let local = self.files.local_lazy();
         self.syntax
             .update(cx, |c, cx| c.set_queue(keys, &session, local, enabled, cx));
     }
 
     /// The checkout the local diffs come from.
     fn local_path(&self) -> Option<std::path::PathBuf> {
-        self.local_source().map(|s| s.path().to_owned())
-    }
-
-    /// The local source for the file list in use, once resolved.
-    fn local_source(&self) -> Option<LocalSource> {
-        let source = self.local.source_for(self.files.key.as_ref()?)?;
-        Some(source.with_renames(self.renames.clone()))
-    }
-
-    /// The local source for `load_diff` and the syntax worker, resolved or
-    /// not yet.
-    fn local_lazy(&self) -> LocalLazy {
-        match &self.files.key {
-            Some(files) => self.local.lazy(files, &self.renames),
-            None => LocalLazy::none(),
-        }
+        self.files.local_path()
     }
 
     fn expand_inline(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -1899,7 +1711,7 @@ impl ChangePage {
     }
 
     fn start_fetch(&mut self, path: &str, cx: &mut Context<Self>) {
-        let local = self.local_lazy();
+        let local = self.files.local_lazy();
         let Some(inline) = self.inline.get_mut(path) else {
             return;
         };
@@ -2617,66 +2429,18 @@ impl ChangePage {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
-        if !self.files.loaded || self.files.local.is_some() {
+        if self.files.marks_wait() {
             // Gerrit's list, computed before the mark, would replace it.
             self.hint.say(reviewed::WAITS, false, cx, |p| &mut p.hint);
             return;
         }
-        let (Some(key), Some(path)) = (
-            self.files.key.clone(),
-            self.cursor_path().map(str::to_owned),
-        ) else {
+        let Some(path) = self.cursor_path().map(str::to_owned) else {
             return;
         };
-        let reviewed = !self.files.reviewed.contains(&path);
-        self.mark_reviewed(&path, reviewed);
-        cx.notify();
-        let syncer = self.session.syncer().clone();
-        let (change, sha, sent) = (self.number, key.target.sha.clone(), path.clone());
-        cx.spawn(async move |this, cx| {
-            let outcome = cx
-                .background_spawn(reviewed::send(syncer, change, sha, sent, reviewed))
-                .await;
-            this.update(cx, |this, cx| {
-                this.reviewed_result(&key, &path, reviewed, outcome, cx)
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn mark_reviewed(&mut self, path: &str, reviewed: bool) {
-        if reviewed {
-            self.files.reviewed.insert(path.to_owned());
-        } else {
-            self.files.reviewed.remove(path);
-        }
-    }
-
-    fn reviewed_result(
-        &mut self,
-        key: &FilesKey,
-        path: &str,
-        reviewed: bool,
-        outcome: reviewed::Outcome,
-        cx: &mut Context<Self>,
-    ) {
-        let (error, login) = match outcome {
-            reviewed::Outcome::Done => return,
-            reviewed::Outcome::Unauthorized => (None, true),
-            reviewed::Outcome::Failed(e) => (Some(e), false),
-        };
-        // Back to what the server has, unless another pair is shown now.
-        if self.files.key.as_ref() == Some(key) && self.files.reviewed.contains(path) == reviewed {
-            self.mark_reviewed(path, !reviewed);
-        }
-        if let Some(e) = error {
-            let note = reviewed::failure_note(path, reviewed, &e);
-            self.hint.say(note, true, cx, |p| &mut p.hint);
-        }
-        if login {
-            cx.emit(ChangeEvent::Unauthorized);
-        }
+        let reviewed = !self.files.is_reviewed(&path);
+        self.file_list
+            .update(cx, |f, cx| f.set_reviewed(&path, reviewed, cx));
+        self.files = self.file_list.read(cx).files();
         cx.notify();
     }
 

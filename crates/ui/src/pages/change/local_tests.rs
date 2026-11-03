@@ -197,7 +197,7 @@ fn page_in(
                 outbox,
                 cx,
             );
-            page.set_checkouts(Some(checkouts));
+            page.set_checkouts(Some(checkouts), cx);
             page
         });
         cx.subscribe(&page, move |_, ev: &ChangeEvent, _| {

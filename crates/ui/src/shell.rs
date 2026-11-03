@@ -2232,7 +2232,7 @@ impl Shell {
             let mut page = ChangePage::new(
                 session, settings, layout, filters, syntax, number, view, active, outbox, cx,
             );
-            page.set_checkouts(checkouts);
+            page.set_checkouts(checkouts, cx);
             page.set_server_badge(badge, cx);
             if let Some(chain) = chain {
                 page.adopt_chain(chain, cx);
