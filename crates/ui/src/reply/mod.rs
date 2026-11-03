@@ -215,6 +215,11 @@ pub fn describe_local(e: &sync::Error) -> String {
         sync::Error::Store(store::Error::NotLocal) => {
             "Not saved: this version is no longer known locally.".into()
         }
+        sync::Error::Store(store::Error::DraftBeingSent) => {
+            "Not saved: this review is being sent to Gerrit right now. Your text is still \
+             here; save it again in a moment to make it a review of its own."
+                .into()
+        }
         other => format!("Not saved: {other}"),
     }
 }

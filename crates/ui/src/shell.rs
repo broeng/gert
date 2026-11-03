@@ -13,7 +13,7 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex
 use gpui_kit::component::{IconName, TitleBar, window_border};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use model::{ChangeDetail, ChangeNumber};
+use model::{ChangeDetail, ChangeNumber, LocalDraftId};
 use sync::notify::{Notification, NotificationSettings, Screen};
 
 use crate::{
@@ -682,10 +682,32 @@ impl Shell {
             subs.push(cx.subscribe_in(
                 &outbox,
                 window,
-                move |this, _, ev: &OutboxEvent, window, cx| {
-                    if matches!(ev, OutboxEvent::Unauthorized) {
-                        this.unauthorized_for(&owner, window, cx);
+                move |this, _, ev: &OutboxEvent, window, cx| match ev {
+                    OutboxEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
+                    OutboxEvent::EditBeingSent {
+                        change,
+                        draft,
+                        message,
+                        unresolved,
+                    } => this.edit_refused(
+                        &owner,
+                        *change,
+                        *draft,
+                        message.clone(),
+                        *unresolved,
+                        window,
+                        cx,
+                    ),
+                    OutboxEvent::DeleteBeingSent(change) => {
+                        if this.current_change() == Some((owner.clone(), *change)) {
+                            match &this.page {
+                                Page::Change(p) => p.update(cx, |p, cx| p.delete_refused(cx)),
+                                Page::Diff(p) => p.update(cx, |p, cx| p.delete_refused(cx)),
+                                _ => {}
+                            }
+                        }
                     }
+                    OutboxEvent::Changed(_) => {}
                 },
             ));
             // The title bar shows the counts.
@@ -715,6 +737,40 @@ impl Shell {
             entry.watch_task = None;
         }
         self.sync_attention_polls(window, cx);
+    }
+
+    /// An edit of a draft of `change` on server `key` was not saved because
+    /// a local review post is sending the draft: the page that shows the
+    /// change gives the text back. Elsewhere (the user went on) it is only
+    /// logged.
+    #[allow(clippy::too_many_arguments)]
+    fn edit_refused(
+        &mut self,
+        key: &ServerKey,
+        change: ChangeNumber,
+        draft: LocalDraftId,
+        text: String,
+        unresolved: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.current_change() != Some((key.clone(), change)) {
+            log::warn!("an edit of a draft of change {change} was not saved: it is being sent");
+            return;
+        }
+        match &self.page {
+            Page::Change(p) => {
+                p.update(cx, |p, cx| {
+                    p.keep_refused_edit(draft, text, unresolved, window, cx)
+                });
+            }
+            Page::Diff(p) => {
+                p.update(cx, |p, cx| {
+                    p.keep_refused_edit(draft, text, unresolved, window, cx)
+                });
+            }
+            _ => {}
+        }
     }
 
     /// Starts and stops the background polls so that exactly the servers

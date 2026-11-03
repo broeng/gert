@@ -29,12 +29,34 @@ use crate::{
     session::{Session, is_unauthorized},
 };
 
+/// What a page says when an edit of a draft was refused because a local
+/// review post is sending it, and no view on the page could keep the text.
+pub const EDIT_BEING_SENT: &str =
+    "Not saved: this comment is being sent to Gerrit with your local review right now";
+
+/// What a page says when deleting such a draft was refused.
+pub const DELETE_BEING_SENT: &str = "This comment is being sent to Gerrit with your local \
+     review and cannot be deleted now";
+
 pub enum OutboxEvent {
     /// The drafts of this change changed in the local database (a draft was
     /// saved, deleted or found uploaded or failed).
     Changed(ChangeNumber),
     /// The server answered 401 to a draft request.
     Unauthorized,
+    /// An edit of a draft of `change` was refused because a local review
+    /// post is sending the draft right now (`store::Error::DraftBeingSent`):
+    /// nothing was saved. Carries what the user wrote, so that the page can
+    /// give it back to them.
+    EditBeingSent {
+        change: ChangeNumber,
+        draft: LocalDraftId,
+        message: String,
+        unresolved: bool,
+    },
+    /// A delete of a draft of `change` was refused for the same reason
+    /// (`store::DeleteOutcome::BeingSent`).
+    DeleteBeingSent(ChangeNumber),
 }
 
 pub struct DraftOutbox {
@@ -156,7 +178,8 @@ impl DraftOutbox {
                 id,
                 message,
                 unresolved,
-            } => self.save(
+            } => self.save_for(
+                Some(change),
                 DraftSave::Update {
                     id,
                     message,
@@ -204,8 +227,31 @@ impl DraftOutbox {
     /// password is still being fetched) the draft only waits; a later retry
     /// uploads it.
     pub fn save(&mut self, save: DraftSave, cx: &mut Context<Self>) {
+        self.save_for(None, save, cx);
+    }
+
+    /// [`Self::save`] of a draft of `change`, if known: an edit refused
+    /// because the draft is being sent is reported as
+    /// [`OutboxEvent::EditBeingSent`] with the text, which is not lost.
+    fn save_for(&mut self, change: Option<ChangeNumber>, save: DraftSave, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
         let upload = self.session.can_upload();
+        let refused = match (&save, change) {
+            (
+                DraftSave::Update {
+                    id,
+                    message,
+                    unresolved,
+                },
+                Some(change),
+            ) => Some(OutboxEvent::EditBeingSent {
+                change,
+                draft: *id,
+                message: message.clone(),
+                unresolved: *unresolved,
+            }),
+            _ => None,
+        };
         cx.spawn(async move |this, cx| {
             let local = {
                 let syncer = syncer.clone();
@@ -216,6 +262,13 @@ impl DraftOutbox {
                 Ok(Some(draft)) => draft,
                 // Deleted meanwhile: nothing to save.
                 Ok(None) => return,
+                Err(sync::Error::Store(store::Error::DraftBeingSent)) => {
+                    log::info!("a draft edit came while the draft was being sent; not saved");
+                    if let Some(event) = refused {
+                        this.update(cx, |_, cx| cx.emit(event)).ok();
+                    }
+                    return;
+                }
                 Err(e) => return log::warn!("saving a draft: {e}"),
             };
             let (change, id) = (draft.change, draft.local_id);
@@ -248,6 +301,11 @@ impl DraftOutbox {
                 Ok(outcome) => outcome,
                 Err(e) => return log::warn!("deleting a draft: {e}"),
             };
+            if outcome == store::DeleteOutcome::BeingSent {
+                this.update(cx, |_, cx| cx.emit(OutboxEvent::DeleteBeingSent(change)))
+                    .ok();
+                return;
+            }
             this.update(cx, |this, cx| this.announce(change, cx)).ok();
             // A draft the server never saw is gone; one it has waits for
             // the server's confirmation.
@@ -414,13 +472,17 @@ mod tests {
         /// The draft sync state each `Changed` event found in the store.
         states: Arc<Mutex<Vec<String>>>,
         unauthorized: Arc<Mutex<usize>>,
+        /// The refusals of drafts being sent, as text.
+        refused: Arc<Mutex<Vec<String>>>,
         session: Session,
+        store: Arc<Mutex<Store>>,
     }
 
     fn fx(cx: &mut TestAppContext, http: &RouteHttpClient) -> Fx {
         let mut store = Store::open_in_memory().expect("store");
         store.server_id(URL).expect("server");
         let env = env_with(store, http);
+        let store = env.store.clone();
         let mut server = setup();
         server.username = Some("u".into());
         let session = Session::new(&env, &server, Some(signed_in())).expect("session");
@@ -428,10 +490,12 @@ mod tests {
         let comments = cx.update(|cx| outbox.update(cx, |o, cx| o.comments(CHANGE, cx)));
         let states: Arc<Mutex<Vec<String>>> = Arc::default();
         let unauthorized = Arc::new(Mutex::new(0));
-        let (log, syncer, count) = (
+        let refused: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (log, syncer, count, refusals) = (
             states.clone(),
             session.syncer().clone(),
             unauthorized.clone(),
+            refused.clone(),
         );
         cx.update(|cx| {
             cx.subscribe(&outbox, move |_, ev: &OutboxEvent, _| match ev {
@@ -449,6 +513,19 @@ mod tests {
                     log.lock().expect("log").push(text);
                 }
                 OutboxEvent::Unauthorized => *count.lock().expect("count") += 1,
+                OutboxEvent::EditBeingSent {
+                    change,
+                    draft,
+                    message,
+                    unresolved,
+                } => refusals.lock().expect("log").push(format!(
+                    "edit {change} {} {message:?} {unresolved}",
+                    draft.0
+                )),
+                OutboxEvent::DeleteBeingSent(change) => refusals
+                    .lock()
+                    .expect("log")
+                    .push(format!("delete {change}")),
             })
             .detach();
         });
@@ -458,8 +535,152 @@ mod tests {
             comments,
             states,
             unauthorized,
+            refused,
             session,
+            store,
         }
+    }
+
+    /// A draft of change 7 that a consolidation post is sending: written
+    /// on a local version of the change, moved onto patch set 1 (the same
+    /// commit) and claimed.
+    fn claimed_draft(fx: &Fx) -> model::LocalDraftId {
+        use store::{
+            Claimant, ConsolidationRewrite, LocalChangeUpsert, LocalOp, NewLocalPatchSet,
+            PatchSetMove,
+        };
+        let server = store::ServerId(1);
+        let now: model::Timestamp = "2024-06-15T10:00:00Z".parse().expect("time");
+        let cid = "I0123456789abcdef0123456789abcdef01234567";
+        let (row, version) = {
+            let mut s = fx.store.lock().expect("store");
+            let upsert = LocalChangeUpsert {
+                seen: None,
+                branch: Some("main".into()),
+                change_id: cid.into(),
+                gerrit_number: Some(CHANGE),
+                subject: "s".into(),
+                author_name: "Me".into(),
+                author_email: "me@example.com".into(),
+                updated: now,
+                state: None,
+                patch_sets: vec![NewLocalPatchSet {
+                    sha: "sha1".into(),
+                    parent_sha: None,
+                    seen_at: now,
+                }],
+            };
+            s.reconcile_local(server, "p", &[LocalOp::Upsert(upsert)], now)
+                .expect("reconcile");
+            let row = s
+                .local_changes_by_change_id(server, cid)
+                .expect("rows")
+                .remove(0);
+            let version = s
+                .local_patch_sets(server, row.id)
+                .expect("versions")
+                .remove(0);
+            (row, version)
+        };
+        let draft = fx
+            .session
+            .syncer()
+            .save_draft_local(DraftSave::Create {
+                change: CHANGE,
+                patch_set: PatchSetRef {
+                    number: version.number,
+                    sha: version.sha.clone(),
+                },
+                input: DraftInput {
+                    path: "a.rs".into(),
+                    side: Side::Revision,
+                    parent: None,
+                    location: Location::Line(3),
+                    in_reply_to: None,
+                    message: "as written".into(),
+                    unresolved: true,
+                },
+            })
+            .expect("draft")
+            .expect("saved");
+        let mut s = fx.store.lock().expect("store");
+        let to = PatchSetRef {
+            number: PatchSetNumber(1),
+            sha: "sha1".into(),
+        };
+        s.rewrite_local_change(
+            server,
+            &ConsolidationRewrite {
+                local_change: row.id,
+                gerrit_number: CHANGE,
+                moves: vec![PatchSetMove {
+                    from: version.number,
+                    to,
+                    exact: true,
+                    drafts: vec![(draft.local_id, None)],
+                    reviews: Vec::new(),
+                }],
+                keep: Vec::new(),
+                review_states: Vec::new(),
+                state: None,
+                else_state: None,
+            },
+        )
+        .expect("rewrite")
+        .expect("rewritten");
+        let by = Claimant {
+            owner: "another run",
+            at: now,
+        };
+        s.claim_local_post(server, row.id, None, PatchSetNumber(1), "n0", &by)
+            .expect("claim")
+            .expect("claimed");
+        draft.local_id
+    }
+
+    #[gpui_kit::test]
+    fn a_draft_being_sent_refuses_edits_and_deletes_and_says_so(cx: &mut TestAppContext) {
+        use crate::diff::DraftRequest;
+
+        let http = RouteHttpClient::new();
+        let fx = fx(cx, &http);
+        let id = claimed_draft(&fx);
+        let request = |cx: &mut TestAppContext, r: DraftRequest| {
+            cx.update(|cx| fx.outbox.update(cx, |o, cx| o.request(CHANGE, r, None, cx)));
+            cx.run_until_parked();
+        };
+        request(
+            cx,
+            DraftRequest::Update {
+                id,
+                message: "edited".into(),
+                unresolved: false,
+            },
+        );
+        request(cx, DraftRequest::Delete(id));
+        assert_eq!(
+            *fx.refused.lock().expect("log"),
+            [
+                format!("edit 7 {} \"edited\" false", id.0),
+                "delete 7".to_owned()
+            ]
+        );
+        // Nothing changed, and nothing but the comments' own reads went to
+        // the server.
+        let draft = fx
+            .store
+            .lock()
+            .expect("store")
+            .load_draft(store::ServerId(1), id)
+            .expect("load")
+            .expect("still there");
+        assert_eq!(draft.message, "as written");
+        let writes: Vec<_> = http
+            .sent()
+            .into_iter()
+            .filter(|r| r.method != "GET")
+            .collect();
+        assert!(writes.is_empty(), "{writes:?}");
     }
 
     fn save(cx: &mut TestAppContext, fx: &Fx, message: &str) {

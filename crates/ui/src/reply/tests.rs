@@ -1779,3 +1779,19 @@ fn escape_while_editing_keeps_a_changed_message_as_a_local_draft(cx: &mut TestAp
     assert!(drafts[0].is_local());
     assert!(f.http.requested().is_empty());
 }
+
+#[test]
+fn a_local_review_that_could_not_be_saved_says_why() {
+    use model::LocalChangeState;
+
+    let store = |e| super::describe_local(&sync::Error::Store(e));
+    assert!(
+        store(store::Error::DraftBeingSent).contains("being sent to Gerrit right now"),
+        "{}",
+        store(store::Error::DraftBeingSent)
+    );
+    assert!(
+        store(store::Error::NotReviewable(LocalChangeState::Consolidated)).contains("on Gerrit")
+    );
+    assert!(store(store::Error::NotReviewable(LocalChangeState::Closed)).contains("closed"));
+}

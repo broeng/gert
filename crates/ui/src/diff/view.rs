@@ -48,6 +48,8 @@ pub enum DiffStatus {
     Error(SharedString),
 }
 
+#[cfg(test)]
+pub(crate) use editing::BEING_SENT;
 pub use editing::DraftRequest;
 use editing::{DraftEditor, EditKey, UnsavedBuffers};
 

@@ -73,6 +73,17 @@ pub enum DraftRequest {
     Retry(LocalDraftId),
 }
 
+/// What the editor of a draft says when its edit was refused because a
+/// local review post is sending the draft (see
+/// [`DiffView::keep_refused_edit`]).
+pub const BEING_SENT: &str = "This comment is being sent to Gerrit with your local review, so \
+     it cannot be changed now. Your text is kept here: copy it into a reply once the comment \
+     is on Gerrit.";
+
+/// The view's note when such an edit is kept while another editor is open.
+const BEING_SENT_KEPT: &str =
+    "A comment you edited is being sent to Gerrit; your text is kept in its editor";
+
 /// What an editor edits. See the module documentation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum EditKey {
@@ -667,6 +678,52 @@ impl DiffView {
         self.list.remeasure_items(row..row + 1);
         cx.emit(DiffEvent::RowsChanged);
         cx.notify();
+    }
+
+    /// Gives back the text of an edit of draft `id` that was not saved
+    /// because a local review post is sending the draft right now: the
+    /// draft's editor opens again with `text` and says why
+    /// ([`BEING_SENT`]). While another editor is open, the text waits as
+    /// the draft's unsaved buffer instead (it comes back when its editor
+    /// opens) and the view says so. False when none of this view's threads
+    /// shows the draft.
+    pub fn keep_refused_edit(
+        &mut self,
+        id: LocalDraftId,
+        text: String,
+        unresolved: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let shown = self.shown.iter().any(|&i| {
+            self.threads.get(i).is_some_and(|t| {
+                t.entries
+                    .iter()
+                    .any(|e| matches!(e, Entry::Draft(d) if d.local_id == id))
+            })
+        });
+        if !shown {
+            return false;
+        }
+        let key = EditKey::Draft(id);
+        self.unsaved.insert(
+            key.clone(),
+            Unsaved {
+                text,
+                resolved: !unresolved,
+            },
+        );
+        if self.editor.as_ref().is_some_and(|e| e.key != key) {
+            self.hint = Some(BEING_SENT_KEPT.into());
+            cx.notify();
+            return true;
+        }
+        self.open_editor(key, None, window, cx);
+        if let Some(ed) = self.editor.as_mut() {
+            ed.note = Some(BEING_SENT.into());
+        }
+        cx.notify();
+        true
     }
 
     pub(super) fn edit_draft_at(

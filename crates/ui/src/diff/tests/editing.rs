@@ -283,6 +283,69 @@ fn editing_a_draft_updates_it_and_cancelling_keeps_the_saved_text(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+fn an_edit_refused_while_the_draft_is_sent_comes_back_in_its_editor(cx: &mut TestAppContext) {
+    use crate::diff::view::BEING_SENT;
+    use model::LocalDraftId;
+
+    let (window, view, events) = editable(cx);
+    let mut t = at13("a", "please fix");
+    t.entries.push(Entry::Draft(draft(
+        5,
+        Location::Line(13),
+        "my saved reply",
+        DraftSync::Synced,
+    )));
+    give_threads(cx, &view, vec![t]);
+    press(cx, window, "shift-n");
+    press(cx, window, "c");
+    typed(cx, window, " and more");
+    clear(&events);
+    save_key(cx, window);
+    assert_eq!(drafts(&events).len(), 1);
+    assert_eq!(text(cx, &view), None, "saving closes the editor");
+
+    // The store refused the edit: the owner hands the text back.
+    let keep = |cx: &mut TestAppContext, id: i64| {
+        cx.update_window(window, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.keep_refused_edit(
+                    LocalDraftId(id),
+                    "my saved reply and more".into(),
+                    true,
+                    window,
+                    cx,
+                )
+            })
+        })
+        .expect("window")
+    };
+    assert!(keep(cx, 5));
+    assert_eq!(text(cx, &view).as_deref(), Some("my saved reply and more"));
+    assert_eq!(
+        cx.update(|cx| view.read(cx).editor_note_for_test())
+            .as_deref(),
+        Some(BEING_SENT)
+    );
+    // Nothing was sent again, and a draft the view does not show is not
+    // its business.
+    assert_eq!(drafts(&events).len(), 1);
+    assert!(!keep(cx, 99));
+
+    // With another editor open, the text waits for its draft's editor.
+    press(cx, window, "escape");
+    press(cx, window, "n");
+    press(cx, window, "c");
+    assert_eq!(text(cx, &view).as_deref(), Some(""));
+    assert!(keep(cx, 5));
+    assert_eq!(
+        text(cx, &view).as_deref(),
+        Some(""),
+        "the open editor stays"
+    );
+    assert!(cx.update(|cx| view.read(cx).hint().is_some_and(|h| h.contains("kept"))));
+}
+
+#[gpui_kit::test]
 fn delete_asks_in_the_card_first(cx: &mut TestAppContext) {
     let (window, view, events) = editable(cx);
     let mut t = at13("a", "please fix");
