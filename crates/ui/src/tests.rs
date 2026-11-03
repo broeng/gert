@@ -4460,6 +4460,26 @@ mod relation_chain {
         cx.update(|cx| page.read(cx).related_scroll_for_test())
     }
 
+    /// How far row `ix`'s middle sits from the middle of the scroll box.
+    fn off_centre(s: &ScrollHandle, ix: usize) -> f32 {
+        let row = s.bounds_for_item(ix).expect("row").center().y + s.offset().y;
+        (row - s.bounds().center().y).as_f32().abs()
+    }
+
+    #[gpui_kit::test]
+    fn the_box_keeps_the_current_change_in_the_middle_while_stepping(cx: &mut TestAppContext) {
+        let (window, shell) = start(cx, 40, 120);
+        let s = scroll(cx, &shell);
+        assert!(s.max_offset().y > px(0.), "the chain overflows its box");
+        assert!(off_centre(&s, 20) < 1., "{}", off_centre(&s, 20));
+
+        press(cx, window, "shift-j");
+        cx.run_until_parked();
+        let s = scroll(cx, &shell);
+        cx.update(|cx| assert_eq!(shell.read(cx).route(), &Route::Change(ChangeNumber(121))));
+        assert!(off_centre(&s, 21) < 1., "{}", off_centre(&s, 21));
+    }
+
     #[gpui_kit::test]
     fn the_panel_keeps_its_chain_and_scroll_position_while_stepping(cx: &mut TestAppContext) {
         let (window, shell) = start(cx, 80, 140);

@@ -1416,7 +1416,8 @@ impl ChangePage {
     }
 
     /// Called as the chain is drawn: brings this change into view if
-    /// asked to, scrolling just far enough. The row bounds are from the last frame that drew the chain,
+    /// asked to, centred in the box and scrolled just far enough in the
+    /// panel. The row bounds are from the last frame that drew the chain,
     /// so when that frame drew it the other way or with other rows, this
     /// waits for the next frame.
     fn settle_related_scroll(&mut self, panel: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1438,7 +1439,13 @@ impl ChangePage {
         match item {
             Some(item) => {
                 let offset = scroll.offset();
-                let y = view::reveal_offset(offset.y, scroll.bounds(), item, scroll.max_offset().y);
+                let y = view::reveal_offset(
+                    !panel,
+                    offset.y,
+                    scroll.bounds(),
+                    item,
+                    scroll.max_offset().y,
+                );
                 scroll.set_offset(point(offset.x, y));
                 self.reveal_related = false;
             }
