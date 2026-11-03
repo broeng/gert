@@ -1,7 +1,8 @@
 //! Dashboard and search results: lists of changes, cache first, then
-//! refreshed by polling.
+//! refreshed by polling. The dashboard of a signed-in server starts with
+//! the user's local changes (see `local_scan`), read from the store.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
@@ -13,16 +14,18 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
-use model::{ChangeNumber, ChangeSummary};
+use model::{ChangeNumber, ChangeSummary, LocalChange, LocalChangeState};
 use store::CachedQuery;
-use sync::PollPolicy;
+use sync::{PollPolicy, PollState};
 
 use crate::{
     actions::*,
     labels::{label_columns, mark, short_name},
     list_model::{DASHBOARD_ROWS, ListModel, PAGE_SIZE, Pager},
+    local_scan::{LocalScanEvent, LocalScanner},
+    local_source::local_chip,
     pages::settings::validate,
-    row::{browser_url, chips, size_text},
+    row::{browser_url, chips, local_state_note, size_text},
     search_link::{account_query, project_query, search_link},
     session::{SavedQuery, Session, is_unauthorized},
     theme::{chip_colors, mark_color},
@@ -112,6 +115,15 @@ const W_CMTS: f32 = 36.;
 
 type Fetched = Result<(sync::QueryUpdate, Option<CachedQuery>), sync::Error>;
 
+/// The selection model's section of the local changes. The query sections
+/// follow it ([`query_section`]); it stays empty on search pages.
+const LOCAL: usize = 0;
+
+/// The selection model's section of query section `i`.
+fn query_section(i: usize) -> usize {
+    i + 1
+}
+
 pub struct ChangeListPage {
     session: Session,
     kind: ListKind,
@@ -131,6 +143,14 @@ pub struct ChangeListPage {
     naming: Option<Entity<InputState>>,
     naming_sub: Option<Subscription>,
     why_not: Option<&'static str>,
+    /// The "Local changes" section, as the store has it (dashboard of a
+    /// signed-in server only). Hidden while empty.
+    local: Vec<LocalChange>,
+    local_scanner: Option<Entity<LocalScanner>>,
+    local_task: Option<Task<()>>,
+    /// When the page last asked the scanner for a round.
+    local_asked: Option<Instant>,
+    local_sub: Option<Subscription>,
     _ticker: Task<()>,
 }
 
@@ -156,7 +176,7 @@ impl ChangeListPage {
             session,
             kind,
             sections: specs.into_iter().map(Section::new).collect(),
-            model: ListModel::new(count),
+            model: ListModel::new(count + 1),
             pager: Pager::default(),
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
@@ -169,6 +189,11 @@ impl ChangeListPage {
             naming: None,
             naming_sub: None,
             why_not: None,
+            local: Vec::new(),
+            local_scanner: None,
+            local_task: None,
+            local_asked: None,
+            local_sub: None,
             _ticker: Task::ready(()),
         };
         for i in 0..count {
@@ -210,6 +235,28 @@ impl ChangeListPage {
         self.model.selected_number()
     }
 
+    /// The rows of the "Local changes" section.
+    #[cfg(test)]
+    pub fn local_rows(&self) -> &[LocalChange] {
+        &self.local
+    }
+
+    /// Shows the local changes of the server (the dashboard of a signed-in
+    /// server): reads them from the store now, again whenever `scanner`
+    /// changed them, and asks it for a round now and on the poll tick.
+    pub fn set_local_scanner(&mut self, scanner: Entity<LocalScanner>, cx: &mut Context<Self>) {
+        self.local_sub = Some(cx.subscribe(
+            &scanner,
+            |this, _, ev: &LocalScanEvent, cx| match ev {
+                LocalScanEvent::Changed => this.load_local(cx),
+            },
+        ));
+        scanner.update(cx, |s, cx| s.request(cx));
+        self.local_asked = Some(Instant::now());
+        self.local_scanner = Some(scanner);
+        self.load_local(cx);
+    }
+
     /// Rows currently shown in section `i`.
     pub fn visible_rows(&self, i: usize) -> &[ChangeSummary] {
         let Some(s) = self.sections.get(i) else {
@@ -230,6 +277,25 @@ impl ChangeListPage {
     }
 
     // ---- data ----
+
+    fn load_local(&mut self, cx: &mut Context<Self>) {
+        let syncer = self.session.syncer().clone();
+        self.local_task = Some(cx.spawn(async move |this, cx| {
+            let rows = cx
+                .background_spawn(async move { syncer.dashboard_local_changes() })
+                .await;
+            this.update(cx, |this, cx| {
+                match rows {
+                    Ok(rows) => this.local = rows,
+                    Err(e) => log::warn!("reading the local changes: {e}"),
+                }
+                this.sync_model();
+                this.model.ensure_selection();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
 
     fn load_cache(&mut self, i: usize, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
@@ -269,9 +335,11 @@ impl ChangeListPage {
         {
             self.pager.clamp(s.rows.len());
         }
+        let local = self.local.iter().map(|c| c.number).collect();
+        self.model.set_section(LOCAL, local);
         for i in 0..self.sections.len() {
             let numbers = self.visible_rows(i).iter().map(|c| c.number).collect();
-            self.model.set_section(i, numbers);
+            self.model.set_section(query_section(i), numbers);
         }
         if let Some(n) = self.restore
             && self.model.select_number(n)
@@ -342,7 +410,7 @@ impl ChangeListPage {
                 if was_load_more && s.rows.len() > before {
                     self.pager.page = before / PAGE_SIZE;
                     self.sync_model();
-                    self.model.select_first_in(0);
+                    self.model.select_first_in(query_section(0));
                     self.reveal = true;
                 } else {
                     self.sync_model();
@@ -369,6 +437,7 @@ impl ChangeListPage {
         if self.ticks.is_multiple_of(10) {
             cx.notify(); // keeps "updated 3m ago" current
         }
+        self.ask_for_local_scan(cx);
         if !self.session.can_sync() {
             return;
         }
@@ -384,6 +453,26 @@ impl ChangeListPage {
                 self.refresh(i, cx);
             }
         }
+    }
+
+    /// Asks the scanner for a round once per poll interval. Scans need no
+    /// network, so this goes by the plain interval, without the backoff a
+    /// failing server gets.
+    fn ask_for_local_scan(&mut self, cx: &mut Context<Self>) {
+        let Some(scanner) = &self.local_scanner else {
+            return;
+        };
+        let interval = self.policy.interval(&PollState {
+            last_attempt: None,
+            window_focused: self.window_active,
+            visible: true,
+            consecutive_failures: 0,
+        });
+        if self.local_asked.is_some_and(|t| t.elapsed() < interval) {
+            return;
+        }
+        self.local_asked = Some(Instant::now());
+        scanner.update(cx, |s, cx| s.request(cx));
     }
 
     /// Called by the shell when the window gains or loses focus. Regaining
@@ -450,7 +539,7 @@ impl ChangeListPage {
         if self.pager.has_cached_next(s.rows.len()) {
             self.pager.page += 1;
             self.sync_model();
-            self.model.select_first_in(0);
+            self.model.select_first_in(query_section(0));
             self.reveal = true;
             cx.notify();
         } else if s.more_on_server && !s.status.busy() && self.session.can_sync() {
@@ -462,7 +551,7 @@ impl ChangeListPage {
         if self.kind == ListKind::Search && self.pager.page > 0 {
             self.pager.page -= 1;
             self.sync_model();
-            self.model.select_first_in(0);
+            self.model.select_first_in(query_section(0));
             self.reveal = true;
             cx.notify();
         }
@@ -552,13 +641,23 @@ impl ChangeListPage {
 
     // ---- rendering ----
 
-    /// Index of a row among the scroll container's children: every section
-    /// contributes a title bar, a column header and then its rows (or one placeholder).
+    /// Index of a row of the selection model's `section` among the scroll
+    /// container's children: every section contributes a title bar, a
+    /// column header and then its rows (or one placeholder); the local
+    /// section comes first and only when it has rows.
     fn child_index(&self, section: usize, row: usize) -> usize {
-        let before: usize = (0..section)
+        if section == LOCAL {
+            return 2 + row;
+        }
+        let local = if self.local.is_empty() {
+            0
+        } else {
+            2 + self.local.len()
+        };
+        let before: usize = (0..section - 1)
             .map(|s| 2 + self.visible_rows(s).len().max(1))
             .sum();
-        before + 2 + row
+        local + before + 2 + row
     }
 
     fn render_header(&self, cols: &[String], cx: &App) -> impl IntoElement {
@@ -789,6 +888,122 @@ impl ChangeListPage {
             })
     }
 
+    fn render_local_title(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::card::title_bar(cx)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(div().font_semibold().child("Local changes"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.local.len().to_string()),
+            )
+    }
+
+    /// The column header of the local changes: the first columns of the
+    /// query sections, so that they line up.
+    fn render_local_header(&self, cx: &App) -> impl IntoElement {
+        let th = |w: f32, t: &'static str| div().w(px(w)).flex_none().truncate().child(t);
+        h_flex()
+            .pl(px(14.))
+            .pr_3()
+            .py_1()
+            .gap_2()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .border_t_1()
+            .border_color(cx.theme().border.opacity(0.6))
+            .child(th(W_NUM, "#"))
+            .child(div().flex_1().min_w(px(W_SUBJECT_MIN)).child("Subject"))
+            .child(th(W_OWNER, "Author").flex_shrink(1.).min_w_0())
+            .child(th(W_PROJECT, "Project").flex_shrink(1.).min_w_0())
+            .child(th(W_BRANCH, "Branch").flex_shrink(1.).min_w_0())
+            .child(th(W_UPDATED, "Updated"))
+    }
+
+    /// A local change: "local" where the number would be (its number is
+    /// synthetic and never shown), the subject with a note on its state,
+    /// the author, project, target branch ("?" when unknown) and the
+    /// committer time of its newest version.
+    fn render_local_row(
+        &self,
+        row: usize,
+        c: &LocalChange,
+        now: Timestamp,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let number = c.number;
+        let tz = TimeZone::system();
+        let cell = |w: f32| div().w(px(w)).flex_none().truncate();
+        let shrinking = |w: f32| div().w(px(w)).flex_shrink(1.).min_w_0().truncate();
+        let muted = theme.muted_foreground;
+        let note_color = match c.state {
+            LocalChangeState::Ambiguous | LocalChangeState::Closed => theme.warning,
+            _ => muted,
+        };
+        h_flex()
+            .id(("local-row", row))
+            .px_3()
+            .py_1()
+            .gap_2()
+            .text_sm()
+            .border_l_2()
+            .border_color(if selected {
+                theme.list_active_border
+            } else {
+                theme.transparent
+            })
+            .when(selected, |d| d.bg(theme.list_active))
+            .hover(|d| d.bg(theme.list_hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.model.select_number(number);
+                cx.emit(ListEvent::Open(number));
+            }))
+            .child(cell(W_NUM).child(local_chip(cx)))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w(px(W_SUBJECT_MIN))
+                    .gap_2()
+                    .overflow_hidden()
+                    .child(div().min_w_0().truncate().child(c.subject.clone()))
+                    .children(local_state_note(c.state).map(|note| {
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(note_color)
+                            .child(note)
+                    })),
+            )
+            .child(shrinking(W_OWNER).child(c.author_name.clone()))
+            .child(shrinking(W_PROJECT).text_color(muted).child(search_link(
+                ("local-project-link", row),
+                c.project.clone(),
+                cx,
+                {
+                    let query = project_query(&c.project);
+                    cx.listener(move |_, _, _, cx| cx.emit(ListEvent::Search(query.clone())))
+                },
+            )))
+            .child(
+                shrinking(W_BRANCH)
+                    .text_color(muted)
+                    .child(c.branch.clone().unwrap_or_else(|| "?".to_owned())),
+            )
+            .child(
+                cell(W_UPDATED)
+                    .text_color(muted)
+                    .child(relative(now, c.updated, &tz)),
+            )
+            // A vanished change is kept only for its unsent data.
+            .when(c.state == LocalChangeState::Vanished, |d| d.opacity(0.55))
+    }
+
     /// The bookmark buttons, on the dashboard and on search results; the one
     /// whose query is being shown is highlighted.
     fn render_bookmarks(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -920,6 +1135,24 @@ impl Render for ChangeListPage {
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll);
+        if !self.local.is_empty() {
+            let rows = self.local.clone();
+            let title = self.render_local_title(cx).into_any_element();
+            body = body.child(crate::card::frame(title, true, false, cx));
+            let head = self.render_local_header(cx).into_any_element();
+            body = body.child(crate::card::frame(head, false, false, cx));
+            for (r, c) in rows.iter().enumerate() {
+                let row = self
+                    .render_local_row(r, c, now, selected == Some((LOCAL, r)), cx)
+                    .into_any_element();
+                body = body.child(crate::card::frame(
+                    crate::card::row_separator(cx).child(row),
+                    false,
+                    r + 1 == rows.len(),
+                    cx,
+                ));
+            }
+        }
         for i in 0..self.sections.len() {
             let rows: Vec<ChangeSummary> = self.visible_rows(i).to_vec();
             let title = self.render_section_header(i, now, cx).into_any_element();
@@ -949,7 +1182,14 @@ impl Render for ChangeListPage {
             }
             for (r, c) in rows.iter().enumerate() {
                 let row = self
-                    .render_row((i, r), c, &cols, now, selected == Some((i, r)), cx)
+                    .render_row(
+                        (i, r),
+                        c,
+                        &cols,
+                        now,
+                        selected == Some((query_section(i), r)),
+                        cx,
+                    )
                     .into_any_element();
                 body = body.child(crate::card::frame(
                     crate::card::row_separator(cx).child(row),

@@ -17,6 +17,7 @@ mod inbox;
 mod labels;
 mod links;
 mod list_model;
+mod local_scan;
 mod local_source;
 mod login;
 mod nav;

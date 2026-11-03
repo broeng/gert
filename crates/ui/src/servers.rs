@@ -21,6 +21,7 @@ use gpui_kit::{
 
 use crate::{
     checkouts::Checkouts,
+    local_scan::LocalScanner,
     outbox::DraftOutbox,
     session::{ServerConfig, ServerKey, ServerSetup, Session},
     syntax_cache::SyntaxCache,
@@ -138,6 +139,9 @@ pub(crate) struct ServerEntry {
     /// repositories. Made on first use from `setup.projects`; a settings
     /// save updates it in place ([`Checkouts::set_projects`]).
     pub checkouts: Option<Entity<Checkouts>>,
+    /// Looks for local changes in `checkouts`. Made on first use, and only
+    /// for a signed-in server.
+    pub local_scan: Option<Entity<LocalScanner>>,
     /// The server's own diff preferences (the user's settings on that
     /// server), as last loaded; the shell's shared settings show the
     /// active server's.
@@ -176,6 +180,7 @@ impl ServerEntry {
             outbox_subs: Vec::new(),
             syntax: None,
             checkouts: None,
+            local_scan: None,
             diff_prefs: None,
             credentials_task: None,
             bookmarks_task: None,

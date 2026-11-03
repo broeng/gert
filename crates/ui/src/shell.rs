@@ -24,6 +24,7 @@ use crate::{
     filters_dialog::{FiltersContext, FiltersDialog, FiltersEvent},
     goto::{ChangeLink, GotoDialog, GotoEvent, LinkError, LinkServer, resolve_link},
     inbox::{self, InboxOp},
+    local_scan::LocalScanner,
     login::LoginOutcome,
     nav::{ChangeView, DiffRoute, NavState, Route},
     notifier::Notifier,
@@ -431,6 +432,37 @@ impl Shell {
         )
     }
 
+    /// The local change scanner of server `key`, made on first use; `None`
+    /// for an anonymous server and one without a session, which are never
+    /// scanned.
+    pub(crate) fn local_scanner(
+        &mut self,
+        key: &ServerKey,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<LocalScanner>> {
+        let entry = self.servers.get(key)?;
+        if entry.setup.username.is_none() || entry.session.is_none() {
+            return None;
+        }
+        if let Some(scanner) = &entry.local_scan {
+            return Some(scanner.clone());
+        }
+        let checkouts = self.checkouts(key, cx)?;
+        let scanner = cx.new(|cx| LocalScanner::new(checkouts, cx));
+        let entry = self.servers.get_mut(key)?;
+        scanner.update(cx, |s, _| s.set_session(entry.session.as_ref()));
+        entry.local_scan = Some(scanner.clone());
+        Some(scanner)
+    }
+
+    /// Asks the scanner of server `key` to look for local changes (cheap
+    /// when nothing moved; see `local_scan`).
+    fn scan_local(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+        if let Some(scanner) = self.local_scanner(key, cx) {
+            scanner.update(cx, |s, cx| s.request(cx));
+        }
+    }
+
     /// Writes the project checkouts of the active server in the background.
     /// Once the config file has them the server's setup and its
     /// [`Checkouts`] follow; on failure the old list stays.
@@ -665,6 +697,9 @@ impl Shell {
             entry.session = session;
             entry.outbox = outbox;
             entry.outbox_subs = subs;
+            if let Some(scanner) = &entry.local_scan {
+                scanner.update(cx, |s, _| s.set_session(entry.session.as_ref()));
+            }
             // The poll holds the old session's client.
             entry.attention_task = None;
             entry.watch_task = None;
@@ -1018,6 +1053,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // The background poll is the cadence of the servers not shown; the
+        // scan needs no network, so it runs whatever the poll found.
+        self.scan_local(key, cx);
         match polled {
             Polled::Count(n) => {
                 if let Some(e) = self.servers.get_mut(key) {
@@ -1247,6 +1285,11 @@ impl Shell {
     }
 
     #[cfg(test)]
+    pub(crate) fn local_scan_for_test(&self, key: &str) -> Option<Entity<LocalScanner>> {
+        self.servers.get(&ServerKey::new(key))?.local_scan.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn syntax_of_for_test(
         &mut self,
         key: &ServerKey,
@@ -1420,6 +1463,7 @@ impl Shell {
             return;
         }
         self.persist_active(cx);
+        self.scan_local(&key, cx);
         // The preferences of the server we left must not linger.
         let prefs = self.servers.get(&key).and_then(|e| e.diff_prefs.clone());
         self.settings.update(cx, |s, cx| s.set_server(prefs, cx));
@@ -1506,6 +1550,11 @@ impl Shell {
         let page = cx.new(|cx| ChangeListPage::new(session, kind, specs, restore, active, cx));
         let bookmarks = self.bookmarks();
         page.update(cx, |p, cx| p.set_bookmarks(bookmarks, cx));
+        if kind == ListKind::Dashboard
+            && let Some(scanner) = self.local_scanner(&owner, cx)
+        {
+            page.update(cx, |p, cx| p.set_local_scanner(scanner, cx));
+        }
         self.page_subs.push(cx.subscribe_in(
             &page,
             window,

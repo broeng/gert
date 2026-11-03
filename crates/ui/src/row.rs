@@ -1,6 +1,6 @@
 //! View-model helpers for change rows. Pure functions of the model.
 
-use model::{ChangeNumber, ChangeStatus, ChangeSummary};
+use model::{ChangeNumber, ChangeStatus, ChangeSummary, LocalChangeState};
 
 /// Small status badges in front of a subject. Nothing is shown for an
 /// ordinary active change.
@@ -69,6 +69,20 @@ pub fn browser_url(base: &str, project: &str, number: ChangeNumber) -> Option<St
             encode_path(project)
         )
     })
+}
+
+/// What the row of a local change says about where it stands; `None` for
+/// one that is simply local.
+pub fn local_state_note(state: LocalChangeState) -> Option<&'static str> {
+    match state {
+        LocalChangeState::Local | LocalChangeState::Consolidated => None,
+        LocalChangeState::Checking => Some("checking with Gerrit\u{2026}"),
+        LocalChangeState::Vanished => {
+            Some("gone from the checkout; kept until Gerrit has been asked")
+        }
+        LocalChangeState::Ambiguous => Some("several Gerrit changes match"),
+        LocalChangeState::Closed => Some("closed on Gerrit; review held"),
+    }
 }
 
 /// Percent-encodes a project name for a URL path; `/` stays.
@@ -147,6 +161,28 @@ mod tests {
     fn local_changes_have_no_browser_url() {
         let local = ChangeNumber::local(3).expect("local number");
         assert_eq!(browser_url("https://g.example.com", "p", local), None);
+    }
+
+    #[test]
+    fn every_local_state_but_the_plain_one_has_a_note() {
+        use LocalChangeState as S;
+        assert_eq!(local_state_note(S::Local), None);
+        assert_eq!(
+            local_state_note(S::Checking),
+            Some("checking with Gerrit\u{2026}")
+        );
+        assert_eq!(
+            local_state_note(S::Vanished),
+            Some("gone from the checkout; kept until Gerrit has been asked")
+        );
+        assert_eq!(
+            local_state_note(S::Ambiguous),
+            Some("several Gerrit changes match")
+        );
+        assert_eq!(
+            local_state_note(S::Closed),
+            Some("closed on Gerrit; review held")
+        );
     }
 
     #[test]
