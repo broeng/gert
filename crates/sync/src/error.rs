@@ -51,6 +51,12 @@ pub enum Error {
     /// was sent.
     #[error("the held items changed meanwhile; nothing was sent")]
     HeldChanged,
+    /// A publish of held items got no answer it could read (a lost
+    /// connection, no answer in time, a server error): it may have reached
+    /// Gerrit. Its claim stays, and the next consolidation run checks the
+    /// change for the post's tag and finishes it (or posts it again).
+    #[error("may have reached Gerrit ({0}); it will be checked and finished on its own")]
+    MaybePosted(String),
 }
 
 impl Error {

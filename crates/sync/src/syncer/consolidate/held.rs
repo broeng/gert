@@ -113,8 +113,10 @@ impl Syncer {
     /// several local changes, with [`Error::HeldChanged`]. After the post,
     /// the published items leave the held list, and the change and its
     /// comments are fetched again. A post whose fate is unknown (no answer
-    /// in time, a lost connection) fails and keeps its claim, which the
-    /// next consolidation run settles by the tag.
+    /// in time, a lost connection) fails with [`Error::MaybePosted`] and
+    /// keeps its claim, which the next consolidation run settles by the
+    /// tag. The lease is given up however the publish ends, also when its
+    /// future is dropped half-way (the claim then stays the same way).
     pub async fn publish_held(
         &self,
         gerrit: ChangeNumber,
@@ -151,13 +153,12 @@ impl Syncer {
             Err(Error::LeaseLost) => return Err(Error::ConsolidationBusy),
             Err(e) => return Err(e),
         }
-        let result = self
-            .publish_held_leased(gerrit, onto, items, &held, &owner, setting)
-            .await;
-        if let Err(e) = self.store().end_consolidation_lease(self.server, &owner) {
-            log::warn!("ending the consolidation lease: {e}");
-        }
-        result
+        let lease = LeaseGuard {
+            syncer: self,
+            owner,
+        };
+        self.publish_held_leased(gerrit, onto, items, &held, &lease.owner, setting)
+            .await
     }
 
     async fn publish_held_leased(
@@ -258,7 +259,7 @@ impl Syncer {
         let answer = self
             .post_review_by_deadline(gerrit, &rev.sha, &input)
             .await
-            .map_err(stopped)?;
+            .map_err(unknown)?;
         let settled = match answer {
             Ok(result) => votes_after(&detail, &input, &result, rev.number),
             // Votes never sink comments: the same post without them. A
@@ -274,7 +275,7 @@ impl Syncer {
                     let again = self
                         .post_review_by_deadline(gerrit, &rev.sha, &bare)
                         .await
-                        .map_err(stopped)?;
+                        .map_err(unknown)?;
                     if let Err(e) = again {
                         return self.publish_refused(&row, &claimed, &nonce, rev.number, e);
                     }
@@ -371,7 +372,8 @@ impl Syncer {
                 | ApiError::Unauthorized
         );
         if !refused {
-            return Err(e.into());
+            // No answer, a 5xx, an unreadable answer: it may have arrived.
+            return Err(Error::MaybePosted(e.to_string()));
         }
         let text = refusal_text(&e);
         let hold = format!("Gerrit refused the post: {text}");
@@ -393,6 +395,37 @@ impl Syncer {
             comments: 0,
             outcome: PostOutcome::Refused { error: text },
         })
+    }
+}
+
+/// What ended a publish's post: given up after the deadline, the post may
+/// have arrived ([`Error::MaybePosted`]); the claim stays for the next
+/// consolidation run's tag check.
+fn unknown(p: Problem) -> Error {
+    match p {
+        Problem::Stop(Error::PostTimedOut) => {
+            Error::MaybePosted("Gerrit did not answer in time".to_owned())
+        }
+        other => stopped(other),
+    }
+}
+
+/// Ends a publish's hold on the consolidation lease however the publish
+/// ends: done, failed, or dropped half-way (its task cancelled).
+struct LeaseGuard<'a> {
+    syncer: &'a Syncer,
+    owner: String,
+}
+
+impl Drop for LeaseGuard<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self
+            .syncer
+            .store()
+            .end_consolidation_lease(self.syncer.server, &self.owner)
+        {
+            log::warn!("ending the consolidation lease: {e}");
+        }
     }
 }
 

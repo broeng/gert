@@ -452,7 +452,8 @@ impl From<Error> for Problem {
             | Error::DropOnly(_)
             | Error::ConsolidationBusy
             | Error::NotCurrent { .. }
-            | Error::HeldChanged => false,
+            | Error::HeldChanged
+            | Error::MaybePosted(_) => false,
         };
         if ends_run {
             Self::Stop(e)

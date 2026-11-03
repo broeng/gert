@@ -322,7 +322,8 @@ fn a_publish_interrupted_after_its_post_is_settled_by_the_tag() {
     f.http
         .queue("POST /changes/7/revisions/", 0, "connection reset");
     let e = publish(&f, 1, &[HeldItem::Message(r.id)]).unwrap_err();
-    assert!(matches!(e, Error::Api(_)), "{e}");
+    assert!(matches!(e, Error::MaybePosted(_)), "{e}");
+    assert!(e.to_string().contains("may have reached Gerrit"), "{e}");
     let tag = first_tag(&f);
     let unfinished = f
         .syncer
@@ -677,4 +678,45 @@ fn a_held_publish_interrupted_across_a_switch_is_settled_not_offered_again() {
     assert_eq!(held.reviews.len(), 1);
     assert_eq!(held.reviews[0].id, r.id);
     assert_eq!(held.reviews[0].message, None);
+}
+
+#[test]
+fn a_publish_dropped_half_way_gives_the_lease_up_and_keeps_its_claim() {
+    use futures::FutureExt as _;
+    let f = fx();
+    let (_, r, _) = held_closed(&f);
+    // The server never answers the post.
+    f.http.queue("POST /changes/7/revisions/", 1, "");
+    let items = [HeldItem::Message(r.id)];
+    let mut publish =
+        Box::pin(
+            f.syncer
+                .publish_held(CHANGE, PatchSetNumber(1), &items, LocalApproval::Exact),
+        );
+    assert!((&mut publish).now_or_never().is_none(), "still posting");
+    assert_eq!(f.http.posts().len(), 1);
+    // Cancelled (its page or task went away).
+    drop(publish);
+    let now = Timestamp::now();
+    assert!(
+        f.syncer
+            .store()
+            .take_consolidation_lease(
+                f.syncer.server,
+                "next run",
+                now,
+                now.checked_add(CLAIM_STALE).unwrap()
+            )
+            .unwrap(),
+        "the lease is free"
+    );
+    assert_eq!(
+        f.syncer
+            .store()
+            .unfinished_local_posts(f.syncer.server)
+            .unwrap()
+            .len(),
+        1,
+        "the claim stays for the tag check"
+    );
 }
