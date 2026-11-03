@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AccountId, DraftInput};
+use crate::{AccountId, DraftInput, PatchSetNumber};
 
 /// What to do with the user's drafts when a review is posted
 /// (`DraftHandling`).
@@ -123,6 +123,13 @@ pub struct ReviewResult {
     /// Set when part of the request failed although the review itself was
     /// accepted (for example a reviewer that could not be added).
     pub error: Option<String>,
+    /// The change's current patch set after the review, when the server
+    /// sends the change along (`change_info`, Gerrit 3.14 does). Gerrit
+    /// accepts votes on a patch set that is not current and keeps them
+    /// there, so this is how to tell that votes posted to a patch set did
+    /// not land on the current one.
+    #[serde(default)]
+    pub current_patch_set: Option<PatchSetNumber>,
 }
 
 /// One value a label can be given, with its meaning (`labels[].values`):

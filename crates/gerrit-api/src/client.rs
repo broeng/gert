@@ -2214,6 +2214,25 @@ mod tests {
         let res =
             block_on(c.post_review(ChangeNumber(5), &sha_rev(), &ReviewInput::default())).unwrap();
         assert_eq!(res.error.as_deref(), Some("reviewer x not found"));
+        assert_eq!(res.current_patch_set, None);
+    }
+
+    #[test]
+    fn the_current_patch_set_after_a_review_is_read_from_the_change() {
+        let fake = FakeHttpClient::new();
+        // As Gerrit 3.14 answers a vote on patch set 1 when 2 is current.
+        fake.push_response(
+            200,
+            xssi(
+                r#"{"labels": {"Code-Review": 1}, "change_info": {"_number": 5,
+                    "current_revision_number": 2, "status": "NEW"}}"#,
+            ),
+        );
+        let c = client(&fake, "https://h", basic());
+        let res =
+            block_on(c.post_review(ChangeNumber(5), &sha_rev(), &ReviewInput::default())).unwrap();
+        assert_eq!(res.current_patch_set, Some(PatchSetNumber(2)));
+        assert_eq!(res.labels.get("Code-Review"), Some(&1));
     }
 
     #[test]

@@ -507,6 +507,15 @@ pub(crate) struct ReviewResult {
     pub labels: Option<BTreeMap<String, i32>>,
     pub ready: Option<bool>,
     pub error: Option<String>,
+    /// The change after the review; only its current patch set is read.
+    pub change_info: Option<ReviewedChange>,
+}
+
+/// The part of the `ChangeInfo` in a `ReviewResult` we read.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+pub(crate) struct ReviewedChange {
+    pub current_revision_number: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -615,6 +624,7 @@ mod tests {
         conforms::<ContextLineInfo>(&spec, "ContextLineInfo");
         conforms::<CommentInfo>(&spec, "CommentInfo");
         conforms::<ReviewResult>(&spec, "ReviewResult");
+        conforms::<ReviewedChange>(&spec, "ChangeInfo");
         conforms::<GroupBaseInfo>(&spec, "GroupBaseInfo");
         conforms::<SuggestedReviewerInfo>(&spec, "SuggestedReviewerInfo");
         conforms::<ReviewerResult>(&spec, "ReviewerResult");

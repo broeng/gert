@@ -723,6 +723,11 @@ pub(crate) fn review_result(r: &wire::ReviewResult) -> ReviewResult {
         labels: r.labels.clone().unwrap_or_default(),
         ready: r.ready,
         error: r.error.clone().filter(|e| !e.is_empty()),
+        current_patch_set: r
+            .change_info
+            .as_ref()
+            .and_then(|c| c.current_revision_number)
+            .map(PatchSetNumber),
     }
 }
 
