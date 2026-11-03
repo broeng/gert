@@ -13,7 +13,9 @@
 //! caller's, quoting where they were). Everything carries the post's nonce
 //! and the claim names its owner, exactly as [`Store::claim_local_post`]
 //! leaves a post. The selected votes and message leave their held review,
-//! which goes once nothing is left of it. After the post,
+//! which goes once nothing is left of it. A published vote supersedes the
+//! same label's vote in older pending reviews of the change, as a newer
+//! review's vote does when consolidation sends it. After the post,
 //! [`Store::finish_local_post`] removes what was posted; a run that finds
 //! the claim later checks the change's messages for the post's tag before
 //! posting again.
@@ -337,6 +339,32 @@ impl Store {
             if let Some(mut r) = pending_reviews::load(&tx, server, *id)? {
                 r.labels.remove(label);
                 write_votes(&tx, server, *id, &r.labels, &r.drop_only)?;
+            }
+        }
+        // A newer vote supersedes an older one, also when the newer one is
+        // published by hand: unsent pending reviews of the change older
+        // than the vote's review lose their vote on the label (and go if
+        // nothing is left of them).
+        for (id, label) in &p.votes {
+            let older: Vec<i64> = tx
+                .prepare_cached(
+                    "SELECT id FROM pending_reviews
+                     WHERE server_id = ?1 AND change_number = ?2 AND state = 'pending'
+                       AND id < ?3",
+                )?
+                .query_map(params![server.0, number(p.gerrit), id.0], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            for o in older {
+                let o = PendingReviewId(o);
+                if let Some(mut r) = pending_reviews::load(&tx, server, o)?
+                    && r.labels.remove(label).is_some()
+                {
+                    tx.execute(
+                        "UPDATE pending_reviews SET labels = ?3 WHERE server_id = ?1 AND id = ?2",
+                        params![server.0, o.0, serde_json::to_string(&r.labels)?],
+                    )?;
+                    pending_reviews::drop_if_empty(&tx, server, o)?;
+                }
             }
         }
         // The messages and comments: onto the current patch set, reserved

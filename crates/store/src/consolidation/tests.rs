@@ -1758,3 +1758,53 @@ fn an_empty_review_is_never_held_and_goes_once_emptied() {
             .all(|x| x.id != c.id)
     );
 }
+
+#[test]
+fn a_published_vote_supersedes_older_unsent_votes_on_its_label() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    // An older pending review on v2 (Code-Review +2 with a message), and
+    // one with nothing else (Verified +1 only).
+    let older = review(&mut s, id, &v2);
+    let only = s
+        .create_pending_review(
+            id,
+            &NewPendingReview {
+                patch_set: v2.number,
+                labels: BTreeMap::from([("Verified".to_owned(), 1)]),
+                strategy: LocalApproval::Follow,
+                message: String::new(),
+                unresolved: false,
+                created: ts(T1),
+                replaces_draft: None,
+            },
+        )
+        .unwrap();
+    // The held one, newer, with both labels.
+    let r = review(&mut s, id, &v1);
+    s.set_review_label(id, r.id, "Verified", -1, LocalApproval::Follow, ts(T1))
+        .unwrap()
+        .unwrap();
+    let mut rw = rewrite(&c, vec![]);
+    rw.review_states = vec![ReviewStateChange::new(
+        r.id,
+        &[Pending],
+        Held,
+        Some("x".into()),
+    )];
+    s.rewrite_local_change(id, &rw).unwrap().unwrap();
+    // A newer pending review keeps its vote.
+    let newer = review(&mut s, id, &v2);
+    let p = HeldPublish {
+        votes: vec![(r.id, "Code-Review".into()), (r.id, "Verified".into())],
+        ..publish(&c)
+    };
+    s.claim_held_publish(id, &p, "n1", &who()).unwrap().unwrap();
+    let older = s.load_pending_review(id, older.id).unwrap().unwrap();
+    assert!(older.labels.is_empty());
+    assert_eq!(older.message.as_deref(), Some("LGTM"));
+    // Nothing left of it: gone.
+    assert!(s.load_pending_review(id, only.id).unwrap().is_none());
+    let newer = s.load_pending_review(id, newer.id).unwrap().unwrap();
+    assert_eq!(newer.labels.len(), 1);
+}
