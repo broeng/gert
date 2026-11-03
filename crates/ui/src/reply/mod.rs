@@ -370,7 +370,7 @@ impl ReplyDialog {
             .as_ref()
             .map_or(PatchSetNumber(0), |c| c.number);
         let message = self.message_draft().map(|d| d.local_id);
-        plan::draft_items(&self.threads, current, message)
+        plan::draft_items(&self.threads, plan::DraftKind::Ordinary, current, message)
     }
 
     /// Drafts the server does not have as they are; sending waits for them.

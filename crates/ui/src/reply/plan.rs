@@ -370,7 +370,9 @@ pub fn attention_changes(
 // ---- drafts ----
 
 /// The patch-set level draft on `current` that is not a reply: the text of
-/// the reply dialog.
+/// the reply dialog. `current` is a Gerrit patch set, or the local patch
+/// set a local review is about. A pending review's sealed message, and a
+/// draft that consolidation reserved or held, is never the dialog's text.
 pub fn message_draft(threads: &[Thread], current: PatchSetNumber) -> Option<&Draft> {
     threads
         .iter()
@@ -379,12 +381,42 @@ pub fn message_draft(threads: &[Thread], current: PatchSetNumber) -> Option<&Dra
             Entry::Draft(d)
                 if d.path == PATCHSET_LEVEL_PATH
                     && d.patch_set == current
-                    && d.in_reply_to.is_none() =>
+                    && d.in_reply_to.is_none()
+                    && d.pending_review.is_none()
+                    && d.reserved_by.is_none()
+                    && d.held_reason.is_none() =>
             {
                 Some(d)
             }
             _ => None,
         })
+}
+
+/// Which drafts the reply dialog lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftKind {
+    /// Ordinary drafts ([`Draft::is_ordinary`]), the ones a reply to Gerrit
+    /// publishes. Drafts of local versions never block or join it (B1).
+    Ordinary,
+    /// The drafts on local versions that wait with a local review (not the
+    /// sealed messages of pending reviews, and none that consolidation
+    /// reserved or held).
+    #[allow(dead_code)] // listed by the local review dialog (next commit)
+    Local,
+}
+
+impl DraftKind {
+    fn takes(self, d: &Draft) -> bool {
+        match self {
+            Self::Ordinary => d.is_ordinary(),
+            Self::Local => {
+                d.is_local()
+                    && d.pending_review.is_none()
+                    && d.reserved_by.is_none()
+                    && d.held_reason.is_none()
+            }
+        }
+    }
 }
 
 /// A draft the reply will publish.
@@ -425,10 +457,11 @@ impl DraftItem {
     }
 }
 
-/// Every draft of the change except `message` (the dialog's own text),
-/// in the order of the threads.
+/// Every draft of the change of the `kind` except `message` (the dialog's
+/// own text), in the order of the threads.
 pub fn draft_items(
     threads: &[Thread],
+    kind: DraftKind,
     current: PatchSetNumber,
     message: Option<LocalDraftId>,
 ) -> Vec<DraftItem> {
@@ -436,15 +469,17 @@ pub fn draft_items(
         .iter()
         .flat_map(|t| {
             t.entries.iter().filter_map(move |e| match e {
-                Entry::Draft(d) if Some(d.local_id) != message => Some(DraftItem {
-                    id: d.local_id,
-                    place: location_text(t),
-                    text: first_line(&d.message),
-                    patch_set: d.patch_set,
-                    other_patch_set: d.patch_set != current,
-                    sync: d.sync.clone(),
-                    last_error: d.last_error.clone(),
-                }),
+                Entry::Draft(d) if Some(d.local_id) != message && kind.takes(d) => {
+                    Some(DraftItem {
+                        id: d.local_id,
+                        place: location_text(t),
+                        text: first_line(&d.message),
+                        patch_set: d.patch_set,
+                        other_patch_set: d.patch_set != current,
+                        sync: d.sync.clone(),
+                        last_error: d.last_error.clone(),
+                    })
+                }
                 _ => None,
             })
         })
@@ -744,7 +779,12 @@ mod tests {
         inline.path = d.path.clone();
         inline.entries = vec![model::Entry::Draft(d)];
         let msg = ps_level(2, 3, "the message");
-        let items = draft_items(&[inline, msg], current, Some(LocalDraftId(2)));
+        let items = draft_items(
+            &[inline.clone(), msg],
+            DraftKind::Ordinary,
+            current,
+            Some(LocalDraftId(2)),
+        );
         assert_eq!(items.len(), 1);
         let i = &items[0];
         assert_eq!(
@@ -753,6 +793,40 @@ mod tests {
         );
         assert!(i.other_patch_set && i.pending() && !i.failed());
         assert_eq!(i.problem().as_deref(), Some("not uploaded: offline"));
+        assert!(draft_items(&[inline], DraftKind::Local, current, None).is_empty());
+    }
+
+    #[test]
+    fn local_drafts_and_sealed_messages_stay_apart_from_a_reply() {
+        let local_ps = PatchSetNumber(PatchSetNumber::LOCAL_BASE + 1);
+        let mut local = ps_level(1, local_ps.0, "on local 1");
+        let mut sealed = ps_level(2, local_ps.0, "the review's message");
+        if let Some(model::Entry::Draft(d)) = sealed.entries.first_mut() {
+            d.pending_review = Some(model::PendingReviewId(1));
+        }
+        let mut held = ps_level(3, 3, "held");
+        if let Some(model::Entry::Draft(d)) = held.entries.first_mut() {
+            d.held_reason = Some("line changed".into());
+        }
+        let ordinary = ps_level(4, 2, "ordinary");
+        let threads = [local.clone(), sealed.clone(), held, ordinary];
+        let ids = |kind| -> Vec<i64> {
+            draft_items(&threads, kind, PatchSetNumber(3), None)
+                .iter()
+                .map(|i| i.id.0)
+                .collect()
+        };
+        assert_eq!(ids(DraftKind::Ordinary), [4]);
+        assert_eq!(ids(DraftKind::Local), [1]);
+        // The dialog's text on local 1 is the plain draft, never the sealed
+        // message; a held draft is no text either.
+        assert_eq!(
+            message_draft(&threads, local_ps).map(|d| d.local_id.0),
+            Some(1)
+        );
+        assert!(message_draft(&threads, PatchSetNumber(3)).is_none());
+        local.entries.clear();
+        assert!(message_draft(&[local, sealed], local_ps).is_none());
     }
 
     #[test]

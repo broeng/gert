@@ -1100,3 +1100,103 @@ fn the_upload_hint_names_the_button_only_when_the_list_has_the_drafts() {
     assert!(!text.contains("Upload drafts"), "{text}");
     assert!(text.contains("message could not be uploaded"), "{text}");
 }
+
+/// A local version of change 7 (commit `localsha`) in the store, with a
+/// draft on it and a pending review with a message; returns its number.
+fn seed_local_version(store: &mut Store) -> PatchSetNumber {
+    let server = setup().server;
+    let now: jiff::Timestamp = "2024-06-15T10:00:00Z".parse().expect("ts");
+    let upsert = store::LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: "I7".into(),
+        gerrit_number: Some(CHANGE),
+        subject: "local".into(),
+        author_name: "Bob".into(),
+        author_email: "bob@example.com".into(),
+        updated: now,
+        state: Some(model::LocalChangeState::Local),
+        patch_sets: vec![store::NewLocalPatchSet {
+            sha: "localsha".into(),
+            parent_sha: None,
+            seen_at: now,
+        }],
+    };
+    store
+        .reconcile_local(server, "p", &[store::LocalOp::Upsert(upsert)], now)
+        .expect("reconcile");
+    let row = store
+        .local_changes_by_change_id(server, "I7")
+        .expect("rows")
+        .remove(0);
+    let version = store
+        .local_patch_sets(server, row.id)
+        .expect("versions")
+        .remove(0);
+    let on = PatchSetRef {
+        number: version.number,
+        sha: version.sha.clone(),
+    };
+    store
+        .create_draft(
+            server,
+            CHANGE,
+            &on,
+            &draft_input("a.rs", Some(2), "on my local version", true),
+            now,
+        )
+        .expect("draft");
+    store
+        .create_pending_review(
+            server,
+            &store::NewPendingReview {
+                patch_set: version.number,
+                labels: [("Code-Review".to_owned(), 2)].into(),
+                strategy: model::LocalApproval::Exact,
+                message: "the local review".into(),
+                unresolved: false,
+                created: now,
+                replaces_draft: None,
+            },
+        )
+        .expect("review");
+    version.number
+}
+
+#[gpui_kit::test]
+fn local_drafts_neither_block_nor_join_a_reply_to_gerrit(cx: &mut TestAppContext) {
+    let f = dialog(
+        cx,
+        |store| {
+            seed_local_version(store);
+        },
+        ok_review,
+    );
+    // Neither the local draft nor the review's message is listed, counted
+    // or taken for the dialog's text.
+    assert_eq!(text(cx, &f), "");
+    cx.update(|cx| {
+        let d = f.dialog.read(cx);
+        assert!(d.drafts_for_test().is_empty());
+        // The local draft is not uploaded, yet it holds nothing up.
+        assert!(d.can_send_for_test(cx));
+    });
+    type_text(cx, &f, "Looks good");
+    f.http.route_json("/comments", "{}");
+    f.http.route_json("/drafts", "{}");
+    press(cx, &f, &[SEND]);
+    assert_eq!(events(&f), ["sent detail=false unapplied=[] warning=None"]);
+    assert_eq!(
+        writes(&f),
+        [
+            "PUT /a/changes/7/revisions/sha3/drafts",
+            "POST /a/changes/7/revisions/sha3/review"
+        ]
+    );
+    // The local draft is still there, untouched; the message went up.
+    let left: Vec<_> = cached_drafts(&f)
+        .into_iter()
+        .map(|d| (d.message.clone(), d.is_local()))
+        .collect();
+    assert_eq!(left, [("on my local version".to_owned(), true)]);
+}
