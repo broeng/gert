@@ -22,7 +22,11 @@ thiserror.workspace = true
 base64.workspace = true
 gerrit-api = { workspace = true, features = ["test-support"] }
 http.workspace = true
+# The end-to-end test of local changes (tests/dev_gerrit/local_e2e.rs)
+# scans and ports with a real clone, as the app's checkouts do.
+local-git.workspace = true
 serde_json.workspace = true
+tempfile = "3"
 # Blocking HTTP for the opt-in tests against a local dev Gerrit
 # (tests/dev_gerrit.rs); same setup as in gerrit-api.
 ureq = { version = "3", default-features = false }

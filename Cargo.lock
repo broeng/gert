@@ -7310,10 +7310,12 @@ dependencies = [
  "gerrit-api",
  "http",
  "jiff",
+ "local-git",
  "log",
  "model",
  "serde_json",
  "store",
+ "tempfile",
  "thiserror 2.0.21",
  "ureq",
 ]

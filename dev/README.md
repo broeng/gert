@@ -129,6 +129,16 @@ reviewed marks, the sync layer's offline flow) each create a throwaway change
 changes 1-9 stay as the read tests expect. Running them repeatedly only adds
 changes; `--reset` clears them.
 
+The sync tests include local changes end to end (`local_e2e`, needs the `git`
+binary): they clone `demo/scheduler` into a temporary directory, commit,
+amend and push new changes `E2E ...` to `refs/for/main` as alice, review
+them locally and check what consolidation sent. To run only those:
+
+```
+GERT_TEST_GERRIT=http://127.0.0.1:8080 \
+  cargo test -p sync --test dev_gerrit local_e2e -- --ignored --nocapture
+```
+
 ## Facts learned from the server
 
 - Gerrit 3.14.4 accepts `context=ALL` on the file diff endpoint, but ignores
@@ -144,6 +154,10 @@ changes; `--reset` clears them.
 - A review that votes for an unknown label or a value the label does not allow
   is answered with 200 and a result without that label (the vote is dropped
   silently). Votes on a merged change are accepted.
+- `GET .../revisions/{rev}/ported_drafts` carries a draft on an unchanged line
+  to that line's new number, and one on a changed or deleted line to the file
+  as a whole (no `line`); the ported draft keeps its old `patch_set`. Local
+  changes port the same lines and hold the others.
 - Comments made in one batch share a timestamp that is only exact to the
   second (also a reply and its parent), so thread order cannot rely on time
   alone.

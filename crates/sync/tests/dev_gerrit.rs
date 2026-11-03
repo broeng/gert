@@ -13,6 +13,10 @@
 //! The consolidation tests also write as `bob` (a reply, for the attention
 //! set) and as `admin` (a project with Gerrit's default permissions, where
 //! `alice` may not vote Code-Review +2).
+//!
+//! `local_e2e` runs local changes end to end: it clones `demo/scheduler`
+//! into a temporary directory and pushes new changes to it as alice (the
+//! `git` binary is needed).
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -29,6 +33,9 @@ use model::{
 };
 use store::Store;
 use sync::{DraftSave, Syncer};
+
+#[path = "dev_gerrit/local_e2e.rs"]
+mod local_e2e;
 
 /// Blocking `ureq` behind the async trait, with a switch that makes every
 /// request fail like a dead network, and one that loses the answer to the
