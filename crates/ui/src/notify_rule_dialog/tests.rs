@@ -168,6 +168,7 @@ fn settings_with(rules: Vec<Rule>) -> NotificationSettings {
 fn nothing(_: &mut Store, _: ServerId) {}
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn enter_edits_the_rule_under_the_cursor_and_a_adds_a_new_one(cx: &mut TestAppContext) {
     let f = fixture(cx, NotificationSettings::default(), false, false, nothing);
     let d = open_on(cx, &f, 1);
@@ -201,6 +202,7 @@ fn enter_edits_the_rule_under_the_cursor_and_a_adds_a_new_one(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn left_and_right_cycle_the_events_and_the_scopes(cx: &mut TestAppContext) {
     let f = fixture(cx, NotificationSettings::default(), false, false, nothing);
     press(cx, &f, &["a"]);
@@ -251,6 +253,7 @@ fn the_fields_follow_the_event(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn without_a_cache_the_usual_labels_and_ranges_are_offered(cx: &mut TestAppContext) {
     let settings = settings_with(vec![vote_rule(&[], &[])]);
     let f = fixture(cx, settings, false, false, nothing);
@@ -315,6 +318,7 @@ fn the_cache_decides_the_labels_and_values(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn labels_and_values_of_the_rule_are_kept_even_when_unseen(cx: &mut TestAppContext) {
     let settings = settings_with(vec![vote_rule(&["Legacy"], &[7, -1])]);
     let f = fixture(cx, settings, false, false, nothing);
@@ -333,6 +337,7 @@ fn labels_and_values_of_the_rule_are_kept_even_when_unseen(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn server_ticks_are_offered_with_several_servers_and_none_means_all(cx: &mut TestAppContext) {
     let f = fixture(cx, NotificationSettings::default(), true, false, nothing);
     press(cx, &f, &["a"]);
@@ -362,6 +367,7 @@ fn server_ticks_are_offered_with_several_servers_and_none_means_all(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_vote_rule_needs_a_label_and_a_value_or_any(cx: &mut TestAppContext) {
     let f = fixture(cx, NotificationSettings::default(), false, false, nothing);
     press(cx, &f, &["a"]);
@@ -405,6 +411,7 @@ fn a_vote_rule_needs_a_label_and_a_value_or_any(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn saving_writes_through_the_backend_and_the_shell_and_page_follow(cx: &mut TestAppContext) {
     let f = fixture(cx, NotificationSettings::default(), false, false, nothing);
     press(cx, &f, &["a"]);
@@ -447,6 +454,7 @@ fn saving_writes_through_the_backend_and_the_shell_and_page_follow(cx: &mut Test
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_failed_save_keeps_the_form_and_changes_nothing(cx: &mut TestAppContext) {
     let f = fixture(cx, NotificationSettings::default(), false, true, nothing);
     press(cx, &f, &["a"]);
@@ -469,6 +477,7 @@ fn a_failed_save_keeps_the_form_and_changes_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn space_ticks_the_focused_box_and_tab_reaches_the_buttons(cx: &mut TestAppContext) {
     let settings = settings_with(vec![vote_rule(&[], &[])]);
     let f = fixture(cx, settings, false, false, nothing);

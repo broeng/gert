@@ -279,6 +279,7 @@ fn a_session_that_can_sync_refreshes_the_detail_files_and_related(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn j_and_k_move_the_file_cursor_and_stop_at_the_ends(cx: &mut TestAppContext) {
     let f = page(cx, false, ChangeView::default());
     assert_eq!(cursor(cx, &f).as_deref(), Some("/COMMIT_MSG"));
@@ -330,6 +331,7 @@ fn enter_asks_to_open_the_diff_of_the_file_under_the_cursor(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn picking_another_base_loads_the_file_list_of_that_pair(cx: &mut TestAppContext) {
     let f = page(cx, false, ChangeView::default());
     press(cx, &f, &["j", "j"]);
@@ -394,6 +396,7 @@ fn i_toggles_the_inline_diff_of_the_current_file(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn shift_i_expands_every_file_and_again_collapses_them(cx: &mut TestAppContext) {
     let f = page(cx, true, ChangeView::default());
     press(cx, &f, &["shift-i"]);
@@ -454,6 +457,7 @@ fn an_inline_diff_is_folded_and_shift_x_opens_it_without_a_request(cx: &mut Test
 /// dead until the user clicked something. The shell must give the focus back
 /// to the page when the focused element vanishes.
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn esc_works_after_the_focused_inline_diff_scrolled_out_of_the_list(cx: &mut TestAppContext) {
     let (window, shell, page) = shell_with_many_files(cx);
     focus_inline(cx, window, &page);
@@ -468,6 +472,7 @@ fn esc_works_after_the_focused_inline_diff_scrolled_out_of_the_list(cx: &mut Tes
 /// the focus,
 /// and the page keys do nothing while it is open.
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn esc_closes_the_help_overlay_from_an_inline_diff(cx: &mut TestAppContext) {
     let (window, shell, page) = shell_with_many_files(cx);
     focus_inline(cx, window, &page);
@@ -685,6 +690,7 @@ fn to_thread(cx: &mut TestAppContext, f: &Fixture, id: &str) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn x_opens_the_diff_of_the_thread_with_a_pair_that_shows_it(cx: &mut TestAppContext) {
     let f = with_comments(cx);
     // shift-p from nowhere starts at the end, shift-n at the start.
@@ -735,6 +741,7 @@ fn type_text(cx: &mut TestAppContext, f: &Fixture, text: &str) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn c_writes_a_patchset_level_draft_on_the_current_patch_set(cx: &mut TestAppContext) {
     let f = page_signed_in(cx, ChangeView::default(), |http| {
         http.route_json("/comments", COMMENTS);
@@ -976,6 +983,7 @@ fn shift_j_and_k_replace_the_page_with_the_next_and_previous_chain_entry(cx: &mu
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn shift_j_and_k_do_nothing_at_the_ends_of_the_chain(cx: &mut TestAppContext) {
     let f = chain_page(cx, 3, 0);
     press(cx, &f, &["shift-k"]);
@@ -1004,6 +1012,7 @@ fn clicking_a_chain_row_opens_it_as_a_new_history_entry(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn shift_l_and_the_link_toggle_the_relation_panel(cx: &mut TestAppContext) {
     let f = chain_page(cx, 5, 2);
     // Wide enough for the panel.
@@ -1148,6 +1157,7 @@ fn shift_v_posts_the_first_vote_only_and_publishes_the_drafts(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn v_then_a_number_picks_that_button(cx: &mut TestAppContext) {
     let f = voting_page(cx, model::ChangeStatus::Merged, |http| {
         http.route(REVIEW, 200, ")]}'\n{\"labels\":{\"Verified\":1}}");
@@ -1234,6 +1244,7 @@ fn no_quick_votes_for_anonymous_sessions(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_401_goes_to_the_login_flow_and_other_errors_are_noted(cx: &mut TestAppContext) {
     let f = voting_page(cx, model::ChangeStatus::New, |http| {
         http.route(REVIEW, 401, "");
@@ -1332,6 +1343,7 @@ fn the_cursor_stays_on_its_file_when_the_rules_change(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn brackets_skip_dimmed_files_but_j_and_k_do_not(cx: &mut TestAppContext) {
     let f = page(cx, false, ChangeView::default());
     set_rules(cx, &f, vec![rule("Dim", "b.rs", FilterAction::Dim)]);
@@ -1363,6 +1375,7 @@ fn brackets_skip_dimmed_files_but_j_and_k_do_not(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn toggling_a_rule_restyles_the_page_live(cx: &mut TestAppContext) {
     let f = page(cx, false, ChangeView::default());
     set_rules(cx, &f, vec![rule("Gen", "a.rs", FilterAction::Hide)]);
@@ -1586,6 +1599,7 @@ fn open_a(cx: &mut TestAppContext, f: &Fixture) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn an_inline_diff_comes_from_the_checkout_and_is_not_stored(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     let f = local_page(cx, &repo, &repo.target);
@@ -1744,6 +1758,7 @@ fn list_of(cx: &TestAppContext, f: &Fixture) -> Vec<String> {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn an_uncached_list_comes_from_the_checkout_when_gerrit_fails(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     // No /files route: Gerrit's answer is a 404.
@@ -1784,6 +1799,7 @@ fn an_uncached_list_comes_from_the_checkout_when_gerrit_fails(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn gerrits_list_replaces_the_local_one_and_the_marker_goes(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     let f = unlisted_page(
@@ -1805,6 +1821,7 @@ fn gerrits_list_replaces_the_local_one_and_the_marker_goes(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn offline_the_local_list_stays(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     // Not signed in and anonymous access refused: the session cannot sync.
@@ -1819,6 +1836,7 @@ fn offline_the_local_list_stays(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_stored_list_wins_without_git(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     // The stored list has src/b.rs too; git would not list it.
@@ -1828,6 +1846,7 @@ fn a_stored_list_wins_without_git(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_missing_commit_gives_no_local_list(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     let missing = "0123456789012345678901234567890123456789";
@@ -1837,6 +1856,7 @@ fn a_missing_commit_gives_no_local_list(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_late_local_list_does_not_replace_gerrits(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     // No checkout settling first: the page is up with no list, git not run.
@@ -1873,6 +1893,7 @@ fn a_late_local_list_does_not_replace_gerrits(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn r_waits_while_the_list_is_the_local_one(cx: &mut TestAppContext) {
     let repo = lt::fixture();
     let mut server = setup();

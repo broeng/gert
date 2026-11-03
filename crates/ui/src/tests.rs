@@ -1090,6 +1090,7 @@ mod drafts {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn ctrl_k_opens_the_switcher_typing_filters_and_enter_switches(cx: &mut TestAppContext) {
         let http = RouteHttpClient::new();
         let (store, ids) = two_server_store(false, false);
@@ -1261,6 +1262,7 @@ mod drafts {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn an_unreachable_server_goes_offline_and_is_asked_less_often(cx: &mut TestAppContext) {
         let http = RouteHttpClient::new();
         http.route("/gb/a/changes/?q=attention", 503, "down");
@@ -1292,6 +1294,7 @@ mod drafts {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_refused_login_is_marked_and_polling_stops(cx: &mut TestAppContext) {
         let http = RouteHttpClient::new();
         http.route("/gb/a/changes/?q=attention", 401, "no");
@@ -1310,6 +1313,7 @@ mod drafts {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn anonymous_servers_are_not_polled(cx: &mut TestAppContext) {
         let http = RouteHttpClient::new();
         let (store, ids) = two_server_store(false, false);
@@ -1320,6 +1324,7 @@ mod drafts {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn switching_swaps_which_server_is_polled(cx: &mut TestAppContext) {
         let http = RouteHttpClient::new();
         http.route("/gb/a/changes/?q=attention", 200, attention_page(&[1]));
@@ -1346,6 +1351,7 @@ mod drafts {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_removed_server_is_never_asked_again(cx: &mut TestAppContext) {
         let http = RouteHttpClient::new();
         http.route("/gb/a/changes/?q=attention", 200, attention_page(&[1]));
@@ -1670,6 +1676,7 @@ mod drafts {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn an_event_is_shown_once_and_acknowledged(cx: &mut TestAppContext) {
             let http = RouteHttpClient::new();
             serve(&http, U1, None);
@@ -1707,6 +1714,7 @@ mod drafts {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn a_shown_event_is_also_kept_in_the_inbox_and_counted_by_the_bell(
             cx: &mut TestAppContext,
         ) {
@@ -1786,6 +1794,7 @@ mod drafts {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn anonymous_servers_are_not_watched(cx: &mut TestAppContext) {
             let http = RouteHttpClient::new();
             serve(&http, U1, None);
@@ -1804,6 +1813,7 @@ mod drafts {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn the_master_switch_stops_and_starts_the_watch(cx: &mut TestAppContext) {
             let http = RouteHttpClient::new();
             serve(&http, U1, None);
@@ -1875,6 +1885,7 @@ mod drafts {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn clicking_a_notification_opens_its_change_on_its_server(cx: &mut TestAppContext) {
             let http = RouteHttpClient::new();
             serve(&http, U1, None);
@@ -2688,6 +2699,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn editing_a_checkout_replaces_it_in_place(cx: &mut TestAppContext) {
         let a = tmp_dir("edit-a");
         let b = tmp_dir("edit-b");
@@ -2709,6 +2721,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_duplicate_name_or_an_empty_field_is_not_saved(cx: &mut TestAppContext) {
         let a = tmp_dir("dup");
         let f = projects_fixture(cx, vec![project("one", &a)]);
@@ -2741,6 +2754,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn removing_a_checkout_asks_first(cx: &mut TestAppContext) {
         let a = tmp_dir("rm");
         let f = projects_fixture(cx, vec![project("one", &a), project("two", &a)]);
@@ -2791,6 +2805,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn the_local_changes_box_turns_the_vote_choice_on_and_both_are_saved(cx: &mut TestAppContext) {
         use model::LocalApproval;
         let f = projects_fixture_as(cx, Vec::new(), Some("u"));
@@ -2850,6 +2865,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_click_that_turns_the_choice_off_moves_the_focus_to_the_box(cx: &mut TestAppContext) {
         let f = projects_fixture_as(cx, Vec::new(), Some("u"));
         press(cx, &f, "a");
@@ -2883,6 +2899,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn the_local_options_cannot_be_changed_on_an_anonymous_server(cx: &mut TestAppContext) {
         use model::LocalApproval;
         let a = tmp_dir("anon-local");
@@ -2980,6 +2997,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn editing_adding_and_deleting(cx: &mut TestAppContext) {
         let f = fixture(cx, false);
         open_settings(cx, &f);
@@ -3032,6 +3050,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn bookmarks_are_added_edited_moved_and_deleted_below_the_queries(cx: &mut TestAppContext) {
         let f = fixture_full(cx, false, StartupPage::Dashboard, Vec::new(), Vec::new());
         open_settings(cx, &f);
@@ -3158,6 +3177,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn switching_the_modes_saves_and_applies_them(cx: &mut TestAppContext) {
         use crate::theme::{ColorMode, ColorModes, color_modes};
         let f = fixture(cx, false);
@@ -3202,6 +3222,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_startup_query_needs_text_and_is_saved(cx: &mut TestAppContext) {
         let f = fixture(cx, false);
         open_settings(cx, &f);
@@ -3318,6 +3339,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn the_cursor_stays_inside_the_tab_and_jumps_to_its_first_row_on_a_switch(
         cx: &mut TestAppContext,
     ) {
@@ -3370,6 +3392,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn l_h_the_arrows_and_the_digits_switch_tabs(cx: &mut TestAppContext) {
         let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
         open_settings(cx, &f);
@@ -3431,6 +3454,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn the_tab_keys_are_not_swallowed_from_inputs_and_wait_for_answers(cx: &mut TestAppContext) {
         let f = fixture(cx, false);
         open_settings(cx, &f);
@@ -3466,6 +3490,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn the_page_opens_on_the_tab_it_was_left_on(cx: &mut TestAppContext) {
         let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
         open_settings(cx, &f);
@@ -3502,6 +3527,7 @@ mod settings_page {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn enter_and_d_on_a_rule_open_the_dialog_on_it(cx: &mut TestAppContext) {
         let f = fixture_with(cx, false, StartupPage::Dashboard, two_rules());
         open_settings(cx, &f);
@@ -3630,6 +3656,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn six_shows_the_tab_with_its_rows_after_the_servers(cx: &mut TestAppContext) {
             let f = fixture(cx, false);
             show(cx, &f);
@@ -3651,6 +3678,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn space_flips_each_option_saves_it_and_the_shell_follows(cx: &mut TestAppContext) {
             let f = fixture(cx, false);
             show(cx, &f);
@@ -3689,6 +3717,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn the_group_window_takes_whole_seconds(cx: &mut TestAppContext) {
             let f = fixture(cx, false);
             show(cx, &f);
@@ -3720,6 +3749,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn quiet_hours_are_validated_and_can_be_cleared(cx: &mut TestAppContext) {
             let f = fixture(cx, false);
             show(cx, &f);
@@ -3791,6 +3821,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn the_default_rules_are_listed_and_the_first_change_writes_them_all(
             cx: &mut TestAppContext,
         ) {
@@ -3818,6 +3849,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn rules_move_with_shift_j_and_k_and_the_cursor_follows(cx: &mut TestAppContext) {
             let f = fixture(cx, false);
             show(cx, &f);
@@ -3840,6 +3872,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn deleting_a_rule_asks_first_and_the_last_one_brings_the_defaults_back(
             cx: &mut TestAppContext,
         ) {
@@ -3871,6 +3904,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn a_failed_delete_changes_nothing_and_says_so(cx: &mut TestAppContext) {
             let f = fixture(cx, true);
             show(cx, &f);
@@ -3886,6 +3920,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn reset_to_defaults_asks_and_is_idle_on_the_defaults(cx: &mut TestAppContext) {
             let f = fixture(cx, false);
             show(cx, &f);
@@ -3930,6 +3965,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn the_test_row_and_t_show_a_notification_through_the_notifier(cx: &mut TestAppContext) {
             let f = fixture(cx, false);
             let notifier = with_notifier(cx, &f);
@@ -3957,6 +3993,7 @@ mod settings_page {
         }
 
         #[gpui_kit::test]
+        #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
         fn tab_and_row_keys_are_typed_while_an_input_is_edited(cx: &mut TestAppContext) {
             let f = fixture(cx, false);
             show(cx, &f);
@@ -4718,6 +4755,7 @@ mod servers_settings {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn renaming_and_coloring_need_no_password(cx: &mut TestAppContext) {
         let f = two(cx);
         let page = on_server(cx, &f, 0);
@@ -4754,6 +4792,7 @@ mod servers_settings {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_new_url_asks_for_the_password_and_moves_the_secret(cx: &mut TestAppContext) {
         let f = two(cx);
         let page = on_server(cx, &f, 0);

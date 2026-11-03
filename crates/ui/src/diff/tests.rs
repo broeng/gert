@@ -161,6 +161,7 @@ fn anchor(cx: &mut TestAppContext, view: &Entity<DiffView>) -> (Option<u32>, Opt
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn j_and_k_move_the_cursor_and_stop_at_the_ends(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
     // 17 rows, see `sample`.
@@ -257,6 +258,7 @@ fn the_server_diff_is_folded_by_the_context_preference(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn enter_opens_the_fold_under_the_cursor_only(cx: &mut TestAppContext) {
     let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
     press(cx, window, "enter"); // row 0 is the leading fold
@@ -288,6 +290,7 @@ fn go_to_second_fold(
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn alt_up_and_down_reveal_ten_lines_and_keep_the_cursor_on_the_fold(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
     go_to_second_fold(cx, window, &view, 9);
@@ -364,6 +367,7 @@ fn shift_x_without_folds_says_so(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn opened_folds_survive_mode_and_diff_changes(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
     press(cx, window, "enter");
@@ -447,6 +451,7 @@ fn server_skips_are_shown_but_cannot_hold_the_cursor(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn paging_and_scrolling_follow_the_cursor(cx: &mut TestAppContext) {
     let diff = fixture("large_diff.response.json");
     let all = ResolvedDiffPreferences {
@@ -785,6 +790,7 @@ fn the_initial_cursor_skips_threads_at_the_top(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn new_threads_keep_the_cursor_line_and_the_opened_folds(cx: &mut TestAppContext) {
     let (window, view, events) = open(cx, sample(), DiffViewMode::SideBySide);
     press(cx, window, "enter"); // open the first fold
@@ -955,6 +961,7 @@ fn is_open(cx: &mut TestAppContext, view: &Entity<DiffView>, id: &str) -> bool {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn shift_n_and_shift_p_visit_the_thread_rows(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, sample(), DiffViewMode::SideBySide);
     give_threads(cx, &view, three_threads());
@@ -1110,6 +1117,7 @@ fn side_scroll(cx: &mut TestAppContext, view: &Entity<DiffView>) -> gpui_kit::Pi
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn h_and_l_scroll_long_lines_sideways_within_their_length(cx: &mut TestAppContext) {
     let (window, view, _) = open(cx, long_line_diff(), DiffViewMode::Unified);
     frame(cx, window);

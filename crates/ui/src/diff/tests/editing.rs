@@ -55,6 +55,7 @@ fn on_line_13(cx: &mut TestAppContext, window: AnyWindowHandle) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn c_opens_an_editor_and_ctrl_enter_saves_the_trimmed_text(cx: &mut TestAppContext) {
     let (window, view, events) = editable(cx);
     give_threads(cx, &view, vec![]);
@@ -93,6 +94,7 @@ fn c_opens_an_editor_and_ctrl_enter_saves_the_trimmed_text(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn letters_typed_in_the_editor_are_text_not_diff_keys(cx: &mut TestAppContext) {
     let (window, view, _) = editable(cx);
     on_line_13(cx, window);
@@ -111,6 +113,7 @@ fn letters_typed_in_the_editor_are_text_not_diff_keys(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn an_empty_comment_is_refused_with_a_hint(cx: &mut TestAppContext) {
     let (window, view, events) = editable(cx);
     on_line_13(cx, window);
@@ -131,6 +134,7 @@ fn an_empty_comment_is_refused_with_a_hint(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn escape_discards_a_new_comment_and_keeps_its_text_as_an_unsaved_buffer(cx: &mut TestAppContext) {
     let (window, view, events) = editable(cx);
     on_line_13(cx, window);
@@ -154,6 +158,7 @@ fn escape_discards_a_new_comment_and_keeps_its_text_as_an_unsaved_buffer(cx: &mu
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn c_on_a_thread_replies_and_the_reply_inherits_the_threads_state(cx: &mut TestAppContext) {
     let (window, view, events) = editable(cx);
     give_threads(
@@ -243,6 +248,7 @@ fn q_opens_a_reply_with_the_last_message_quoted(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn editing_a_draft_updates_it_and_cancelling_keeps_the_saved_text(cx: &mut TestAppContext) {
     let (window, view, events) = editable(cx);
     let mut t = at13("a", "please fix");
@@ -291,6 +297,7 @@ fn refocus(cx: &mut TestAppContext, window: AnyWindowHandle, view: &Entity<DiffV
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn text_for_a_draft_that_went_away_is_saved_as_a_new_draft(cx: &mut TestAppContext) {
     use crate::diff::view::RESCUED;
 
@@ -362,6 +369,7 @@ fn text_for_a_draft_that_went_away_is_saved_as_a_new_draft(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn delete_asks_in_the_card_first(cx: &mut TestAppContext) {
     let (window, view, events) = editable(cx);
     let mut t = at13("a", "please fix");
@@ -392,6 +400,7 @@ fn delete_asks_in_the_card_first(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_left_comment_goes_to_the_parent_or_to_the_base_patch_set(cx: &mut TestAppContext) {
     // Row 5 (old14, nothing on the right) only has a left side.
     let go = |cx: &mut TestAppContext, base: Option<u32>| {
@@ -426,6 +435,7 @@ fn a_left_comment_goes_to_the_parent_or_to_the_base_patch_set(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_editor_survives_a_rebuild_with_its_text_and_focus(cx: &mut TestAppContext) {
     let (window, view, _) = editable(cx);
     on_line_13(cx, window);
@@ -473,6 +483,7 @@ fn long() -> model::Diff {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_editor_keeps_its_focus_when_scrolled_out_of_view(cx: &mut TestAppContext) {
     let prefs = model::ResolvedDiffPreferences {
         context: model::DiffContext::All,

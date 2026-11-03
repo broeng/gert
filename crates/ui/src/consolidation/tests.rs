@@ -359,6 +359,7 @@ fn a_pushed_local_change_has_its_review_sent_under_the_app_name(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_open_page_follows_the_change_to_gerrit_and_says_what_was_sent(cx: &mut TestAppContext) {
     let f = fixture();
     let s = start(cx, &f, Some("u"));
@@ -403,6 +404,7 @@ fn the_open_page_follows_the_change_to_gerrit_and_says_what_was_sent(cx: &mut Te
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn history_entries_of_the_local_change_lead_to_gerrit_when_visited(cx: &mut TestAppContext) {
     let f = fixture();
     let s = start(cx, &f, Some("u"));
@@ -883,6 +885,7 @@ impl Started {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_page_waits_for_an_open_editor_before_it_follows(cx: &mut TestAppContext) {
     let (f, s, row) = on_the_local_page(cx);
     // `c`: a comment on the local version, being written.
@@ -909,6 +912,7 @@ fn the_page_waits_for_an_open_editor_before_it_follows(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_page_waits_for_the_reply_dialog_before_it_follows(cx: &mut TestAppContext) {
     let (f, s, row) = on_the_local_page(cx);
     s.press(cx, "a");
@@ -1131,6 +1135,7 @@ fn a_refused_login_mid_run_signs_the_server_out(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_note_stays_off_another_servers_page(cx: &mut TestAppContext) {
     use crate::session::ServerKey;
 

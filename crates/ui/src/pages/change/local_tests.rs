@@ -331,6 +331,7 @@ fn local_number(store: &Mutex<Store>, change_id: &str) -> ChangeNumber {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_local_change_shows_its_header_files_and_message_without_the_network(cx: &mut TestAppContext) {
     let ck = checkout();
     let store = store_with(
@@ -465,6 +466,7 @@ fn a_local_change_borrows_the_labels_of_the_newest_cached_change(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_gerrit_change_lists_its_local_version_and_shows_its_files_from_the_checkout(
     cx: &mut TestAppContext,
 ) {
@@ -622,6 +624,7 @@ fn refreshing_keeps_the_local_versions_and_the_store_never_gets_them(cx: &mut Te
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_local_change_picks_up_a_new_version_on_refresh(cx: &mut TestAppContext) {
     let ck = checkout();
     let store = store_with(
@@ -682,6 +685,7 @@ fn a_local_change_picks_up_a_new_version_on_refresh(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_checkout_that_breaks_costs_one_git_read_per_refresh(cx: &mut TestAppContext) {
     let ck = checkout();
     let store = store_with(
@@ -729,6 +733,7 @@ fn a_checkout_that_breaks_costs_one_git_read_per_refresh(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_patch_set_and_a_rebased_local_version_say_why_they_cannot_be_compared(
     cx: &mut TestAppContext,
 ) {
@@ -881,6 +886,7 @@ impl Series {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_local_series_has_its_relation_chain_from_the_checkout(cx: &mut TestAppContext) {
     let s = series();
     let store = s.store();
@@ -1035,6 +1041,7 @@ fn a_chain_opens_an_older_version_at_that_version_and_steps_past_plain_commits(
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_long_chain_keeps_the_commits_nearest_and_says_there_are_more(cx: &mut TestAppContext) {
     let repo = TestRepo::new();
     repo.commit("Base");
@@ -1188,6 +1195,7 @@ impl Stacked {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn local_commits_on_a_gerrit_patch_set_join_its_relation_chain(cx: &mut TestAppContext) {
     let s = stacked();
     let store = s.store();

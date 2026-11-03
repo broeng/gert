@@ -512,6 +512,7 @@ fn an_anonymous_server_is_not_scanned(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn opening_a_local_row_sends_nothing_and_notifies_nothing(cx: &mut TestAppContext) {
     let f = fixture();
     f.own("Own change", ID_A);
@@ -580,6 +581,7 @@ fn upsert(
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn every_state_renders_and_j_k_cross_into_the_queries(cx: &mut TestAppContext) {
     let mut store = Store::open_in_memory().expect("store");
     let server = store.server_id(URL).expect("server id");

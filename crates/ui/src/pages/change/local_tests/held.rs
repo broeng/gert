@@ -175,6 +175,7 @@ impl Fixture {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn held_items_show_their_reasons_and_a_drop_only_vote_only_drops(cx: &mut TestAppContext) {
     let (f, ck) = held_page(cx, false);
     cx.update(|cx| {
@@ -221,6 +222,7 @@ fn held_items_show_their_reasons_and_a_drop_only_vote_only_drops(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_held_vote_is_published_onto_the_current_patch_set(cx: &mut TestAppContext) {
     let (f, ck) = held_page(cx, false);
     // Code-Review (drop-only), then Verified.
@@ -257,6 +259,7 @@ fn a_held_vote_is_published_onto_the_current_patch_set(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_held_comment_is_posted_quoting_its_place_and_a_message_as_the_message(
     cx: &mut TestAppContext,
 ) {
@@ -301,6 +304,7 @@ fn a_held_comment_is_posted_quoting_its_place_and_a_message_as_the_message(
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_merged_change_says_published_votes_are_post_submit_votes(cx: &mut TestAppContext) {
     let (f, ck) = held_page(cx, true);
     let mut visual = gpui_kit::VisualTestContext::from_window(f.window, cx);

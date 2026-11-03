@@ -362,6 +362,7 @@ fn single_letter_keys_are_text_in_the_message(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn escape_keeps_what_was_typed_as_a_patchset_draft(cx: &mut TestAppContext) {
     let f = dialog(
         cx,
@@ -447,6 +448,7 @@ the tests"
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn closing_with_changed_text_updates_the_draft_and_clearing_it_deletes_it(cx: &mut TestAppContext) {
     let f = dialog(
         cx,
@@ -567,6 +569,7 @@ fn only_changed_votes_are_in_the_body(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_sent_event_names_the_votes_cast_and_none_for_a_plain_reply(cx: &mut TestAppContext) {
     let f = dialog(cx, |_| {}, ok_review);
     type_text(cx, &f, "hi");
@@ -750,6 +753,7 @@ fn a_draft_the_server_refuses_is_reported_and_nothing_is_posted(cx: &mut TestApp
 // ---- results ----
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_sent_review_refreshes_the_change_and_the_comments(cx: &mut TestAppContext) {
     let f = dialog(
         cx,
@@ -841,6 +845,7 @@ fn a_401_goes_to_the_login_flow_and_keeps_the_text(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_refusal_is_shown_in_the_dialog_with_the_servers_words(cx: &mut TestAppContext) {
     for (status, needle) in [
         (403, "not allowed (403): cannot vote on Verified"),

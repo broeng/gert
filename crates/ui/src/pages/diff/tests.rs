@@ -502,6 +502,7 @@ fn a_failed_whitespace_refetch_is_reported_and_the_header_stays_truthful(cx: &mu
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_whitespace_refetch_keeps_the_folds_the_user_opened(cx: &mut TestAppContext) {
     let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(whole_file()));
     press(cx, p.window, &["enter"]);
@@ -515,6 +516,7 @@ fn a_whitespace_refetch_keeps_the_folds_the_user_opened(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_preferences_panel_changes_session_settings_and_refetches(cx: &mut TestAppContext) {
     let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(whole_file()));
     press(cx, p.window, &[","]);
@@ -603,6 +605,7 @@ fn current_route(cx: &mut TestAppContext, shell: &Entity<Shell>) -> Route {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn enter_opens_the_diff_page_and_u_returns_with_the_cursor_on_that_file(cx: &mut TestAppContext) {
     let (window, shell, _http) = shell_flow(cx);
     press(cx, window, &["j", "enter"]);
@@ -624,6 +627,7 @@ fn enter_opens_the_diff_page_and_u_returns_with_the_cursor_on_that_file(cx: &mut
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn right_bracket_on_the_last_file_returns_to_the_change_with_the_cursor_on_it(
     cx: &mut TestAppContext,
 ) {
@@ -639,6 +643,7 @@ fn right_bracket_on_the_last_file_returns_to_the_change_with_the_cursor_on_it(
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn back_after_stepping_through_files_leads_to_the_change(cx: &mut TestAppContext) {
     let (window, shell, _http) = shell_flow(cx);
     press(cx, window, &["j", "enter", "j", "j", "enter"]);
@@ -653,6 +658,7 @@ fn back_after_stepping_through_files_leads_to_the_change(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn back_from_a_diff_restores_the_change_page_cursor(cx: &mut TestAppContext) {
     let (window, shell, _http) = shell_flow(cx);
     press(cx, window, &["j", "enter", "j", "j", "enter"]);
@@ -665,6 +671,7 @@ fn back_from_a_diff_restores_the_change_page_cursor(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_chain_row_opens_a_change_at_a_patch_set_and_back_restores_the_page(cx: &mut TestAppContext) {
     use crate::{nav::ChangeView, pages::change::ChangeEvent};
     let mut store = seeded();
@@ -716,6 +723,7 @@ fn a_chain_row_opens_a_change_at_a_patch_set_and_back_restores_the_page(cx: &mut
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn compare_with_the_parent_adds_a_history_entry(cx: &mut TestAppContext) {
     let (window, shell, _http) = shell_flow(cx);
     press(cx, window, &["j", "enter", "j", "j", "enter"]);
@@ -740,6 +748,7 @@ fn compare_with_the_parent_adds_a_history_entry(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_view_mode_survives_moving_between_files(cx: &mut TestAppContext) {
     let (window, shell, _http) = shell_flow(cx);
     press(cx, window, &["j", "enter", "j", "enter"]);
@@ -1729,6 +1738,7 @@ mod local {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn gerrits_list_replaces_the_local_one(cx: &mut TestAppContext) {
         let f = lt::fixture();
         let http = RouteHttpClient::new();
@@ -1774,6 +1784,7 @@ mod local {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_missing_commit_gives_no_local_list(cx: &mut TestAppContext) {
         let f = lt::fixture();
         let missing = "0123456789012345678901234567890123456789";

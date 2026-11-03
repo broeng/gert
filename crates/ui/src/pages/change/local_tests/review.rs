@@ -57,6 +57,7 @@ fn local_change(cx: &mut TestAppContext, ck: &Checkout) -> (Fixture, ChangeNumbe
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_draft_on_a_local_change_is_saved_and_never_uploaded(cx: &mut TestAppContext) {
     let ck = checkout();
     let (f, number) = local_change(cx, &ck);
@@ -109,6 +110,7 @@ fn a_draft_on_a_local_change_is_saved_and_never_uploaded(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_reply_to_a_gerrit_thread_while_a_local_version_is_shown_uploads_normally(
     cx: &mut TestAppContext,
 ) {
@@ -171,6 +173,7 @@ impl Fixture {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_quick_vote_on_a_local_version_goes_into_its_pending_review(cx: &mut TestAppContext) {
     let ck = checkout();
     let (f, number) = local_change(cx, &ck);
@@ -239,6 +242,7 @@ fn a_quick_vote_on_a_local_version_goes_into_its_pending_review(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_quick_vote_on_a_local_patch_set_of_a_gerrit_change_stays_local(cx: &mut TestAppContext) {
     let ck = checkout();
     let store = store_with(
@@ -309,6 +313,7 @@ fn seed_reviews(store: &mut Store, version: PatchSetNumber, states: &[model::Pen
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn the_local_reviews_card_lists_waiting_reviews_and_its_keys_edit_and_cancel(
     cx: &mut TestAppContext,
 ) {
@@ -486,6 +491,7 @@ fn a_vote_on_gerrit_does_not_count_as_the_vote_on_a_local_version(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn c_on_a_local_version_of_a_gerrit_change_writes_a_local_draft(cx: &mut TestAppContext) {
     let ck = checkout();
     let store = store_with(

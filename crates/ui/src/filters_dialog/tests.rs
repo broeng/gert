@@ -237,6 +237,7 @@ fn two_rules() -> Vec<FileFilter> {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn f_m_opens_the_dialog_over_the_page_and_escape_gives_the_page_back(cx: &mut TestAppContext) {
     let f = on_the_change(cx, two_rules());
     let d = open_dialog(cx, &f);
@@ -259,6 +260,7 @@ fn f_m_opens_the_dialog_over_the_page_and_escape_gives_the_page_back(cx: &mut Te
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_rule_added_from_a_change_is_scoped_to_its_project_and_hides_its_files(
     cx: &mut TestAppContext,
 ) {
@@ -308,6 +310,7 @@ fn a_rule_added_from_a_change_is_scoped_to_its_project_and_hides_its_files(
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn an_invalid_form_shows_why_and_is_not_saved(cx: &mut TestAppContext) {
     let f = on_the_change(cx, two_rules());
     let d = open_dialog(cx, &f);
@@ -338,6 +341,7 @@ fn an_invalid_form_shows_why_and_is_not_saved(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn deleting_a_rule_needs_a_yes(cx: &mut TestAppContext) {
     let f = on_the_change(cx, two_rules());
     let d = open_dialog(cx, &f);
@@ -359,6 +363,7 @@ fn deleting_a_rule_needs_a_yes(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn shift_j_and_k_reorder_and_save(cx: &mut TestAppContext) {
     let f = on_the_change(cx, two_rules());
     let d = open_dialog(cx, &f);
@@ -379,6 +384,7 @@ fn shift_j_and_k_reorder_and_save(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn j_and_k_move_and_space_switches_the_default(cx: &mut TestAppContext) {
     let f = on_the_change(cx, two_rules());
     let d = open_dialog(cx, &f);
@@ -396,6 +402,7 @@ fn j_and_k_move_and_space_switches_the_default(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn escape_in_the_form_drops_the_edits_and_a_second_one_closes(cx: &mut TestAppContext) {
     let f = on_the_change(cx, two_rules());
     let d = open_dialog(cx, &f);
@@ -413,6 +420,7 @@ fn escape_in_the_form_drops_the_edits_and_a_second_one_closes(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_refused_write_is_shown_and_keeps_the_dialog_as_it_was(cx: &mut TestAppContext) {
     let f = on_the_change(cx, two_rules());
     *f.backend.refuse.lock().expect("lock") = Some("disk full".into());
@@ -446,6 +454,7 @@ fn a_refused_write_is_shown_and_keeps_the_dialog_as_it_was(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_highlight_takes_its_color_and_bold_from_the_form(cx: &mut TestAppContext) {
     let f = on_the_change(cx, vec![rule("Gen", "*.pb.go", FilterAction::Dim)]);
     let d = open_dialog(cx, &f);
@@ -474,6 +483,7 @@ fn a_highlight_takes_its_color_and_bold_from_the_form(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn only_this_project_fills_in_the_changes_project(cx: &mut TestAppContext) {
     let mut scoped = rule("Gen", "*.pb.go", FilterAction::Dim);
     scoped.projects = vec!["other/a".into(), "other/b".into()];
@@ -536,11 +546,13 @@ fn color_field_opens_on(cx: &mut TestAppContext, key: &'static str) {
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn enter_on_the_color_field_opens_the_picker(cx: &mut TestAppContext) {
     color_field_opens_on(cx, "enter");
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn space_on_the_color_field_opens_the_picker(cx: &mut TestAppContext) {
     color_field_opens_on(cx, "space");
 }
@@ -556,6 +568,7 @@ fn the_servers_field_is_only_offered_with_several_servers(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
 fn a_rule_limited_to_other_servers_is_saved_and_leaves_this_change_alone(cx: &mut TestAppContext) {
     let f = on_the_change_in(cx, Vec::new(), true);
     let d = open_dialog(cx, &f);

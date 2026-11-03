@@ -945,6 +945,7 @@ mod in_the_shell {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn m_opens_the_menu_over_the_page_and_escape_gives_the_page_back(cx: &mut TestAppContext) {
         let (window, shell) = on_the_change(cx, Some("bob"), change(), &Default::default());
         press(cx, window, "m");
@@ -965,6 +966,7 @@ mod in_the_shell {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_revert_opens_the_new_change_and_says_so(cx: &mut TestAppContext) {
         let http = gerrit_api::fake::RouteHttpClient::new();
         http.route("POST /a/changes/7/revert", 200, super::NEW_CHANGE);
@@ -1008,6 +1010,7 @@ mod in_the_shell {
     const AFTER: &str = r#"{"_number":7,"project":"p","branch":"main","subject":"Rebased subject","status":"NEW","owner":{"_account_id":1},"created":"2024-06-15 10:00:00.000000000","updated":"2024-06-15 10:00:00.000000000","current_revision":"sha4","revisions":{"sha4":{"_number":4}}}"#;
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_done_action_closes_the_menu_and_the_page_takes_the_change(cx: &mut TestAppContext) {
         let http = gerrit_api::fake::RouteHttpClient::new();
         http.route_json("GET /a/changes/7?", BEFORE);
@@ -1031,6 +1034,7 @@ mod in_the_shell {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_refused_action_keeps_the_menu_and_the_page_follows_the_server(cx: &mut TestAppContext) {
         let http = gerrit_api::fake::RouteHttpClient::new();
         http.route_json("GET /a/changes/7?", BEFORE);
@@ -1121,6 +1125,7 @@ mod in_the_shell {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn on_the_diff_page_shift_a_opens_the_menu_and_a_rebase_moves_to_the_new_patch_set(
         cx: &mut TestAppContext,
     ) {
@@ -1164,6 +1169,7 @@ mod in_the_shell {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn a_refused_action_updates_the_diff_page_but_keeps_the_menu(cx: &mut TestAppContext) {
         let http = gerrit_api::fake::RouteHttpClient::new();
         http.route_json("GET /a/changes/7?", BEFORE);
@@ -1196,6 +1202,7 @@ mod in_the_shell {
     }
 
     #[gpui_kit::test]
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
     fn the_menu_gets_the_scanner_only_where_local_changes_are_on(cx: &mut TestAppContext) {
         let mut d = change();
         d.summary.project = "p".into();
