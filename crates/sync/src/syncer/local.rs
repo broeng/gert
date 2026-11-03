@@ -2,13 +2,16 @@
 //! [`crate::local`] for the rules).
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap, hash_map::Entry},
     hash::{DefaultHasher, Hash, Hasher},
 };
 
 use jiff::Timestamp;
-use model::{ChangeNumber, LocalChange, LocalChangeState, LocalPatchSet, LocalScan};
-use store::{BorrowedLabels, LocalChangeEntry, ReconcileReport, Store};
+use model::{
+    ChangeNumber, ChangeSummary, CommitInfo, LocalChange, LocalChangeState, LocalPatchSet,
+    LocalScan, PatchSetNumber,
+};
+use store::{BorrowedLabels, LocalChangeEntry, ReconcileReport, ServerId, Store};
 
 use super::Syncer;
 use crate::{
@@ -169,27 +172,89 @@ impl Syncer {
         if number.is_local() {
             return Ok(Vec::new());
         }
+        versions_of_gerrit_change(&self.store(), self.server, number)
+    }
+
+    /// What each of `commits` (a relation chain read from the checkout of
+    /// `project`) is, as far as the store knows, in the same order:
+    ///
+    /// * a patch set of a cached Gerrit change (its detail lists the
+    ///   commit, or a local version of it was mapped to that patch set);
+    /// * a local version of a Gerrit change, by its stable name (as
+    ///   [`Syncer::local_patch_sets_of`] gives it);
+    /// * a version of a local change;
+    /// * none of these ([`ChainCommit::Unknown`]): a commit by someone
+    ///   else, without a Change-Id, of a change not cached, or an old
+    ///   version of a change that was consolidated.
+    ///
+    /// No network. Blocking (SQLite).
+    pub fn classify_chain(
+        &self,
+        project: &str,
+        commits: &[CommitInfo],
+    ) -> Result<Vec<ChainCommit>, Error> {
         let store = self.store();
-        let rows = store.local_changes_of_gerrit_change(self.server, number)?;
-        let several = rows.len() > 1;
-        let mut all = Vec::new();
-        for row in rows {
-            let shown = row.state != LocalChangeState::Consolidated;
-            for v in store.local_patch_sets(self.server, row.id)? {
-                all.push((shown, v));
+        let ids: BTreeSet<String> = commits.iter().filter_map(|c| c.change_id.clone()).collect();
+        let ids: Vec<String> = ids.into_iter().collect();
+        let cached = store.cached_changes_by_change_id(self.server, project, &ids)?;
+        let gerrit = |change: ChangeNumber, patch_set| {
+            let found = cached.iter().find(|g| g.summary.number == change);
+            ChainCommit::Gerrit {
+                change,
+                patch_set,
+                current: found.and_then(|g| g.current),
+                summary: found.map(|g| Box::new(g.summary.clone())),
             }
-        }
-        all.sort_by_key(|(_, v)| (v.seen_at, v.id));
-        Ok(all
-            .into_iter()
-            .zip(1..)
-            .filter_map(|((shown, mut v), n)| {
-                if several {
-                    v.ordinal = n;
+        };
+        let mut versions: HashMap<ChangeNumber, Vec<LocalPatchSet>> = HashMap::new();
+        let mut out = Vec::with_capacity(commits.len());
+        for c in commits {
+            let on_gerrit = cached.iter().find_map(|g| {
+                let ps = g.patch_sets.as_ref()?.iter().find(|p| p.sha == c.sha)?;
+                Some((g.summary.number, ps.number))
+            });
+            if let Some((change, patch_set)) = on_gerrit {
+                out.push(gerrit(change, patch_set));
+                continue;
+            }
+            let mut found = ChainCommit::Unknown;
+            for v in store.local_patch_sets_by_sha(self.server, &c.sha)? {
+                let Some(row) = store.local_change(self.server, v.local_change)? else {
+                    continue;
+                };
+                if row.project != project {
+                    continue;
                 }
-                (shown && v.gerrit_patch_set.is_none()).then_some(v)
-            })
-            .collect())
+                found = match (row.gerrit_number, v.gerrit_patch_set) {
+                    (Some(change), Some(patch_set)) => gerrit(change, patch_set),
+                    (Some(change), None) => {
+                        let of = match versions.entry(change) {
+                            Entry::Occupied(e) => e.into_mut(),
+                            Entry::Vacant(e) => {
+                                e.insert(versions_of_gerrit_change(&store, self.server, change)?)
+                            }
+                        };
+                        // Left out when its row was consolidated.
+                        match of.iter().find(|w| w.id == v.id) {
+                            Some(w) => ChainCommit::LocalVersion {
+                                change,
+                                patch_set: w.number,
+                                ordinal: w.ordinal,
+                            },
+                            None => continue,
+                        }
+                    }
+                    (None, _) => ChainCommit::Local {
+                        change: row.number,
+                        patch_set: v.number,
+                        ordinal: v.ordinal,
+                    },
+                };
+                break;
+            }
+            out.push(found);
+        }
+        Ok(out)
     }
 
     /// The labels a local change of `project` borrows (see
@@ -219,6 +284,64 @@ impl Syncer {
         let projects: BTreeSet<String> = rows.into_iter().map(|c| c.project).collect();
         Ok(projects.into_iter().collect())
     }
+}
+
+/// What a commit of a relation chain read from the checkout is (see
+/// [`Syncer::classify_chain`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChainCommit {
+    /// Version `ordinal` ("local 2") of local change `change`.
+    Local {
+        change: ChangeNumber,
+        patch_set: PatchSetNumber,
+        ordinal: u32,
+    },
+    /// Local version `ordinal` of Gerrit change `change`: not a patch set
+    /// on Gerrit.
+    LocalVersion {
+        change: ChangeNumber,
+        patch_set: PatchSetNumber,
+        ordinal: u32,
+    },
+    /// Patch set `patch_set` of Gerrit change `change`, with the change's
+    /// current patch set and summary when they are cached.
+    Gerrit {
+        change: ChangeNumber,
+        patch_set: PatchSetNumber,
+        current: Option<PatchSetNumber>,
+        summary: Option<Box<ChangeSummary>>,
+    },
+    /// Nothing the store knows.
+    Unknown,
+}
+
+/// The local patch sets of Gerrit change `number` that are not on Gerrit,
+/// with their stable names (see [`Syncer::local_patch_sets_of`]).
+fn versions_of_gerrit_change(
+    store: &Store,
+    server: ServerId,
+    number: ChangeNumber,
+) -> Result<Vec<LocalPatchSet>, Error> {
+    let rows = store.local_changes_of_gerrit_change(server, number)?;
+    let several = rows.len() > 1;
+    let mut all = Vec::new();
+    for row in rows {
+        let shown = row.state != LocalChangeState::Consolidated;
+        for v in store.local_patch_sets(server, row.id)? {
+            all.push((shown, v));
+        }
+    }
+    all.sort_by_key(|(_, v)| (v.seen_at, v.id));
+    Ok(all
+        .into_iter()
+        .zip(1..)
+        .filter_map(|((shown, mut v), n)| {
+            if several {
+                v.ordinal = n;
+            }
+            (shown && v.gerrit_patch_set.is_none()).then_some(v)
+        })
+        .collect())
 }
 
 /// `ids` and the rows' Change-Ids, sorted, each once.

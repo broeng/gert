@@ -480,3 +480,97 @@ fn local_versions_keep_their_names_when_one_is_pushed_and_across_rows() {
     assert_eq!(rows.len(), 2);
     assert_eq!(ordinals(&syncer), [("v2".into(), 2), ("v3".into(), 3)]);
 }
+
+#[test]
+fn chain_commits_are_told_apart_from_the_store() {
+    let (http, syncer) = syncer();
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    // `amended` is a local version of 42 (I2); I1 is a change of its own.
+    let sc = scan(vec![commit("amended", "I2"), commit("c1", "I1")]);
+    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
+    let own = syncer
+        .store()
+        .local_changes_by_change_id(syncer.server, "I1")
+        .unwrap()
+        .remove(0);
+    let (_, own_versions) = syncer.local_change(own.number).unwrap().unwrap();
+    let local_42 = syncer.local_patch_sets_of(ChangeNumber(42)).unwrap();
+
+    let mut other = commit("other", "I9").commit;
+    other.change_id = None;
+    let chain = [
+        commit("c1", "I1").commit,
+        commit("amended", "I2").commit,
+        commit("pushed", "I2").commit,
+        other,
+    ];
+    let kinds = syncer.classify_chain("p", &chain).unwrap();
+    assert_eq!(
+        kinds[0],
+        ChainCommit::Local {
+            change: own.number,
+            patch_set: own_versions[0].number,
+            ordinal: 1,
+        }
+    );
+    assert_eq!(
+        kinds[1],
+        ChainCommit::LocalVersion {
+            change: ChangeNumber(42),
+            patch_set: local_42[0].number,
+            ordinal: 1,
+        }
+    );
+    let ChainCommit::Gerrit {
+        change,
+        patch_set,
+        current,
+        summary,
+    } = &kinds[2]
+    else {
+        panic!("{:?}", kinds[2]);
+    };
+    assert_eq!(
+        (*change, *patch_set, *current),
+        (ChangeNumber(42), PatchSetNumber(1), Some(PatchSetNumber(1)))
+    );
+    assert_eq!(summary.as_ref().map(|s| s.subject.as_str()), Some("s"));
+    assert_eq!(kinds[3], ChainCommit::Unknown);
+
+    // Another project's checkout knows none of them.
+    let kinds = syncer.classify_chain("q", &chain).unwrap();
+    assert!(
+        kinds.iter().all(|k| *k == ChainCommit::Unknown),
+        "{kinds:?}"
+    );
+
+    // Pushed: the local version is patch set 2 of 42 now.
+    let mut detail = syncer
+        .cached_change(ChangeNumber(42))
+        .unwrap()
+        .unwrap()
+        .detail;
+    let mut ps2 = detail.revisions[0].clone();
+    ps2.number = PatchSetNumber(2);
+    ps2.sha = "amended".into();
+    detail.revisions.push(ps2);
+    detail.current_patch_set = Some(PatchSetNumber(2));
+    syncer
+        .store()
+        .save_change_detail(syncer.server, &detail, Timestamp::UNIX_EPOCH)
+        .unwrap();
+    let kinds = syncer.classify_chain("p", &chain[1..2]).unwrap();
+    assert!(
+        matches!(
+            kinds[0],
+            ChainCommit::Gerrit {
+                change: ChangeNumber(42),
+                patch_set: PatchSetNumber(2),
+                ..
+            }
+        ),
+        "{kinds:?}"
+    );
+    assert_eq!(http.requests().len(), 1);
+}

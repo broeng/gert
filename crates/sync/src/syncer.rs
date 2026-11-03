@@ -421,6 +421,7 @@ mod watch;
 pub use actions::NewChange;
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
 pub use edits::ReviewerAdded;
+pub use local::ChainCommit;
 pub use store::DraftCounts;
 pub use watch::WatchOptions;
 
