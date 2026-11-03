@@ -15,9 +15,12 @@
 //!
 //! Publishing is the user's own post, through `sync::Syncer::publish_held`
 //! (which refuses a drop-only vote whatever is asked, and waits for no
-//! consolidation run: it refuses while one runs). Dropping discards text,
-//! so it asks once: the first press arms it, the second drops; the
-//! question expires.
+//! consolidation run: it refuses while one runs). It runs on the server's
+//! [`crate::outbox::DraftOutbox`], so leaving the page does not cancel it;
+//! the outcome comes back as an outbox event, which this page (or another
+//! page of the change opened since) says. Sending notifies the reviewers
+//! and dropping discards text, so both ask once: the first press arms it,
+//! the second acts; the question expires.
 //!
 //! Keys (`w` for "withheld"; `h` and `l` scroll an inline diff): `w n` /
 //! `w p` select, `w s` sends, `w d` drops and `w y` copies a comment's
@@ -38,8 +41,15 @@ use super::{
 };
 use crate::{actions::*, change_detail::patch_set_label, reply};
 
-/// How long a first "drop" waits for the second.
-const DROP_ASK: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a first "send" or "drop" waits for the second.
+const ASK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a first press asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HeldAsk {
+    Send,
+    Drop,
+}
 
 /// Why a drop-only vote offers nothing but Drop.
 pub const DROP_ONLY_NOTE: &str = "approvals are only sent on the exact commit they were given on";
@@ -120,15 +130,15 @@ fn first_line(text: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// What the page says after a publish of `row`.
-fn published_text(row: &HeldRow, out: &HeldPublished) -> (String, bool) {
+/// What the page says after a publish of `item`.
+fn published_text(item: &HeldItem, out: &HeldPublished) -> (String, bool) {
     let ps = out.patch_set.0;
     match &out.outcome {
         PostOutcome::Sent => (
-            match row {
-                HeldRow::Comment(_) => format!("Posted as a patch-set comment on PS {ps}"),
-                HeldRow::Message(_) => format!("Message published on PS {ps}"),
-                _ => format!("Vote published onto PS {ps}"),
+            match item {
+                HeldItem::Comment(_) => format!("Posted as a patch-set comment on PS {ps}"),
+                HeldItem::Message(_) => format!("Message published on PS {ps}"),
+                HeldItem::Vote { .. } => format!("Vote published onto PS {ps}"),
             },
             false,
         ),
@@ -194,7 +204,7 @@ impl ChangePage {
         if self
             .confirm_held
             .as_ref()
-            .is_some_and(|i| !items.contains(i))
+            .is_some_and(|(i, _)| !items.contains(i))
         {
             self.confirm_held = None;
             self.held_timer = None;
@@ -322,35 +332,57 @@ impl ChangePage {
             let why = "Offline: publishing needs a connection to Gerrit";
             return self.hint.say(why, true, cx, |p| &mut p.hint);
         }
-        if self.held_task.is_some() {
-            return;
+        // It notifies the reviewers: asked once, like a drop.
+        if self.confirm_held.as_ref() != Some(&(item.clone(), HeldAsk::Send)) {
+            self.arm_held(item, HeldAsk::Send, cx);
+            let ask = match row {
+                HeldRow::Comment(_) => format!(
+                    "Post this comment on PS {}? Press w s (or the button) again",
+                    onto.0
+                ),
+                HeldRow::Message(_) => format!(
+                    "Publish this message on PS {}? Press w s (or the button) again",
+                    onto.0
+                ),
+                _ => format!(
+                    "Publish this vote onto PS {}? Press w s (or the button) again",
+                    onto.0
+                ),
+            };
+            return self.hint.say(ask, false, cx, |p| &mut p.hint);
         }
-        let syncer = self.session.syncer().clone();
-        let change = self.number;
-        let row = row.clone();
-        let setting = self.held_setting;
-        self.held_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    syncer.publish_held(change, onto, &[item], setting).await
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.held_task = None;
-                let (text, error) = match &result {
-                    Ok(out) => published_text(&row, out),
-                    Err(e) => (format!("Not sent: {e}"), true),
-                };
-                this.outbox.update(cx, |o, cx| o.published(change, cx));
-                if result.is_ok() {
-                    // New votes and messages on the change.
-                    this.reload(cx);
-                }
-                this.hint.say(text, error, cx, |p| &mut p.hint);
-                cx.notify();
-            })
-            .ok();
-        }));
+        self.disarm_held(cx);
+        let (change, setting) = (self.number, self.held_setting);
+        let started = self
+            .outbox
+            .update(cx, |o, cx| o.publish_held(change, onto, item, setting, cx));
+        if started {
+            self.hint.say("Sending\u{2026}", false, cx, |p| &mut p.hint);
+        }
+    }
+
+    /// A held publish of this change ended (it ran on the outbox, so it
+    /// also ends after the page was left and opened again): says how.
+    pub(super) fn held_published(
+        &mut self,
+        item: &HeldItem,
+        result: &Result<HeldPublished, sync::Error>,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, error) = match result {
+            Ok(out) => published_text(item, out),
+            Err(sync::Error::MaybePosted(why)) => (
+                format!("May have reached Gerrit ({why}); it will be checked and finished"),
+                true,
+            ),
+            Err(e) => (format!("Not sent: {e}"), true),
+        };
+        if result.is_ok() {
+            // New votes and messages on the change.
+            self.reload(cx);
+        }
+        self.hint.say(text, error, cx, |p| &mut p.hint);
+        cx.notify();
     }
 
     /// Drops `row`'s item on the second ask.
@@ -358,8 +390,8 @@ impl ChangePage {
         let Some(item) = row.item() else {
             return;
         };
-        if self.confirm_held.as_ref() != Some(&item) {
-            self.arm_held(item, cx);
+        if self.confirm_held.as_ref() != Some(&(item.clone(), HeldAsk::Drop)) {
+            self.arm_held(item, HeldAsk::Drop, cx);
             let ask = match row {
                 HeldRow::Comment(_) => "Drop this comment? Press w d (or Drop) again",
                 HeldRow::Message(_) => "Drop this message? Press w d (or Drop) again",
@@ -409,15 +441,16 @@ impl ChangePage {
         self.hint.say("Copied", false, cx, |p| &mut p.hint);
     }
 
-    /// Asks about dropping `item`; the question expires after
-    /// [`DROP_ASK`], so a later `w d` asks again.
-    fn arm_held(&mut self, item: HeldItem, cx: &mut Context<Self>) {
-        self.confirm_held = Some(item.clone());
+    /// Asks about sending or dropping `item`; the question expires after
+    /// [`ASK`], so a later `w s` or `w d` asks again.
+    fn arm_held(&mut self, item: HeldItem, ask: HeldAsk, cx: &mut Context<Self>) {
+        let asked = (item, ask);
+        self.confirm_held = Some(asked.clone());
         self.remeasure(super::state::Block::Held);
         self.held_timer = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(DROP_ASK).await;
+            cx.background_executor().timer(ASK).await;
             this.update(cx, |this, cx| {
-                if this.confirm_held.as_ref() == Some(&item) {
+                if this.confirm_held.as_ref() == Some(&asked) {
                     this.disarm_held(cx);
                 }
             })
@@ -457,11 +490,16 @@ impl ChangePage {
             .map(|(i, row)| {
                 let item = row.item();
                 let is_selected = item.is_some() && item == selected;
-                let arm = item.is_some() && self.confirm_held == item;
+                let asked = |ask| {
+                    item.as_ref()
+                        .is_some_and(|i| self.confirm_held == Some((i.clone(), ask)))
+                };
+                let arm = asked(HeldAsk::Drop);
+                let arm_send = asked(HeldAsk::Send);
                 let publish = |label: String| {
                     let item = item.clone();
                     Button::new(("held-publish", i))
-                        .label(label)
+                        .label(if arm_send { "Send?".to_owned() } else { label })
                         .xsmall()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(r) = item.as_ref().and_then(|i| this.held_row_by_item(i)) {
@@ -776,7 +814,7 @@ mod tests {
 
     #[test]
     fn a_publish_says_what_happened() {
-        let row = HeldRow::Comment(draft(5));
+        let row = HeldItem::Comment(LocalDraftId(5));
         let out = |outcome| HeldPublished {
             patch_set: PatchSetNumber(3),
             votes: Vec::new(),

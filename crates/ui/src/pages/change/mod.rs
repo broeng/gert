@@ -342,11 +342,12 @@ pub struct ChangePage {
     held_setting: LocalApproval,
     /// The item the held card has selected; `None` is the first.
     held_cursor: Option<sync::HeldItem>,
-    /// The held item a first "drop" asked about.
-    confirm_held: Option<sync::HeldItem>,
+    /// The held item a first "send" or "drop" asked about.
+    confirm_held: Option<(sync::HeldItem, held::HeldAsk)>,
     /// Ends the drop question after a while.
     held_timer: Option<Task<()>>,
-    /// A publish or drop of a held item on its way.
+    /// A drop of a held item on its way (a publish runs on the outbox,
+    /// which outlives the page).
     held_task: Option<Task<()>>,
     /// The filter the user picked; `None` is the default for the threads.
     thread_filter: Option<ThreadFilter>,
@@ -478,6 +479,20 @@ impl ChangePage {
             .push(cx.subscribe(&comments, |this, _, ev, cx| match ev {
                 CommentsEvent::Changed => this.apply_threads(cx),
                 CommentsEvent::Unauthorized => cx.emit(ChangeEvent::Unauthorized),
+            }));
+        // A held publish (it runs on the outbox) says how it went here.
+        let outbox_entity = this.outbox.clone();
+        this._subs
+            .push(cx.subscribe(&outbox_entity, |this, _, ev, cx| {
+                if let outbox::OutboxEvent::HeldPublished {
+                    change,
+                    item,
+                    result,
+                } = ev
+                    && *change == this.number
+                {
+                    this.held_published(item, result, cx);
+                }
             }));
         let syncer = this.session.syncer().clone();
         this.task = Some(cx.spawn(async move |this, cx| {

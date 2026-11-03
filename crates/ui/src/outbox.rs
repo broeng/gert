@@ -11,19 +11,26 @@
 //! login page); a 403 and every other failure is recorded on the draft by
 //! `sync` and shown in its card, nothing more.
 //!
+//! It also runs the held card's publishes ([`DraftOutbox::publish_held`]):
+//! the outbox lives with the server's session, so a publish goes on when
+//! its page is left, and its outcome comes back as
+//! [`OutboxEvent::HeldPublished`] (the page of that change says it; the
+//! shell logs it otherwise).
+//!
 //! The outbox also owns the registry of [`ChangeComments`]: one entity per
 //! change, shared by the pages that show it (the change page and the diff
 //! pages of the same change), so a draft saved in one is in the other at the
 //! same moment. The registry holds them weakly: the entity goes away with
 //! the last page using it.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use gpui_kit::*;
 use model::{
-    ChangeDetail, ChangeNumber, DraftInput, Entry, LocalDraftId, PatchSetNumber, PatchSetRef,
+    ChangeDetail, ChangeNumber, DraftInput, Entry, LocalApproval, LocalDraftId, PatchSetNumber,
+    PatchSetRef,
 };
-use sync::{DraftCounts, DraftSave};
+use sync::{DraftCounts, DraftSave, HeldItem, HeldPublished};
 
 use crate::{
     comments::ChangeComments,
@@ -54,6 +61,13 @@ pub enum OutboxEvent {
     /// A delete of a draft of `change` was refused for the same reason
     /// (`store::DeleteOutcome::BeingSent`).
     DeleteBeingSent(ChangeNumber),
+    /// A publish of held item `item` of `change` ended (see
+    /// [`DraftOutbox::publish_held`]).
+    HeldPublished {
+        change: ChangeNumber,
+        item: HeldItem,
+        result: Arc<Result<HeldPublished, sync::Error>>,
+    },
 }
 
 pub struct DraftOutbox {
@@ -62,6 +76,8 @@ pub struct DraftOutbox {
     /// Drafts not on the server, over all changes (for the title bar).
     counts: DraftCounts,
     counts_task: Option<Task<()>>,
+    /// Held publishes on their way: they outlive the page that asked.
+    publishing: HashMap<(ChangeNumber, HeldItem), Task<()>>,
 }
 
 impl EventEmitter<OutboxEvent> for DraftOutbox {}
@@ -144,7 +160,58 @@ impl DraftOutbox {
             comments: HashMap::new(),
             counts: DraftCounts::default(),
             counts_task: None,
+            publishing: HashMap::new(),
         }
+    }
+
+    /// Publishes held item `item` of `change` onto its current patch set
+    /// `onto`, at the user's request (`sync::Syncer::publish_held`, with
+    /// the project's `local_approval` `setting`). Runs here, not on the
+    /// page, so leaving the page does not cancel it; the outcome comes as
+    /// [`OutboxEvent::HeldPublished`], after the listeners were told the
+    /// change moved. False (nothing done) if that item is on its way
+    /// already.
+    pub fn publish_held(
+        &mut self,
+        change: ChangeNumber,
+        onto: PatchSetNumber,
+        item: HeldItem,
+        setting: LocalApproval,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let key = (change, item.clone());
+        if self.publishing.contains_key(&key) {
+            return false;
+        }
+        let syncer = self.session.syncer().clone();
+        let task = cx.spawn({
+            let key = key.clone();
+            async move |this, cx| {
+                let items = [item.clone()];
+                let result = cx
+                    .background_spawn(async move {
+                        syncer.publish_held(change, onto, &items, setting).await
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.publishing.remove(&key);
+                    if let Err(e) = &result
+                        && is_unauthorized(e)
+                    {
+                        cx.emit(OutboxEvent::Unauthorized);
+                    }
+                    this.announce(change, cx);
+                    cx.emit(OutboxEvent::HeldPublished {
+                        change,
+                        item,
+                        result: Arc::new(result),
+                    });
+                })
+                .ok();
+            }
+        });
+        self.publishing.insert(key, task);
+        true
     }
 
     /// Counts the drafts and uploads the pending ones. Call it when the
@@ -686,6 +753,7 @@ pub(crate) mod tests {
                     .lock()
                     .expect("log")
                     .push(format!("delete {change}")),
+                OutboxEvent::HeldPublished { .. } => {}
             })
             .detach();
         });

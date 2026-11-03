@@ -535,6 +535,40 @@ impl Shell {
         }
     }
 
+    /// A held publish of server `key` ended (`DraftOutbox::publish_held`).
+    /// The page of that change says how (it listens itself); with another
+    /// page on screen it is logged. A consolidation run asked for while the
+    /// publish held the lease (and found it taken) runs now, and the
+    /// dashboard's local section is read again.
+    fn held_published(
+        &mut self,
+        key: &ServerKey,
+        change: ChangeNumber,
+        item: &sync::HeldItem,
+        result: &Result<sync::HeldPublished, sync::Error>,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.current_change() == Some((key.clone(), change))
+            && matches!(self.page, Page::Change(_));
+        if !shown {
+            match result {
+                Ok(out) => log::info!(
+                    "held item {item:?} of change {change} on {key} published: {:?}",
+                    out.outcome
+                ),
+                Err(e) => {
+                    log::warn!("publishing held item {item:?} of change {change} on {key}: {e}")
+                }
+            }
+        }
+        self.consolidate(key, Request::Now, cx);
+        if self.nav.current_server() == Some(key)
+            && let Page::List(p) = &self.page
+        {
+            p.update(cx, |p, cx| p.reload_local(cx));
+        }
+    }
+
     /// What a consolidation run of server `key` did: logged, and the pages
     /// follow. A refused login goes the usual way, and a lost connection
     /// marks the server offline until a refresh works again. The drafts and
@@ -963,6 +997,11 @@ impl Shell {
                             }
                         }
                     }
+                    OutboxEvent::HeldPublished {
+                        change,
+                        item,
+                        result,
+                    } => this.held_published(&owner, *change, item, result, cx),
                     OutboxEvent::Changed(_) => {}
                 },
             ));

@@ -226,6 +226,12 @@ fn a_held_vote_is_published_onto_the_current_patch_set(cx: &mut TestAppContext) 
     // Code-Review (drop-only), then Verified.
     f.chord(cx, "w n");
     f.chord(cx, "w s");
+    assert_eq!(
+        f.hint(cx).as_deref(),
+        Some("Publish this vote onto PS 3? Press w s (or the button) again")
+    );
+    assert!(f.review_posts().is_empty(), "asked first");
+    f.chord(cx, "w s");
     assert_eq!(f.hint(cx).as_deref(), Some("Vote published onto PS 3"));
     let posts = f.review_posts();
     assert_eq!(posts.len(), 1, "{posts:?}");
@@ -263,6 +269,7 @@ fn a_held_comment_is_posted_quoting_its_place_and_a_message_as_the_message(
         Some("a comment")
     );
     f.chord(cx, "w s");
+    f.chord(cx, "w s");
     assert_eq!(
         f.hint(cx).as_deref(),
         Some("Posted as a patch-set comment on PS 3")
@@ -278,6 +285,7 @@ fn a_held_comment_is_posted_quoting_its_place_and_a_message_as_the_message(
     assert!(posts[0].1.get("labels").is_none());
     // The message (now the last item).
     f.chord(cx, "w p");
+    f.chord(cx, "w s");
     f.chord(cx, "w s");
     assert_eq!(f.hint(cx).as_deref(), Some("Message published on PS 3"));
     let posts = f.review_posts();
@@ -300,6 +308,12 @@ fn a_merged_change_says_published_votes_are_post_submit_votes(cx: &mut TestAppCo
     assert!(visual.debug_bounds("held-closed-note").is_some());
     f.chord(cx, "w n");
     f.chord(cx, "w s");
+    assert_eq!(
+        f.hint(cx).as_deref(),
+        Some("Publish this vote onto PS 3? Press w s (or the button) again")
+    );
+    assert!(f.review_posts().is_empty(), "asked first");
+    f.chord(cx, "w s");
     assert_eq!(f.hint(cx).as_deref(), Some("Vote published onto PS 3"));
     let posts = f.review_posts();
     assert_eq!(posts.len(), 1);
@@ -319,4 +333,55 @@ fn an_approval_given_on_another_commit_is_drop_only_whatever_was_recorded(cx: &m
     assert!(f.hint(cx).is_some_and(|h| h.contains("only be dropped")));
     assert!(f.review_posts().is_empty());
     f.assert_no_local_in_bodies(&ck);
+}
+
+#[gpui_kit::test]
+fn a_publish_goes_on_when_the_page_is_left(cx: &mut TestAppContext) {
+    let (f, _ck) = held_page(cx, false);
+    // The outbox outlives the page (the shell keeps it).
+    let outbox = cx.update(|cx| f.page.read(cx).outbox.clone());
+    let ended = Arc::new(Mutex::new(Vec::new()));
+    let seen = ended.clone();
+    let _sub = cx.update(|cx| {
+        cx.subscribe(&outbox, move |_, ev: &crate::outbox::OutboxEvent, _| {
+            if let crate::outbox::OutboxEvent::HeldPublished { result, .. } = ev {
+                seen.lock().expect("log").push(result.is_ok());
+            }
+        })
+    });
+    f.chord(cx, "w n");
+    f.chord(cx, "w s");
+    // The second press, and the page is gone before anything ran.
+    for key in ["w", "s"] {
+        cx.update_window(f.window, |_, window, cx| window.press(key, cx))
+            .expect("press");
+    }
+    cx.update_window(f.window, |_, window, _| window.remove_window())
+        .expect("close");
+    let Fixture {
+        page, http, store, ..
+    } = f;
+    drop(page);
+    cx.run_until_parked();
+    assert_eq!(*ended.lock().expect("log"), [true]);
+    let posted = http
+        .sent()
+        .iter()
+        .filter(|r| r.method == "POST" && r.target.ends_with("/review"))
+        .count();
+    assert_eq!(posted, 1);
+    // The lease is free again: consolidation does not wait for it.
+    let now = Timestamp::now();
+    assert!(
+        store
+            .lock()
+            .expect("store")
+            .take_consolidation_lease(
+                SERVER,
+                "a run",
+                now,
+                now.checked_add(sync::CLAIM_STALE).expect("time")
+            )
+            .expect("lease")
+    );
 }
