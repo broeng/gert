@@ -1242,6 +1242,7 @@ fn main() {
             http: Arc::new(http),
             store: Arc::new(Mutex::new(store)),
             backend: Arc::new(Demo),
+            app_name: "review-demo".into(),
         },
         diff: LocalDiff {
             preferences: local,

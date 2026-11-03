@@ -20,6 +20,8 @@ use crate::{
 };
 
 pub(crate) const URL: &str = "https://g.example.com";
+/// The application name the test environments pass in.
+pub(crate) const APP: &str = "test-app";
 
 pub(crate) fn setup() -> ServerSetup {
     ServerSetup {
@@ -43,6 +45,7 @@ pub(crate) fn env_with(
         http: Arc::new(http.clone()),
         store: Arc::new(Mutex::new(store)),
         backend: Arc::new(FakeBackend::default()),
+        app_name: APP.into(),
     }
 }
 

@@ -239,6 +239,9 @@ pub struct Env {
     pub store: Arc<Mutex<Store>>,
     /// The global backend; a server's own is `Session::backend`.
     pub backend: Arc<dyn Backend>,
+    /// The application's name (`app`'s `APP_NAME`): every server's syncer
+    /// starts the tags of the reviews it posts for local changes with it.
+    pub app_name: String,
 }
 
 impl Env {
@@ -323,7 +326,8 @@ impl Session {
             backend: env.server_backend(&setup.key),
             base_url: setup.base_url.trim_end_matches('/').to_owned(),
             username: setup.username.clone(),
-            syncer: Syncer::new(client, env.store.clone(), setup.server),
+            syncer: Syncer::new(client, env.store.clone(), setup.server)
+                .with_app_name(&env.app_name),
             can_sync,
         })
     }

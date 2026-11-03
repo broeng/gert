@@ -78,6 +78,7 @@ fn startup() -> anyhow::Result<Prepared> {
                 keyring: Arc::new(Keyring),
                 store,
             }),
+            app_name: APP_NAME.into(),
         },
         servers,
         active,
