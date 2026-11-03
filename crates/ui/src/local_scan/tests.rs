@@ -752,3 +752,133 @@ fn scan_now_waits_for_the_checkout_to_open(cx: &mut TestAppContext) {
     let report = task.now_or_never().expect("answered").expect("a report");
     assert_eq!(report.inserted.len(), 1);
 }
+
+/// A search page for `query` over `store`, with a scanner that never runs
+/// a round (no session), focused.
+fn search_page(
+    cx: &mut TestAppContext,
+    store: Store,
+    query: &str,
+) -> (AnyWindowHandle, Entity<ChangeListPage>) {
+    let env = env_with(store, &RouteHttpClient::new());
+    let session = Session::new(&env, &setup(), None).expect("session");
+    let specs = vec![SavedQuery {
+        name: "Search".into(),
+        query: query.into(),
+    }];
+    let (window, page) = open(cx, |window, cx| {
+        let checkouts = cx.new(|_| Checkouts::new(Vec::new()));
+        let scanner = cx.new(|cx| LocalScanner::new(checkouts, cx));
+        let page = cx.new(|cx| {
+            let mut page = ChangeListPage::new(session, ListKind::Search, specs, None, true, cx);
+            page.set_local_scanner(scanner, cx);
+            page
+        });
+        let focus = page.read(cx).focus_handle_for_test();
+        window.focus(&focus, cx);
+        page
+    });
+    cx.run_until_parked();
+    (window, page)
+}
+
+/// A store with the cached results of `query` (change 1) and local rows:
+/// purely local ones on `main`, on `stable` and on an unknown branch, and a
+/// local version of Gerrit change 7.
+fn search_store(query: &str) -> Store {
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server id");
+    store
+        .save_query_page(server, query, &[summary(1)], false, ts())
+        .expect("save query");
+    let mut version = upsert(
+        "I4",
+        "Fix the version",
+        Some("main"),
+        LocalChangeState::Local,
+    );
+    if let LocalOp::Upsert(u) = &mut version {
+        u.gerrit_number = Some(ChangeNumber(7));
+    }
+    let ops = [
+        upsert(
+            "I1",
+            "Fix the scroll",
+            Some("main"),
+            LocalChangeState::Local,
+        ),
+        upsert(
+            "I2",
+            "Fix the stable scroll",
+            Some("stable"),
+            LocalChangeState::Local,
+        ),
+        upsert("I3", "Fix somewhere", None, LocalChangeState::Checking),
+        version,
+    ];
+    store
+        .reconcile_local(server, "p", &ops, ts())
+        .expect("reconcile");
+    store
+}
+
+#[gpui_kit::test]
+fn a_search_lists_the_local_changes_that_fit_it_first(cx: &mut TestAppContext) {
+    let query = "project:p branch:main fix";
+    let (window, page) = search_page(cx, search_store(query), query);
+    let rows = cx.update(|cx| {
+        page.read(cx)
+            .local_rows()
+            .iter()
+            .map(|c| (c.subject.clone(), c.number))
+            .collect::<Vec<_>>()
+    });
+    // Neither the other branch, nor the unknown one, nor a version of a
+    // Gerrit change.
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, "Fix the scroll");
+    assert!(rows[0].1.is_local());
+    // First: the selection starts on it, and `j` goes on to Gerrit's.
+    let selected = |cx: &mut TestAppContext| cx.update(|cx| page.read(cx).selected_number());
+    assert_eq!(selected(cx), Some(rows[0].1));
+    cx.update_window(window, |_, window, cx| {
+        use gpui_kit::test::TestWindowExt as _;
+        window.press("j", cx)
+    })
+    .expect("press");
+    assert_eq!(selected(cx), Some(ChangeNumber(1)));
+    // Drawn with the "local" chip, above the query's section.
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("local-chip-0").is_some());
+}
+
+#[gpui_kit::test]
+fn a_search_outside_the_subset_lists_no_local_changes(cx: &mut TestAppContext) {
+    for query in ["fix OR scroll", "-branch:stable", "message:fix"] {
+        let (_, page) = search_page(cx, search_store(query), query);
+        assert!(
+            cx.update(|cx| page.read(cx).local_rows().is_empty()),
+            "{query:?}"
+        );
+        assert_eq!(
+            cx.update(|cx| page.read(cx).selected_number()),
+            Some(ChangeNumber(1)),
+            "{query:?}"
+        );
+    }
+    // A plain word fits the three purely local changes.
+    let (_, page) = search_page(cx, search_store("fix"), "fix");
+    let mut subjects = cx.update(|cx| {
+        page.read(cx)
+            .local_rows()
+            .iter()
+            .map(|c| c.subject.clone())
+            .collect::<Vec<_>>()
+    });
+    subjects.sort();
+    assert_eq!(
+        subjects,
+        ["Fix somewhere", "Fix the scroll", "Fix the stable scroll"]
+    );
+}

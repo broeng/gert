@@ -1637,9 +1637,7 @@ impl Shell {
         let page = cx.new(|cx| ChangeListPage::new(session, kind, specs, restore, active, cx));
         let bookmarks = self.bookmarks();
         page.update(cx, |p, cx| p.set_bookmarks(bookmarks, cx));
-        if kind == ListKind::Dashboard
-            && let Some(scanner) = self.local_scanner(&owner, cx)
-        {
+        if let Some(scanner) = self.local_scanner(&owner, cx) {
             page.update(cx, |p, cx| p.set_local_scanner(scanner, cx));
         }
         self.page_subs.push(cx.subscribe_in(

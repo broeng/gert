@@ -1,6 +1,8 @@
 //! Dashboard and search results: lists of changes, cache first, then
-//! refreshed by polling. The dashboard of a signed-in server starts with
-//! the user's local changes (see `local_scan`), read from the store.
+//! refreshed by polling. On a signed-in server both start with the user's
+//! local changes (see `local_scan`), read from the store: all of them on
+//! the dashboard, and on a search page those that fit the query
+//! (`sync::local::search`).
 
 use std::time::{Duration, Instant};
 
@@ -16,7 +18,7 @@ use gpui_kit::*;
 use jiff::{Timestamp, tz::TimeZone};
 use model::{ChangeNumber, ChangeSummary, LocalChange, LocalChangeState};
 use store::CachedQuery;
-use sync::{PollPolicy, PollState};
+use sync::{PollPolicy, PollState, local::search::LocalQuery};
 
 use crate::{
     actions::*,
@@ -116,7 +118,7 @@ const W_CMTS: f32 = 36.;
 type Fetched = Result<(sync::QueryUpdate, Option<CachedQuery>), sync::Error>;
 
 /// The selection model's section of the local changes. The query sections
-/// follow it ([`query_section`]); it stays empty on search pages.
+/// follow it ([`query_section`]).
 const LOCAL: usize = 0;
 
 /// The selection model's section of query section `i`.
@@ -143,8 +145,9 @@ pub struct ChangeListPage {
     naming: Option<Entity<InputState>>,
     naming_sub: Option<Subscription>,
     why_not: Option<&'static str>,
-    /// The "Local changes" section, as the store has it (dashboard of a
-    /// signed-in server only). Hidden while empty.
+    /// The "Local changes" section, as the store has it (signed-in server
+    /// only; on a search page the rows that fit the query). Hidden while
+    /// empty.
     local: Vec<LocalChange>,
     local_scanner: Option<Entity<LocalScanner>>,
     local_task: Option<Task<()>>,
@@ -241,9 +244,10 @@ impl ChangeListPage {
         &self.local
     }
 
-    /// Shows the local changes of the server (the dashboard of a signed-in
-    /// server): reads them from the store now, again whenever `scanner`
-    /// changed them, and asks it for a round now and on the poll tick.
+    /// Shows the local changes of the server (a signed-in server's
+    /// dashboard, or the ones that fit a search): reads them from the
+    /// store now, again whenever `scanner` changed them, and asks it for a
+    /// round now and on the poll tick.
     pub fn set_local_scanner(&mut self, scanner: Entity<LocalScanner>, cx: &mut Context<Self>) {
         self.local_sub = Some(cx.subscribe(
             &scanner,
@@ -278,11 +282,30 @@ impl ChangeListPage {
 
     // ---- data ----
 
+    /// Reads the local changes from the store: all of them on the
+    /// dashboard, those that fit the query on a search page (none when the
+    /// query is outside the subset `sync::local::search` handles).
     fn load_local(&mut self, cx: &mut Context<Self>) {
         let syncer = self.session.syncer().clone();
+        let query = match self.kind {
+            ListKind::Dashboard => None,
+            ListKind::Search => match self.search_query().and_then(LocalQuery::parse) {
+                Some(q) => Some(q),
+                None => {
+                    self.local_task = None;
+                    return;
+                }
+            },
+        };
         self.local_task = Some(cx.spawn(async move |this, cx| {
             let rows = cx
-                .background_spawn(async move { syncer.dashboard_local_changes() })
+                .background_spawn(async move {
+                    let rows = syncer.dashboard_local_changes()?;
+                    Ok::<_, sync::Error>(match query {
+                        Some(q) => rows.into_iter().filter(|c| q.matches(c)).collect(),
+                        None => rows,
+                    })
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match rows {
@@ -964,7 +987,11 @@ impl ChangeListPage {
                 this.model.select_number(number);
                 cx.emit(ListEvent::Open(number));
             }))
-            .child(cell(W_NUM).child(local_chip(cx)))
+            .child(
+                cell(W_NUM)
+                    .debug_selector(|| format!("local-chip-{row}"))
+                    .child(local_chip(cx)),
+            )
             .child(
                 h_flex()
                     .flex_1()
