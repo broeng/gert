@@ -947,6 +947,33 @@ impl Store {
         tx.commit()?;
         Ok(removed)
     }
+
+    /// Deletes a local change that vanished from the checkout with unsent
+    /// data once Gerrit was asked and does not have it (the user decision
+    /// O1), with all its local data, as [`Store::delete_local_change`]
+    /// does. Only if it is still `Vanished` without a Gerrit change and no
+    /// post of it is in flight, checked in the same transaction: a change
+    /// whose commits came back meanwhile is not `Vanished` any more. False
+    /// otherwise.
+    pub fn delete_vanished_local_change(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+    ) -> Result<bool, Error> {
+        let tx = self.conn.transaction()?;
+        let Some(row) = load_change(&tx, server, change)? else {
+            return Ok(false);
+        };
+        if row.state != LocalChangeState::Vanished
+            || row.gerrit_number.is_some()
+            || posting(&tx, server, change)?
+        {
+            return Ok(false);
+        }
+        let removed = delete_change(&tx, server, change)?;
+        tx.commit()?;
+        Ok(removed)
+    }
 }
 
 /// Whether a consolidation post of local change `id` is in flight: a

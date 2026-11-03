@@ -42,7 +42,12 @@
 //! 2. **Lookup.** Local changes without a Gerrit change are looked up in
 //!    batches of up to 50 per project, by `project~branch~Change-Id` (each
 //!    part percent-encoded: Gerrit decodes them) when the target branch is
-//!    known, else by Change-Id. Not found: `Checking` becomes `Local`.
+//!    known, else by Change-Id. Not found: `Checking` becomes `Local`,
+//!    and a `Vanished` row (gone from the checkout, kept for its unsent
+//!    data) is deleted with its local data and logged (the user decision
+//!    O1), but only on a definite answer: the query succeeded, the
+//!    Change-Id was well-formed and the answer was not cut off. A failed
+//!    query or an undecided answer changes nothing.
 //!    Several hits with an unknown branch: `Ambiguous`, never
 //!    consolidated. A Change-Id Gerrit cannot be asked about (not `I` and
 //!    40 hex digits) is `Local` at once.
@@ -378,8 +383,9 @@ pub struct ConsolidateReport {
     pub ambiguous: Vec<LocalChangeId>,
     /// Rows of `not_found` and `ambiguous` (or with a Change-Id Gerrit
     /// cannot be asked about) whose state this run changed: `Checking`
-    /// became `Local`, or a row became `Ambiguous`. The others were looked
-    /// up as before and nothing about them moved.
+    /// became `Local`, a row became `Ambiguous`, or a `Vanished` row that
+    /// Gerrit does not have was deleted with its local data (O1). The
+    /// others were looked up as before and nothing about them moved.
     pub state_changed: Vec<LocalChangeId>,
     pub posts: Vec<PostReport>,
     /// Local versions that never reached Gerrit, ported or held (as
@@ -419,8 +425,8 @@ enum Lookup {
     /// The Change-Id is not one Gerrit can be asked about (nor one it
     /// would have taken in a push).
     Malformed,
-    /// Not decided: the answer may be incomplete. Nothing changes; LC5b
-    /// must not read this as "not on Gerrit" when it deletes vanished rows.
+    /// Not decided: the answer may be incomplete. Nothing changes; in
+    /// particular a vanished row is not deleted.
     Unknown,
 }
 
@@ -763,6 +769,28 @@ impl Syncer {
         for (row, lookup) in self.look_up(&to_look_up, run).await? {
             match lookup {
                 Lookup::Found(n) => found.push((row, n)),
+                Lookup::NotFound if row.state == LocalChangeState::Vanished => {
+                    // Gone from the checkout with unsent data, and Gerrit
+                    // does not have it (O1): it goes with its local data.
+                    // Only on a definite answer: the query succeeded, the
+                    // Change-Id was one Gerrit can be asked about and the
+                    // answer was not cut off (else the lookup is not
+                    // `NotFound`).
+                    run.report.not_found.push(row.id);
+                    if self
+                        .store()
+                        .delete_vanished_local_change(self.server, row.id)?
+                    {
+                        log::info!(
+                            "local change {} ({} in {}) vanished from the checkout and is not \
+                             on Gerrit: deleted with its unsent local review data",
+                            row.id.0,
+                            row.change_id,
+                            row.project
+                        );
+                        run.report.state_changed.push(row.id);
+                    }
+                }
                 Lookup::NotFound => {
                     run.report.not_found.push(row.id);
                     if self.set_state_if(

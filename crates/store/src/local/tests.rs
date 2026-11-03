@@ -1144,3 +1144,25 @@ fn versions_off_every_named_branch_are_marked_by_a_complete_scan() {
     assert_eq!(on(&s, "p"), [true, true]);
     let _ = row;
 }
+
+#[test]
+fn only_a_vanished_change_without_a_gerrit_change_is_deleted_as_vanished() {
+    let (mut s, id) = setup();
+    let a = add(&mut s, id, upsert("IA", None, &["a1"]));
+    let ps = s.local_patch_sets(id, a.id).unwrap();
+    s.create_pending_review(id, &review(&ps[0])).unwrap();
+    // Still local: kept.
+    assert!(!s.delete_vanished_local_change(id, a.id).unwrap());
+    s.set_local_change_state(id, a.id, LocalChangeState::Vanished)
+        .unwrap();
+    assert!(s.delete_vanished_local_change(id, a.id).unwrap());
+    assert!(s.local_change(id, a.id).unwrap().is_none());
+    assert!(s.pending_reviews(id, a.number).unwrap().is_empty());
+    // One with a Gerrit change is consolidation's to decide.
+    let mut u = upsert("IB", None, &["b1"]);
+    u.gerrit_number = Some(ChangeNumber(7));
+    u.state = Some(LocalChangeState::Vanished);
+    let b = add(&mut s, id, u);
+    assert!(!s.delete_vanished_local_change(id, b.id).unwrap());
+    assert!(s.local_change(id, b.id).unwrap().is_some());
+}

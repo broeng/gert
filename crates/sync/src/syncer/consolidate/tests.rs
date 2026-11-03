@@ -280,6 +280,17 @@ impl Fx {
         (row, versions)
     }
 
+    /// A local change with one version `sha` that vanished from the
+    /// checkout (it is kept only while it has unsent data, so give it some).
+    fn vanished(&self, change_id: &str, sha: &str) -> (LocalChange, Vec<LocalPatchSet>) {
+        let (row, v) = self.local(change_id, Some("main"), None, &[sha]);
+        self.syncer
+            .store()
+            .set_local_change_state(self.syncer.server, row.id, LocalChangeState::Vanished)
+            .unwrap();
+        (self.row(&row), v)
+    }
+
     fn draft(&self, row: &LocalChange, v: &LocalPatchSet, message: &str) -> Draft {
         self.syncer
             .save_draft_local(DraftSave::Create {
@@ -453,25 +464,34 @@ fn first_tag(f: &Fx) -> String {
 // ---- lookup ----
 
 #[test]
-fn not_found_makes_checking_local_and_leaves_vanished_alone() {
+fn not_found_makes_checking_local_and_deletes_a_vanished_change() {
     let f = fx();
     let (checking, _) = f.local(CID, Some("main"), None, &["l1"]);
     let other = "Iffffffffffffffffffffffffffffffffffffffff";
-    let (vanished, v) = f.local(other, Some("main"), None, &["l2"]);
-    // Kept while vanished: it has a draft.
-    f.draft(&vanished, &v[0], "keep me");
-    f.syncer
-        .store()
-        .set_local_change_state(f.syncer.server, vanished.id, LocalChangeState::Vanished)
-        .unwrap();
+    let (vanished, v) = f.vanished(other, "l2");
+    let r = f.review(&v[0], &[("Code-Review", 1)], "msg");
     f.query_finds(&[]);
     let report = f.run();
     assert!(report.ran && report.stopped.is_none(), "{report:?}");
     assert_eq!(report.not_found.len(), 2);
     assert_eq!(f.row(&checking).state, LocalChangeState::Local);
-    assert_eq!(f.row(&vanished).state, LocalChangeState::Vanished);
-    // Only the row that was checking changed state.
-    assert_eq!(report.state_changed, [checking.id]);
+    // O1: gone from the checkout, and Gerrit does not have it: deleted
+    // with its local data.
+    assert!(
+        f.syncer
+            .store()
+            .local_change(f.syncer.server, vanished.id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        f.syncer
+            .store()
+            .load_pending_review(f.syncer.server, r.id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(report.state_changed, [vanished.id, checking.id]);
     // One query for both, by triplet, in the project.
     let sent = f.http.routes.requested();
     assert_eq!(sent.len(), 1, "{sent:?}");
@@ -483,11 +503,64 @@ fn not_found_makes_checking_local_and_leaves_vanished_alone() {
     assert!(q.contains(&format!("change:\"p~main~{CID}\"")), "{q}");
     assert!(q.contains(&format!("change:\"p~main~{other}\"")), "{q}");
     assert!(q.contains(" OR ") && q.contains("project:\"p\""), "{q}");
-    f.assert_nothing_local(&["l1", "l2"]);
     // Looked up again: nothing changes state this time.
     let again = f.run();
-    assert_eq!(again.not_found.len(), 2);
+    assert_eq!(again.not_found.len(), 1);
     assert!(again.state_changed.is_empty(), "{again:?}");
+}
+
+#[test]
+fn a_vanished_change_stays_unless_gerrit_definitely_does_not_have_it() {
+    // A failed query.
+    let f = fx();
+    let (row, v) = f.vanished(CID, "l1");
+    let d = f.draft(&row, &v[0], "keep me");
+    f.http.queue("/changes/?q=", 400, "Invalid change format");
+    let report = f.run();
+    assert!(
+        report.not_found.is_empty() && report.errors.len() == 1,
+        "{report:?}"
+    );
+    assert_eq!(f.row(&row).state, LocalChangeState::Vanished);
+    // A lost connection.
+    f.http.queue("/changes/?q=", 0, "connection reset");
+    let report = f.run();
+    assert!(report.stopped.is_some(), "{report:?}");
+    assert_eq!(f.row(&row).state, LocalChangeState::Vanished);
+    // A cut-off answer.
+    let mut hit = summary_json(9, "other", "NEW");
+    hit["_more_changes"] = json!(true);
+    f.http
+        .routes
+        .route_json("/changes/?q=", &json!([hit]).to_string());
+    let report = f.run();
+    assert!(report.not_found.is_empty(), "{report:?}");
+    assert_eq!(f.row(&row).state, LocalChangeState::Vanished);
+    assert!(f.load_draft(&d).is_some());
+
+    // A Change-Id Gerrit cannot be asked about: never deleted.
+    let f = fx();
+    let (row, v) = f.vanished("Ixyz", "l1");
+    f.draft(&row, &v[0], "keep me");
+    let report = f.run();
+    assert!(report.not_found.is_empty(), "{report:?}");
+    assert_eq!(f.row(&row).state, LocalChangeState::Vanished);
+    assert!(f.http.routes.requested().is_empty());
+}
+
+#[test]
+fn a_vanished_change_that_gerrit_has_is_consolidated() {
+    let f = fx();
+    let (row, v) = f.vanished(CID, "s1");
+    let d = f.draft(&row, &v[0], "a comment");
+    f.query_finds(&[(7, "main", "NEW")]);
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.posts_apply(json!({}), 1);
+    let report = f.run();
+    assert_eq!(report.found.len(), 1, "{report:?}");
+    assert_eq!(f.load_draft(&d), None);
+    assert_eq!(f.http.posts().len(), 1);
+    assert_eq!(f.row(&row).state, LocalChangeState::Consolidated);
 }
 
 #[test]
