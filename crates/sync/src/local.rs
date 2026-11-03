@@ -475,5 +475,7 @@ pub fn plan_disabled(entries: &[LocalChangeEntry]) -> Vec<LocalOp> {
         .collect()
 }
 
+pub mod search;
+
 #[cfg(test)]
 mod tests;
