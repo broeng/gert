@@ -20,10 +20,11 @@ use super::{ChangeEvent, ChangePage, state::Block, view::patch_set_menu};
 use crate::{
     LocalDiff,
     diff_load::DiffSource,
-    nav::ChangeView,
+    nav::{ChangeView, Route},
     outbox::DraftOutbox,
-    session::{ProjectSettings, Session},
+    session::{ProjectSettings, ServerSetup, Session, Startup},
     settings::{DiffSettings, FileFilters, PageLayout},
+    shell::Shell,
     syntax_cache::SyntaxCache,
     testing::{detail, file},
     tests::{URL, env_with, open, setup},
@@ -1115,6 +1116,147 @@ fn a_vote_on_a_local_version_moves_on_along_the_chain_from_the_checkout(cx: &mut
         "{events:?}"
     );
     f.assert_nothing_local_sent(&[&s.first, &s.second, &s.third]);
+}
+
+#[gpui_kit::test]
+#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
+fn stepping_through_a_chain_from_the_checkout_carries_it_over(cx: &mut TestAppContext) {
+    let s = series();
+    let store = s.store();
+    let number = |id: &str| {
+        store
+            .local_changes_by_change_id(SERVER, id)
+            .expect("rows")
+            .remove(0)
+            .number
+    };
+    let (first, third) = (number("I1"), number("I3"));
+    let version_of_9 = store
+        .local_patch_sets_by_sha(SERVER, &s.second.clone().into())
+        .expect("versions")[0]
+        .number;
+    let http = RouteHttpClient::new();
+    let startup = Startup {
+        env: env_with(store, &http),
+        diff: Default::default(),
+        start_page: Default::default(),
+        filters: Vec::new(),
+        servers: vec![ServerSetup {
+            projects: vec![s.project()],
+            ..setup()
+        }],
+        active: None,
+    };
+    let (window, shell) = open(cx, |window, cx| {
+        cx.new(|cx| Shell::new(startup, window, cx))
+    });
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        shell.update(cx, |s, cx| {
+            s.navigate_for_test(Route::Change(third), window, cx)
+        })
+    })
+    .expect("navigate");
+    let page = |cx: &mut TestAppContext| {
+        cx.update(|cx| shell.read(cx).change_page_for_test().expect("change page"))
+    };
+    let chain = |cx: &mut TestAppContext, p: &Entity<ChangePage>| {
+        cx.update(|cx| p.read(cx).chain_for_test())
+    };
+    // The chain on the page on show.
+    let shown = |cx: &mut TestAppContext| {
+        let p = page(cx);
+        chain(cx, &p)
+    };
+    let adopted = |cx: &mut TestAppContext, p: &Entity<ChangePage>| {
+        cx.update(|cx| p.read(cx).chain_adopted_for_test())
+    };
+    // The page's own chain, once git has read it. `handed` says the page
+    // has one from the start, which must stay on show while git reads.
+    let own = |cx: &mut TestAppContext, handed: bool| {
+        let p = page(cx);
+        for _ in 0..100 {
+            let rows = chain(cx, &p);
+            assert!(!handed || !rows.is_empty(), "the chain vanished");
+            if !rows.is_empty() && !adopted(cx, &p) {
+                break;
+            }
+            cx.executor().allow_parking();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        assert!(!adopted(cx, &p), "the page read its own chain");
+        chain(cx, &p)
+    };
+    let press = |cx: &mut TestAppContext, key: &str| {
+        cx.update_window(window, |_, window, cx| window.press(key, cx))
+            .expect("press");
+    };
+    // The series with row `this` the change on show.
+    let rows = |this: usize| -> Vec<(String, String, bool)> {
+        [
+            ("local", "Third local"),
+            ("#9 local 1", "Second, amended"),
+            ("local", "First local"),
+            ("#7 PS 1", "On Gerrit"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (label, subject))| (label.to_owned(), subject.to_owned(), ix == this))
+        .collect()
+    };
+    let route = |cx: &mut TestAppContext| {
+        let p = page(cx);
+        cx.update(|cx| {
+            (
+                shell.read(cx).route().clone(),
+                p.read(cx).view_state().target,
+            )
+        })
+    };
+    assert_eq!(own(cx, false), rows(0));
+
+    // Down to the local version of 9: its page has the chain at once,
+    // with its own row on that version, before git has read it.
+    let before = page(cx);
+    press(cx, "shift-j");
+    let nine = page(cx);
+    assert_ne!(nine, before);
+    assert_eq!(
+        route(cx),
+        (Route::Change(ChangeNumber(9)), Some(version_of_9))
+    );
+    assert!(adopted(cx, &nine));
+    assert_eq!(chain(cx, &nine), rows(1));
+    // The chain read from git is the same.
+    assert_eq!(own(cx, true), rows(1));
+
+    // On to the local change, and back up: the row handed back opens 9 at
+    // its version again, not at its current Gerrit patch set.
+    press(cx, "shift-j");
+    assert_eq!(shown(cx), rows(2));
+    assert_eq!(route(cx), (Route::Change(first), None));
+    assert_eq!(own(cx, true), rows(2));
+    press(cx, "shift-k");
+    assert_eq!(shown(cx), rows(1));
+    assert_eq!(
+        route(cx),
+        (Route::Change(ChangeNumber(9)), Some(version_of_9))
+    );
+    assert_eq!(own(cx, true), rows(1));
+
+    // A change outside the chain starts afresh.
+    cx.update_window(window, |_, window, cx| {
+        shell.update(cx, |s, cx| {
+            s.navigate_for_test(Route::Change(ChangeNumber(70)), window, cx)
+        })
+    })
+    .expect("navigate");
+    assert!(shown(cx).is_empty());
+    let sent: Vec<String> = http.requested();
+    for sha in [&s.first, &s.second, &s.third] {
+        assert!(sent.iter().all(|r| !r.contains(sha.as_str())), "{sent:?}");
+    }
 }
 
 #[gpui_kit::test]

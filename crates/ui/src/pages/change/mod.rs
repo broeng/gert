@@ -1606,6 +1606,12 @@ impl ChangePage {
         })
     }
 
+    /// Whether the chain on show is the one the previous page handed over.
+    #[cfg(test)]
+    pub(crate) fn chain_adopted_for_test(&self) -> bool {
+        self.related.as_ref().is_some_and(|r| r.adopted)
+    }
+
     /// Fetches the votes of the open changes in the chain for their markers.
     fn load_related_summaries(
         &mut self,
