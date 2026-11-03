@@ -3,8 +3,9 @@
 //!
 //! The pages flip the mark in memory at once, then send the request on the
 //! background executor with [`send`]. `Syncer::set_reviewed` keeps the cache
-//! in step and puts it back when the request fails; the page does the same
-//! for what it shows. A 401 goes to the login flow, any other failure (a 403
+//! in step and puts it back when the request fails; for what the pages
+//! show, `FileList` does (to what the server has, with several requests
+//! for one mark on their way). A 401 goes to the login flow, any other failure (a 403
 //! included, which must not log the user out) becomes a short note.
 
 use model::{ChangeNumber, RevisionId};
