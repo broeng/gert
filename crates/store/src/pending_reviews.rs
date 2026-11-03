@@ -191,9 +191,37 @@ pub(crate) fn transition(
     Ok(true)
 }
 
+/// Deletes review `id` if nothing is left of it (no vote, no message) and
+/// it is pending, held or failed: an empty review has nothing to send,
+/// shows nowhere and must not keep its change open. Returns whether it
+/// went.
+pub(crate) fn drop_if_empty(
+    conn: &Connection,
+    server: ServerId,
+    id: PendingReviewId,
+) -> Result<bool, Error> {
+    let Some(r) = load(conn, server, id)? else {
+        return Ok(false);
+    };
+    let empty = r.labels.is_empty() && r.message_draft.is_none();
+    let open = matches!(
+        r.state,
+        PendingReviewState::Pending | PendingReviewState::Held | PendingReviewState::Failed
+    );
+    if !(empty && open) {
+        return Ok(false);
+    }
+    conn.execute(
+        "DELETE FROM pending_reviews WHERE server_id = ?1 AND id = ?2",
+        params![server.0, id.0],
+    )?;
+    Ok(true)
+}
+
 /// Applies `change` (see [`crate::ReviewStateChange`]) to a review of
 /// local change `owner`: the transition, then the votes it keeps and which
-/// of them may only be dropped. Returns whether it moved.
+/// of them may only be dropped. A review held or failed with nothing left
+/// is deleted ([`drop_if_empty`]). Returns whether it moved.
 pub(crate) fn apply_change(
     conn: &Connection,
     server: ServerId,
@@ -230,6 +258,12 @@ pub(crate) fn apply_change(
                 serde_json::to_string(&change.drop_only)?
             ],
         )?;
+    }
+    if matches!(
+        change.state,
+        PendingReviewState::Held | PendingReviewState::Failed
+    ) {
+        drop_if_empty(conn, server, change.review)?;
     }
     Ok(true)
 }
@@ -556,6 +590,9 @@ impl Store {
     ) -> Result<bool, Error> {
         let tx = self.conn.transaction()?;
         let moved = transition(&tx, server, id, None, from, to, note)?;
+        if moved && matches!(to, PendingReviewState::Held | PendingReviewState::Failed) {
+            drop_if_empty(&tx, server, id)?;
+        }
         tx.commit()?;
         Ok(moved)
     }
@@ -655,8 +692,10 @@ impl Store {
 
     /// Removes one label's vote from a review that is not being sent, when
     /// a newer review sets the same label and supersedes it. Not a new
-    /// vote: `voted_at` and the strategy stay. `None` if the review is gone
-    /// or `Sending`; a label it does not have changes nothing.
+    /// vote: `voted_at` and the strategy stay. A review left with neither
+    /// votes nor a message is deleted. `None` if the review is gone or
+    /// `Sending`; a label it does not have changes nothing. Returns the
+    /// review as it was left.
     pub fn remove_review_label(
         &mut self,
         server: ServerId,
@@ -675,6 +714,8 @@ impl Store {
                 "UPDATE pending_reviews SET labels = ?3 WHERE server_id = ?1 AND id = ?2",
                 params![server.0, id.0, serde_json::to_string(&review.labels)?],
             )?;
+            // Superseded entirely, without a message: nothing left of it.
+            drop_if_empty(&tx, server, id)?;
         }
         tx.commit()?;
         Ok(Some(review))

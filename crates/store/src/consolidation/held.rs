@@ -75,15 +75,7 @@ fn held_review(
 
 /// Deletes review `id` if nothing is left of it: no vote and no message.
 fn drop_if_empty(conn: &Connection, server: ServerId, id: PendingReviewId) -> Result<(), Error> {
-    if let Some(r) = pending_reviews::load(conn, server, id)?
-        && r.labels.is_empty()
-        && r.message_draft.is_none()
-    {
-        conn.execute(
-            "DELETE FROM pending_reviews WHERE server_id = ?1 AND id = ?2",
-            params![server.0, id.0],
-        )?;
-    }
+    pending_reviews::drop_if_empty(conn, server, id)?;
     Ok(())
 }
 

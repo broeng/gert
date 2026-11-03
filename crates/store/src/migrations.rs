@@ -494,6 +494,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE local_post_claims ADD COLUMN account_id INTEGER;
     ",
+    // v20 -> v21: held or failed pending reviews with neither votes nor a
+    // message have nothing to send and show nowhere, yet kept their local
+    // change open (and listed on the dashboard). Such reviews are deleted
+    // from now on; this removes those left from before.
+    "
+    DELETE FROM pending_reviews
+    WHERE state IN ('held', 'failed') AND labels = '{}'
+      AND NOT EXISTS (SELECT 1 FROM drafts WHERE drafts.pending_review_id = pending_reviews.id);
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

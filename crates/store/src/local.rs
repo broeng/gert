@@ -561,7 +561,9 @@ impl Store {
                          state = 'closed'
                          OR EXISTS (SELECT 1 FROM pending_reviews r
                              WHERE r.server_id = ?1 AND r.local_change_id = local_changes.id
-                               AND r.state IN ('held', 'failed'))
+                               AND r.state IN ('held', 'failed')
+                               AND (r.labels <> '{{}}' OR EXISTS (SELECT 1 FROM drafts m
+                                   WHERE m.pending_review_id = r.id)))
                          OR EXISTS (SELECT 1 FROM drafts d
                              WHERE d.server_id = ?1 AND d.held_reason IS NOT NULL
                                AND (d.reserved_by = local_changes.id

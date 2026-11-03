@@ -1692,3 +1692,69 @@ fn a_post_keeps_the_account_of_its_first_claim() {
     );
     assert_eq!(s.local_post_account(id, "other").unwrap(), None);
 }
+
+#[test]
+fn an_empty_review_is_never_held_and_goes_once_emptied() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, _) = setup();
+    // Held with its last vote superseded and no message: gone.
+    let r = review(&mut s, id, &v1);
+    s.set_pending_review_state(id, r.id, &[Pending], Held, Some("x"))
+        .unwrap();
+    assert!(s.drop_held_message(id, r.id).unwrap());
+    s.remove_review_label(id, r.id, "Code-Review").unwrap();
+    assert!(s.load_pending_review(id, r.id).unwrap().is_none());
+    // Empty when it would be held: deleted instead.
+    let empty = s
+        .create_pending_review(
+            id,
+            &NewPendingReview {
+                patch_set: v1.number,
+                labels: BTreeMap::new(),
+                strategy: LocalApproval::Exact,
+                message: String::new(),
+                unresolved: false,
+                created: ts(T1),
+                replaces_draft: None,
+            },
+        )
+        .unwrap();
+    s.set_pending_review_state(id, empty.id, &[Pending], Held, Some("x"))
+        .unwrap();
+    assert!(s.load_pending_review(id, empty.id).unwrap().is_none());
+    // Nor does a closed change hold one; the change settles.
+    let again = s
+        .create_pending_review(
+            id,
+            &NewPendingReview {
+                patch_set: v1.number,
+                labels: BTreeMap::new(),
+                strategy: LocalApproval::Exact,
+                message: " ".into(),
+                unresolved: false,
+                created: ts(T1),
+                replaces_draft: None,
+            },
+        )
+        .unwrap();
+    s.hold_closed_local_change(id, c.id, ChangeNumber(42), "change merged")
+        .unwrap()
+        .unwrap();
+    assert!(s.load_pending_review(id, again.id).unwrap().is_none());
+    assert!(
+        s.held_items(id, ChangeNumber(42))
+            .unwrap()
+            .reviews
+            .is_empty()
+    );
+    assert_eq!(
+        s.settle_local_change(id, c.id).unwrap(),
+        Some(LocalChangeState::Consolidated)
+    );
+    assert!(
+        s.dashboard_local_changes(id)
+            .unwrap()
+            .iter()
+            .all(|x| x.id != c.id)
+    );
+}

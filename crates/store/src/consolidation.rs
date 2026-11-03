@@ -48,6 +48,11 @@ use crate::{
 mod held;
 pub use held::HeldPublish;
 
+/// SQL: review `pending_reviews` (unaliased) has neither votes nor a
+/// message.
+pub(crate) const EMPTY_REVIEW: &str = "pending_reviews.labels = '{}'
+    AND NOT EXISTS (SELECT 1 FROM drafts m WHERE m.pending_review_id = pending_reviews.id)";
+
 /// A new place for a moved draft whose lines moved (ported).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftAnchor {
@@ -684,6 +689,15 @@ impl Store {
         // on the Gerrit change, where the held card looks.
         move_to_gerrit_number(&tx, server, change, gerrit)?;
         set_state(&tx, server, change, LocalChangeState::Closed)?;
+        // An empty pending review (no vote, no message) is nothing to hold.
+        tx.execute(
+            &format!(
+                "DELETE FROM pending_reviews
+                 WHERE server_id = ?1 AND local_change_id = ?2 AND state = 'pending'
+                   AND {EMPTY_REVIEW}"
+            ),
+            params![server.0, change.0],
+        )?;
         let reviews = tx.execute(
             "UPDATE pending_reviews SET state = 'held', held_reason = ?3, error = NULL,
                  drop_only = NULL
@@ -910,9 +924,12 @@ impl Store {
                 "server_id = ?1 AND change_number = ?2 AND held_reason IS NOT NULL",
                 &[&server.0, &number(gerrit)],
             )?,
+            // Not an empty one (from before they were deleted): it has
+            // nothing to show.
             reviews: pending_reviews::query(
                 &self.conn,
-                "r.server_id = ?1 AND r.change_number = ?2 AND r.state IN ('held', 'failed')",
+                "r.server_id = ?1 AND r.change_number = ?2 AND r.state IN ('held', 'failed')
+                 AND (r.labels <> '{}' OR d.id IS NOT NULL)",
                 &[&server.0, &number(gerrit)],
             )?,
         })
