@@ -1985,7 +1985,7 @@ fn a_vote_moves_on_to_the_open_child_in_the_chain() {
 
 #[test]
 fn a_vote_does_not_move_on_to_a_closed_child_or_what_is_no_change() {
-    use super::{ChainOpen::*, advance_row, more_row};
+    use super::{ChainOpen::*, advance_row};
     use model::ChangeStatus::*;
     let n = ChangeNumber;
     for status in [Merged, Abandoned, model::ChangeStatus::Unknown("X".into())] {
@@ -1995,15 +1995,12 @@ fn a_vote_does_not_move_on_to_a_closed_child_or_what_is_no_change() {
         ];
         assert_eq!(advance_row(&rows), None);
     }
-    // Another version of this change, a commit that is no change, and the
-    // row for commits left out.
+    // Another version of this change, and a commit that is no change.
     let rows = [
         chain_row(false, Some(Here(PatchSetNumber(2))), None),
         chain_row(true, None, None),
     ];
     assert_eq!(advance_row(&rows), None);
     let rows = [chain_row(false, None, None), chain_row(true, None, None)];
-    assert_eq!(advance_row(&rows), None);
-    let rows = [more_row(), chain_row(true, None, None)];
     assert_eq!(advance_row(&rows), None);
 }

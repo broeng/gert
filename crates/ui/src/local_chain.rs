@@ -21,20 +21,18 @@ use sync::{ChainCommit, Syncer};
 
 use crate::checkouts::{CheckoutState, Checkouts};
 
-/// Commits read on each side of the commit, at most.
-const LIMIT: usize = 25;
+/// Commits read on each side of the commit, at most. The chain shows all
+/// of them: the walk already ends at history a remote-tracking branch has
+/// (and the chain at the first Gerrit patch set below), so this only
+/// guards against a checkout without remote-tracking branches, whose
+/// whole history would otherwise be read.
+const GUARD: usize = 1000;
 
 /// A chain read from the checkout.
 #[derive(Clone, Debug, Default)]
 pub struct Chain {
     /// Newest first.
     pub entries: Vec<ChainEntry>,
-    /// More commits were built on the commit than the chain shows (the
-    /// ones nearest the branch tips are left out).
-    pub more_above: bool,
-    /// The chain goes on below the last entry: the limit ended it, not a
-    /// remote-tracking branch or a Gerrit patch set.
-    pub more_below: bool,
 }
 
 /// One commit of a chain read from the checkout and what it is.
@@ -61,7 +59,7 @@ pub async fn read(
         return None;
     };
     cx.background_spawn(async move {
-        let series = match repo.series(&sha, LIMIT) {
+        let series = match repo.series(&sha, GUARD) {
             Ok(Local::Available(s)) => s,
             Ok(Local::NotLocal(why)) => {
                 log::debug!("no local relation chain for {sha}: {why}");
@@ -78,6 +76,9 @@ pub async fn read(
             ancestors,
             more_ancestors,
         } = series;
+        if more_descendants || more_ancestors {
+            log::debug!("the relation chain of {sha} has more than {GUARD} commits on a side");
+        }
         let commits: Vec<CommitInfo> = descendants.into_iter().chain(ancestors).collect();
         let kinds = match syncer.classify_chain(&project, &commits) {
             Ok(k) => k,
@@ -86,15 +87,8 @@ pub async fn read(
                 return None;
             }
         };
-        let all = commits.len();
         let entries = cut(&sha, commits.into_iter().zip(kinds).collect());
-        // Cut at a Gerrit patch set: nothing more belongs to this chain.
-        let more_below = more_ancestors && entries.len() == all;
-        Some(Chain {
-            entries,
-            more_above: more_descendants,
-            more_below,
-        })
+        Some(Chain { entries })
     })
     .await
 }
@@ -112,9 +106,6 @@ pub struct Stack {
     /// The Gerrit changes whose patch sets are among those commits: the
     /// local ones go above them.
     pub on_gerrit: Vec<ChangeNumber>,
-    /// More commits were built on the patch set than were read (the ones
-    /// nearest the branch tips are left out).
-    pub more: bool,
 }
 
 /// What the checkout of `project` built on Gerrit patch set `sha` on its
@@ -138,7 +129,7 @@ pub async fn read_stack(
         return None;
     };
     cx.background_spawn(async move {
-        let series = match repo.series(&sha, LIMIT) {
+        let series = match repo.series(&sha, GUARD) {
             Ok(Local::Available(s)) => s,
             Ok(Local::NotLocal(why)) => {
                 log::debug!("no local commits on {sha}: {why}");
@@ -156,10 +147,10 @@ pub async fn read_stack(
                 return None;
             }
         };
-        let mut stack = Stack {
-            more: series.more_descendants,
-            ..Stack::default()
-        };
+        if series.more_descendants {
+            log::debug!("more than {GUARD} commits were built on {sha}");
+        }
+        let mut stack = Stack::default();
         for (commit, kind) in series.descendants.into_iter().zip(kinds) {
             match kind {
                 ChainCommit::Local { .. } | ChainCommit::LocalVersion { .. } => {

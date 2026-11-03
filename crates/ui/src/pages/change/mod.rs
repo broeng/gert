@@ -214,7 +214,7 @@ fn row_change(open: Option<ChainOpen>) -> Option<ChangeNumber> {
 /// above the change on show, its child, when it is another change (or a
 /// local version of one) and open. A row with Gerrit's status must be
 /// `New`; a local commit without one is open while it is on a branch.
-/// `None` at the tip, for a closed child, the row for commits left out, or
+/// `None` at the tip, for a closed child, a commit that is no change, or
 /// when the change is not in the chain.
 fn advance_row(rows: &[ChainRow]) -> Option<(ChangeNumber, Option<PatchSetNumber>)> {
     let at = rows.iter().position(|r| r.this)?;
@@ -230,18 +230,6 @@ fn advance_row(rows: &[ChainRow]) -> Option<(ChangeNumber, Option<PatchSetNumber
         ChainOpen::Change(n) => Some((n, None)),
         ChainOpen::At(n, ps) => Some((n, Some(ps))),
         ChainOpen::Here(_) => None,
-    }
-}
-
-/// The row that stands for commits a chain read from the checkout leaves
-/// out.
-fn more_row() -> ChainRow {
-    ChainRow {
-        label: "\u{2026}".to_owned(),
-        subject: "more commits not shown".to_owned(),
-        this: false,
-        open: None,
-        related: None,
     }
 }
 
@@ -1356,15 +1344,9 @@ impl ChangePage {
             })
             .unwrap_or(0);
         let mut ignored = HashMap::new();
-        let local: Vec<ChainRow> = stack
-            .more
-            .then(more_row)
+        let local: Vec<ChainRow> = entries
             .into_iter()
-            .chain(
-                entries
-                    .into_iter()
-                    .map(|e| self.git_chain_row(sha, e, &mut ignored)),
-            )
+            .map(|e| self.git_chain_row(sha, e, &mut ignored))
             .collect();
         rows.splice(at..at, local);
         rows
@@ -1483,13 +1465,6 @@ impl ChangePage {
             .entries
             .iter()
             .map(|e| self.git_chain_row(sha, e, &mut summaries))
-            .collect();
-        let rows: Vec<ChainRow> = chain
-            .more_above
-            .then(more_row)
-            .into_iter()
-            .chain(rows)
-            .chain(chain.more_below.then(more_row))
             .collect();
         // As for Gerrit's chain: the same rows again stay where the user
         // scrolled them.

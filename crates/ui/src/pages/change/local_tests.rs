@@ -1119,7 +1119,7 @@ fn a_vote_on_a_local_version_moves_on_along_the_chain_from_the_checkout(cx: &mut
 
 #[gpui_kit::test]
 #[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]
-fn a_long_chain_keeps_the_commits_nearest_and_says_there_are_more(cx: &mut TestAppContext) {
+fn a_long_chain_shows_every_commit(cx: &mut TestAppContext) {
     let repo = TestRepo::new();
     repo.commit("Base");
     for i in 0..26 {
@@ -1154,15 +1154,14 @@ fn a_long_chain_keeps_the_commits_nearest_and_says_there_are_more(cx: &mut TestA
     }
     let subjects: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
     let at = rows.iter().position(|r| r.2).expect("this change");
-    // 25 above, nearest first kept; the commit and 24 below it.
-    assert_eq!(rows.len(), 1 + 25 + 1 + 24 + 1, "{subjects:?}");
-    assert_eq!(rows[0].0, "\u{2026}");
-    assert_eq!(subjects[1], "Above 24");
+    // All 26 above, the commit, all 26 below and the base (no remote
+    // has it), with no row standing for commits left out.
+    assert_eq!(rows.len(), 26 + 1 + 26 + 1, "{subjects:?}");
+    assert_eq!(subjects[0], "Above 25");
     assert_eq!(subjects[at - 1], "Above 0");
     assert_eq!(subjects[at], "The change");
     assert_eq!(subjects[at + 1], "Below 25");
-    assert_eq!(subjects[rows.len() - 2], "Below 2");
-    assert_eq!(rows[rows.len() - 1].0, "\u{2026}");
+    assert_eq!(subjects[rows.len() - 1], "Base");
 }
 
 /// The relation chain of `f`'s page once it has `rows` rows (git runs on
