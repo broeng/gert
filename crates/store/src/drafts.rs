@@ -930,6 +930,36 @@ impl Store {
 
     // ---- reviewed marks ----
 
+    /// Whether `path` is marked reviewed in the cached file lists of patch
+    /// set `target`; `None` when none is cached.
+    pub fn reviewed_path(
+        &self,
+        server: ServerId,
+        change: ChangeNumber,
+        target: &RevisionId,
+        path: &str,
+    ) -> Result<Option<bool>, Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT reviewed_json FROM file_lists
+             WHERE server_id = ?1 AND change_number = ?2 AND target_sha = ?3",
+        )?;
+        let rows = stmt.query_map(params![server.0, number(change), target.as_str()], |r| {
+            r.get::<_, Option<String>>(0)
+        })?;
+        let mut any = None;
+        for json in rows {
+            let paths: Vec<String> = match json? {
+                Some(j) => serde_json::from_str(&j)?,
+                None => Vec::new(),
+            };
+            if paths.iter().any(|p| p == path) {
+                return Ok(Some(true));
+            }
+            any = Some(false);
+        }
+        Ok(any)
+    }
+
     /// Sets or clears a reviewed mark in every cached file list of the
     /// patch set `target` (the marks belong to the patch set, whatever
     /// base the list compares against). A list without marks yet is

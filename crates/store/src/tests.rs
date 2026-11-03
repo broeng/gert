@@ -558,6 +558,11 @@ fn two_servers_with_the_same_numbers_and_queries_do_not_mix() {
         s.load_file_list(b, &files_key).unwrap().unwrap().reviewed,
         Some(vec!["from-b".to_owned()])
     );
+    // Read back per server; unknown without a cached list.
+    let bbb: model::RevisionId = "bbb".into();
+    assert_eq!(s.reviewed_path(a, n, &bbb, "extra").unwrap(), Some(true));
+    assert_eq!(s.reviewed_path(b, n, &bbb, "extra").unwrap(), Some(false));
+    assert_eq!(s.reviewed_path(a, n, &"ccc".into(), "extra").unwrap(), None);
 }
 
 #[test]
