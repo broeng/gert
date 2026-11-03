@@ -22,7 +22,7 @@ mod syncer;
 pub use error::{Error, PendingDraft};
 pub use events::diff_change;
 pub use poll::{PollPolicy, PollState};
-pub use port::{NotLocalPath, PathMap, PortCommit, PortError, PortMaps, PortSource};
+pub use port::{HasCheckout, NotLocalPath, PathMap, PortCommit, PortError, PortMaps, PortSource};
 pub use syncer::{
     CLAIM_STALE, ChainCommit, CommentsView, ConsolidateOptions, ConsolidateReport,
     ConsolidationTiming, DraftCounts, DraftSave, FoundChange, NewChange, POST_DEADLINE, Ported,

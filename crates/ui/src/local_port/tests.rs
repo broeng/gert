@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use local_git::testutil::TestRepo;
 use model::{LocalApproval, RevisionId};
-use sync::{NotLocalPath, PathMap, PortError, PortSource};
+use sync::{HasCheckout, NotLocalPath, PathMap, PortError, PortSource};
 
 use super::*;
 
@@ -51,11 +51,13 @@ fn a_checkout_answers_commits_and_line_maps() {
     let opened = Repo::open(f.repo.path()).expect("open");
     for state in [CheckoutState::Opening, CheckoutState::Open(opened)] {
         let ports = CheckoutPorts::new(vec![checkout("p", f.repo.path(), state)]);
+        assert_eq!(ports.has_checkout("p"), HasCheckout::Yes);
         let c = ports
             .commit("p", &f.pushed)
             .expect("commit")
             .expect("there");
-        assert_eq!(c.parent.as_ref(), Some(&f.base));
+        assert_eq!(c.parents, std::slice::from_ref(&f.base));
+        assert!(!c.is_merge());
         assert_eq!(
             ports
                 .commit("p", &RevisionId("0".repeat(40)))
@@ -98,6 +100,11 @@ fn without_a_usable_checkout_there_is_none() {
         checkout("broken", &missing, CheckoutState::Opening),
         checkout("failed", f.repo.path(), CheckoutState::Failed(failed)),
     ]);
+    // Not configured at all; configured, but not usable now (before and
+    // after the run tried to open it).
+    assert_eq!(ports.has_checkout("unknown"), HasCheckout::NotConfigured);
+    assert_eq!(ports.has_checkout("failed"), HasCheckout::NotNow);
+    assert_eq!(ports.has_checkout("broken"), HasCheckout::Yes);
     for project in ["broken", "failed", "unknown"] {
         assert_eq!(ports.commit(project, &f.base), Err(PortError::NoCheckout));
         assert_eq!(
@@ -105,4 +112,5 @@ fn without_a_usable_checkout_there_is_none() {
             Err(PortError::NoCheckout)
         );
     }
+    assert_eq!(ports.has_checkout("broken"), HasCheckout::NotNow);
 }

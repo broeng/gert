@@ -1299,3 +1299,115 @@ fn comments_on_a_version_amended_before_upload_are_ported_through_the_checkout(
         assert!(!r.contains(amended.sha.as_str()), "{r}");
     }
 }
+
+#[gpui_kit::test]
+fn comments_on_an_amend_the_branch_was_reset_from_are_ported(cx: &mut TestAppContext) {
+    use model::{DraftInput, Location, PatchSetRef, Side};
+    use sync::DraftSave;
+
+    let mut f = fixture();
+    f.repo.write("a.txt", b"1\n2\n3\n4\n5\n");
+    f.repo.git(&["add", "-A"]);
+    f.repo.git(&["commit", "-q", "--amend", "--no-edit"]);
+    let pushed = f.repo.git(&["rev-parse", "HEAD"]);
+    let s = start(cx, &f, Some("u"));
+    let scanner = cx
+        .update(|cx| s.shell.read(cx).local_scan_for_test("test"))
+        .expect("a scanner");
+    let scan = |cx: &mut TestAppContext| {
+        let task = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
+        cx.run_until_parked();
+        task.now_or_never().expect("answered").expect("scanned");
+    };
+
+    // Amended (a line on top, line 2 changed), seen, and commented on.
+    f.repo.write("a.txt", b"0\n1\nTWO\n3\n4\n5\n");
+    f.repo.git(&["add", "-A"]);
+    f.repo.git(&["commit", "-q", "--amend", "--no-edit"]);
+    let amend = f.repo.git(&["rev-parse", "HEAD"]);
+    scan(cx);
+    let (row, _) = s.row();
+    let versions = s
+        .store
+        .lock()
+        .expect("store")
+        .local_patch_sets(SERVER, row.id)
+        .expect("versions");
+    let amended = versions
+        .iter()
+        .find(|v| v.sha.as_str() == amend)
+        .expect("the amend is a version")
+        .clone();
+    let syncer = cx.update(|cx| {
+        s.shell
+            .read(cx)
+            .session_for_test("test")
+            .map(|s| s.syncer().clone())
+            .expect("session")
+    });
+    let draft = |line: u32, message: &str| {
+        syncer
+            .save_draft_local(DraftSave::Create {
+                change: row.number,
+                patch_set: PatchSetRef {
+                    number: amended.number,
+                    sha: amended.sha.clone(),
+                },
+                input: DraftInput {
+                    path: "a.txt".into(),
+                    side: Side::Revision,
+                    parent: None,
+                    location: Location::Line(line),
+                    in_reply_to: None,
+                    message: message.into(),
+                    unresolved: true,
+                },
+            })
+            .expect("store")
+            .expect("draft")
+    };
+    let kept = draft(5, "on an unchanged line");
+    let changed = draft(3, "on a changed line");
+
+    // The user resets the branch to the first version and pushes that: the
+    // amend is on no branch any more and will never reach Gerrit.
+    f.repo.git(&["reset", "-q", "--hard", &pushed]);
+    scan(cx);
+    f.sha = pushed;
+    f.pushed();
+    f.http.routes.route_json(
+        &format!("/revisions/{}/files", f.sha),
+        &json!({"/COMMIT_MSG": {"status": "A"}, "a.txt": {"status": "A"}}).to_string(),
+    );
+    s.trigger(cx);
+
+    let posts = f.http.posts();
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    let (target, body) = &posts[0];
+    assert!(
+        target.contains(&format!("/changes/42/revisions/{}/review", f.sha)),
+        "{target}"
+    );
+    assert_eq!(
+        body["comments"]["a.txt"],
+        json!([{"side": "REVISION", "line": 4, "message": "on an unchanged line",
+                "unresolved": true}])
+    );
+    let store = s.store.lock().expect("store");
+    assert_eq!(store.load_draft(SERVER, kept.local_id).expect("load"), None);
+    let held = store
+        .load_draft(SERVER, changed.local_id)
+        .expect("load")
+        .expect("held");
+    assert!(
+        held.held_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("Line 3 of a.txt changed in PS 1")),
+        "{held:?}"
+    );
+    drop(store);
+    assert_no_local_number_sent(&f);
+    for r in f.http.routes.requested() {
+        assert!(!r.contains(&amend), "{r}");
+    }
+}

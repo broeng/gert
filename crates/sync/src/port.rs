@@ -13,8 +13,33 @@ use model::{LineMap, RevisionId};
 /// A commit as the checkout has it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortCommit {
-    /// Its first parent; `None` for a root commit.
-    pub parent: Option<RevisionId>,
+    /// Its parents, first parent first: none for a root commit, several
+    /// for a merge.
+    pub parents: Vec<RevisionId>,
+}
+
+impl PortCommit {
+    /// The first parent; `None` for a root commit.
+    pub fn parent(&self) -> Option<&RevisionId> {
+        self.parents.first()
+    }
+
+    pub fn is_merge(&self) -> bool {
+        self.parents.len() > 1
+    }
+}
+
+/// Whether a project has a checkout to port with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HasCheckout {
+    /// Configured, and open or about to be opened.
+    Yes,
+    /// Configured, but it cannot be used now (opening it failed): try
+    /// again later.
+    NotNow,
+    /// No checkout is configured for the project (any more): nothing of
+    /// it can ever be ported.
+    NotConfigured,
 }
 
 /// What the checkout says about one path between two commits.
@@ -61,6 +86,9 @@ pub enum PortError {
 
 /// The local checkouts, as far as porting needs them. Blocking.
 pub trait PortSource: Send + Sync {
+    /// Whether `project` has a checkout. Cheap: it starts nothing.
+    fn has_checkout(&self, project: &str) -> HasCheckout;
+
     /// Commit `sha` in the checkout of `project`; `None` when the checkout
     /// does not have it.
     fn commit(&self, project: &str, sha: &RevisionId) -> Result<Option<PortCommit>, PortError>;

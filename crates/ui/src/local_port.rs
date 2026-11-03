@@ -14,7 +14,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 use local_git::{Local, NotLocal, Repo};
 use model::RevisionId;
-use sync::{NotLocalPath, PathMap, PortCommit, PortError, PortMaps, PortSource};
+use sync::{HasCheckout, NotLocalPath, PathMap, PortCommit, PortError, PortMaps, PortSource};
 
 use crate::checkouts::{Checkout, CheckoutState};
 
@@ -82,11 +82,24 @@ impl CheckoutPorts {
 }
 
 impl PortSource for CheckoutPorts {
+    fn has_checkout(&self, project: &str) -> HasCheckout {
+        match self.projects.iter().find(|(name, _)| name == project) {
+            None => HasCheckout::NotConfigured,
+            Some((_, Source::Failed)) => HasCheckout::NotNow,
+            Some((_, Source::Open(_))) => HasCheckout::Yes,
+            Some((_, Source::Path(_))) => {
+                let opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
+                match opened.get(project) {
+                    Some(None) => HasCheckout::NotNow,
+                    _ => HasCheckout::Yes,
+                }
+            }
+        }
+    }
+
     fn commit(&self, project: &str, sha: &RevisionId) -> Result<Option<PortCommit>, PortError> {
         match self.repo(project)?.commit(sha) {
-            Ok(Local::Available(c)) => Ok(Some(PortCommit {
-                parent: c.parents.first().cloned(),
-            })),
+            Ok(Local::Available(c)) => Ok(Some(PortCommit { parents: c.parents })),
             Ok(Local::NotLocal(_)) => Ok(None),
             Err(e) => Err(PortError::Git(e.to_string())),
         }

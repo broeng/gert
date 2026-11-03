@@ -14,7 +14,9 @@
 //! - `/PATCHSET_LEVEL` always ports; `/COMMIT_MSG` maps through the two
 //!   commits' synthetic texts, as Gerrit builds them.
 //! - A comment on the parent side ports only when that side is unchanged:
-//!   the two parents have the same content for the file.
+//!   the two parents have the same content for the file, and neither
+//!   commit is a merge (Gerrit compares a merge with an auto-merge).
+//! - A reply stays on its thread's patch set and is never carried over.
 //! - Gerrit takes a comment only on a file that its patch set changes (or a
 //!   magic file such as `/COMMIT_MSG`) and refuses the whole post for any
 //!   other, so a comment whose file the target does not change is held.
@@ -49,6 +51,13 @@ pub(super) fn port_draft(
         parent: d.parent,
         location,
     };
+    if d.in_reply_to.is_some() {
+        // Replies stay on their thread's patch set and are uploaded as
+        // ordinary drafts; one here would answer a thread elsewhere.
+        return Err(
+            "A reply belongs to its thread's patch set and is not carried over.".to_owned(),
+        );
+    }
     if d.path == PATCHSET_LEVEL_PATH {
         return Ok(at(&d.path, d.location));
     }
@@ -69,6 +78,13 @@ pub(super) fn port_draft(
             let same = match maps.get(&d.path) {
                 Some(PathMap::Lines(m)) => {
                     m.is_identity() && m.target_path() == Some(d.path.as_str())
+                }
+                Some(PathMap::NotLocal(NotLocalPath::NotAFile)) => {
+                    return Err(format!(
+                        "The base side of {} in the local version is another file (renamed or \
+                         added there), so a comment on it is not carried over.",
+                        d.path
+                    ));
                 }
                 Some(PathMap::NotLocal(why)) => return Err(not_local(&d.path, why)),
                 None => false,

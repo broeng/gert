@@ -57,6 +57,10 @@ pub struct Syncer {
     /// Starts the tag of the reviews consolidation posts.
     app_name: Arc<str>,
     consolidation_timing: ConsolidationTiming,
+    /// When porting a local change's versions last failed (a checkout that
+    /// could not be opened, `git` failing): consolidation tries again only
+    /// after its slow re-check, not on every run.
+    port_failed: Arc<Mutex<std::collections::HashMap<model::LocalChangeId, Timestamp>>>,
 }
 
 impl Syncer {
@@ -68,6 +72,7 @@ impl Syncer {
             drafts_lock: Arc::default(),
             app_name: DEFAULT_APP_NAME.into(),
             consolidation_timing: ConsolidationTiming::default(),
+            port_failed: Arc::default(),
         }
     }
 

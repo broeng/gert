@@ -60,15 +60,19 @@
 //!    *exact* match) has its drafts and pending reviews moved onto that
 //!    patch set in one store transaction; moved drafts are reserved for
 //!    the post. In the same transaction, a version that is not a Gerrit
-//!    patch set and never will be (a version seen later is one, or the
+//!    patch set and never will be (a version seen later is one, the
+//!    version is on no named branch in the last complete scan, or the
 //!    change vanished from the checkout) is *ported*: through a
 //!    [`PortSource`] (the checkout), each of its drafts moves onto the
 //!    current patch set where its lines are unchanged (onto the newest
 //!    patch set in the checkout when the current one is not there), or is
 //!    held with the reason (see the `port` module); its pending reviews go
-//!    along. With no patch set in the checkout, everything is held. A
-//!    newer version that is not on Gerrit yet waits for its own patch set,
-//!    and without a port source or a checkout nothing is ported or held.
+//!    along. With no patch set in the checkout, or no checkout configured
+//!    for the project, everything is held. A newer version that is not on
+//!    Gerrit yet waits for its own patch set. Without a port source nothing
+//!    is ported or held; a checkout that cannot be used now (or `git`
+//!    failing) leaves the versions for a later try, after the slow
+//!    re-check.
 //! 6. **Send.** Per revision, the pending reviews in creation order, each
 //!    in one `POST …/review`: the reserved comments on that revision inline
 //!    (`comments`; the first post of a revision takes them all), the
@@ -158,7 +162,7 @@ use model::{
 use store::{Claimant, ConsolidationRewrite, LocalPost, PatchSetMove, ReviewStateChange};
 
 use super::Syncer;
-use crate::{Error, PortCommit, PortError, PortMaps, PortSource};
+use crate::{Error, HasCheckout, PortCommit, PortError, PortMaps, PortSource};
 
 mod port;
 
@@ -556,7 +560,9 @@ impl RowData {
     /// The versions whose data is ported now: not a patch set of the change
     /// (`on_gerrit` tells), with a draft that moves or a pending review on
     /// them, and superseded: a version seen later is a patch set of the
-    /// change, or the change vanished from the checkout. Only such a
+    /// change, the version was on no named branch in the last complete scan
+    /// (amended away, or the branch reset), or the change vanished from the
+    /// checkout. Only such a
     /// version "never reaches Gerrit"; a newer version that is not on
     /// Gerrit yet waits for its own patch set (its drafts say "sent when
     /// this version is on Gerrit"). In order of the versions.
@@ -579,6 +585,7 @@ impl RowData {
             })
             .filter(|v| {
                 vanished
+                    || !v.on_branch
                     || self
                         .versions
                         .iter()
@@ -1020,7 +1027,12 @@ impl Syncer {
             .versions
             .iter()
             .any(|v| v.gerrit_patch_set.is_none() && shas.contains(&&v.sha));
-        let port_work = run.options.port.is_some()
+        let port_work = run
+            .options
+            .port
+            .as_ref()
+            .is_some_and(|p| p.has_checkout(&row.project) != HasCheckout::NotNow)
+            && !self.port_backing_off(row.id)
             && !data
                 .to_port(
                     |sha| shas.contains(&sha),
@@ -1295,8 +1307,10 @@ impl Syncer {
     /// Each draft goes where [`port::port_draft`] says or is held with the
     /// reason; the pending reviews go along (their votes are decided when
     /// they are posted, see [`casts`]). With no patch set in the checkout,
-    /// everything is held. Without a port source or a checkout, or when
-    /// `git` fails, those versions stay as they are.
+    /// or no checkout configured for the project, everything is held.
+    /// Without a port source those versions stay as they are; with a
+    /// checkout that cannot be used now, or `git` failing, they stay too,
+    /// and the change is not tried again before the slow re-check.
     async fn port_plan(
         &self,
         row: &LocalChange,
@@ -1319,6 +1333,24 @@ impl Syncer {
         let Some(source) = run.options.port.clone() else {
             return Ok(plan);
         };
+        match source.has_checkout(&row.project) {
+            HasCheckout::Yes => {}
+            HasCheckout::NotNow => {
+                self.port_failed(row.id);
+                return Ok(plan);
+            }
+            HasCheckout::NotConfigured => {
+                let why = format!(
+                    "No checkout is configured for project {}, so this could not be carried \
+                     over from the local version.",
+                    row.project
+                );
+                for v in versions {
+                    plan.hold_version(row, detail, data, v, &why, run.options);
+                }
+                return Ok(plan);
+            }
+        }
         let (rev, commit) = match port_target(&*source, &row.project, detail) {
             Ok(Some(target)) => target,
             Ok(None) => {
@@ -1331,23 +1363,37 @@ impl Syncer {
                 }
                 return Ok(plan);
             }
-            Err(PortError::NoCheckout) => return Ok(plan),
             Err(e) => {
-                run.report
-                    .errors
-                    .push((row.id, format!("porting the local versions: {e}")));
+                self.port_failed(row.id);
+                if e != PortError::NoCheckout {
+                    run.report
+                        .errors
+                        .push((row.id, format!("porting the local versions: {e}")));
+                }
                 return Ok(plan);
             }
         };
-        // Gerrit takes comments only on the files its patch set changes.
-        let files = match self.client.get_files(number, &rev.sha, None).await {
-            Ok(files) => files,
-            Err(e) => {
-                let why = skip_or_stop(e.into())?;
-                run.report.errors.push((row.id, why));
-                return Ok(plan);
+        // Gerrit takes comments only on the files its patch set changes;
+        // only comments on files need the list.
+        let on_files = versions.iter().any(|v| {
+            data.on_versions
+                .iter()
+                .any(|d| d.patch_set == v.number && movable(d) && !d.path.starts_with('/'))
+        });
+        let files = if on_files {
+            match self.client.get_files(number, &rev.sha, None).await {
+                Ok(files) => files,
+                Err(e) => {
+                    let why = skip_or_stop(e.into())?;
+                    self.port_failed(row.id);
+                    run.report.errors.push((row.id, why));
+                    return Ok(plan);
+                }
             }
+        } else {
+            Vec::new()
         };
+        let mut failed = false;
         for v in versions {
             match port_version(&*source, row, v, rev, &commit, &files, data) {
                 Ok((m, keep)) => {
@@ -1364,14 +1410,52 @@ impl Syncer {
                     plan.moves.push(m);
                     plan.keep.extend(keep);
                 }
-                Err(PortError::NoCheckout) => {}
-                Err(e) => run
-                    .report
-                    .errors
-                    .push((row.id, format!("porting PS {}: {e}", v.number.0))),
+                Err(e) => {
+                    failed = true;
+                    if e != PortError::NoCheckout {
+                        run.report
+                            .errors
+                            .push((row.id, format!("porting PS {}: {e}", v.number.0)));
+                    }
+                }
             }
         }
+        if failed {
+            self.port_failed(row.id);
+        } else {
+            self.port_worked(row.id);
+        }
         Ok(plan)
+    }
+
+    /// Porting `change` failed in a way that may pass (a checkout that
+    /// could not be opened, `git` failing): it is tried again after the
+    /// slow re-check, not on every run.
+    fn port_failed(&self, change: LocalChangeId) {
+        self.port_failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(change, Timestamp::now());
+    }
+
+    fn port_worked(&self, change: LocalChangeId) {
+        self.port_failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&change);
+    }
+
+    /// Whether porting `change` failed less than the slow re-check ago.
+    fn port_backing_off(&self, change: LocalChangeId) -> bool {
+        let now = Timestamp::now();
+        let since = now
+            .checked_sub(self.consolidation_timing.slow_recheck)
+            .unwrap_or(now);
+        self.port_failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&change)
+            .is_some_and(|t| *t > since)
     }
 
     // ---- sending ----
@@ -2214,10 +2298,17 @@ fn port_version(
         .iter()
         .filter(|d| d.patch_set == v.number && movable(d))
         .collect();
+    // The paths the checkout is asked about: not those `port_draft` holds
+    // or carries over without a map.
     let paths = |side: Side| -> Vec<String> {
         let set: BTreeSet<&str> = drafts
             .iter()
-            .filter(|d| d.side == side && d.path != model::PATCHSET_LEVEL_PATH)
+            .filter(|d| d.side == side && d.in_reply_to.is_none())
+            .filter(|d| d.path != model::PATCHSET_LEVEL_PATH)
+            .filter(|d| {
+                side == Side::Revision
+                    || (d.path != model::COMMIT_MSG_PATH && d.parent.is_none_or(|p| p <= 1))
+            })
             .map(|d| d.path.as_str())
             .collect();
         set.into_iter().map(str::to_owned).collect()
@@ -2231,11 +2322,31 @@ fn port_version(
     let parent = if parent_paths.is_empty() {
         Ok(PortMaps::new())
     } else {
-        match (&v.parent_sha, &commit.parent) {
-            (Some(from), Some(to)) => {
-                side_maps(source.line_maps(&row.project, from, to, &parent_paths))?
-            }
-            _ => Err("A root commit has no base side to carry a comment over to.".to_owned()),
+        match source.commit(&row.project, &v.sha)? {
+            None => Err(format!(
+                "The local version cannot be compared with the patch set: commit {} is not \
+                 in the checkout.",
+                v.sha.short(12)
+            )),
+            Some(from) if from.is_merge() || commit.is_merge() => Err(
+                "Comments on the base side of a merge commit are not carried over: Gerrit \
+                 compares a merge with an auto-merge."
+                    .to_owned(),
+            ),
+            Some(from) => match (from.parent(), commit.parent()) {
+                // The very same base: every file is the same there.
+                (Some(a), Some(b)) if a == b => Ok(parent_paths
+                    .iter()
+                    .map(|p| {
+                        let same = model::LineMap::identity(p.clone(), u32::MAX);
+                        (p.clone(), crate::PathMap::Lines(same))
+                    })
+                    .collect()),
+                (Some(a), Some(b)) => {
+                    side_maps(source.line_maps(&row.project, a, b, &parent_paths))?
+                }
+                _ => Err("A root commit has no base side to carry a comment over to.".to_owned()),
+            },
         }
     };
     let mut moved = Vec::new();
@@ -2656,13 +2767,14 @@ fn held_reason(
 }
 
 /// Whether `value` is an approval of `label` on the target change: the
-/// label's highest value, when that is positive.
+/// label's highest value, when that is positive, or more (a vote given
+/// with borrowed labels whose range is wider than the change's).
 fn is_approval(detail: &ChangeDetail, label: &str, value: i32) -> bool {
     detail
         .label_values
         .get(label)
         .and_then(|values| values.iter().map(|v| v.value).max())
-        .is_some_and(|max| max > 0 && value == max)
+        .is_some_and(|max| max > 0 && value >= max)
 }
 
 /// "Code-Review +2, Verified -1".

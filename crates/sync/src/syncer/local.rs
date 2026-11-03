@@ -83,7 +83,15 @@ impl Syncer {
         } else {
             plan_disabled(&entries)
         };
-        Ok(store.reconcile_local(self.server, project, &ops, now)?)
+        let report = store.reconcile_local(self.server, project, &ops, now)?;
+        if enabled && scan.is_complete() {
+            // Under the same store lock: which versions are still on a
+            // named branch, for porting the ones that are not.
+            let on_branch: Vec<RevisionId> =
+                scan.commits.iter().map(|c| c.commit.sha.clone()).collect();
+            store.mark_local_versions_on_branch(self.server, project, &on_branch)?;
+        }
+        Ok(report)
     }
 
     /// A hash of everything [`Syncer::reconcile_local`] reads from the
