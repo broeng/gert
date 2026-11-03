@@ -15,7 +15,13 @@
 //! A post is claimed first ([`Store::claim_local_post`]): its drafts and
 //! its review get the post's nonce, which is also in the review's tag, so
 //! after a crash [`Store::unfinished_local_posts`] names the posts to check
-//! against the change's messages before posting again.
+//! against the change's messages before posting again. The claim also
+//! names the run that made it and when (`local_post_claims`): a later run
+//! recovers only the posts of runs that are gone and that are too old to
+//! still be in flight ([`Store::recoverable_local_posts`],
+//! [`Store::adopt_local_post`]). One run per server at a time holds the
+//! consolidation lease ([`Store::take_consolidation_lease`]), also across
+//! processes sharing the database.
 //!
 //! The rewrite moves exactly what it is told. Anything created after the
 //! run's snapshot stays where it is and counts as unsent, so the change is
@@ -26,6 +32,7 @@ use std::collections::HashSet;
 use model::{
     ChangeNumber, Draft, LocalChange, LocalChangeId, LocalChangeState, LocalDraftId, Location,
     PatchSetNumber, PatchSetRef, PendingReview, PendingReviewId, PendingReviewState, Side,
+    Timestamp,
 };
 use rusqlite::params;
 
@@ -35,6 +42,7 @@ use crate::{
         has_unsent, load_change, load_patch_sets, move_to_gerrit_number, query_changes, set_state,
     },
     number, pending_reviews,
+    review_cache::millis,
 };
 
 /// A new place for a moved draft whose lines moved (ported).
@@ -133,6 +141,14 @@ pub struct LocalPost {
     /// except the message drafts of its other reviews, each now carrying
     /// the post's nonce. In creation order.
     pub drafts: Vec<Draft>,
+}
+
+/// Who claims a consolidation post, and when: the run's owner token and
+/// the time of the claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Claimant<'a> {
+    pub owner: &'a str,
+    pub at: Timestamp,
 }
 
 /// What the held card of a Gerrit change shows.
@@ -345,13 +361,15 @@ impl Store {
     /// Claiming again with the same nonce returns the same post (a retry
     /// after a crash). `None`, writing nothing, if the change is gone, if
     /// a draft or the review is claimed under another nonce, or if the
-    /// review is not the change's or in none of the states `from`.
+    /// review is not the change's or in none of the states `from`. The
+    /// claim records `by` (see [`Store::recoverable_local_posts`]).
     pub fn claim_local_post(
         &mut self,
         server: ServerId,
         change: LocalChangeId,
         review: Option<(PendingReviewId, &[PendingReviewState])>,
         nonce: &str,
+        by: &Claimant<'_>,
     ) -> Result<Option<LocalPost>, Error> {
         let tx = self.conn.transaction()?;
         if load_change(&tx, server, change)?.is_none() {
@@ -399,11 +417,102 @@ impl Store {
             params![server.0, change.0, review_id, nonce],
         )?;
         let drafts = crate::drafts::query(&tx, mine, &[&server.0, &change.0, &review_id])?;
+        record_claim(&tx, server, change, nonce, by)?;
         tx.commit()?;
         Ok(Some(LocalPost {
             review: claimed,
             drafts,
         }))
+    }
+
+    /// Takes over the post claimed under `nonce` for recovery: only if no
+    /// claim records it, or its claim is `by.owner`'s, or older than
+    /// `stale_before` (its run is gone and its request cannot still be in
+    /// flight). Records `by` as the claimant and returns the post as
+    /// claimed ([`Store::local_post`]), in one transaction. `None`,
+    /// writing nothing, otherwise or if nothing carries the nonce.
+    pub fn adopt_local_post(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        nonce: &str,
+        by: &Claimant<'_>,
+        stale_before: Timestamp,
+    ) -> Result<Option<LocalPost>, Error> {
+        let tx = self.conn.transaction()?;
+        let live: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM local_post_claims
+                 WHERE server_id = ?1 AND nonce = ?2 AND owner <> ?3 AND claimed_ms >= ?4)",
+            params![server.0, nonce, by.owner, millis(stale_before)],
+            |r| r.get(0),
+        )?;
+        if live {
+            return Ok(None);
+        }
+        let Some(post) = read_post(&tx, server, change, nonce)? else {
+            return Ok(None);
+        };
+        record_claim(&tx, server, change, nonce, by)?;
+        tx.commit()?;
+        Ok(Some(post))
+    }
+
+    /// The unfinished posts ([`Store::unfinished_local_posts`]) that a run
+    /// of `owner` may recover: those no claim records (claimed before
+    /// claims named their run) and those claimed by another run before
+    /// `stale_before`. A younger claim of another run may still be in
+    /// flight. Sorted, without duplicates.
+    pub fn recoverable_local_posts(
+        &self,
+        server: ServerId,
+        owner: &str,
+        stale_before: Timestamp,
+    ) -> Result<Vec<(LocalChangeId, String)>, Error> {
+        let mut out = Vec::new();
+        for (change, nonce) in self.unfinished_local_posts(server)? {
+            let live: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM local_post_claims
+                     WHERE server_id = ?1 AND nonce = ?2
+                       AND (owner = ?3 OR claimed_ms >= ?4))",
+                params![server.0, nonce, owner, millis(stale_before)],
+                |r| r.get(0),
+            )?;
+            if !live {
+                out.push((change, nonce));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Takes the server's consolidation lease for `owner` until `until`, if
+    /// no other owner holds it past `now`; renews it if `owner` holds it.
+    /// One statement, so two processes on one database cannot both get it.
+    /// Returns whether `owner` holds it now.
+    pub fn take_consolidation_lease(
+        &mut self,
+        server: ServerId,
+        owner: &str,
+        now: Timestamp,
+        until: Timestamp,
+    ) -> Result<bool, Error> {
+        let n = self.conn.execute(
+            "INSERT INTO consolidation_leases (server_id, owner, expires_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT (server_id) DO UPDATE
+                 SET owner = excluded.owner, expires_ms = excluded.expires_ms
+                 WHERE consolidation_leases.owner = excluded.owner
+                    OR consolidation_leases.expires_ms <= ?4",
+            params![server.0, owner, millis(until), millis(now)],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Gives up `owner`'s consolidation lease; another owner's stays.
+    pub fn end_consolidation_lease(&mut self, server: ServerId, owner: &str) -> Result<(), Error> {
+        self.conn.execute(
+            "DELETE FROM consolidation_leases WHERE server_id = ?1 AND owner = ?2",
+            params![server.0, owner],
+        )?;
+        Ok(())
     }
 
     /// The post of local change `change` claimed under `nonce`, as it is
@@ -418,26 +527,7 @@ impl Store {
         change: LocalChangeId,
         nonce: &str,
     ) -> Result<Option<LocalPost>, Error> {
-        if load_change(&self.conn, server, change)?.is_none() {
-            return Ok(None);
-        }
-        let review = pending_reviews::query(
-            &self.conn,
-            "r.server_id = ?1 AND r.local_change_id = ?2 AND r.state = 'sending'
-             AND r.nonce = ?3",
-            &[&server.0, &change.0, &nonce],
-        )?
-        .into_iter()
-        .next();
-        let drafts = crate::drafts::query(
-            &self.conn,
-            "server_id = ?1 AND reserved_by = ?2 AND posting_nonce = ?3",
-            &[&server.0, &change.0, &nonce],
-        )?;
-        if review.is_none() && drafts.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(LocalPost { review, drafts }))
+        read_post(&self.conn, server, change, nonce)
     }
 
     /// Gives up a claimed post that was not sent (the server refused it, or
@@ -451,11 +541,10 @@ impl Store {
         change: LocalChangeId,
         nonce: &str,
     ) -> Result<usize, Error> {
-        Ok(self.conn.execute(
-            "UPDATE drafts SET posting_nonce = NULL
-             WHERE server_id = ?1 AND reserved_by = ?2 AND posting_nonce = ?3",
-            params![server.0, change.0, nonce],
-        )?)
+        let tx = self.conn.transaction()?;
+        let n = release_drafts(&tx, server, change, nonce)?;
+        tx.commit()?;
+        Ok(n)
     }
 
     /// The consolidation posts that were claimed and not finished or
@@ -481,12 +570,12 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Records a successful consolidation post, in one transaction: removes
-    /// the posted drafts (`(id, version)` as they were sent) whose version
-    /// is unchanged, and applies the review states. A draft edited while
-    /// the post was in flight stays reserved, so the next post sends it;
-    /// the post's claim on the change's drafts is cleared (see
-    /// [`Store::claim_local_post`]).
+    /// Records a successful consolidation post claimed under `nonce`, in
+    /// one transaction: removes the posted drafts (`(id, version)` as they
+    /// were sent) whose version is unchanged, and applies the review
+    /// states. The post's claim is cleared (see
+    /// [`Store::claim_local_post`]), so its drafts that were not posted (on
+    /// another revision) are free for the next post.
     /// Only the change's own drafts (reserved for it, its reviews' message
     /// drafts, or held on its versions) are removed. `None`, writing
     /// nothing, if the change is gone.
@@ -494,6 +583,7 @@ impl Store {
         &mut self,
         server: ServerId,
         change: LocalChangeId,
+        nonce: &str,
         posted: &[(LocalDraftId, u32)],
         review_states: &[ReviewStateChange],
     ) -> Result<Option<FinishReport>, Error> {
@@ -524,13 +614,8 @@ impl Store {
                 report.drafts_kept += 1;
             }
         }
-        // What stays (edited while the post was in flight) is free for the
-        // next post.
-        tx.execute(
-            "UPDATE drafts SET posting_nonce = NULL
-             WHERE server_id = ?1 AND reserved_by = ?2 AND posting_nonce IS NOT NULL",
-            params![server.0, change.0],
-        )?;
+        // What stays is free for the next post.
+        release_drafts(&tx, server, change, nonce)?;
         for s in review_states {
             if pending_reviews::transition(
                 &tx,
@@ -592,6 +677,73 @@ impl Store {
         }
         Ok(out)
     }
+}
+
+/// The post claimed under `nonce`: the review being sent under it and the
+/// drafts carrying it. `None` if the change is gone or nothing carries it.
+fn read_post(
+    conn: &rusqlite::Connection,
+    server: ServerId,
+    change: LocalChangeId,
+    nonce: &str,
+) -> Result<Option<LocalPost>, Error> {
+    if load_change(conn, server, change)?.is_none() {
+        return Ok(None);
+    }
+    let review = pending_reviews::query(
+        conn,
+        "r.server_id = ?1 AND r.local_change_id = ?2 AND r.state = 'sending'
+         AND r.nonce = ?3",
+        &[&server.0, &change.0, &nonce],
+    )?
+    .into_iter()
+    .next();
+    let drafts = crate::drafts::query(
+        conn,
+        "server_id = ?1 AND reserved_by = ?2 AND posting_nonce = ?3",
+        &[&server.0, &change.0, &nonce],
+    )?;
+    if review.is_none() && drafts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(LocalPost { review, drafts }))
+}
+
+/// Records (or moves) the claim of the post under `nonce` to `by`.
+fn record_claim(
+    conn: &rusqlite::Connection,
+    server: ServerId,
+    change: LocalChangeId,
+    nonce: &str,
+    by: &Claimant<'_>,
+) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO local_post_claims (server_id, nonce, local_change_id, owner, claimed_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (server_id, nonce) DO UPDATE
+             SET owner = excluded.owner, claimed_ms = excluded.claimed_ms",
+        params![server.0, nonce, change.0, by.owner, millis(by.at)],
+    )?;
+    Ok(())
+}
+
+/// Clears the claim under `nonce`: its record and the nonce on the
+/// change's drafts. Returns how many drafts were released.
+fn release_drafts(
+    conn: &rusqlite::Connection,
+    server: ServerId,
+    change: LocalChangeId,
+    nonce: &str,
+) -> Result<usize, Error> {
+    conn.execute(
+        "DELETE FROM local_post_claims WHERE server_id = ?1 AND nonce = ?2",
+        params![server.0, nonce],
+    )?;
+    Ok(conn.execute(
+        "UPDATE drafts SET posting_nonce = NULL
+         WHERE server_id = ?1 AND reserved_by = ?2 AND posting_nonce = ?3",
+        params![server.0, change.0, nonce],
+    )?)
 }
 
 /// `(patch set, sealed, reserved or held)` of a draft of `server`.

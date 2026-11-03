@@ -372,6 +372,10 @@ fn delete_change(conn: &Connection, server: ServerId, id: LocalChangeId) -> Resu
         params![server.0, synthetic(id), id.0],
     )?;
     conn.execute(
+        "DELETE FROM local_post_claims WHERE server_id = ?1 AND local_change_id = ?2",
+        params![server.0, id.0],
+    )?;
+    conn.execute(
         "DELETE FROM local_patch_sets WHERE server_id = ?1 AND local_change_id = ?2",
         params![server.0, id.0],
     )?;

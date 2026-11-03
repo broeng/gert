@@ -697,6 +697,7 @@ impl Syncer {
                     row.id,
                     Some((r.id, &[PendingReviewState::Pending])),
                     &nonce,
+                    &self.claimant(),
                 )?;
                 if let Some(post) = claimed {
                     self.post_claimed(row, number, detail, rev, post, &nonce, options, report)
@@ -705,9 +706,13 @@ impl Syncer {
             }
             if !self.postable_comments(row.id, Some(ps))?.is_empty() {
                 let nonce = new_nonce();
-                let claimed = self
-                    .store()
-                    .claim_local_post(self.server, row.id, None, &nonce)?;
+                let claimed = self.store().claim_local_post(
+                    self.server,
+                    row.id,
+                    None,
+                    &nonce,
+                    &self.claimant(),
+                )?;
                 if let Some(post) = claimed {
                     self.post_claimed(row, number, detail, rev, post, &nonce, options, report)
                         .await?;
@@ -817,7 +822,7 @@ impl Syncer {
             if let Some(s) = &settled {
                 entry.outcome = s.outcome.clone();
             }
-            self.settle(row, &post, &parts.posted, settled)?;
+            self.settle(row, &post, nonce, &parts.posted, settled)?;
             if review.is_some() {
                 report.posts.push(entry);
             }
@@ -883,7 +888,7 @@ impl Syncer {
                 if let Some(s) = &settled {
                     entry.outcome = s.outcome.clone();
                 }
-                self.settle(row, &post, &parts.posted, settled)?;
+                self.settle(row, &post, nonce, &parts.posted, settled)?;
                 report.posts.push(entry);
                 Ok(())
             }
@@ -920,6 +925,7 @@ impl Syncer {
         &self,
         row: &LocalChange,
         post: &LocalPost,
+        nonce: &str,
         posted: &[(LocalDraftId, u32)],
         settled: Option<Settled>,
     ) -> Result<(), Problem> {
@@ -936,7 +942,7 @@ impl Syncer {
                 note: settled.as_ref().and_then(|s| s.note.clone()),
             })
             .collect();
-        store.finish_local_post(self.server, row.id, posted, &states)?;
+        store.finish_local_post(self.server, row.id, nonce, posted, &states)?;
         if let (Some(review), Some(s)) = (&post.review, &settled) {
             for label in review.labels.keys() {
                 if !s.keep.iter().any(|(l, _)| l == label) {
@@ -1011,6 +1017,14 @@ impl Syncer {
             }
         }
         Ok(text)
+    }
+
+    /// Who claims posts (until runs have owners of their own).
+    fn claimant(&self) -> store::Claimant<'static> {
+        store::Claimant {
+            owner: "consolidation",
+            at: Timestamp::now(),
+        }
     }
 
     fn local_tag(&self, change: LocalChangeId, nonce: &str) -> String {
@@ -1125,7 +1139,7 @@ impl Syncer {
         let outcome = settled
             .as_ref()
             .map_or(PostOutcome::Sent, |s| s.outcome.clone());
-        self.settle(&row, &post, &parts.posted, settled)?;
+        self.settle(&row, &post, nonce, &parts.posted, settled)?;
         report.posts.push(PostReport {
             local_change: change,
             change: number,

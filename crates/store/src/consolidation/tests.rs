@@ -10,6 +10,14 @@ fn ts(s: &str) -> model::Timestamp {
 }
 
 const T0: &str = "2024-03-01T10:00:00Z";
+
+/// The claimant of the posts in these tests.
+fn who() -> Claimant<'static> {
+    Claimant {
+        owner: "run-1",
+        at: ts(T1),
+    }
+}
 const T1: &str = "2024-03-01T11:00:00Z";
 
 /// A local change `IL` in project `p` with versions v1 and v2.
@@ -413,7 +421,7 @@ fn a_rewrite_refuses_local_targets_and_another_gerrit_change() {
         s.rewrite_local_change(id, &rewrite(&c, vec![])).unwrap(),
         None
     );
-    assert_eq!(s.finish_local_post(id, c.id, &[], &[]).unwrap(), None);
+    assert_eq!(s.finish_local_post(id, c.id, "n", &[], &[]).unwrap(), None);
 }
 
 #[test]
@@ -435,7 +443,7 @@ fn finishing_the_post_removes_what_was_sent_and_then_it_consolidates() {
     );
     s.rewrite_local_change(id, &rw).unwrap().unwrap();
     let claim = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n")
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n", &who())
         .unwrap()
         .unwrap();
     let claimed = claim.review.unwrap();
@@ -458,7 +466,7 @@ fn finishing_the_post_removes_what_was_sent_and_then_it_consolidates() {
         note: None,
     }];
     let report = s
-        .finish_local_post(id, c.id, &post, &done)
+        .finish_local_post(id, c.id, "n", &post, &done)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -491,7 +499,7 @@ fn finishing_the_post_removes_what_was_sent_and_then_it_consolidates() {
             .unwrap(),
         Some(LocalChangeState::Checking)
     );
-    s.finish_local_post(id, c.id, &[(b.local_id, edited.version)], &[])
+    s.finish_local_post(id, c.id, "n", &[(b.local_id, edited.version)], &[])
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -641,7 +649,7 @@ fn claiming_a_post_marks_its_drafts_and_review_with_one_nonce() {
     let (mut s, id, c, v1, v2) = setup();
     let (a, r, other) = moved(&mut s, id, &c, &v1, &v2);
     let post = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1")
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
         .unwrap()
         .unwrap();
     let review = post.review.unwrap();
@@ -664,14 +672,17 @@ fn claiming_a_post_marks_its_drafts_and_review_with_one_nonce() {
 
     // Another run cannot claim it, with or without the review; the same
     // run can (a retry after a crash).
-    assert_eq!(s.claim_local_post(id, c.id, None, "n2").unwrap(), None);
     assert_eq!(
-        s.claim_local_post(id, c.id, Some((other.id, &[Pending][..])), "n2")
+        s.claim_local_post(id, c.id, None, "n2", &who()).unwrap(),
+        None
+    );
+    assert_eq!(
+        s.claim_local_post(id, c.id, Some((other.id, &[Pending][..])), "n2", &who())
             .unwrap(),
         None
     );
     let again = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1")
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
         .unwrap()
         .unwrap();
     assert_eq!(again.drafts.len(), 2);
@@ -686,7 +697,7 @@ fn claiming_a_post_marks_its_drafts_and_review_with_one_nonce() {
         .unwrap();
     assert!(s.unfinished_local_posts(id).unwrap().is_empty());
     let retry = s
-        .claim_local_post(id, c.id, Some((r.id, &[Failed][..])), "n3")
+        .claim_local_post(id, c.id, Some((r.id, &[Failed][..])), "n3", &who())
         .unwrap()
         .unwrap();
     assert_eq!(retry.review.unwrap().nonce.as_deref(), Some("n3"));
@@ -699,7 +710,7 @@ fn a_claimed_post_reads_back_exactly_as_claimed() {
     let (a, r, other) = moved(&mut s, id, &c, &v1, &v2);
     assert_eq!(s.local_post(id, c.id, "n1").unwrap(), None);
     let claimed = s
-        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1")
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
         .unwrap()
         .unwrap();
     // Reserved after the claim (by a later rewrite): not part of the post.
@@ -768,14 +779,17 @@ fn a_comment_only_post_has_a_nonce_too() {
         }],
     );
     s.rewrite_local_change(id, &rw).unwrap().unwrap();
-    let post = s.claim_local_post(id, c.id, None, "n1").unwrap().unwrap();
+    let post = s
+        .claim_local_post(id, c.id, None, "n1", &who())
+        .unwrap()
+        .unwrap();
     assert_eq!((post.review, post.drafts.len()), (None, 1));
     assert_eq!(
         s.unfinished_local_posts(id).unwrap(),
         [(c.id, "n1".to_owned())]
     );
     // Finished: nothing is left claimed.
-    s.finish_local_post(id, c.id, &[(a.local_id, post.drafts[0].version)], &[])
+    s.finish_local_post(id, c.id, "n1", &[(a.local_id, post.drafts[0].version)], &[])
         .unwrap()
         .unwrap();
     assert!(s.unfinished_local_posts(id).unwrap().is_empty());
@@ -789,20 +803,140 @@ fn claims_that_do_not_fit_write_nothing() {
     let other_change = add(&mut s, id, "IO", None);
     // Not in the states named, another change's review, a gone change.
     assert_eq!(
-        s.claim_local_post(id, c.id, Some((r.id, &[Held][..])), "n")
+        s.claim_local_post(id, c.id, Some((r.id, &[Held][..])), "n", &who())
             .unwrap(),
         None
     );
     assert_eq!(
-        s.claim_local_post(id, other_change.id, Some((r.id, &[Pending][..])), "n")
-            .unwrap(),
+        s.claim_local_post(
+            id,
+            other_change.id,
+            Some((r.id, &[Pending][..])),
+            "n",
+            &who()
+        )
+        .unwrap(),
         None
     );
     assert_eq!(
-        s.claim_local_post(id, LocalChangeId(999), None, "n")
+        s.claim_local_post(id, LocalChangeId(999), None, "n", &who())
             .unwrap(),
         None
     );
     assert_eq!(posting_nonce(&s, a.local_id), None);
     assert!(s.unfinished_local_posts(id).unwrap().is_empty());
+}
+
+#[test]
+fn one_owner_at_a_time_holds_the_lease() {
+    let (mut s, id, ..) = setup();
+    let (t0, t1, t2) = (ts(T0), ts(T1), ts("2024-03-01T12:00:00Z"));
+    assert!(s.take_consolidation_lease(id, "a", t0, t1).unwrap());
+    // Another owner waits until it expires; the holder renews.
+    assert!(!s.take_consolidation_lease(id, "b", t0, t1).unwrap());
+    assert!(s.take_consolidation_lease(id, "a", t0, t2).unwrap());
+    assert!(!s.take_consolidation_lease(id, "b", t1, t2).unwrap());
+    assert!(s.take_consolidation_lease(id, "b", t2, t2).unwrap());
+    // Ending someone else's lease does nothing; ending one's own frees it.
+    s.end_consolidation_lease(id, "a").unwrap();
+    assert!(!s.take_consolidation_lease(id, "a", t1, t2).unwrap());
+    s.end_consolidation_lease(id, "b").unwrap();
+    assert!(s.take_consolidation_lease(id, "a", t1, t2).unwrap());
+}
+
+#[test]
+fn only_claims_of_gone_runs_that_are_old_enough_are_recovered() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (_, r, _) = moved(&mut s, id, &c, &v1, &v2);
+    let claimed_at = ts(T1);
+    let by = Claimant {
+        owner: "old-run",
+        at: claimed_at,
+    };
+    s.claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &by)
+        .unwrap()
+        .unwrap();
+    let young = ts("2024-03-01T10:30:00Z");
+    let old = ts("2024-03-01T11:30:00Z");
+    // Still in flight: claimed after `stale_before`, by another run.
+    assert!(
+        s.recoverable_local_posts(id, "new-run", young)
+            .unwrap()
+            .is_empty()
+    );
+    let me = Claimant {
+        owner: "new-run",
+        at: ts("2024-03-01T12:00:00Z"),
+    };
+    assert_eq!(
+        s.adopt_local_post(id, c.id, "n1", &me, young).unwrap(),
+        None
+    );
+    // Old enough.
+    assert_eq!(
+        s.recoverable_local_posts(id, "new-run", old).unwrap(),
+        [(c.id, "n1".to_owned())]
+    );
+    let post = s
+        .adopt_local_post(id, c.id, "n1", &me, old)
+        .unwrap()
+        .unwrap();
+    assert_eq!(post.review.unwrap().id, r.id);
+    // Now the new run's: no other run may take it over, however old.
+    let third = Claimant {
+        owner: "third-run",
+        at: ts("2024-03-01T12:00:00Z"),
+    };
+    assert!(
+        s.recoverable_local_posts(id, "third-run", old)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        s.adopt_local_post(id, c.id, "n1", &third, old).unwrap(),
+        None
+    );
+    // Finishing clears the claim.
+    let sent = ReviewStateChange {
+        review: r.id,
+        from: vec![Sending],
+        state: Sent,
+        note: None,
+    };
+    s.finish_local_post(id, c.id, "n1", &[], &[sent])
+        .unwrap()
+        .unwrap();
+    assert!(s.unfinished_local_posts(id).unwrap().is_empty());
+    let left: i64 = s
+        .conn
+        .query_row("SELECT COUNT(*) FROM local_post_claims", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn a_claim_recorded_by_no_run_is_recoverable() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (_, r, _) = moved(&mut s, id, &c, &v1, &v2);
+    s.claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
+        .unwrap()
+        .unwrap();
+    // As a claim made before claims named their run (v15).
+    s.conn.execute("DELETE FROM local_post_claims", []).unwrap();
+    assert_eq!(
+        s.recoverable_local_posts(id, "any", ts(T0)).unwrap(),
+        [(c.id, "n1".to_owned())]
+    );
+    // Deleting the change removes its claims.
+    s.claim_local_post(id, c.id, Some((r.id, &[Sending][..])), "n1", &who())
+        .unwrap()
+        .unwrap();
+    assert!(s.delete_local_change(id, c.id).unwrap());
+    let left: i64 = s
+        .conn
+        .query_row("SELECT COUNT(*) FROM local_post_claims", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
 }

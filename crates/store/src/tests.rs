@@ -1138,7 +1138,16 @@ fn v13_keeps_a_reserved_draft_claimable() {
     migrate(&mut conn, MIGRATIONS).unwrap();
     let mut s = Store { conn };
     let post = s
-        .claim_local_post(ServerId(1), model::LocalChangeId(1), None, "n1")
+        .claim_local_post(
+            ServerId(1),
+            model::LocalChangeId(1),
+            None,
+            "n1",
+            &crate::Claimant {
+                owner: "run",
+                at: model::Timestamp::UNIX_EPOCH,
+            },
+        )
         .unwrap()
         .unwrap();
     assert_eq!(post.drafts.len(), 1);
@@ -1146,4 +1155,29 @@ fn v13_keeps_a_reserved_draft_claimable() {
         s.unfinished_local_posts(ServerId(1)).unwrap(),
         [(model::LocalChangeId(1), "n1".to_owned())]
     );
+}
+
+// ---- v16: consolidation leases, claims, held markers ----
+
+#[test]
+fn v16_from_every_older_version_starts_without_leases_or_claims() {
+    for from in 1..MIGRATIONS.len() {
+        let mut conn = db_at_version(from);
+        migrate(&mut conn, MIGRATIONS).unwrap();
+        assert_eq!(user_version(&conn).unwrap() as usize, MIGRATIONS.len());
+        for table in ["consolidation_leases", "local_post_claims"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} from v{from}");
+        }
+        conn.query_row("SELECT COUNT(drop_only) FROM pending_reviews", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+        conn.query_row("SELECT COUNT(checked_ms) FROM local_changes", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+    }
 }

@@ -430,6 +430,36 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE servers ADD COLUMN account_id INTEGER;
     ALTER TABLE servers ADD COLUMN account_username TEXT;
     ",
+    // v15 -> v16: consolidation runs that do not step on each other, and
+    // what the held card needs.
+    //
+    // `consolidation_leases` lets one consolidation run per server go on at
+    // a time, also across processes on one cache: a run takes the row (or
+    // an expired one) and renews it before every post. `local_post_claims`
+    // names the run that claimed a post and when, so that a later run only
+    // recovers posts whose run is gone and that are too old to still be in
+    // flight. `pending_reviews.drop_only` is a JSON array of the labels of
+    // a held review whose votes may only be dropped (approvals under the
+    // strict rule or `exact`); NULL means none. `local_changes.checked_ms`
+    // is when consolidation last asked Gerrit about the change, so rows
+    // with nothing to send are asked about rarely.
+    "
+    CREATE TABLE consolidation_leases (
+        server_id  INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
+        owner      TEXT NOT NULL,
+        expires_ms INTEGER NOT NULL
+    );
+    CREATE TABLE local_post_claims (
+        server_id       INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        nonce           TEXT NOT NULL,
+        local_change_id INTEGER NOT NULL REFERENCES local_changes(id) ON DELETE CASCADE,
+        owner           TEXT NOT NULL,
+        claimed_ms      INTEGER NOT NULL,
+        PRIMARY KEY (server_id, nonce)
+    );
+    ALTER TABLE pending_reviews ADD COLUMN drop_only TEXT;
+    ALTER TABLE local_changes ADD COLUMN checked_ms INTEGER;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {
