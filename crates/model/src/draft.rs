@@ -141,6 +141,10 @@ pub struct Draft {
     /// Gerrit change: why it is held for the user to publish or drop.
     #[serde(default)]
     pub held_reason: Option<String>,
+    /// The account signed in when it was written, if known. A local
+    /// review's consolidation sends only that account's comments.
+    #[serde(default)]
+    pub author: Option<crate::AccountId>,
 }
 
 impl Draft {

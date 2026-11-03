@@ -914,6 +914,28 @@ impl Store {
         Ok(Some(now))
     }
 
+    /// Holds the comments reserved for local change `change`'s post that
+    /// another account wrote (`author` set and not `me`): only that account
+    /// sends them; the user may publish them from the held card or drop
+    /// them. Claimed comments (a post in flight) are left to their post.
+    /// Returns how many were held.
+    pub fn hold_foreign_drafts(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        me: model::AccountId,
+    ) -> Result<usize, Error> {
+        Ok(self.conn.execute(
+            "UPDATE drafts SET held_reason = 'written while signed in as '
+                 || COALESCE(author_name, 'account ' || author_id)
+                 || '; it is sent only by that account, or published from here'
+             WHERE server_id = ?1 AND reserved_by = ?2 AND author_id IS NOT NULL
+               AND author_id <> ?3 AND held_reason IS NULL AND posting_nonce IS NULL
+               AND pending_review_id IS NULL AND state <> 'pending_delete'",
+            params![server.0, change.0, i64::try_from(me.0).unwrap_or(i64::MAX)],
+        )?)
+    }
+
     /// What is held on Gerrit change `gerrit` from local reviews: drafts
     /// that could not be moved onto it, and pending reviews on it that are
     /// held or failed, each in creation order.

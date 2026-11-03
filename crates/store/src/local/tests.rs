@@ -1152,10 +1152,10 @@ fn only_a_vanished_change_without_a_gerrit_change_is_deleted_as_vanished() {
     let ps = s.local_patch_sets(id, a.id).unwrap();
     s.create_pending_review(id, &review(&ps[0])).unwrap();
     // Still local: kept.
-    assert!(!s.delete_vanished_local_change(id, a.id).unwrap());
+    assert!(!s.delete_vanished_local_change(id, a.id, ME).unwrap());
     s.set_local_change_state(id, a.id, LocalChangeState::Vanished)
         .unwrap();
-    assert!(s.delete_vanished_local_change(id, a.id).unwrap());
+    assert!(s.delete_vanished_local_change(id, a.id, ME).unwrap());
     assert!(s.local_change(id, a.id).unwrap().is_none());
     assert!(s.pending_reviews(id, a.number).unwrap().is_empty());
     // One with a Gerrit change is consolidation's to decide.
@@ -1163,7 +1163,7 @@ fn only_a_vanished_change_without_a_gerrit_change_is_deleted_as_vanished() {
     u.gerrit_number = Some(ChangeNumber(7));
     u.state = Some(LocalChangeState::Vanished);
     let b = add(&mut s, id, u);
-    assert!(!s.delete_vanished_local_change(id, b.id).unwrap());
+    assert!(!s.delete_vanished_local_change(id, b.id, ME).unwrap());
     assert!(s.local_change(id, b.id).unwrap().is_some());
 }
 
@@ -1244,5 +1244,29 @@ fn the_dashboard_lists_closed_rows_and_rows_with_held_items() {
             .unwrap()
             .gerrit_number,
         Some(ChangeNumber(41))
+    );
+}
+
+const ME: model::AccountId = model::AccountId(7);
+
+#[test]
+fn a_vanished_change_with_another_accounts_data_is_not_deleted() {
+    let (mut s, id) = setup();
+    s.set_account(id, model::AccountId(8), Some("bob"), None)
+        .unwrap();
+    let a = add(&mut s, id, upsert("IA", None, &["a1"]));
+    let ps = s.local_patch_sets(id, a.id).unwrap();
+    let d = s
+        .create_draft(id, a.number, &psref(&ps[0]), &draft_input("bob's"), ts(T1))
+        .unwrap();
+    assert_eq!(d.author, Some(model::AccountId(8)));
+    s.set_local_change_state(id, a.id, LocalChangeState::Vanished)
+        .unwrap();
+    // Signed in as 7, Gerrit may hide 8's private change: kept.
+    assert!(!s.delete_vanished_local_change(id, a.id, ME).unwrap());
+    // 8 itself may.
+    assert!(
+        s.delete_vanished_local_change(id, a.id, model::AccountId(8))
+            .unwrap()
     );
 }

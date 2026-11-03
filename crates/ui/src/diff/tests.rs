@@ -687,6 +687,7 @@ pub(crate) mod threads {
             pending_review: None,
             reserved_by: None,
             held_reason: None,
+            author: None,
         }
     }
 }

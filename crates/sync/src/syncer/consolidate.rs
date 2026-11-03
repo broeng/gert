@@ -50,7 +50,11 @@
 //!    query or an undecided answer changes nothing.
 //!    Several hits with an unknown branch: `Ambiguous`, never
 //!    consolidated. A Change-Id Gerrit cannot be asked about (not `I` and
-//!    40 hex digits) is `Local` at once.
+//!    40 hex digits) is `Local` at once; a vanished change with one is
+//!    deleted (O1: Gerrit refuses such a Change-Id in a push, so it never
+//!    gets there). A vanished change holding data written under another
+//!    account is never deleted: that account's private change is hidden
+//!    from this one.
 //! 3. **Known changes.** Local changes with a Gerrit change are asked about
 //!    in batches of up to 50 by number, with their revisions: one request
 //!    per batch, not per change. Those with nothing that could be sent
@@ -775,21 +779,30 @@ impl Syncer {
         for (row, lookup) in self.look_up(&to_look_up, run).await? {
             match lookup {
                 Lookup::Found(n) => found.push((row, n)),
-                Lookup::NotFound if row.state == LocalChangeState::Vanished => {
-                    // Gone from the checkout with unsent data, and Gerrit
-                    // does not have it (O1): it goes with its local data.
-                    // Only on a definite answer: the query succeeded, the
+                Lookup::NotFound | Lookup::Malformed if row.state == LocalChangeState::Vanished => {
+                    // Gone from the checkout with unsent data, and never to
+                    // be on Gerrit (O1): it goes with its local data. Only
+                    // on a definite answer: the query succeeded, the
                     // Change-Id was one Gerrit can be asked about and the
                     // answer was not cut off (else the lookup is not
-                    // `NotFound`).
-                    run.report.not_found.push(row.id);
+                    // `NotFound`); or the Change-Id is one Gerrit refuses
+                    // in a push. Not while it holds another account's
+                    // data: Gerrit hides that account's private changes.
+                    if lookup == Lookup::NotFound {
+                        run.report.not_found.push(row.id);
+                    }
                     if self
                         .store()
-                        .delete_vanished_local_change(self.server, row.id)?
+                        .delete_vanished_local_change(self.server, row.id, run.me)?
                     {
+                        let why = if lookup == Lookup::NotFound {
+                            "is not on Gerrit"
+                        } else {
+                            "has a Change-Id Gerrit does not take"
+                        };
                         log::info!(
-                            "local change {} ({} in {}) vanished from the checkout and is not \
-                             on Gerrit: deleted with its unsent local review data",
+                            "local change {} ({} in {}) vanished from the checkout and {why}: \
+                             deleted with its unsent local review data",
                             row.id.0,
                             row.change_id,
                             row.project
@@ -808,17 +821,18 @@ impl Syncer {
                     }
                 }
                 Lookup::Malformed => {
-                    log::info!(
-                        "local change {} has Change-Id {:?}, which Gerrit cannot be asked \
-                         about; it stays local",
-                        row.id.0,
-                        row.change_id
-                    );
                     if self.set_state_if(
                         &row,
                         &[LocalChangeState::Checking],
                         LocalChangeState::Local,
                     )? {
+                        // Said once, when it becomes local.
+                        log::info!(
+                            "local change {} has Change-Id {:?}, which Gerrit cannot be asked \
+                             about; it stays local",
+                            row.id.0,
+                            row.change_id
+                        );
                         run.report.state_changed.push(row.id);
                     }
                 }
@@ -829,6 +843,13 @@ impl Syncer {
                         &[LocalChangeState::Checking, LocalChangeState::Local],
                         LocalChangeState::Ambiguous,
                     )? {
+                        log::info!(
+                            "local change {} ({} in {}) matches several Gerrit changes and its \
+                             target branch is unknown; it is not consolidated",
+                            row.id.0,
+                            row.change_id,
+                            row.project
+                        );
                         run.report.state_changed.push(row.id);
                     }
                 }
@@ -1519,6 +1540,9 @@ impl Syncer {
         for r in &foreign {
             self.hold_foreign(row, number, detail, r, run)?;
         }
+        // Likewise comments written under another account.
+        self.store()
+            .hold_foreign_drafts(self.server, row.id, run.me)?;
         self.supersede(row, number, detail, &reviews, current, run.options)?;
         let mut revisions: BTreeSet<PatchSetNumber> = reviews.iter().map(|r| r.patch_set).collect();
         revisions.extend(

@@ -725,6 +725,7 @@ mod tests {
             pending_review: None,
             reserved_by: None,
             held_reason: Some("line 40 changed".into()),
+            author: None,
         }
     }
 

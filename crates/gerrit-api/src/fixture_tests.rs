@@ -612,6 +612,7 @@ fn drafts_response_joins_the_published_threads() {
             pending_review: None,
             reserved_by: None,
             held_reason: None,
+            author: None,
         })
         .collect();
     let threads = build_threads(&comments, &drafts);

@@ -503,6 +503,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     WHERE state IN ('held', 'failed') AND labels = '{}'
       AND NOT EXISTS (SELECT 1 FROM drafts WHERE drafts.pending_review_id = pending_reviews.id);
     ",
+    // v21 -> v22: who wrote a draft: the signed-in account (id and
+    // username) when it was created. A local review's consolidation posts
+    // only the comments of the account it runs as and holds the others.
+    // NULL for drafts written before this step, sent as before.
+    "
+    ALTER TABLE drafts ADD COLUMN author_id INTEGER;
+    ALTER TABLE drafts ADD COLUMN author_name TEXT;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

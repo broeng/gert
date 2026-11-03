@@ -997,14 +997,17 @@ impl Store {
     /// Deletes a local change that vanished from the checkout with unsent
     /// data once Gerrit was asked and does not have it (the user decision
     /// O1), with all its local data, as [`Store::delete_local_change`]
-    /// does. Only if it is still `Vanished` without a Gerrit change and no
-    /// post of it is in flight, checked in the same transaction: a change
-    /// whose commits came back meanwhile is not `Vanished` any more. False
-    /// otherwise.
+    /// does. Only if it is still `Vanished` without a Gerrit change, no
+    /// post of it is in flight, and none of its data was written by
+    /// another account than `me` (Gerrit hides another account's private
+    /// change from `me`, so "not found" proves nothing then), checked in
+    /// the same transaction: a change whose commits came back meanwhile is
+    /// not `Vanished` any more. False otherwise.
     pub fn delete_vanished_local_change(
         &mut self,
         server: ServerId,
         change: LocalChangeId,
+        me: model::AccountId,
     ) -> Result<bool, Error> {
         let tx = self.conn.transaction()?;
         let Some(row) = load_change(&tx, server, change)? else {
@@ -1013,6 +1016,7 @@ impl Store {
         if row.state != LocalChangeState::Vanished
             || row.gerrit_number.is_some()
             || posting(&tx, server, change)?
+            || others_data(&tx, server, change, me)?
         {
             return Ok(false);
         }
@@ -1020,6 +1024,30 @@ impl Store {
         tx.commit()?;
         Ok(removed)
     }
+}
+
+/// Whether local change `id` has data written by another account than
+/// `me`: a pending review or a draft on its numbers with another author.
+fn others_data(
+    conn: &Connection,
+    server: ServerId,
+    id: LocalChangeId,
+    me: model::AccountId,
+) -> Result<bool, Error> {
+    let numbers = patch_set_numbers("?3");
+    let me = i64::try_from(me.0).unwrap_or(i64::MAX);
+    Ok(conn
+        .prepare_cached(&format!(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pending_reviews WHERE server_id = ?1 AND local_change_id = ?3
+                   AND author_id IS NOT NULL AND author_id <> ?4
+             ) OR EXISTS (
+                 SELECT 1 FROM drafts WHERE server_id = ?1
+                   AND (change_number = ?2 OR patch_set IN {numbers} OR reserved_by = ?3)
+                   AND author_id IS NOT NULL AND author_id <> ?4
+             )"
+        ))?
+        .query_row(params![server.0, synthetic(id), id.0, me], |r| r.get(0))?)
 }
 
 /// Whether a consolidation post of local change `id` is in flight: a

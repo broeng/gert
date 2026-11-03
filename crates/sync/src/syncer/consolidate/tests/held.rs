@@ -374,6 +374,7 @@ fn quotes_say_where_a_comment_was() {
         pending_review: None,
         reserved_by: None,
         held_reason: Some("x".into()),
+        author: None,
     };
     assert_eq!(
         super::super::held::quote("local 2", &d),

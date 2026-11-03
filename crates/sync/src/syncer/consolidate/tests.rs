@@ -542,15 +542,84 @@ fn a_vanished_change_stays_unless_gerrit_definitely_does_not_have_it() {
     assert!(report.not_found.is_empty(), "{report:?}");
     assert_eq!(f.row(&row).state, LocalChangeState::Vanished);
     assert!(f.load_draft(&d).is_some());
+}
 
-    // A Change-Id Gerrit cannot be asked about: never deleted.
+#[test]
+fn a_vanished_change_with_a_malformed_change_id_goes_unasked() {
+    // Gerrit refuses such a Change-Id in a push: it never gets there.
     let f = fx();
     let (row, v) = f.vanished("Ixyz", "l1");
-    f.draft(&row, &v[0], "keep me");
+    f.draft(&row, &v[0], "lost");
     let report = f.run();
     assert!(report.not_found.is_empty(), "{report:?}");
-    assert_eq!(f.row(&row).state, LocalChangeState::Vanished);
+    assert_eq!(report.state_changed, [row.id]);
+    assert!(
+        f.syncer
+            .store()
+            .local_change(f.syncer.server, row.id)
+            .unwrap()
+            .is_none()
+    );
     assert!(f.http.routes.requested().is_empty());
+}
+
+#[test]
+fn a_vanished_change_with_another_accounts_data_is_kept() {
+    let f = fx();
+    let server = f.syncer.server;
+    f.syncer
+        .store()
+        .set_account(server, AccountId(2000), Some("other"), None)
+        .unwrap();
+    let (row, v) = f.vanished(CID, "l1");
+    f.draft(&row, &v[0], "theirs");
+    f.syncer
+        .store()
+        .set_account(server, AccountId(ME), Some("me"), None)
+        .unwrap();
+    // Not found for this account: it may be the other's private change.
+    f.query_finds(&[]);
+    let report = f.run();
+    assert_eq!(report.not_found, [row.id]);
+    assert_eq!(f.row(&row).state, LocalChangeState::Vanished);
+}
+
+#[test]
+fn another_accounts_comments_are_held_not_posted() {
+    let f = fx();
+    let server = f.syncer.server;
+    let (row, v) = f.local(CID, Some("main"), None, &["s1"]);
+    let mine = f.draft(&row, &v[0], "mine");
+    f.syncer
+        .store()
+        .set_account(server, AccountId(2000), Some("other"), None)
+        .unwrap();
+    let theirs = f.draft(&row, &v[0], "theirs");
+    assert_eq!(theirs.author, Some(AccountId(2000)));
+    f.syncer
+        .store()
+        .set_account(server, AccountId(ME), Some("me"), None)
+        .unwrap();
+    f.query_finds(&[(7, "main", "NEW")]);
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.posts_apply(json!({}), 1);
+    f.run();
+    let posts = f.http.posts();
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    assert_eq!(
+        posts[0]["comments"]["src/a.rs"],
+        json!([{"side": "REVISION", "line": 7, "message": "mine", "unresolved": true}])
+    );
+    assert_eq!(f.load_draft(&mine), None);
+    let held = f.load_draft(&theirs).unwrap();
+    assert!(
+        held.held_reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with("written while signed in as other")),
+        "{held:?}"
+    );
+    assert_eq!(f.syncer.held_items(CHANGE).unwrap().drafts.len(), 1);
+    assert_eq!(f.row(&row).state, LocalChangeState::Local);
 }
 
 #[test]

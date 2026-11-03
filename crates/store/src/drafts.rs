@@ -125,7 +125,7 @@ impl MergeReport {
 const COLUMNS: &str = "id, change_number, patch_set, revision_sha, server_draft_id, path, side, \
      parent, line, start_line, start_character, end_line, end_character, in_reply_to, message, \
      unresolved, updated_ms, state, failed_op, error, retryable, attempts, last_error, version, \
-     pending_review_id, reserved_by, held_reason";
+     pending_review_id, reserved_by, held_reason, author_id";
 
 #[derive(Debug)]
 struct BadColumn(String);
@@ -220,6 +220,10 @@ fn draft_from_row(r: &Row<'_>) -> rusqlite::Result<Draft> {
         pending_review: r.get::<_, Option<i64>>(24)?.map(PendingReviewId),
         reserved_by: r.get::<_, Option<i64>>(25)?.map(LocalChangeId),
         held_reason: r.get(26)?,
+        author: r
+            .get::<_, Option<i64>>(27)?
+            .and_then(|a| u64::try_from(a).ok())
+            .map(model::AccountId),
     })
 }
 
@@ -346,11 +350,14 @@ impl Store {
     ) -> Result<Draft, Error> {
         let (sl, sc, el, ec) = range_columns(&input.location);
         self.conn.execute(
+            // Written by the signed-in account as last fetched.
             "INSERT INTO drafts (server_id, change_number, patch_set, revision_sha, path, side,
                  parent, line, start_line, start_character, end_line, end_character,
-                 in_reply_to, message, unresolved, updated_ms, state)
+                 in_reply_to, message, unresolved, updated_ms, state, author_id, author_name)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                 'pending_create')",
+                 'pending_create',
+                 (SELECT account_id FROM servers WHERE id = ?1),
+                 (SELECT account_username FROM servers WHERE id = ?1))",
             params![
                 server.0,
                 number(change),
