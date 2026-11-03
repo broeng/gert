@@ -92,6 +92,20 @@
 //! where they landed. A newer review supersedes an older unsent review's
 //! vote on a label, but only when the newer vote will be cast.
 //!
+//! A review ported from a version that never reached Gerrit (its votes
+//! were given on another commit than the one it is posted to) follows the
+//! rules by case. If the change was on Gerrit when the votes were given
+//! (the review's `voted_at` is not before Gerrit's `created` minus five
+//! minutes), the strict rule holds: nothing is cast, approvals are held
+//! drop-only and other votes publishable. A purely local change takes the
+//! stricter of the review's `local_approval` snapshot and the project's
+//! setting now (`exact` without an entry): under `follow` every vote is
+//! cast while the target patch set is current (it is in the checkout, or
+//! nothing was ported), also when some comments were held; otherwise all
+//! are held, publishable. Under `exact-or-manual` all are held,
+//! publishable; under `exact` approvals are held drop-only and other votes
+//! publishable. Votes are cast all together or not at all.
+//!
 //! Votes never sink comments: a post refused for its votes (a 400, 403 or
 //! 409 whose text mentions a label or a vote, such as "Applying label
 //! \"Code-Review\": 2 is restricted") is posted again without them under
@@ -1245,7 +1259,7 @@ impl Syncer {
                     && !r.patch_set.is_local()
             })
             .collect();
-        self.supersede(row, number, &reviews, current)?;
+        self.supersede(row, number, detail, &reviews, current, run.options)?;
         let mut revisions: BTreeSet<PatchSetNumber> = reviews.iter().map(|r| r.patch_set).collect();
         revisions.extend(
             self.postable_comments(row.id, None)?
@@ -1338,17 +1352,19 @@ impl Syncer {
             .collect())
     }
 
-    /// A newer review whose votes will be cast (its patch set is current)
-    /// supersedes the vote of every older unsent review of the change on
-    /// the same label: the older one loses it before anything is sent. A
-    /// newer review whose votes will be held supersedes nothing, so an
-    /// older vote meant for the current patch set is not lost to it.
+    /// A newer review whose votes will be cast (see [`casts`]) supersedes
+    /// the vote of every older unsent review of the change on the same
+    /// label: the older one loses it before anything is sent. A newer
+    /// review whose votes will be held supersedes nothing, so an older vote
+    /// meant for the current patch set is not lost to it.
     fn supersede(
         &self,
         row: &LocalChange,
         number: ChangeNumber,
+        detail: &ChangeDetail,
         sending: &[PendingReview],
         current: Current,
+        options: &ConsolidateOptions,
     ) -> Result<(), Problem> {
         let mut store = self.store();
         let mut older = store.pending_reviews(self.server, number)?;
@@ -1363,7 +1379,12 @@ impl Syncer {
                 PendingReviewState::Pending | PendingReviewState::Held | PendingReviewState::Failed
             )
         });
-        for newer in sending.iter().filter(|r| Some(r.patch_set) == current) {
+        let cast = |r: &&PendingReview| {
+            detail
+                .revision(r.patch_set)
+                .is_some_and(|rev| casts(row, detail, r, rev, current, options))
+        };
+        for newer in sending.iter().filter(cast) {
             for label in newer.labels.keys() {
                 for o in older
                     .iter()
@@ -1395,13 +1416,22 @@ impl Syncer {
         let review = post.review.as_ref();
         let parts = Parts::of(&post, rev.number);
         let votes: BTreeMap<String, i32> = review.map(|r| r.labels.clone()).unwrap_or_default();
-        let castable = *current == Some(rev.number);
+        let castable = review.is_none_or(|r| casts(row, detail, r, rev, *current, run.options));
         let (send_votes, held) = if castable || votes.is_empty() {
             (votes, None)
         } else {
             let held: Votes = votes.into_iter().collect();
             let drop_only = drop_only_labels(row, detail, review, &held, run.options);
-            let reason = held_reason(rev.number, *current, &held, &drop_only);
+            let reason = votes_held_reason(
+                row,
+                detail,
+                review,
+                rev,
+                *current,
+                run.options,
+                &held,
+                &drop_only,
+            );
             (
                 BTreeMap::new(),
                 Some(Settled::held(held, drop_only, reason)),
@@ -1826,16 +1856,30 @@ impl Syncer {
                         all.iter().any(|v| v.account.id == me && v.value == *value)
                     }))
         });
-        let settled = if !missing.is_empty() && current == Some(rev.number) {
+        // Whether the post meant to cast its votes, as `post_claimed` decides.
+        let meant = post
+            .review
+            .as_ref()
+            .is_none_or(|r| casts(row, detail, r, rev, current, run.options));
+        let settled = if !missing.is_empty() && meant {
             let error = format!(
                 "the review was posted, but Gerrit does not show {}",
                 describe_votes(&missing)
             );
             Some(Settled::failed(missing, error))
         } else if !missing.is_empty() {
-            let drop_only =
-                drop_only_labels(row, detail, post.review.as_ref(), &missing, run.options);
-            let reason = held_reason(rev.number, current, &missing, &drop_only);
+            let review = post.review.as_ref();
+            let drop_only = drop_only_labels(row, detail, review, &missing, run.options);
+            let reason = votes_held_reason(
+                row,
+                detail,
+                review,
+                rev,
+                current,
+                run.options,
+                &missing,
+                &drop_only,
+            );
             Some(Settled::held(missing, drop_only, reason))
         } else if !applied.is_empty() && current.is_some_and(|c| c != rev.number) {
             // Cast, on a patch set that is not current now; whether it
@@ -2069,28 +2113,147 @@ fn drop_only_labels(
     votes: &[(String, i32)],
     options: &ConsolidateOptions,
 ) -> BTreeSet<String> {
-    // "Purely local": the votes were given before the change was on Gerrit.
-    let created = detail.summary.created;
-    let purely_local = review.is_some_and(|r| {
-        created
-            .checked_sub(SKEW)
-            .is_ok_and(|limit| r.voted_at < limit)
+    let drop_only = review.is_none_or(|r| {
+        !purely_local(detail, r) || strategy(row, r, options) == LocalApproval::Exact
     });
-    let strategy = review.map_or(LocalApproval::Exact, |r| {
-        r.strategy.max(
-            options
-                .local_approval
-                .get(&row.project)
-                .copied()
-                .unwrap_or(LocalApproval::Exact),
-        )
-    });
-    let drop_only = !purely_local || strategy == LocalApproval::Exact;
     votes
         .iter()
         .filter(|(l, v)| drop_only && is_approval(detail, l, *v))
         .map(|(l, _)| l.clone())
         .collect()
+}
+
+/// "Purely local": the review's votes were given before the change was on
+/// Gerrit (before its creation, minus [`SKEW`] for the clocks). Otherwise
+/// the strict rule applies to them.
+fn purely_local(detail: &ChangeDetail, review: &PendingReview) -> bool {
+    detail
+        .summary
+        .created
+        .checked_sub(SKEW)
+        .is_ok_and(|limit| review.voted_at < limit)
+}
+
+/// The `local_approval` strategy for a review: the stricter of its
+/// snapshot and the project's setting now (`exact` without an entry).
+fn strategy(
+    row: &LocalChange,
+    review: &PendingReview,
+    options: &ConsolidateOptions,
+) -> LocalApproval {
+    review.strategy.max(
+        options
+            .local_approval
+            .get(&row.project)
+            .copied()
+            .unwrap_or(LocalApproval::Exact),
+    )
+}
+
+/// Whether the review's votes are cast when it is posted to `rev`: never
+/// unless `rev` is current. On the very commit they were given on (an
+/// exact match), they are. On another one (the review was ported from a
+/// version that never reached Gerrit) only under `follow` for a purely
+/// local change: the strict rule never moves a vote, and the `exact*`
+/// strategies hold them.
+fn casts(
+    row: &LocalChange,
+    detail: &ChangeDetail,
+    review: &PendingReview,
+    rev: &Revision,
+    current: Current,
+    options: &ConsolidateOptions,
+) -> bool {
+    if current != Some(rev.number) {
+        return false;
+    }
+    is_exact(review, rev)
+        || (purely_local(detail, review) && strategy(row, review, options) == LocalApproval::Follow)
+}
+
+/// Whether `rev` is the commit the review's votes were given on.
+fn is_exact(review: &PendingReview, rev: &Revision) -> bool {
+    review.given_on_sha == rev.sha
+}
+
+/// Why the votes `votes` of a post to `rev` are held: for an exact match
+/// (or a post without a review) because `rev` is not current, else because
+/// the review was ported ([`ported_held_reason`]).
+#[allow(clippy::too_many_arguments)]
+fn votes_held_reason(
+    row: &LocalChange,
+    detail: &ChangeDetail,
+    review: Option<&PendingReview>,
+    rev: &Revision,
+    current: Current,
+    options: &ConsolidateOptions,
+    votes: &[(String, i32)],
+    drop_only: &BTreeSet<String>,
+) -> String {
+    match review {
+        Some(r) if !is_exact(r, rev) => {
+            ported_held_reason(row, detail, r, rev, current, options, votes, drop_only)
+        }
+        _ => held_reason(rev.number, current, votes, drop_only),
+    }
+}
+
+/// Why the votes of `review`, ported from a local version that never
+/// reached Gerrit onto `rev`, are held, and what the user may do with them
+/// (the structured form is `drop_only`).
+#[allow(clippy::too_many_arguments)]
+fn ported_held_reason(
+    row: &LocalChange,
+    detail: &ChangeDetail,
+    review: &PendingReview,
+    rev: &Revision,
+    current: Current,
+    options: &ConsolidateOptions,
+    votes: &[(String, i32)],
+    drop_only: &BTreeSet<String>,
+) -> String {
+    let (fixed, others): (Votes, Votes) = votes
+        .iter()
+        .cloned()
+        .partition(|(l, _)| drop_only.contains(l));
+    let mut reason = format!(
+        "These votes were given on local commit {}, which never reached Gerrit; the review \
+         was carried over to PS {}, so they were not sent.",
+        review.given_on_sha.short(12),
+        rev.number.0
+    );
+    if !purely_local(detail, review) {
+        reason.push_str(" The change was on Gerrit when they were given, so they are not moved.");
+    } else {
+        match strategy(row, review, options) {
+            LocalApproval::Follow if current != Some(rev.number) => {
+                let current =
+                    current.map_or_else(|| "another".to_owned(), |c| format!("PS {}", c.0));
+                reason.push_str(&format!(
+                    " PS {} is not the current patch set on Gerrit ({current} is).",
+                    rev.number.0
+                ));
+            }
+            LocalApproval::Follow => {}
+            LocalApproval::ExactOrManual | LocalApproval::Exact => {
+                reason.push_str(" The project sends votes only onto the exact commit.");
+            }
+        }
+    }
+    if !fixed.is_empty() {
+        reason.push_str(&format!(
+            " {}: an approval goes only onto the commit it was given on, so it can only be \
+             dropped.",
+            describe_votes(&fixed)
+        ));
+    }
+    if !others.is_empty() {
+        reason.push_str(&format!(
+            " {}: publish onto the current patch set, or drop.",
+            describe_votes(&others)
+        ));
+    }
+    reason
 }
 
 /// Why the votes of a review on non-current patch set `ps` are held, and

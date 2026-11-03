@@ -1891,3 +1891,304 @@ fn votes_gerrit_drops_after_a_new_patch_set_are_held_too() {
             .contains("Gerrit did not apply Verified +1")
     );
 }
+
+// ---- votes of a ported review ----
+
+/// Gerrit's change 7 was created at 2024-01-01T00:00:00Z: votes given six
+/// minutes before were purely local, four minutes before were not (the
+/// clock skew margin is five minutes).
+const PURELY_LOCAL: &str = "2023-12-31T23:54:00Z";
+const STRICT: &str = "2023-12-31T23:56:00Z";
+
+impl Fx {
+    /// Moves review `r` of local version `v` onto Gerrit's PS `ps` with
+    /// commit `sha`, as a port does (not exact).
+    fn port_review(
+        &self,
+        row: &LocalChange,
+        v: &LocalPatchSet,
+        r: &PendingReview,
+        ps: u32,
+        sha: &str,
+    ) {
+        let rewrite = ConsolidationRewrite {
+            local_change: row.id,
+            gerrit_number: CHANGE,
+            moves: vec![PatchSetMove {
+                from: v.number,
+                to: PatchSetRef {
+                    number: PatchSetNumber(ps),
+                    sha: sha.into(),
+                },
+                exact: false,
+                drafts: Vec::new(),
+                reviews: vec![r.id],
+            }],
+            keep: Vec::new(),
+            review_states: Vec::new(),
+            state: None,
+            else_state: None,
+        };
+        let report = self
+            .syncer
+            .store()
+            .rewrite_local_change(self.syncer.server, &rewrite)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.reviews_moved, 1);
+    }
+}
+
+/// What became of a review with Code-Review +2 (an approval) and Verified
+/// -1 given on local commit `l1` at `voted_at` under `snapshot`, ported onto
+/// PS `target` of Gerrit's patch sets `shas` (the last current), with the
+/// project's setting `setting`: the votes posted (`Null` for none), and the
+/// review.
+fn ported_votes(
+    snapshot: LocalApproval,
+    setting: Option<LocalApproval>,
+    voted_at: &str,
+    shas: &[&str],
+    target: u32,
+) -> (Value, PendingReview) {
+    let f = fx();
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["l1"]);
+    let r = f.review_with(
+        &v[0],
+        &[("Code-Review", 2), ("Verified", -1)],
+        "carried over",
+        snapshot,
+        ts(voted_at),
+    );
+    f.port_review(&row, &v[0], &r, target, shas[target as usize - 1]);
+    f.gerrit("NEW", shas, json!([]));
+    let current = u32::try_from(shas.len()).unwrap();
+    f.posts_apply(json!({"Code-Review": 2, "Verified": -1}), current);
+    let options = ConsolidateOptions {
+        local_approval: setting
+            .map(|s| BTreeMap::from([("p".to_owned(), s)]))
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    let report = f.run_with(&options);
+    assert!(
+        report.stopped.is_none() && report.errors.is_empty(),
+        "{report:?}"
+    );
+    // The message is posted whatever happens to the votes, on the target.
+    let posts = f.http.posts();
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    assert!(
+        f.http.post_targets()[0]
+            .contains(&format!("/revisions/{}/review", shas[target as usize - 1])),
+        "{:?}",
+        f.http.post_targets()
+    );
+    assert_eq!(
+        posts[0]["comments"][PATCHSET_LEVEL_PATH][0]["message"],
+        "carried over"
+    );
+    f.assert_nothing_local(&["l1"]);
+    let labels = posts[0].get("labels").cloned().unwrap_or(Value::Null);
+    (labels, f.reloaded(&r))
+}
+
+fn both_votes() -> BTreeMap<String, i32> {
+    BTreeMap::from([("Code-Review".to_owned(), 2), ("Verified".to_owned(), -1)])
+}
+
+/// Held with both votes kept; `drop_only` as given.
+fn assert_held(r: &PendingReview, drop_only: &[&str]) {
+    assert_eq!(r.state, PendingReviewState::Held, "{r:?}");
+    assert_eq!(r.labels, both_votes());
+    let expected: BTreeSet<String> = drop_only.iter().map(|l| (*l).to_owned()).collect();
+    assert_eq!(r.drop_only, expected, "{:?}", r.held_reason);
+    assert!(
+        r.held_reason
+            .as_deref()
+            .is_some_and(|h| h.contains("local commit l1"))
+    );
+}
+
+#[test]
+fn a_ported_review_of_a_change_already_on_gerrit_follows_the_strict_rule() {
+    // Given four minutes before Gerrit's change was created: within the
+    // margin, so the change counts as on Gerrit, whatever the strategy.
+    for strategy in LocalApproval::ALL {
+        let (labels, r) = ported_votes(strategy, Some(strategy), STRICT, &["s1"], 1);
+        assert_eq!(labels, Value::Null, "{strategy:?}");
+        // The approval only drops; Verified -1 may be published.
+        assert_held(&r, &["Code-Review"]);
+        let reason = r.held_reason.unwrap();
+        assert!(reason.contains("not moved"), "{reason}");
+        assert!(
+            reason.contains("Code-Review +2: an approval goes only onto the commit")
+                && reason.contains("Verified -1: publish onto the current patch set"),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn a_ported_purely_local_review_under_follow_casts_every_vote_on_the_current_patch_set() {
+    let (labels, r) = ported_votes(
+        LocalApproval::Follow,
+        Some(LocalApproval::Follow),
+        PURELY_LOCAL,
+        &["s1"],
+        1,
+    );
+    assert_eq!(labels, json!({"Code-Review": 2, "Verified": -1}));
+    assert_eq!(r.state, PendingReviewState::Sent);
+}
+
+#[test]
+fn a_ported_review_under_follow_holds_its_votes_on_a_patch_set_that_is_not_current() {
+    let (labels, r) = ported_votes(
+        LocalApproval::Follow,
+        Some(LocalApproval::Follow),
+        PURELY_LOCAL,
+        &["s1", "s2"],
+        1,
+    );
+    assert_eq!(labels, Value::Null);
+    // Publishable, approval and all.
+    assert_held(&r, &[]);
+    let reason = r.held_reason.unwrap();
+    assert!(
+        reason.contains("PS 1 is not the current patch set on Gerrit (PS 2 is)"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_ported_review_under_exact_or_manual_holds_every_vote_publishable() {
+    let (labels, r) = ported_votes(
+        LocalApproval::ExactOrManual,
+        Some(LocalApproval::ExactOrManual),
+        PURELY_LOCAL,
+        &["s1"],
+        1,
+    );
+    assert_eq!(labels, Value::Null);
+    assert_held(&r, &[]);
+    let reason = r.held_reason.unwrap();
+    assert!(reason.contains("only onto the exact commit"), "{reason}");
+    assert!(
+        reason.contains("Code-Review +2, Verified -1: publish onto the current patch set"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_ported_review_under_exact_holds_its_approval_drop_only() {
+    let (labels, r) = ported_votes(
+        LocalApproval::Exact,
+        Some(LocalApproval::Exact),
+        PURELY_LOCAL,
+        &["s1"],
+        1,
+    );
+    assert_eq!(labels, Value::Null);
+    assert_held(&r, &["Code-Review"]);
+}
+
+#[test]
+fn the_stricter_of_snapshot_and_setting_decides_for_a_ported_review() {
+    use LocalApproval::{Exact, ExactOrManual, Follow};
+    // (snapshot, setting now, the drop-only labels of the held review)
+    let cases: [(LocalApproval, Option<LocalApproval>, &[&str]); 5] = [
+        (Follow, Some(Exact), &["Code-Review"]),
+        (Exact, Some(Follow), &["Code-Review"]),
+        (Follow, None, &["Code-Review"]),
+        (ExactOrManual, Some(Follow), &[]),
+        (Follow, Some(ExactOrManual), &[]),
+    ];
+    for (snapshot, setting, drop_only) in cases {
+        let (labels, r) = ported_votes(snapshot, setting, PURELY_LOCAL, &["s1"], 1);
+        assert_eq!(labels, Value::Null, "{snapshot:?} {setting:?}");
+        assert_held(&r, drop_only);
+    }
+}
+
+#[test]
+fn a_held_ported_vote_supersedes_nothing_and_a_cast_one_does() {
+    // An older review on the pushed commit s1 (exact, current) and a newer
+    // one ported from l2 onto it, both on Code-Review.
+    let run = |newer_strategy: LocalApproval, newer_voted: &str| {
+        let f = fx();
+        let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1", "l2"]);
+        let older = f.review(&v[0], &[("Code-Review", 1)], "older");
+        let newer = f.review_with(
+            &v[1],
+            &[("Code-Review", 2)],
+            "newer",
+            newer_strategy,
+            ts(newer_voted),
+        );
+        f.port_review(&row, &v[1], &newer, 1, "s1");
+        f.gerrit("NEW", &["s1"], json!([]));
+        // Every post's votes apply.
+        f.http.respond("/review", |posts| {
+            let labels = posts.last().and_then(|p| p.get("labels")).cloned();
+            json!({"labels": labels.unwrap_or(json!({})),
+                   "change_info": {"current_revision_number": 1}})
+        });
+        let options = ConsolidateOptions {
+            local_approval: BTreeMap::from([("p".to_owned(), newer_strategy)]),
+            ..Default::default()
+        };
+        f.run_with(&options);
+        let labels: Vec<Value> = f
+            .http
+            .posts()
+            .iter()
+            .map(|p| p.get("labels").cloned().unwrap_or(Value::Null))
+            .collect();
+        (labels, f.reloaded(&older), f.reloaded(&newer))
+    };
+    // Held (the strict rule): the older +1 is still cast.
+    let (labels, older, newer) = run(LocalApproval::Follow, STRICT);
+    assert_eq!(labels, [json!({"Code-Review": 1}), Value::Null]);
+    assert_eq!(older.state, PendingReviewState::Sent);
+    assert_eq!(newer.state, PendingReviewState::Held);
+    // Cast (follow, purely local): the older review loses its vote.
+    let (labels, older, newer) = run(LocalApproval::Follow, PURELY_LOCAL);
+    assert_eq!(labels, [Value::Null, json!({"Code-Review": 2})]);
+    assert_eq!(older.state, PendingReviewState::Sent);
+    assert!(older.labels.is_empty());
+    assert_eq!(newer.state, PendingReviewState::Sent);
+}
+
+#[test]
+fn recovery_of_a_ported_review_whose_votes_were_held_holds_them_again() {
+    let f = fx();
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["l1"]);
+    let r = f.review_with(
+        &v[0],
+        &[("Code-Review", 2)],
+        "msg",
+        LocalApproval::Follow,
+        ts(STRICT),
+    );
+    f.port_review(&row, &v[0], &r, 1, "s1");
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.http
+        .queue("POST /changes/7/revisions/", 0, "connection reset");
+    assert!(f.run().stopped.is_some());
+    let tag = first_tag(&f);
+    assert!(f.http.posts()[0].get("labels").is_none());
+    // It arrived, without votes, as meant: held, not failed.
+    f.gerrit(
+        "NEW",
+        &["s1"],
+        json!([{"id": "m1", "author": {"_account_id": ME}, "date": "2024-01-03 00:00:00.000000000",
+                "message": "Patch Set 1:\n\n(1 comment)", "tag": tag, "_revision_number": 1}]),
+    );
+    let report = f.run();
+    assert!(report.stopped.is_none(), "{report:?}");
+    assert_eq!(f.http.posts().len(), 1, "not posted again");
+    let r = f.reloaded(&r);
+    assert_eq!(r.state, PendingReviewState::Held);
+    assert_eq!(r.drop_only, BTreeSet::from(["Code-Review".to_owned()]));
+}
