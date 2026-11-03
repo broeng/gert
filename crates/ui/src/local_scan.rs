@@ -17,7 +17,9 @@
 //! when it learns the account's email. A request while a round runs is remembered and runs once
 //! that one is done, so there is never more than one scan of a project at a
 //! time. Requests are cheap: a round skips every project whose skip key is
-//! unchanged after one `for-each-ref`.
+//! unchanged after one `for-each-ref` and reading `git config`.
+//! [`LocalScanner::scan_now`] scans one project in the next round whatever
+//! its key says, and answers with the reconcile's report.
 //!
 //! # A round
 //!
@@ -48,11 +50,16 @@
 
 use std::collections::{HashMap, HashSet};
 
+use futures::channel::oneshot;
 use gpui_kit::{AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use local_git::Repo;
+use store::ReconcileReport;
 use sync::{Syncer, local::scan_change_ids};
 
-use crate::{checkouts::Checkouts, session::Session};
+use crate::{
+    checkouts::{CheckoutState, Checkouts},
+    session::Session,
+};
 
 /// How many of a checkout's newest local commits a scan looks at (the
 /// user's decision: 200 per project).
@@ -65,6 +72,29 @@ pub enum LocalScanEvent {
     /// again.
     Changed,
 }
+
+/// Why [`LocalScanner::scan_now`] has no report.
+// Used by the Submit warning, which comes with local patch sets of Gerrit
+// changes; until then only the tests call `scan_now`.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ScanNowError {
+    /// The server is anonymous or has no session: nothing is scanned.
+    #[error("local changes are not looked for on this server")]
+    Inactive,
+    /// The project has no checkout with the `local_changes` option on, or
+    /// its checkout could not be opened.
+    #[error("{0} has no usable checkout with local changes on")]
+    NotScanned(String),
+    /// git or the store failed (the message says which).
+    #[error("{0}")]
+    Failed(String),
+    /// The scanner went away (the server was removed) before answering.
+    #[error("the scanner is gone")]
+    Gone,
+}
+
+type ScanNowReply = oneshot::Sender<Result<ReconcileReport, ScanNowError>>;
 
 /// Everything a project's scan depends on. Equal keys mean a new scan would
 /// change nothing.
@@ -99,6 +129,9 @@ struct Round {
     /// Every project with the option on, open or not.
     enabled: HashSet<String>,
     memos: HashMap<String, Memo>,
+    /// Open projects to scan whatever their skip key says
+    /// ([`LocalScanner::scan_now`]).
+    forced: HashSet<String>,
 }
 
 /// What a round did.
@@ -106,6 +139,8 @@ struct Ran {
     memos: HashMap<String, Memo>,
     changed: bool,
     full_scans: usize,
+    /// The outcome for each forced project.
+    reports: HashMap<String, Result<ReconcileReport, String>>,
 }
 
 /// The scanner of one server. See the module comment.
@@ -123,6 +158,8 @@ pub struct LocalScanner {
     task: Option<Task<()>>,
     /// A request came while a round ran.
     again: bool,
+    /// [`LocalScanner::scan_now`] calls waiting for a round.
+    waiting: Vec<(String, ScanNowReply)>,
     /// Full scans (`Repo::scan`) done so far, for the tests.
     full_scans: usize,
     _checkouts: Subscription,
@@ -142,6 +179,7 @@ impl LocalScanner {
             epoch: 0,
             task: None,
             again: false,
+            waiting: Vec::new(),
             full_scans: 0,
             _checkouts: sub,
         }
@@ -179,16 +217,42 @@ impl LocalScanner {
         self.task.is_none() && !self.again
     }
 
+    /// Scans `project` now, whatever its skip key says, and answers with
+    /// the reconcile's report: for a caller that needs a fresh look at the
+    /// checkout and can wait for it (the Submit warning). Shares the rule
+    /// of one round at a time: it runs with the next round, after the one
+    /// that may be running. A checkout that is still opening is waited
+    /// for.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn scan_now(
+        &mut self,
+        project: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ReconcileReport, ScanNowError>> {
+        let (tx, rx) = oneshot::channel();
+        if self.syncer.is_none() {
+            tx.send(Err(ScanNowError::Inactive)).ok();
+        } else {
+            self.waiting.push((project.to_owned(), tx));
+            self.request(cx);
+        }
+        cx.background_spawn(async move { rx.await.unwrap_or(Err(ScanNowError::Gone)) })
+    }
+
     /// Asks for a round (see the module comment). Never blocks.
     pub fn request(&mut self, cx: &mut Context<Self>) {
         let Some(syncer) = self.syncer.clone() else {
+            for (_, reply) in self.waiting.drain(..) {
+                reply.send(Err(ScanNowError::Inactive)).ok();
+            }
             return;
         };
         if self.task.is_some() {
             self.again = true;
             return;
         }
-        let (open, enabled) = self.checkouts.update(cx, |c, cx| {
+        let waiting = std::mem::take(&mut self.waiting);
+        let (open, enabled, waiting) = self.checkouts.update(cx, |c, cx| {
             let names: Vec<String> = c.local_change_projects().map(|p| p.name.clone()).collect();
             let open: Vec<(String, Repo)> = names
                 .iter()
@@ -197,18 +261,46 @@ impl LocalScanner {
                     Some((name.clone(), repo))
                 })
                 .collect();
-            (open, names.into_iter().collect::<HashSet<_>>())
+            // Each waiting call runs now, waits for its checkout to open
+            // (the open notifies, which asks for another round), or fails.
+            let mut later = Vec::new();
+            let mut now = Vec::new();
+            for (project, reply) in waiting {
+                match c.get(&project, cx).filter(|ck| ck.local_changes) {
+                    Some(ck) if ck.repo().is_some() => now.push((project, reply)),
+                    Some(ck) if matches!(ck.state, CheckoutState::Opening) => {
+                        later.push((project, reply))
+                    }
+                    _ => {
+                        reply.send(Err(ScanNowError::NotScanned(project))).ok();
+                    }
+                }
+            }
+            let enabled = names.into_iter().collect::<HashSet<_>>();
+            (open, enabled, (now, later))
         });
+        let (now, later) = waiting;
+        self.waiting = later;
         let round = Round {
             syncer,
             limit: self.limit,
             open,
             enabled,
             memos: self.memos.clone(),
+            forced: now.iter().map(|(p, _)| p.clone()).collect(),
         };
         let epoch = self.epoch;
         self.task = Some(cx.spawn(async move |this, cx| {
-            let ran = cx.background_spawn(async move { run(round) }).await;
+            let mut ran = cx.background_spawn(async move { run(round) }).await;
+            for (project, reply) in now {
+                let answer = match ran.reports.remove(&project) {
+                    Some(Ok(report)) => Ok(report),
+                    Some(Err(e)) => Err(ScanNowError::Failed(e)),
+                    // Opened, then gone from the list meanwhile.
+                    None => Err(ScanNowError::NotScanned(project)),
+                };
+                reply.send(answer).ok();
+            }
             this.update(cx, |this, cx| this.finished(epoch, ran, cx))
                 .ok();
         }));
@@ -252,33 +344,49 @@ fn run(round: Round) -> Ran {
         open,
         enabled,
         mut memos,
+        forced,
     } = round;
     let mut ran = Ran {
         memos: HashMap::new(),
         changed: false,
         full_scans: 0,
+        reports: HashMap::new(),
     };
     let account_email = syncer.account_email().unwrap_or_else(|e| {
         log::warn!("reading the account email: {e}");
         None
     });
     for (project, repo) in &open {
+        let memo = memos.remove(project);
+        let force = forced.contains(project);
+        // A forced scan ignores the memo (and so always scans).
         match scan_project(
             &syncer,
             project,
             repo,
             limit,
             account_email.as_deref(),
-            memos.remove(project),
+            if force { None } else { memo },
         ) {
             Ok(outcome) => {
-                ran.changed |= outcome.changed;
-                ran.full_scans += usize::from(outcome.scanned);
+                ran.changed |= outcome
+                    .report
+                    .as_ref()
+                    .is_some_and(ReconcileReport::changed);
+                ran.full_scans += usize::from(outcome.report.is_some());
                 if let Some(memo) = outcome.memo {
                     ran.memos.insert(project.clone(), memo);
                 }
+                if force && let Some(report) = outcome.report {
+                    ran.reports.insert(project.clone(), Ok(report));
+                }
             }
-            Err(e) => log::warn!("looking for local changes of {project}: {e}"),
+            Err(e) => {
+                log::warn!("looking for local changes of {project}: {e}");
+                if force {
+                    ran.reports.insert(project.clone(), Err(e.to_string()));
+                }
+            }
         }
     }
     // Projects still opening (or failed) keep their memo for later.
@@ -305,8 +413,9 @@ struct Outcome {
     /// The memo to keep: `None` when the reconcile did not settle (or an
     /// earlier memo is gone because the scan ran).
     memo: Option<Memo>,
-    changed: bool,
-    scanned: bool,
+    /// The reconcile's report; `None` when the skip key said there was
+    /// nothing to do.
+    report: Option<ReconcileReport>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -337,8 +446,7 @@ fn scan_project(
         if key == memo.key {
             return Ok(Outcome {
                 memo: Some(memo),
-                changed: false,
-                scanned: false,
+                report: None,
             });
         }
     }
@@ -358,8 +466,7 @@ fn scan_project(
     });
     Ok(Outcome {
         memo,
-        changed: report.changed(),
-        scanned: true,
+        report: Some(report),
     })
 }
 

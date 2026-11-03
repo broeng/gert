@@ -14,7 +14,7 @@ use model::{
 };
 use store::{LocalChangeUpsert, LocalOp, NewLocalPatchSet, ServerId, Store};
 
-use super::LocalScanner;
+use super::{LocalScanner, ScanNowError};
 use crate::{
     checkouts::Checkouts,
     login::tests::FakeBackend,
@@ -675,4 +675,77 @@ fn every_state_renders_and_j_k_cross_into_the_queries(cx: &mut TestAppContext) {
     assert_eq!(selected(cx), Some(numbers[3]));
     press(cx, "enter");
     assert_eq!(*events.borrow(), [numbers[3]]);
+}
+
+#[gpui_kit::test]
+fn scan_now_scans_whatever_the_skip_key_says_and_answers(cx: &mut TestAppContext) {
+    use futures::FutureExt as _;
+    let f = fixture();
+    f.own("Own change", ID_A);
+    let s = start(cx, &f, Some("u"), true);
+    let scanner = s.scanner(cx).expect("a scanner");
+    let scans = s.full_scans(cx);
+
+    // Nothing moved, yet it scans, and the report says what it found.
+    let task = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
+    cx.run_until_parked();
+    let report = task.now_or_never().expect("answered").expect("a report");
+    assert!(report.is_settled());
+    assert!(!report.changed());
+    assert_eq!(s.full_scans(cx), scans + 1);
+
+    // While a round runs it waits for the next one, which sees the new
+    // commit.
+    f.own("Second change", ID_B);
+    scanner.update(cx, |sc, cx| sc.request(cx));
+    let task = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
+    cx.run_until_parked();
+    let report = task.now_or_never().expect("answered").expect("a report");
+    assert!(report.inserted.is_empty(), "the running round took it");
+    assert_eq!(s.full_scans(cx), scans + 3);
+    assert_eq!(s.subjects(cx), ["Own change", "Second change"]);
+
+    // A project without a usable checkout has no report.
+    let task = scanner.update(cx, |sc, cx| sc.scan_now("unknown", cx));
+    cx.run_until_parked();
+    assert_eq!(
+        task.now_or_never().expect("answered"),
+        Err(ScanNowError::NotScanned("unknown".into()))
+    );
+}
+
+#[gpui_kit::test]
+fn scan_now_without_a_session_says_so(cx: &mut TestAppContext) {
+    use futures::FutureExt as _;
+    let checkouts = cx.new(|_| Checkouts::new(Vec::new()));
+    let scanner = cx.new(|cx| LocalScanner::new(checkouts, cx));
+    let task = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
+    cx.run_until_parked();
+    assert_eq!(
+        task.now_or_never().expect("answered"),
+        Err(ScanNowError::Inactive)
+    );
+}
+
+#[gpui_kit::test]
+fn scan_now_waits_for_the_checkout_to_open(cx: &mut TestAppContext) {
+    use futures::FutureExt as _;
+    let f = fixture();
+    f.own("Own change", ID_A);
+    let mut store = Store::open_in_memory().expect("store");
+    store.server_id(URL).expect("server id");
+    let env = env_with(store, &f.http);
+    let setup = ServerSetup {
+        username: Some("u".into()),
+        ..setup()
+    };
+    let session = Session::new(&env, &setup, None).expect("session");
+    let checkouts = cx.new(|_| Checkouts::new(vec![f.project(true)]));
+    let scanner = cx.new(|cx| LocalScanner::new(checkouts, cx));
+    scanner.update(cx, |sc, _| sc.set_session(Some(&session)));
+    // Nothing has opened the checkout yet.
+    let task = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
+    cx.run_until_parked();
+    let report = task.now_or_never().expect("answered").expect("a report");
+    assert_eq!(report.inserted.len(), 1);
 }
