@@ -35,6 +35,7 @@ fn review(patch_set: model::PatchSetNumber, message: &str) -> NewPendingReview {
         message: message.into(),
         unresolved: false,
         created: Timestamp::now(),
+        offline: false,
         replaces_draft: None,
     }
 }
@@ -57,6 +58,7 @@ fn pending_reviews_are_written_and_listed_without_the_network() {
         strategy: LocalApproval::Follow,
         message: "edited".into(),
         unresolved: true,
+        offline: false,
     };
     let edited = syncer
         .update_pending_review(first.id, &edit)

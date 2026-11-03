@@ -54,6 +54,7 @@ impl Syncer {
             label,
             value,
             strategy,
+            false,
             Timestamp::now(),
         )?)
     }

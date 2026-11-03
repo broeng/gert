@@ -103,6 +103,7 @@ fn review(s: &mut Store, id: ServerId, p: &LocalPatchSet) -> PendingReview {
             message: "LGTM".into(),
             unresolved: false,
             created: ts(T1),
+            offline: false,
             replaces_draft: None,
         },
     )
@@ -1026,7 +1027,7 @@ fn finishing_a_post_keeps_the_votes_that_did_not_reach_gerrit() {
     use PendingReviewState::*;
     let (mut s, id, c, v1, v2) = setup();
     let (a, r, _) = moved(&mut s, id, &c, &v1, &v2);
-    s.set_review_label(id, r.id, "Verified", 1, LocalApproval::Exact, ts(T1))
+    s.set_review_label(id, r.id, "Verified", 1, LocalApproval::Exact, false, ts(T1))
         .unwrap()
         .unwrap();
     let post = s
@@ -1362,9 +1363,17 @@ fn held_setup() -> (Store, ServerId, LocalChange, PendingReview, Draft) {
     let (mut s, id, c, v1, _) = setup();
     let d = draft(&mut s, id, &c, &v1, "line 7 is odd");
     let r = review(&mut s, id, &v1);
-    s.set_review_label(id, r.id, "Verified", 1, LocalApproval::Follow, ts(T1))
-        .unwrap()
-        .unwrap();
+    s.set_review_label(
+        id,
+        r.id,
+        "Verified",
+        1,
+        LocalApproval::Follow,
+        false,
+        ts(T1),
+    )
+    .unwrap()
+    .unwrap();
     let mut rw = rewrite(&c, vec![]);
     rw.keep = vec![(d.local_id, "line 7 changed".into())];
     let mut held = ReviewStateChange::new(r.id, &[Pending], Held, Some("not exact".into()));
@@ -1715,6 +1724,7 @@ fn an_empty_review_is_never_held_and_goes_once_emptied() {
                 message: String::new(),
                 unresolved: false,
                 created: ts(T1),
+                offline: false,
                 replaces_draft: None,
             },
         )
@@ -1733,6 +1743,7 @@ fn an_empty_review_is_never_held_and_goes_once_emptied() {
                 message: " ".into(),
                 unresolved: false,
                 created: ts(T1),
+                offline: false,
                 replaces_draft: None,
             },
         )
@@ -1776,15 +1787,24 @@ fn a_published_vote_supersedes_older_unsent_votes_on_its_label() {
                 message: String::new(),
                 unresolved: false,
                 created: ts(T1),
+                offline: false,
                 replaces_draft: None,
             },
         )
         .unwrap();
     // The held one, newer, with both labels.
     let r = review(&mut s, id, &v1);
-    s.set_review_label(id, r.id, "Verified", -1, LocalApproval::Follow, ts(T1))
-        .unwrap()
-        .unwrap();
+    s.set_review_label(
+        id,
+        r.id,
+        "Verified",
+        -1,
+        LocalApproval::Follow,
+        false,
+        ts(T1),
+    )
+    .unwrap()
+    .unwrap();
     let mut rw = rewrite(&c, vec![]);
     rw.review_states = vec![ReviewStateChange::new(
         r.id,

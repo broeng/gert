@@ -272,6 +272,24 @@ pub struct PendingReview {
     pub author: Option<crate::AccountId>,
     #[serde(default)]
     pub author_name: Option<String>,
+    /// Whether the change was on Gerrit when a vote was saved (its local
+    /// change already had a Gerrit change: a local patch set of it). Such
+    /// votes are never purely local.
+    #[serde(default)]
+    pub known_on_gerrit: bool,
+    /// Whether the votes were saved while the server could not be reached
+    /// (offline, or no session that could sync), so the change could not
+    /// have been checked: purely local unless `known_on_gerrit`. A later
+    /// vote keeps it only if the earlier votes were already purely local.
+    #[serde(default)]
+    pub offline: bool,
+    /// When a lookup last found the review's local change not on Gerrit
+    /// (a complete, well-formed answer; the time the lookup started, by
+    /// the local clock). Joined in from the local change when the review
+    /// is read. Votes saved no later than this were given before the
+    /// change was on Gerrit.
+    #[serde(default)]
+    pub not_found_at: Option<Timestamp>,
 }
 
 impl PendingReview {

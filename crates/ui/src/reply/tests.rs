@@ -1158,6 +1158,7 @@ fn seed_local_version(store: &mut Store) -> PatchSetNumber {
                 message: "the local review".into(),
                 unresolved: false,
                 created: now,
+                offline: false,
                 replaces_draft: None,
             },
         )
@@ -1265,6 +1266,7 @@ fn seed_pending_review(store: &mut Store, message: &str) {
                 message: message.into(),
                 unresolved: true,
                 created: jiff::Timestamp::now(),
+                offline: false,
                 replaces_draft: None,
             },
         )
@@ -1637,6 +1639,7 @@ fn seed_gerrit_plus_two(store: &mut Store) -> model::PendingReview {
                 message: "first".into(),
                 unresolved: false,
                 created: jiff::Timestamp::now(),
+                offline: false,
                 replaces_draft: None,
             },
         )

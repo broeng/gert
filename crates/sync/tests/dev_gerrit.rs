@@ -573,6 +573,7 @@ impl Fx {
                 message: "local review message".into(),
                 unresolved: true,
                 created: model::Timestamp::now(),
+                offline: false,
                 replaces_draft: None,
             })
             .unwrap();
@@ -996,6 +997,7 @@ impl Fx {
                     message: "found by the lookup".into(),
                     unresolved: false,
                     created: model::Timestamp::now(),
+                    offline: false,
                     replaces_draft: None,
                 },
             )

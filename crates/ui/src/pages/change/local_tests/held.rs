@@ -80,6 +80,7 @@ fn held_page_with(cx: &mut TestAppContext, merged: bool, recorded: bool) -> (Fix
                 message: "LGTM".into(),
                 unresolved: false,
                 created: at(51),
+                offline: false,
                 replaces_draft: None,
             },
         )

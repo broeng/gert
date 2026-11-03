@@ -60,6 +60,9 @@ pub struct NewPendingReview {
     pub unresolved: bool,
     /// Also the first `voted_at`.
     pub created: Timestamp,
+    /// Whether the server could not be reached when the review was saved
+    /// ([`PendingReview::offline`]).
+    pub offline: bool,
     /// An ordinary patch-set-level draft on the same local patch set that
     /// held the message until now (the reply dialog's text, kept while the
     /// dialog was closed): removed in the same transaction, since the
@@ -78,14 +81,18 @@ pub struct PendingReviewEdit {
     /// Empty or blank removes the message.
     pub message: String,
     pub unresolved: bool,
+    /// Whether the server could not be reached now; taken, as the
+    /// strategy, only when the labels change ([`PendingReview::offline`]).
+    pub offline: bool,
 }
 
 const COLUMNS: &str = "r.id, r.local_change_id, r.change_number, r.patch_set, r.revision_sha, \
      r.given_on_sha, r.labels, r.strategy, r.state, r.error, r.held_reason, r.created_ms, \
      r.voted_at_ms, r.nonce, d.message, d.id, d.unresolved, r.drop_only, r.author_id, \
-     r.author_name";
+     r.author_name, r.known_on_gerrit, r.offline, c.not_found_ms";
 
-const FROM: &str = "pending_reviews r LEFT JOIN drafts d ON d.pending_review_id = r.id";
+const FROM: &str = "pending_reviews r LEFT JOIN drafts d ON d.pending_review_id = r.id \
+     LEFT JOIN local_changes c ON c.id = r.local_change_id";
 
 fn review_from_row(r: &Row<'_>) -> rusqlite::Result<PendingReview> {
     let ts = |col: usize| -> rusqlite::Result<Timestamp> {
@@ -125,7 +132,48 @@ fn review_from_row(r: &Row<'_>) -> rusqlite::Result<PendingReview> {
             .and_then(|id| u64::try_from(id).ok())
             .map(model::AccountId),
         author_name: r.get(19)?,
+        known_on_gerrit: r.get(20)?,
+        offline: r.get(21)?,
+        not_found_at: match r.get::<_, Option<i64>>(22)? {
+            Some(ms) => Some(from_millis(ms).map_err(|_| bad(22, &ms.to_string()))?),
+            None => None,
+        },
     })
+}
+
+/// Records new votes `labels` on `review`, given `now` under `strategy`
+/// with the server reachable or not (`offline`): see
+/// [`Store::update_pending_review`].
+fn revote(
+    conn: &Connection,
+    server: ServerId,
+    review: &PendingReview,
+    labels: &BTreeMap<String, i32>,
+    strategy: LocalApproval,
+    offline: bool,
+    now: Timestamp,
+) -> Result<(), Error> {
+    // Purely local so far: given offline, or before a lookup that did not
+    // find the change. Then the new votes decide on their own.
+    let proven = !review.known_on_gerrit
+        && (review.offline || review.not_found_at.is_some_and(|t| review.voted_at <= t));
+    conn.execute(
+        "UPDATE pending_reviews SET labels = ?3, strategy = ?4, voted_at_ms = ?5,
+             known_on_gerrit = known_on_gerrit OR EXISTS (
+                 SELECT 1 FROM local_changes c
+                 WHERE c.id = pending_reviews.local_change_id AND c.gerrit_number IS NOT NULL),
+             offline = ?6
+         WHERE server_id = ?1 AND id = ?2",
+        params![
+            server.0,
+            review.id.0,
+            serde_json::to_string(labels)?,
+            strategy.as_str(),
+            millis(now),
+            proven && offline
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn load(
@@ -371,9 +419,9 @@ impl Store {
         let inserted = tx.execute(
             "INSERT INTO pending_reviews (server_id, local_change_id, change_number, patch_set,
                  revision_sha, given_on_sha, labels, strategy, state, created_ms, voted_at_ms,
-                 author_id, author_name)
+                 author_id, author_name, known_on_gerrit, offline)
              SELECT ?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, 'pending', ?8, ?8, account_id,
-                 account_username
+                 account_username, ?9, ?10
              FROM servers WHERE id = ?1",
             params![
                 server.0,
@@ -383,7 +431,9 @@ impl Store {
                 sha,
                 serde_json::to_string(&input.labels)?,
                 input.strategy.as_str(),
-                millis(input.created)
+                millis(input.created),
+                gerrit_number.is_some(),
+                input.offline
             ],
         )?;
         if inserted == 0 {
@@ -415,7 +465,12 @@ impl Store {
 
     /// Replaces the votes and message of a review that is still `Pending`
     /// (the reply dialog reopened on it). The strategy and `voted_at` change
-    /// only if the labels do. `None` if there is no such review or it is no
+    /// only if the labels do, and so does what was recorded about Gerrit
+    /// at the save: `known_on_gerrit` becomes true if the change is on
+    /// Gerrit by now, and `offline` is `edit.offline` if the earlier votes
+    /// were already purely local, else false. So the review, judged as a
+    /// whole by its latest vote, is purely local only if every vote was:
+    /// the votes of one review are cast or held together. `None` if there is no such review or it is no
     /// longer pending; nothing is written then.
     pub fn update_pending_review(
         &mut self,
@@ -432,16 +487,14 @@ impl Store {
             return Ok(None);
         }
         if review.labels != edit.labels {
-            tx.execute(
-                "UPDATE pending_reviews SET labels = ?3, strategy = ?4, voted_at_ms = ?5
-                 WHERE server_id = ?1 AND id = ?2",
-                params![
-                    server.0,
-                    id.0,
-                    serde_json::to_string(&edit.labels)?,
-                    edit.strategy.as_str(),
-                    millis(now)
-                ],
+            revote(
+                &tx,
+                server,
+                &review,
+                &edit.labels,
+                edit.strategy,
+                edit.offline,
+                now,
             )?;
         }
         write_message(&tx, server, &review, &edit.message, edit.unresolved, now)?;
@@ -653,10 +706,12 @@ impl Store {
 
     /// Gives one label's vote in a review that is still `Pending` (a quick
     /// vote on its version), leaving the other votes and the message
-    /// alone. A new vote: `voted_at` becomes `now` and the strategy the
-    /// project's mode now. Read and written in one transaction, so a
+    /// alone. A new vote: `voted_at` becomes `now`, the strategy the
+    /// project's mode now, and `offline` whether the server could not be
+    /// reached now (see [`Store::update_pending_review`]). Read and written in one transaction, so a
     /// message edited meanwhile is never overwritten. `None` if the review
     /// is gone or no longer pending; nothing is written then.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_review_label(
         &mut self,
         server: ServerId,
@@ -664,27 +719,19 @@ impl Store {
         label: &str,
         value: i32,
         strategy: LocalApproval,
+        offline: bool,
         now: Timestamp,
     ) -> Result<Option<PendingReview>, Error> {
         let tx = self.conn.transaction()?;
-        let Some(mut review) = load(&tx, server, id)? else {
+        let Some(review) = load(&tx, server, id)? else {
             return Ok(None);
         };
         if review.state != PendingReviewState::Pending {
             return Ok(None);
         }
-        review.labels.insert(label.to_owned(), value);
-        tx.execute(
-            "UPDATE pending_reviews SET labels = ?3, strategy = ?4, voted_at_ms = ?5
-             WHERE server_id = ?1 AND id = ?2",
-            params![
-                server.0,
-                id.0,
-                serde_json::to_string(&review.labels)?,
-                strategy.as_str(),
-                millis(now)
-            ],
-        )?;
+        let mut labels = review.labels.clone();
+        labels.insert(label.to_owned(), value);
+        revote(&tx, server, &review, &labels, strategy, offline, now)?;
         let review = load(&tx, server, id)?;
         tx.commit()?;
         Ok(review)

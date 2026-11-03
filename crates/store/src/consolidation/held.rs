@@ -265,7 +265,7 @@ impl Store {
         // Where the votes were given, when and under which strategy: the
         // new review keeps it, so the approval rules judge it as before
         // (should it fail and be held again).
-        let mut origin: Option<(String, i64, String)> = None;
+        let mut origin: Option<(String, i64, String, bool, bool)> = None;
         for (id, label) in &p.votes {
             let Some(r) = held_review(&tx, server, *id, change, gerrit)? else {
                 return Ok(None);
@@ -274,6 +274,8 @@ impl Store {
                 r.given_on_sha.as_str().to_owned(),
                 crate::review_cache::millis(r.voted_at),
                 r.strategy.as_str().to_owned(),
+                r.known_on_gerrit,
+                r.offline,
             );
             if origin.as_ref().is_some_and(|o| *o != this) {
                 // Votes given on different commits or at different times
@@ -306,18 +308,22 @@ impl Store {
         }
 
         let at = crate::review_cache::millis(p.at);
-        let (given_on, voted_at, strategy) = origin.unwrap_or_else(|| {
-            (
-                p.to.sha.as_str().to_owned(),
-                at,
-                model::LocalApproval::Exact.as_str().to_owned(),
-            )
-        });
+        let (given_on, voted_at, strategy, known_on_gerrit, offline) =
+            origin.unwrap_or_else(|| {
+                (
+                    p.to.sha.as_str().to_owned(),
+                    at,
+                    model::LocalApproval::Exact.as_str().to_owned(),
+                    true,
+                    false,
+                )
+            });
         tx.execute(
             "INSERT INTO pending_reviews (server_id, local_change_id, change_number, patch_set,
                  revision_sha, given_on_sha, labels, strategy, state, created_ms, voted_at_ms,
-                 nonce, author_id, author_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?10, ?6, ?7, 'sending', ?8, ?11, ?9, ?12, ?13)",
+                 nonce, author_id, author_name, known_on_gerrit, offline)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?10, ?6, ?7, 'sending', ?8, ?11, ?9, ?12, ?13, ?14,
+                 ?15)",
             params![
                 server.0,
                 p.local_change.0,
@@ -331,7 +337,9 @@ impl Store {
                 given_on,
                 voted_at,
                 i64::try_from(p.author.0).ok(),
-                p.author_name
+                p.author_name,
+                known_on_gerrit,
+                offline
             ],
         )?;
         let review = PendingReviewId(tx.last_insert_rowid());

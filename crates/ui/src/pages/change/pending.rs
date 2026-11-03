@@ -369,6 +369,9 @@ mod tests {
             message_draft: None,
             author: None,
             author_name: None,
+            known_on_gerrit: false,
+            offline: false,
+            not_found_at: None,
         }
     }
 

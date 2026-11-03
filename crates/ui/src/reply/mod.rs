@@ -907,6 +907,7 @@ impl ReplyDialog {
                             strategy,
                             message: message.clone(),
                             unresolved,
+                            offline: false,
                         };
                         if let Some(r) = syncer.update_pending_review(id, &edit)? {
                             return Ok((r, false));
@@ -921,6 +922,7 @@ impl ReplyDialog {
                             message,
                             unresolved,
                             created: Timestamp::now(),
+                            offline: false,
                             replaces_draft: None,
                         };
                         return syncer.create_pending_review(&input).map(|r| (r, true));
@@ -937,6 +939,7 @@ impl ReplyDialog {
                         message,
                         unresolved,
                         created: Timestamp::now(),
+                        offline: false,
                         replaces_draft,
                     };
                     syncer.create_pending_review(&input).map(|r| (r, false))

@@ -92,6 +92,7 @@ fn review(p: &LocalPatchSet) -> NewPendingReview {
         message: "LGTM".into(),
         unresolved: false,
         created: ts(T1),
+        offline: false,
         replaces_draft: None,
     }
 }

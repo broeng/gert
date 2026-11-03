@@ -220,6 +220,7 @@ fn a_quick_vote_on_a_local_version_goes_into_its_pending_review(cx: &mut TestApp
                 message: "Nearly".into(),
                 unresolved: true,
                 created: Timestamp::now(),
+                offline: false,
                 replaces_draft: None,
             },
         )
@@ -295,6 +296,7 @@ fn seed_reviews(store: &mut Store, version: PatchSetNumber, states: &[model::Pen
                     message: format!("review {i}, {}", state.as_str()),
                     unresolved: false,
                     created: at(50 + i as u32),
+                    offline: false,
                     replaces_draft: None,
                 },
             )

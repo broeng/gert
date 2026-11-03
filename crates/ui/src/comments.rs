@@ -379,6 +379,7 @@ mod tests {
             message: message.into(),
             unresolved: false,
             created: jiff::Timestamp::now(),
+            offline: false,
             replaces_draft: None,
         };
         let first = store

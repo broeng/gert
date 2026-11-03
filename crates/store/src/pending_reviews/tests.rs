@@ -72,6 +72,7 @@ fn new_review(patch_set: PatchSetNumber, message: &str) -> NewPendingReview {
         message: message.into(),
         unresolved: false,
         created: ts(T0),
+        offline: false,
         replaces_draft: None,
     }
 }
@@ -82,6 +83,7 @@ fn edit(cr: i32, message: &str) -> PendingReviewEdit {
         strategy: LocalApproval::Exact,
         message: message.into(),
         unresolved: true,
+        offline: false,
     }
 }
 
@@ -530,7 +532,7 @@ fn a_quick_vote_sets_one_label_and_leaves_the_message_alone() {
         .unwrap()
         .unwrap();
     let v = s
-        .set_review_label(id, r.id, "Verified", 1, LocalApproval::Exact, ts(T2))
+        .set_review_label(id, r.id, "Verified", 1, LocalApproval::Exact, false, ts(T2))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -544,8 +546,16 @@ fn a_quick_vote_sets_one_label_and_leaves_the_message_alone() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        s.set_review_label(id, r.id, "Verified", -1, LocalApproval::Exact, ts(T2))
-            .unwrap(),
+        s.set_review_label(
+            id,
+            r.id,
+            "Verified",
+            -1,
+            LocalApproval::Exact,
+            false,
+            ts(T2)
+        )
+        .unwrap(),
         None
     );
     assert_eq!(
@@ -667,4 +677,185 @@ fn a_review_records_the_account_signed_in_when_it_was_written() {
         .unwrap();
     let again = f.s.load_pending_review(f.id, mine.id).unwrap().unwrap();
     assert_eq!(again.author, Some(model::AccountId(7)));
+}
+
+// ---- what proves a review purely local ----
+
+#[test]
+fn a_review_records_whether_the_change_was_on_gerrit_and_the_server_reachable() {
+    let Fx {
+        mut s,
+        id,
+        versions,
+        ..
+    } = fx();
+    let local = s
+        .create_pending_review(id, &new_review(versions[0].number, "m"))
+        .unwrap();
+    assert!(!local.known_on_gerrit && !local.offline);
+    assert_eq!(local.not_found_at, None);
+    let offline = s
+        .create_pending_review(
+            id,
+            &NewPendingReview {
+                offline: true,
+                ..new_review(versions[1].number, "m")
+            },
+        )
+        .unwrap();
+    assert!(offline.offline);
+    // A local patch set of a Gerrit change: known, offline or not.
+    let gerrit = add_change(&mut s, id, "I2", Some(7));
+    let v = s.local_patch_sets(id, gerrit.id).unwrap().remove(0);
+    let known = s
+        .create_pending_review(
+            id,
+            &NewPendingReview {
+                offline: true,
+                ..new_review(v.number, "m")
+            },
+        )
+        .unwrap();
+    assert!(known.known_on_gerrit);
+}
+
+#[test]
+fn the_latest_not_found_lookup_is_kept_on_the_change_and_read_with_its_reviews() {
+    let Fx {
+        mut s,
+        id,
+        change,
+        versions,
+    } = fx();
+    let r = s
+        .create_pending_review(id, &new_review(versions[0].number, "m"))
+        .unwrap();
+    assert!(
+        s.mark_local_change_not_found(id, change.id, ts(T1))
+            .unwrap()
+    );
+    // An older answer arriving late does not move it back.
+    assert!(
+        s.mark_local_change_not_found(id, change.id, ts(T0))
+            .unwrap()
+    );
+    let r = s.load_pending_review(id, r.id).unwrap().unwrap();
+    assert_eq!(r.not_found_at, Some(ts(T1)));
+    assert_eq!(
+        s.pending_reviews(id, change.number).unwrap()[0].not_found_at,
+        Some(ts(T1))
+    );
+    // Never on a change that is on Gerrit.
+    let gerrit = add_change(&mut s, id, "I2", Some(7));
+    assert!(
+        !s.mark_local_change_not_found(id, gerrit.id, ts(T2))
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_new_vote_keeps_offline_only_when_the_earlier_votes_were_proven() {
+    let Fx {
+        mut s,
+        id,
+        change,
+        versions,
+    } = fx();
+    let offline = |s: &mut Store, ps: PatchSetNumber| {
+        s.create_pending_review(
+            id,
+            &NewPendingReview {
+                offline: true,
+                ..new_review(ps, "m")
+            },
+        )
+        .unwrap()
+    };
+    // Given offline, then a quick vote offline: still offline.
+    let r = offline(&mut s, versions[0].number);
+    let r = s
+        .set_review_label(id, r.id, "Verified", 1, LocalApproval::Follow, true, ts(T1))
+        .unwrap()
+        .unwrap();
+    assert!(r.offline);
+    assert_eq!(r.voted_at, ts(T1));
+    // Then online: the new vote needs a lookup after it.
+    let r = s
+        .set_review_label(
+            id,
+            r.id,
+            "Verified",
+            -1,
+            LocalApproval::Follow,
+            false,
+            ts(T2),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(!r.offline);
+
+    // Given online and not proven (no lookup after it), then a vote
+    // offline: the first vote is still unproven, so not offline.
+    let r = s
+        .create_pending_review(id, &new_review(versions[1].number, "m"))
+        .unwrap();
+    let r = s
+        .update_pending_review(
+            id,
+            r.id,
+            &PendingReviewEdit {
+                offline: true,
+                ..edit(1, "m")
+            },
+            ts(T1),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(!r.offline);
+    // Proven by a lookup after it (T1): the next offline vote counts.
+    s.mark_local_change_not_found(id, change.id, ts(T1))
+        .unwrap();
+    let r = s
+        .update_pending_review(
+            id,
+            r.id,
+            &PendingReviewEdit {
+                offline: true,
+                ..edit(2, "m")
+            },
+            ts(T2),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(r.offline);
+    // The message alone is no new vote: nothing changes.
+    let same = s
+        .update_pending_review(id, r.id, &edit(2, "other text"), ts(T2))
+        .unwrap()
+        .unwrap();
+    assert!(same.offline);
+}
+
+#[test]
+fn a_new_vote_after_the_change_reached_gerrit_is_known_on_gerrit() {
+    let Fx {
+        mut s,
+        id,
+        change,
+        versions,
+    } = fx();
+    let r = s
+        .create_pending_review(id, &new_review(versions[0].number, "m"))
+        .unwrap();
+    s.conn
+        .execute(
+            "UPDATE local_changes SET gerrit_number = 7 WHERE id = ?1",
+            [change.id.0],
+        )
+        .unwrap();
+    let r = s
+        .set_review_label(id, r.id, "Verified", 1, LocalApproval::Follow, true, ts(T1))
+        .unwrap()
+        .unwrap();
+    assert!(r.known_on_gerrit && !r.offline);
 }

@@ -726,6 +726,7 @@ fn closed_and_held_rows_show_their_gerrit_number_and_open_that_change(cx: &mut T
                 message: String::new(),
                 unresolved: false,
                 created: ts(),
+                offline: false,
                 replaces_draft: None,
             },
         )

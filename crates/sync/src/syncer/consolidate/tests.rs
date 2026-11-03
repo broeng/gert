@@ -338,6 +338,7 @@ impl Fx {
                 message: message.into(),
                 unresolved: false,
                 created,
+                offline: false,
                 replaces_draft: None,
             })
             .unwrap()
@@ -3495,6 +3496,7 @@ fn a_draft_written_during_a_run_is_ported_by_the_next() {
                     message: "written meanwhile".into(),
                     unresolved: false,
                     created: Timestamp::now(),
+                    offline: false,
                     replaces_draft: None,
                 })
                 .unwrap();

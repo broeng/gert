@@ -738,6 +738,9 @@ mod tests {
             message_draft: Some(LocalDraftId(9)),
             author: None,
             author_name: None,
+            known_on_gerrit: false,
+            offline: false,
+            not_found_at: None,
         }
     }
 

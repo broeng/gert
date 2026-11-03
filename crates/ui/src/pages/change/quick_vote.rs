@@ -176,6 +176,7 @@ impl ChangePage {
                         message: String::new(),
                         unresolved: false,
                         created: Timestamp::now(),
+                        offline: false,
                         replaces_draft: None,
                     })
                 })

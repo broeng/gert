@@ -274,6 +274,7 @@ impl Started {
                     message: "Looks right".into(),
                     unresolved: false,
                     created: Timestamp::now(),
+                    offline: false,
                     replaces_draft: None,
                 },
             )

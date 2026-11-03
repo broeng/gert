@@ -519,6 +519,19 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE local_changes ADD COLUMN off_branch_ms INTEGER;
     ",
+    // v23 -> v24: what proves a local review's votes were given before
+    // the change was on Gerrit ("purely local"). On the local change: the
+    // latest complete lookup that did not find it (`not_found_ms`, when
+    // the lookup started). On the review, recorded when its votes are
+    // saved: whether the change was already on Gerrit (a local patch set
+    // of a Gerrit change) and whether the server could not be reached.
+    // Reviews from before this step have neither flag, so only a lookup
+    // after their votes makes them purely local.
+    "
+    ALTER TABLE local_changes ADD COLUMN not_found_ms INTEGER;
+    ALTER TABLE pending_reviews ADD COLUMN known_on_gerrit INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pending_reviews ADD COLUMN offline INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

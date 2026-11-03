@@ -683,6 +683,27 @@ impl Store {
         Ok(changed)
     }
 
+    /// Records that a lookup started at `asked` found local change
+    /// `change` not on Gerrit: a complete, well-formed answer (the query
+    /// succeeded, the Change-Id is one Gerrit can be asked about, the
+    /// result was not cut off). The latest such time is kept, as
+    /// [`PendingReview::not_found_at`](model::PendingReview::not_found_at)
+    /// of its reviews: votes saved no later were given before the change
+    /// was on Gerrit. Not for a change that has a Gerrit change.
+    pub fn mark_local_change_not_found(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        asked: Timestamp,
+    ) -> Result<bool, Error> {
+        let changed = self.conn.execute(
+            "UPDATE local_changes SET not_found_ms = MAX(COALESCE(not_found_ms, ?3), ?3)
+             WHERE server_id = ?1 AND id = ?2 AND gerrit_number IS NULL",
+            params![server.0, change.0, millis(asked)],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// The versions of a local change in the order they were first seen.
     pub fn local_patch_sets(
         &self,

@@ -342,6 +342,7 @@ impl Fx {
                 message: message.into(),
                 unresolved: false,
                 created: model::Timestamp::now() - ago,
+                offline: false,
                 replaces_draft: None,
             })
             .unwrap()

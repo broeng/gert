@@ -1045,6 +1045,9 @@ fn v12_rebuilds_pending_reviews_with_an_owner_and_keeps_the_counter() {
         assert_eq!((r.created, r.voted_at), (r.created, r.created));
         assert_eq!(r.held_reason.as_deref(), Some("why"));
         assert_eq!(r.nonce.as_deref(), Some("n"));
+        // v24: nothing proves an older review purely local.
+        assert!(!r.known_on_gerrit && !r.offline);
+        assert_eq!(r.not_found_at, None);
     }
     assert_eq!(reviews[1].message.as_deref(), Some("m"));
     // The orphan's message draft was unsealed, not left dangling.
@@ -1067,6 +1070,7 @@ fn v12_rebuilds_pending_reviews_with_an_owner_and_keeps_the_counter() {
                 message: String::new(),
                 unresolved: false,
                 created: ts(T1),
+                offline: false,
                 replaces_draft: None,
             },
         )
