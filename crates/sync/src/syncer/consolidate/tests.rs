@@ -319,16 +319,16 @@ impl Fx {
     }
 
     fn review(&self, v: &LocalPatchSet, labels: &[(&str, i32)], message: &str) -> PendingReview {
-        self.review_with(v, labels, message, LocalApproval::Exact, Timestamp::now())
+        self.new_review(v, labels, message, LocalApproval::Exact, false)
     }
 
-    fn review_with(
+    fn new_review(
         &self,
         v: &LocalPatchSet,
         labels: &[(&str, i32)],
         message: &str,
         strategy: LocalApproval,
-        created: Timestamp,
+        offline: bool,
     ) -> PendingReview {
         self.syncer
             .create_pending_review(&NewPendingReview {
@@ -337,11 +337,57 @@ impl Fx {
                 strategy,
                 message: message.into(),
                 unresolved: false,
-                created,
-                offline: false,
+                created: Timestamp::now(),
+                offline,
                 replaces_draft: None,
             })
             .unwrap()
+    }
+
+    /// A review of `v` whose votes were given as `given` says, checked
+    /// against [`crate::purely_local`]. Purely local ones need a local
+    /// change that is not on Gerrit yet (see [`Fx::found_on_gerrit`]).
+    fn review_with(
+        &self,
+        v: &LocalPatchSet,
+        labels: &[(&str, i32)],
+        message: &str,
+        strategy: LocalApproval,
+        given: Given,
+    ) -> PendingReview {
+        let r = self.new_review(v, labels, message, strategy, given == Given::Offline);
+        if given == Given::BeforeLookup {
+            // A lookup in the vote's own millisecond would not count.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            self.syncer
+                .store()
+                .mark_local_change_not_found(self.syncer.server, r.local_change, Timestamp::now())
+                .unwrap();
+        }
+        let r = self.reloaded(&r);
+        let purely = matches!(given, Given::Offline | Given::BeforeLookup);
+        assert_eq!(crate::purely_local(&r), purely, "{given:?}: {r:?}");
+        assert_eq!(r.known_on_gerrit, given == Given::OnGerrit, "{given:?}");
+        r
+    }
+
+    /// Gives the local change Gerrit's change `CHANGE`, as a lookup that
+    /// found it does, moving nothing.
+    fn found_on_gerrit(&self, row: &LocalChange) {
+        let rewrite = ConsolidationRewrite {
+            local_change: row.id,
+            gerrit_number: CHANGE,
+            moves: Vec::new(),
+            keep: Vec::new(),
+            review_states: Vec::new(),
+            state: None,
+            else_state: None,
+        };
+        self.syncer
+            .store()
+            .rewrite_local_change(self.syncer.server, &rewrite)
+            .unwrap()
+            .unwrap();
     }
 
     fn assert_nothing_local(&self, local: &[&str]) {
@@ -1058,13 +1104,13 @@ fn an_exact_match_on_an_older_patch_set_posts_comments_and_holds_the_votes() {
 fn a_purely_local_approval_may_be_published_under_exact_or_manual() {
     let f = fx();
     let (row, v) = f.local(CID, Some("main"), None, &["s1"]);
-    // Given long before Gerrit's change was created (2024-01-01).
+    // Given while Gerrit could not be reached.
     let r = f.review_with(
         &v[0],
         &[("Code-Review", 2)],
         "",
         LocalApproval::ExactOrManual,
-        ts("2023-06-01T00:00:00Z"),
+        Given::Offline,
     );
     f.query_finds(&[(7, "main", "NEW")]);
     f.gerrit("NEW", &["s1", "s2"], json!([]));
@@ -2131,11 +2177,20 @@ fn votes_gerrit_drops_after_a_new_patch_set_are_held_too() {
 
 // ---- votes of a ported review ----
 
-/// Gerrit's change 7 was created at 2024-01-01T00:00:00Z: votes given six
-/// minutes before were purely local, four minutes before were not (the
-/// clock skew margin is five minutes).
-const PURELY_LOCAL: &str = "2023-12-31T23:54:00Z";
-const STRICT: &str = "2023-12-31T23:56:00Z";
+/// How a review's votes were given, for the rules on ported reviews (see
+/// `sync::purely_local`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Given {
+    /// Saved while Gerrit could not be reached: purely local.
+    Offline,
+    /// Saved, then a lookup did not find the change: purely local.
+    BeforeLookup,
+    /// Saved while Gerrit was reachable, and no lookup after it: the strict
+    /// rule (nothing confirms the change was not there yet).
+    Unconfirmed,
+    /// Saved on a local patch set of a Gerrit change: the strict rule.
+    OnGerrit,
+}
 
 impl Fx {
     /// Moves review `r` of local version `v` onto Gerrit's PS `ps` with
@@ -2177,25 +2232,27 @@ impl Fx {
 }
 
 /// What became of a review with Code-Review +2 (an approval) and Verified
-/// -1 given on local commit `l1` at `voted_at` under `snapshot`, ported onto
+/// -1 given on local commit `l1` as `given` under `snapshot`, ported onto
 /// PS `target` of Gerrit's patch sets `shas` (the last current), with the
 /// project's setting `setting`: the votes posted (`Null` for none), and the
 /// review.
 fn ported_votes(
     snapshot: LocalApproval,
     setting: Option<LocalApproval>,
-    voted_at: &str,
+    given: Given,
     shas: &[&str],
     target: u32,
 ) -> (Value, PendingReview) {
     let f = fx();
-    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["l1"]);
+    // On Gerrit already, or found there after the review (by the port).
+    let gerrit = (given == Given::OnGerrit).then_some(CHANGE);
+    let (row, v) = f.local(CID, Some("main"), gerrit, &["l1"]);
     let r = f.review_with(
         &v[0],
         &[("Code-Review", 2), ("Verified", -1)],
         "carried over",
         snapshot,
-        ts(voted_at),
+        given,
     );
     f.port_review(&row, &v[0], &r, target, shas[target as usize - 1]);
     f.gerrit("NEW", shas, json!([]));
@@ -2249,15 +2306,23 @@ fn assert_held(r: &PendingReview, drop_only: &[&str]) {
 
 #[test]
 fn a_ported_review_of_a_change_already_on_gerrit_follows_the_strict_rule() {
-    // Given four minutes before Gerrit's change was created: within the
-    // margin, so the change counts as on Gerrit, whatever the strategy.
-    for strategy in LocalApproval::ALL {
-        let (labels, r) = ported_votes(strategy, Some(strategy), STRICT, &["s1"], 1);
+    // Given on a local patch set of the Gerrit change, or with nothing to
+    // confirm the change was not on Gerrit yet: whatever the strategy.
+    for (strategy, given) in LocalApproval::ALL
+        .into_iter()
+        .flat_map(|s| [(s, Given::OnGerrit), (s, Given::Unconfirmed)])
+    {
+        let (labels, r) = ported_votes(strategy, Some(strategy), given, &["s1"], 1);
         assert_eq!(labels, Value::Null, "{strategy:?}");
         // The approval only drops; Verified -1 may be published.
         assert_held(&r, &["Code-Review"]);
         let reason = r.held_reason.unwrap();
         assert!(reason.contains("not moved"), "{reason}");
+        let why = match given {
+            Given::OnGerrit => "The change was on Gerrit when they were given",
+            _ => "Gerrit could not confirm the change was not there yet when you voted",
+        };
+        assert!(reason.contains(why), "{reason}");
         assert!(
             reason.contains("Code-Review +2: an approval goes only onto the commit")
                 && reason.contains("Verified -1: publish onto the current patch set"),
@@ -2266,12 +2331,90 @@ fn a_ported_review_of_a_change_already_on_gerrit_follows_the_strict_rule() {
     }
 }
 
+/// What makes a review's votes purely local, as the runs record it: a
+/// lookup that did not find the change after the votes, or votes saved
+/// offline; never a lookup before them only, nor a vote saved on a local
+/// patch set of a Gerrit change.
+#[test]
+fn a_lookup_that_does_not_find_the_change_after_the_votes_makes_them_purely_local() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), None, &["l1"]);
+    f.query_finds(&[]);
+    // A lookup before the vote proves nothing about it.
+    let report = f.run();
+    assert_eq!(report.not_found.len(), 1, "{report:?}");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let r = f.new_review(
+        &v[0],
+        &[("Code-Review", 2)],
+        "",
+        LocalApproval::Follow,
+        false,
+    );
+    assert!(r.not_found_at.is_some_and(|t| t < r.voted_at), "{r:?}");
+    assert!(!crate::purely_local(&r));
+    // The next lookup does (a lookup in the vote's millisecond would not).
+    let tick = || std::thread::sleep(std::time::Duration::from_millis(2));
+    tick();
+    f.run();
+    let r = f.reloaded(&r);
+    assert!(r.not_found_at.is_some_and(|t| r.voted_at < t), "{r:?}");
+    assert!(crate::purely_local(&r));
+    // A vote added later (a quick vote) needs a lookup after it too.
+    let r = f
+        .syncer
+        .set_pending_review_label(r.id, "Verified", 1, LocalApproval::Follow, false)
+        .unwrap()
+        .unwrap();
+    assert!(!crate::purely_local(&r));
+    tick();
+    f.run();
+    assert!(crate::purely_local(&f.reloaded(&r)));
+    // Given offline, it needs none; nor does an earlier proven vote.
+    let r = f
+        .syncer
+        .set_pending_review_label(r.id, "Verified", -1, LocalApproval::Follow, true)
+        .unwrap()
+        .unwrap();
+    assert!(r.offline && crate::purely_local(&r));
+}
+
+#[test]
+fn votes_saved_offline_are_purely_local_unless_the_change_was_on_gerrit() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), None, &["l1"]);
+    let r = f.new_review(
+        &v[0],
+        &[("Code-Review", 2)],
+        "",
+        LocalApproval::Follow,
+        true,
+    );
+    assert!(crate::purely_local(&r));
+    // A local patch set of a Gerrit change: the strict rule, offline or
+    // not, and no lookup is made for it.
+    let (_, w) = f.local(
+        "I1111111111111111111111111111111111111111",
+        Some("main"),
+        Some(ChangeNumber(8)),
+        &["k1"],
+    );
+    let k = f.new_review(
+        &w[0],
+        &[("Code-Review", 2)],
+        "",
+        LocalApproval::Follow,
+        true,
+    );
+    assert!(k.known_on_gerrit && !crate::purely_local(&k));
+}
+
 #[test]
 fn a_ported_purely_local_review_under_follow_casts_every_vote_on_the_current_patch_set() {
     let (labels, r) = ported_votes(
         LocalApproval::Follow,
         Some(LocalApproval::Follow),
-        PURELY_LOCAL,
+        Given::BeforeLookup,
         &["s1"],
         1,
     );
@@ -2284,7 +2427,7 @@ fn a_ported_review_under_follow_holds_its_votes_on_a_patch_set_that_is_not_curre
     let (labels, r) = ported_votes(
         LocalApproval::Follow,
         Some(LocalApproval::Follow),
-        PURELY_LOCAL,
+        Given::Offline,
         &["s1", "s2"],
         1,
     );
@@ -2303,7 +2446,7 @@ fn a_ported_review_under_exact_or_manual_holds_every_vote_publishable() {
     let (labels, r) = ported_votes(
         LocalApproval::ExactOrManual,
         Some(LocalApproval::ExactOrManual),
-        PURELY_LOCAL,
+        Given::BeforeLookup,
         &["s1"],
         1,
     );
@@ -2322,7 +2465,7 @@ fn a_ported_review_under_exact_holds_its_approval_drop_only() {
     let (labels, r) = ported_votes(
         LocalApproval::Exact,
         Some(LocalApproval::Exact),
-        PURELY_LOCAL,
+        Given::BeforeLookup,
         &["s1"],
         1,
     );
@@ -2342,7 +2485,7 @@ fn the_stricter_of_snapshot_and_setting_decides_for_a_ported_review() {
         (Follow, Some(ExactOrManual), &[]),
     ];
     for (snapshot, setting, drop_only) in cases {
-        let (labels, r) = ported_votes(snapshot, setting, PURELY_LOCAL, &["s1"], 1);
+        let (labels, r) = ported_votes(snapshot, setting, Given::Offline, &["s1"], 1);
         assert_eq!(labels, Value::Null, "{snapshot:?} {setting:?}");
         assert_held(&r, drop_only);
     }
@@ -2352,17 +2495,11 @@ fn the_stricter_of_snapshot_and_setting_decides_for_a_ported_review() {
 fn a_held_ported_vote_supersedes_nothing_and_a_cast_one_does() {
     // An older review on the pushed commit s1 (exact, current) and a newer
     // one ported from l2 onto it, both on Code-Review.
-    let run = |newer_strategy: LocalApproval, newer_voted: &str| {
+    let run = |newer_strategy: LocalApproval, given: Given| {
         let f = fx();
-        let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1", "l2"]);
+        let (row, v) = f.local(CID, Some("main"), None, &["s1", "l2"]);
         let older = f.review(&v[0], &[("Code-Review", 1)], "older");
-        let newer = f.review_with(
-            &v[1],
-            &[("Code-Review", 2)],
-            "newer",
-            newer_strategy,
-            ts(newer_voted),
-        );
+        let newer = f.review_with(&v[1], &[("Code-Review", 2)], "newer", newer_strategy, given);
         f.port_review(&row, &v[1], &newer, 1, "s1");
         f.gerrit("NEW", &["s1"], json!([]));
         // Every post's votes apply.
@@ -2385,12 +2522,12 @@ fn a_held_ported_vote_supersedes_nothing_and_a_cast_one_does() {
         (labels, f.reloaded(&older), f.reloaded(&newer))
     };
     // Held (the strict rule): the older +1 is still cast.
-    let (labels, older, newer) = run(LocalApproval::Follow, STRICT);
+    let (labels, older, newer) = run(LocalApproval::Follow, Given::Unconfirmed);
     assert_eq!(labels, [json!({"Code-Review": 1}), Value::Null]);
     assert_eq!(older.state, PendingReviewState::Sent);
     assert_eq!(newer.state, PendingReviewState::Held);
     // Cast (follow, purely local): the older review loses its vote.
-    let (labels, older, newer) = run(LocalApproval::Follow, PURELY_LOCAL);
+    let (labels, older, newer) = run(LocalApproval::Follow, Given::BeforeLookup);
     assert_eq!(labels, [Value::Null, json!({"Code-Review": 2})]);
     assert_eq!(older.state, PendingReviewState::Sent);
     assert!(older.labels.is_empty());
@@ -2406,7 +2543,7 @@ fn recovery_of_a_ported_review_whose_votes_were_held_holds_them_again() {
         &[("Code-Review", 2)],
         "msg",
         LocalApproval::Follow,
-        ts(STRICT),
+        Given::OnGerrit,
     );
     f.port_review(&row, &v[0], &r, 1, "s1");
     f.gerrit("NEW", &["s1"], json!([]));
@@ -3071,7 +3208,8 @@ fn the_port_goes_to_the_newest_patch_set_in_the_checkout_and_its_votes_wait() {
         .map("l1", "s1", "src/a.rs", shifted("src/a.rs"));
     let (_, options) = port.options();
     let f = fx();
-    let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+    // Reviewed while local, then found on Gerrit.
+    let (row, v) = f.local_on(false, &[("l1", "base"), ("s1", "base")]);
     let d = f.draft_with(
         &row,
         &v[0],
@@ -3082,8 +3220,9 @@ fn the_port_goes_to_the_newest_patch_set_in_the_checkout_and_its_votes_wait() {
         &[("Code-Review", 2)],
         "msg",
         LocalApproval::Follow,
-        ts(PURELY_LOCAL),
+        Given::BeforeLookup,
     );
+    f.found_on_gerrit(&row);
     f.gerrit("NEW", &["s1", "s2"], json!([]));
     route_files(&f);
     f.posts_apply(json!({}), 2);
@@ -3189,7 +3328,8 @@ fn follow_casts_the_votes_even_when_some_comments_were_held() {
         ..options
     };
     let f = fx();
-    let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+    // Reviewed while local, then found on Gerrit.
+    let (row, v) = f.local_on(false, &[("l1", "base"), ("s1", "base")]);
     let held = f.draft_with(
         &row,
         &v[0],
@@ -3200,8 +3340,9 @@ fn follow_casts_the_votes_even_when_some_comments_were_held() {
         &[("Code-Review", 2)],
         "LGTM",
         LocalApproval::Follow,
-        ts(PURELY_LOCAL),
+        Given::BeforeLookup,
     );
+    f.found_on_gerrit(&row);
     f.gerrit("NEW", &["s1"], json!([]));
     route_files(&f);
     f.posts_apply(json!({"Code-Review": 2}), 1);
@@ -3226,10 +3367,10 @@ fn an_amended_version_is_ported_once_a_later_version_is_pushed() {
             PathMap::Lines(LineMap::identity("/COMMIT_MSG", 12)),
         );
     let (port, options) = port.options();
-    for (strategy, voted_at, cast) in [
-        (LocalApproval::Follow, PURELY_LOCAL, true),
-        (LocalApproval::Follow, STRICT, false),
-        (LocalApproval::Exact, PURELY_LOCAL, false),
+    for (strategy, given, cast) in [
+        (LocalApproval::Follow, Given::Offline, true),
+        (LocalApproval::Follow, Given::Unconfirmed, false),
+        (LocalApproval::Exact, Given::BeforeLookup, false),
     ] {
         port.calls.lock().unwrap().clear();
         let options = ConsolidateOptions {
@@ -3258,7 +3399,7 @@ fn an_amended_version_is_ported_once_a_later_version_is_pushed() {
             &[("Code-Review", 2), ("Verified", -1)],
             "LGTM",
             strategy,
-            ts(voted_at),
+            given,
         );
         f.query_finds(&[(7, "main", "NEW")]);
         f.gerrit("NEW", &["s1"], json!([]));

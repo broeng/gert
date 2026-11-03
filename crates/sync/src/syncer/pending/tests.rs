@@ -69,7 +69,7 @@ fn pending_reviews_are_written_and_listed_without_the_network() {
         (Some("edited"), true)
     );
     let voted = syncer
-        .set_pending_review_label(first.id, "Verified", 1, LocalApproval::Exact)
+        .set_pending_review_label(first.id, "Verified", 1, LocalApproval::Exact, false)
         .unwrap()
         .unwrap();
     assert_eq!(voted.labels.get("Verified"), Some(&1));

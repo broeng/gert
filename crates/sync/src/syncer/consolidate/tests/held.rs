@@ -505,13 +505,13 @@ fn another_accounts_approval_is_drop_only_once_moved_on() {
 fn a_purely_local_approval_under_follow_may_still_be_published() {
     let f = fx();
     let (_, v) = f.local(CID, Some("main"), None, &["l1"]);
-    // Given long before Gerrit's change was created (2024-01-01).
+    // Given while Gerrit could not be reached.
     let r = f.review_with(
         &v[0],
         &[("Code-Review", 2)],
         "",
         LocalApproval::Follow,
-        ts("2023-06-01T00:00:00Z"),
+        Given::Offline,
     );
     f.query_finds(&[(7, "main", "MERGED")]);
     f.gerrit("MERGED", &["s9"], json!([]));
@@ -547,7 +547,7 @@ fn a_publish_that_fails_keeps_where_its_votes_were_given() {
         &[("Code-Review", 2)],
         "",
         LocalApproval::Follow,
-        ts("2023-06-01T00:00:00Z"),
+        Given::Offline,
     );
     f.query_finds(&[(7, "main", "MERGED")]);
     f.gerrit("MERGED", &["s9"], json!([]));

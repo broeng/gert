@@ -164,8 +164,8 @@ impl ChangePage {
                     // list was read. Gone or claimed for sending meanwhile:
                     // a new review.
                     if let Some(r) = newest
-                        && let Some(r) =
-                            syncer.set_pending_review_label(r.id, &vote.0, vote.1, strategy)?
+                        && let Some(r) = syncer
+                            .set_pending_review_label(r.id, &vote.0, vote.1, strategy, false)?
                     {
                         return Ok(r);
                     }

@@ -116,10 +116,10 @@
 //!
 //! A review ported from a version that never reached Gerrit (its votes
 //! were given on another commit than the one it is posted to) follows the
-//! rules by case. If the change was on Gerrit when the votes were given
-//! (the review's `voted_at` is not before Gerrit's `created` minus five
-//! minutes), the strict rule holds: nothing is cast, approvals are held
-//! drop-only and other votes publishable. A purely local change takes the
+//! rules by case. Unless its votes are purely local ([`purely_local`]:
+//! when they were given, the change was not on Gerrit, or Gerrit could
+//! not be reached), the strict rule holds: nothing is cast, approvals are
+//! held drop-only and other votes publishable. A purely local change takes the
 //! stricter of the review's `local_approval` snapshot and the project's
 //! setting now (`exact` without an entry): under `follow` every vote is
 //! cast while the target patch set is current (it is in the checkout, or
@@ -186,8 +186,6 @@ type Votes = Vec<(String, i32)>;
 const BATCH: usize = 50;
 /// The most results one lookup asks for (Gerrit's default query limit).
 const LOOKUP_LIMIT: u32 = 500;
-/// The clock skew allowed by the "purely local" test.
-const SKEW: SignedDuration = SignedDuration::from_mins(5);
 /// How long the consolidation lease lasts without renewal, and how old a
 /// claim of another run must be before it is recovered (by default): far
 /// beyond a post's life, which [`POST_DEADLINE`] bounds (in awake time),
@@ -778,6 +776,9 @@ impl Syncer {
             })
             .collect();
         let mut found = Vec::new();
+        // Before any query goes out: a "not found" proves no more than
+        // that the change was not on Gerrit when its lookup started.
+        let asked = Timestamp::now();
         for (row, lookup) in self.look_up(&to_look_up, run).await? {
             match lookup {
                 Lookup::Found(n) => found.push((row, n)),
@@ -814,6 +815,10 @@ impl Syncer {
                 }
                 Lookup::NotFound => {
                     run.report.not_found.push(row.id);
+                    // A definite answer, as for O1 above: what makes the
+                    // votes saved before `asked` purely local.
+                    self.store()
+                        .mark_local_change_not_found(self.server, row.id, asked)?;
                     if self.set_state_if(
                         &row,
                         &[LocalChangeState::Checking],
@@ -1742,7 +1747,7 @@ impl Syncer {
         let cast = |r: &&PendingReview| {
             detail
                 .revision(r.patch_set)
-                .is_some_and(|rev| casts(row, detail, r, rev, current, options))
+                .is_some_and(|rev| casts(row, r, rev, current, options))
         };
         for newer in sending.iter().filter(cast) {
             for label in newer.labels.keys() {
@@ -1776,22 +1781,14 @@ impl Syncer {
         let review = post.review.as_ref();
         let parts = Parts::of(&post, rev.number);
         let votes: BTreeMap<String, i32> = review.map(|r| r.labels.clone()).unwrap_or_default();
-        let castable = review.is_none_or(|r| casts(row, detail, r, rev, *current, run.options));
+        let castable = review.is_none_or(|r| casts(row, r, rev, *current, run.options));
         let (send_votes, held) = if castable || votes.is_empty() {
             (votes, None)
         } else {
             let held: Votes = votes.into_iter().collect();
             let drop_only = drop_only_labels(row, detail, review, &held, run.options);
-            let reason = votes_held_reason(
-                row,
-                detail,
-                review,
-                rev,
-                *current,
-                run.options,
-                &held,
-                &drop_only,
-            );
+            let reason =
+                votes_held_reason(row, review, rev, *current, run.options, &held, &drop_only);
             (
                 BTreeMap::new(),
                 Some(Settled::held(held, drop_only, reason)),
@@ -2263,7 +2260,7 @@ impl Syncer {
         let meant = post
             .review
             .as_ref()
-            .is_none_or(|r| casts(row, detail, r, rev, current, run.options));
+            .is_none_or(|r| casts(row, r, rev, current, run.options));
         let settled = if !missing.is_empty() && meant {
             let error = format!(
                 "the review was posted, but Gerrit does not show {}",
@@ -2273,16 +2270,8 @@ impl Syncer {
         } else if !missing.is_empty() {
             let review = post.review.as_ref();
             let drop_only = drop_only_labels(row, detail, review, &missing, run.options);
-            let reason = votes_held_reason(
-                row,
-                detail,
-                review,
-                rev,
-                current,
-                run.options,
-                &missing,
-                &drop_only,
-            );
+            let reason =
+                votes_held_reason(row, review, rev, current, run.options, &missing, &drop_only);
             Some(Settled::held(missing, drop_only, reason))
         } else if !applied.is_empty() && current.is_some_and(|c| c != rev.number) {
             // Cast, on a patch set that is not current now; whether it
@@ -2795,8 +2784,7 @@ pub fn held_vote_drop_only(
     review.drop_only.contains(label)
         || (is_approval(detail, label, value)
             && review.given_on_sha != *target
-            && !(purely_local(detail, review)
-                && review.strategy.max(setting) != LocalApproval::Exact))
+            && !(purely_local(review) && review.strategy.max(setting) != LocalApproval::Exact))
 }
 
 /// The labels of `review`'s votes that may only be dropped as things are
@@ -2839,9 +2827,8 @@ fn drop_only_labels(
     votes: &[(String, i32)],
     options: &ConsolidateOptions,
 ) -> BTreeSet<String> {
-    let drop_only = review.is_none_or(|r| {
-        !purely_local(detail, r) || strategy(row, r, options) == LocalApproval::Exact
-    });
+    let drop_only = review
+        .is_none_or(|r| !purely_local(r) || strategy(row, r, options) == LocalApproval::Exact);
     votes
         .iter()
         .filter(|(l, v)| drop_only && is_approval(detail, l, *v))
@@ -2849,15 +2836,20 @@ fn drop_only_labels(
         .collect()
 }
 
-/// "Purely local": the review's votes were given before the change was on
-/// Gerrit (before its creation, minus [`SKEW`] for the clocks). Otherwise
-/// the strict rule applies to them.
-fn purely_local(detail: &ChangeDetail, review: &PendingReview) -> bool {
-    detail
-        .summary
-        .created
-        .checked_sub(SKEW)
-        .is_ok_and(|limit| review.voted_at < limit)
+/// "Purely local": when the review's votes were given, the change was not
+/// on Gerrit, or Gerrit could not be reached
+/// ([`PendingReview::purely_local`]: no vote saved on a local patch set
+/// of a Gerrit change, and the votes saved offline or before a complete
+/// lookup that did not find the change started). Otherwise the strict
+/// rule applies to them, also when nothing proves the change was there:
+/// Gerrit was reachable at the vote, but no lookup completed before the
+/// change showed up (a push right after the vote). That is the safe
+/// choice; a saved review starts a lookup at once, so the gap is small.
+///
+/// The one place this is decided: consolidation's vote decisions, the
+/// held card ([`held_vote_drop_only`]) and recovery go through it.
+pub fn purely_local(review: &PendingReview) -> bool {
+    review.purely_local()
 }
 
 /// The `local_approval` strategy for a review: the stricter of its
@@ -2884,7 +2876,6 @@ fn strategy(
 /// strategies hold them.
 fn casts(
     row: &LocalChange,
-    detail: &ChangeDetail,
     review: &PendingReview,
     rev: &Revision,
     current: Current,
@@ -2894,7 +2885,7 @@ fn casts(
         return false;
     }
     is_exact(review, rev)
-        || (purely_local(detail, review) && strategy(row, review, options) == LocalApproval::Follow)
+        || (purely_local(review) && strategy(row, review, options) == LocalApproval::Follow)
 }
 
 /// Whether `rev` is the commit the review's votes were given on.
@@ -2908,7 +2899,6 @@ fn is_exact(review: &PendingReview, rev: &Revision) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn votes_held_reason(
     row: &LocalChange,
-    detail: &ChangeDetail,
     review: Option<&PendingReview>,
     rev: &Revision,
     current: Current,
@@ -2918,7 +2908,7 @@ fn votes_held_reason(
 ) -> String {
     match review {
         Some(r) if !is_exact(r, rev) => {
-            ported_held_reason(row, detail, r, rev, current, options, votes, drop_only)
+            ported_held_reason(row, r, rev, current, options, votes, drop_only)
         }
         _ => held_reason(rev.number, current, votes, drop_only),
     }
@@ -2930,7 +2920,6 @@ fn votes_held_reason(
 #[allow(clippy::too_many_arguments)]
 fn ported_held_reason(
     row: &LocalChange,
-    detail: &ChangeDetail,
     review: &PendingReview,
     rev: &Revision,
     current: Current,
@@ -2944,10 +2933,12 @@ fn ported_held_reason(
         review.given_on_sha.short(12),
         rev.number.0
     );
-    if !purely_local(detail, review) {
+    if review.known_on_gerrit {
+        reason.push_str(" The change was on Gerrit when they were given, so they are not moved.");
+    } else if !purely_local(review) {
         reason.push_str(
-            " The change was on Gerrit when they were given, or reached it within five minutes \
-             of them (allowed for clock differences), so they are not moved.",
+            " Gerrit could not confirm the change was not there yet when you voted, so they \
+             are not moved.",
         );
     } else {
         match strategy(row, review, options) {

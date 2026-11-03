@@ -10,8 +10,9 @@
 //! amended before the push is ported, its comment on a changed line held,
 //! its +2 cast or held by strategy, and what `exact-or-manual` held is
 //! published from the held card (`exact`'s may only be dropped); a
-//! `follow` review saved just before the push falls under the strict rule
-//! (the five-minute window); (c) a +2 on a local patch set of a
+//! `follow` review is purely local when a lookup after it did not find the
+//! change or it was saved offline, else the strict rule holds it; (c) a +2
+//! on a local patch set of a
 //! Gerrit change is cast only when that commit is pushed as it is; (d) our
 //! line maps agree with Gerrit's own porting of drafts.
 //!
@@ -23,10 +24,10 @@
 //!   move, so the scanner keeps seeing the commit as local.
 //! * The comments of a consolidation post carry the post's tag, as its
 //!   change message does.
-//! * "Purely local" needs the votes to be older than the Gerrit change by
-//!   more than the five minutes allowed for clock skew. A push right after
-//!   the review counts as "on Gerrit when given" (the strict rule), so (b)
-//!   dates its reviews ten minutes back, and one test pins that rule.
+//! * A query for a Change-Id Gerrit does not have answers with an empty
+//!   list: the "not found" that proves the votes saved before it purely
+//!   local. The app runs that lookup right after a review is saved; the
+//!   tests call it the same way.
 
 use std::{path::Path, process::Command};
 
@@ -324,15 +325,15 @@ impl Fx {
             .unwrap();
     }
 
-    /// A local review of version `v` as the reply dialog saves it, given
-    /// `ago` before now.
+    /// A local review of version `v` as the reply dialog saves it, with the
+    /// server reachable or not (`offline`).
     fn review(
         &self,
         v: &model::LocalPatchSet,
         labels: &[(&str, i32)],
         strategy: LocalApproval,
         message: &str,
-        ago: jiff::SignedDuration,
+        offline: bool,
     ) -> model::PendingReview {
         self.syncer
             .create_pending_review(&store::NewPendingReview {
@@ -341,8 +342,8 @@ impl Fx {
                 strategy,
                 message: message.into(),
                 unresolved: false,
-                created: model::Timestamp::now() - ago,
-                offline: false,
+                created: model::Timestamp::now(),
+                offline,
                 replaces_draft: None,
             })
             .unwrap()
@@ -515,7 +516,7 @@ fn a_local_review_of_a_pushed_commit_is_sent_as_it_was_given() {
             &[("Code-Review", 1), ("Verified", 1)],
             *strategy,
             "local review message",
-            jiff::SignedDuration::ZERO,
+            false,
         );
         assert_eq!(r.state, PendingReviewState::Pending);
         reviews.push(r);
@@ -622,23 +623,18 @@ fn a_review_of_a_version_amended_before_upload_is_ported_by_strategy() {
     consolidate(&syncer, &clone, LocalApproval::Follow);
 
     // Local 1: a comment on an unchanged line, one on the line the amend
-    // changes, and a review with an approval. Given 10 minutes ago: "purely
-    // local" needs the votes to be older than Gerrit's change by more than
-    // the five minutes allowed for clock skew, and the push follows at
-    // once here.
+    // changes, and a review with an approval, followed by the lookup a
+    // saved review starts: Gerrit does not have the change, so the votes
+    // are purely local.
     for c in &mut cases {
         let v = f.version(&c.id, &c.v1);
         let number = f.entry(&c.id).change.number;
         f.comment(number, &v, &c.path, 2, "on two, unchanged");
         f.comment(number, &v, &c.path, 4, "on four, which changes");
-        c.review = Some(f.review(
-            &v,
-            &[("Code-Review", 2)],
-            c.strategy,
-            "looks good",
-            jiff::SignedDuration::from_mins(10),
-        ));
+        c.review = Some(f.review(&v, &[("Code-Review", 2)], c.strategy, "looks good", false));
     }
+    after_a_tick();
+    consolidate(&syncer, &clone, LocalApproval::Follow);
 
     // Amended (line four), scanned (local 2), pushed: Gerrit's PS 1 is
     // local 2, and local 1 never reached Gerrit.
@@ -764,44 +760,83 @@ fn a_review_of_a_version_amended_before_upload_is_ported_by_strategy() {
     }
 }
 
-/// Today's rule, pinned: a `follow` review saved just before the push is
-/// not "purely local" (Gerrit's change is less than five minutes younger
-/// than the votes, within the clock skew allowed), so the strict rule
-/// holds its +2 drop-only, and the reason says why.
+/// A lookup in the vote's own millisecond proves nothing (the order of
+/// the two is unknown), so a test waits a moment between them.
+fn after_a_tick() {
+    std::thread::sleep(std::time::Duration::from_millis(5));
+}
+
+/// When a `follow` review of a version amended before the push is purely
+/// local: saved, then a lookup that does not find the change, then amended
+/// and pushed within seconds: cast; saved offline (no lookup at all):
+/// cast; saved with Gerrit reachable but pushed before any lookup: the
+/// strict rule holds the +2 drop-only, saying Gerrit could not confirm.
 #[test]
 #[ignore = "needs GERT_TEST_GERRIT"]
-fn a_follow_review_saved_just_before_the_push_falls_under_the_strict_rule() {
+fn a_follow_review_is_purely_local_after_a_lookup_or_offline() {
     let (f, syncer) = Fx::e2e();
     let clone = Clone::new();
-    clone.branch("e2e-window");
-    let path = unique_path("window");
-    let id = change_id();
-    let v1 = clone.commit(&path, &six_lines("four"), "E2E window", &id);
+    let mut cases = Vec::new();
+    for name in ["looked-up", "offline", "unconfirmed"] {
+        let branch = format!("e2e-local-{name}");
+        clone.branch(&branch);
+        let path = unique_path(name);
+        let id = change_id();
+        let v1 = clone.commit(&path, &six_lines("four"), &format!("E2E {name}"), &id);
+        cases.push((name, branch, path, id, v1));
+    }
     f.scan(&clone);
     consolidate(&syncer, &clone, LocalApproval::Follow);
-    let v = f.version(&id, &v1);
-    f.comment(f.entry(&id).change.number, &v, &path, 2, "on two");
-    let review = f.review(
-        &v,
-        &[("Code-Review", 2)],
-        LocalApproval::Follow,
-        "saved just now",
-        jiff::SignedDuration::ZERO,
-    );
-    clone.amend(&path, &six_lines("FOUR"));
-    clone.push();
+    let mut reviews = Vec::new();
+    for (name, _, path, id, v1) in &cases {
+        let v = f.version(id, v1);
+        f.comment(f.entry(id).change.number, &v, path, 2, "on two");
+        let offline = *name == "offline";
+        reviews.push(f.review(
+            &v,
+            &[("Code-Review", 2)],
+            LocalApproval::Follow,
+            name,
+            offline,
+        ));
+        if *name == "looked-up" {
+            // The lookup a saved review starts (the others are saved after
+            // it, so it proves nothing about them).
+            after_a_tick();
+            consolidate(&syncer, &clone, LocalApproval::Follow);
+        }
+    }
+    for (_, branch, path, _, _) in &cases {
+        clone.switch(branch);
+        clone.amend(path, &six_lines("FOUR"));
+        clone.push();
+    }
     f.scan(&clone);
     consolidate(&syncer, &clone, LocalApproval::Follow);
 
-    let n = gerrit_change(&id);
-    let review = f.review_now(&review);
-    println!("{review:#?}");
-    assert_eq!(comments_on(n, &path).len(), 1, "the comment is ported");
-    assert_eq!(alice_votes(n), []);
-    assert_eq!(review.state, PendingReviewState::Held);
-    assert!(review.drop_only.contains("Code-Review"), "{review:?}");
-    let reason = review.held_reason.unwrap();
-    assert!(reason.contains("within five minutes"), "{reason}");
+    for ((name, _, path, id, _), review) in cases.iter().zip(&reviews) {
+        let n = gerrit_change(id);
+        let review = f.review_now(review);
+        println!("{name}: {review:#?}");
+        assert_eq!(
+            comments_on(n, path).len(),
+            1,
+            "{name}: the comment is ported"
+        );
+        if *name == "unconfirmed" {
+            assert_eq!(alice_votes(n), [], "{name}");
+            assert_eq!(review.state, PendingReviewState::Held);
+            assert!(review.drop_only.contains("Code-Review"), "{review:?}");
+            let reason = review.held_reason.unwrap();
+            assert!(
+                reason.contains("Gerrit could not confirm the change was not there yet"),
+                "{reason}"
+            );
+        } else {
+            assert_eq!(alice_votes(n), [("Code-Review".to_owned(), 2)], "{name}");
+            assert_eq!(review.state, PendingReviewState::Sent, "{name}");
+        }
+    }
 }
 
 // ---- (c) local patch sets of a Gerrit change ----
@@ -854,7 +889,7 @@ fn an_approval_on_a_local_patch_set_goes_only_onto_its_exact_commit() {
             &[("Code-Review", 2)],
             LocalApproval::Follow,
             "approved locally",
-            jiff::SignedDuration::ZERO,
+            false,
         );
         reviews.push(r);
     }

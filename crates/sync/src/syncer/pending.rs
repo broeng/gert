@@ -39,14 +39,16 @@ impl Syncer {
     }
 
     /// Gives one label's vote in a review that is still pending, leaving
-    /// the rest of it alone (a quick vote). `None` when it is gone or no
-    /// longer pending. Blocking (SQLite).
+    /// the rest of it alone (a quick vote). `offline`: the server cannot be
+    /// reached now (see [`PendingReview::offline`]). `None` when it is gone
+    /// or no longer pending. Blocking (SQLite).
     pub fn set_pending_review_label(
         &self,
         id: PendingReviewId,
         label: &str,
         value: i32,
         strategy: LocalApproval,
+        offline: bool,
     ) -> Result<Option<PendingReview>, Error> {
         Ok(self.store().set_review_label(
             self.server,
@@ -54,7 +56,7 @@ impl Syncer {
             label,
             value,
             strategy,
-            false,
+            offline,
             Timestamp::now(),
         )?)
     }
