@@ -47,6 +47,7 @@ use crate::{
     diff_load::{DiffSource, LoadError, context_label, load_diff},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
+    local_rules::{self, Op, Target},
     local_source::{
         LocalSource, LocalState, Lookup, Renames, Resolved, Unserved, local_file_list,
         local_marker, lookup, renames_of,
@@ -926,15 +927,20 @@ impl DiffPage {
 
     // ---- change actions ----
 
+    /// What the page shows, for [`local_rules`]: known from the route,
+    /// also before the detail is loaded and when signed out.
+    fn rule_target(&self) -> Target {
+        Target {
+            change: self.route.change,
+            target: Some(self.route.target),
+            base: self.route.base,
+        }
+    }
+
     /// `shift-a`: asks the shell for the change action menu (`m` is the
     /// unified / side-by-side toggle in the diff).
     fn open_actions(&mut self, _: &ChangeMenu, _: &mut Window, cx: &mut Context<Self>) {
-        if self.route.change.is_local() {
-            self.hint
-                .say(action_menu::LOCAL, false, cx, |p| &mut p.hint);
-            return;
-        }
-        if let Some(why) = action_menu::unavailable(&self.session) {
+        if let Some(why) = local_rules::refusal(Op::Actions, &self.rule_target(), &self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
@@ -1011,14 +1017,7 @@ impl DiffPage {
     /// changes on screen at once; if the request fails it goes back and a
     /// note says why.
     fn toggle_reviewed(&mut self, _: &ToggleReviewed, _: &mut Window, cx: &mut Context<Self>) {
-        // Known from the route, also before the detail is loaded and when
-        // signed out.
-        let r = &self.route;
-        if r.change.is_local() || r.target.is_local() || r.base.is_some_and(|b| b.is_local()) {
-            self.hint.say(reviewed::LOCAL, false, cx, |p| &mut p.hint);
-            return;
-        }
-        if let Some(why) = reviewed::unavailable(&self.session) {
+        if let Some(why) = local_rules::refusal(Op::Reviewed, &self.rule_target(), &self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
@@ -1027,12 +1026,7 @@ impl DiffPage {
         };
         if (self.files_pending > 0 && !self.files_loaded) || self.files_local.is_some() {
             // Gerrit's list, computed before the mark, would replace it.
-            self.hint.say(
-                "Reviewed marks come with Gerrit's file list",
-                false,
-                cx,
-                |p| &mut p.hint,
-            );
+            self.hint.say(reviewed::WAITS, false, cx, |p| &mut p.hint);
             return;
         }
         let path = self.route.path.clone();

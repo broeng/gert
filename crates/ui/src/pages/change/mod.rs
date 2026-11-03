@@ -61,6 +61,7 @@ use crate::{
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
     local_chain,
+    local_rules::{self, Op, Target},
     local_source::{
         LocalLazy, LocalSource, LocalState, Lookup, Renames, Resolved, Unserved, local_file_list,
         lookup, renames_of,
@@ -127,7 +128,6 @@ pub enum ChangeEvent {
 
 /// The file list of the current patch set pair.
 /// Why `r` waits for Gerrit's file list.
-const REVIEWED_WAITS: &str = "Reviewed marks come with Gerrit's file list";
 /// The files notice of a local version the checkout cannot list.
 const LOCAL_FILES_UNAVAILABLE: &str =
     "the project's checkout does not have this version (the files of local versions come from it)";
@@ -2520,13 +2520,7 @@ impl ChangePage {
 
     /// `m`: asks the shell for the change action menu.
     fn open_actions(&mut self, _: &ChangeMenu, _: &mut Window, cx: &mut Context<Self>) {
-        if self.number.is_local() {
-            // Every action of the menu is a request to Gerrit.
-            self.hint
-                .say(action_menu::LOCAL, false, cx, |p| &mut p.hint);
-            return;
-        }
-        if let Some(why) = action_menu::unavailable(&self.session) {
+        if let Some(why) = local_rules::refusal(Op::Actions, &self.rule_target(), &self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
@@ -2538,17 +2532,23 @@ impl ChangePage {
         }
     }
 
+    /// The change and the patch set pair picked, for [`local_rules`]. The
+    /// pair is unknown until the detail is there.
+    fn rule_target(&self) -> Target {
+        let d = self.detail.as_ref();
+        Target {
+            change: self.number,
+            target: d.and_then(|d| self.sel.target_number(d)),
+            base: d.and_then(|d| self.sel.base_number(d)),
+        }
+    }
+
     /// Whether a reply or vote would be on a local version: a local change,
     /// or a local patch set picked as the target. Neither may go to Gerrit,
     /// which would take it for the current patch set: they become pending
     /// reviews of the version.
     pub(super) fn on_local_target(&self) -> bool {
-        self.number.is_local()
-            || self
-                .detail
-                .as_ref()
-                .and_then(|d| self.sel.target_number(d))
-                .is_some_and(PatchSetNumber::is_local)
+        self.rule_target().is_local_for(Op::Reply)
     }
 
     /// The Submit chain button.
@@ -2614,17 +2614,13 @@ impl ChangePage {
     /// The mark changes on screen at once; if the request fails it goes
     /// back and a note says why.
     fn toggle_reviewed(&mut self, _: &ToggleReviewed, _: &mut Window, cx: &mut Context<Self>) {
-        if self.number.is_local() || self.files.key.as_ref().is_some_and(FilesKey::is_local) {
-            self.hint.say(reviewed::LOCAL, false, cx, |p| &mut p.hint);
-            return;
-        }
-        if let Some(why) = reviewed::unavailable(&self.session) {
+        if let Some(why) = local_rules::refusal(Op::Reviewed, &self.rule_target(), &self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
         if !self.files.loaded || self.files.local.is_some() {
             // Gerrit's list, computed before the mark, would replace it.
-            self.hint.say(REVIEWED_WAITS, false, cx, |p| &mut p.hint);
+            self.hint.say(reviewed::WAITS, false, cx, |p| &mut p.hint);
             return;
         }
         let (Some(key), Some(path)) = (

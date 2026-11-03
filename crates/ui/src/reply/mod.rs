@@ -103,6 +103,7 @@ use sync::{DraftSave, PublishOutcome};
 use crate::{
     change_detail::{change_label, patch_set_label},
     comments::ChangeComments,
+    local_rules::{Op, Target},
     outbox::DraftOutbox,
     servers::ServerBadge,
     session::{Session, is_unauthorized},
@@ -349,8 +350,12 @@ impl ReplyDialog {
         // a review to edit, a local target, or a local change. It never
         // becomes a reply to Gerrit, also when the version is missing:
         // Gerrit would take it for its current patch set.
-        let wants_local =
-            edit.is_some() || target.is_some_and(PatchSetNumber::is_local) || number.is_local();
+        let rule_target = Target {
+            change: number,
+            target,
+            base: None,
+        };
+        let wants_local = edit.is_some() || rule_target.is_local_for(Op::Reply);
         let asked = edit.and_then(|id| reviews.iter().find(|r| r.id == id).cloned());
         let mut error = None;
         let mut notice = None;

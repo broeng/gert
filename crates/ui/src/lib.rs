@@ -21,6 +21,7 @@ mod links;
 mod list_model;
 mod local_chain;
 mod local_port;
+mod local_rules;
 mod local_scan;
 mod local_source;
 mod login;

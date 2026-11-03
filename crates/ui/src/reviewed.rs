@@ -22,6 +22,10 @@ pub enum Outcome {
 /// it has no place for them until the version is uploaded.
 pub const LOCAL: &str = "Reviewed marks are kept by Gerrit; available once uploaded";
 
+/// Why `r` waits: the list on show is not Gerrit's yet, and Gerrit's,
+/// computed before the mark, would replace it.
+pub const WAITS: &str = "Reviewed marks come with Gerrit's file list";
+
 /// Why the mark cannot be set now, as a note for the user.
 pub fn unavailable(session: &Session) -> Option<&'static str> {
     if !session.can_comment() {
