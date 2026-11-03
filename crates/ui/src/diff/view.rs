@@ -736,6 +736,12 @@ impl DiffView {
         self.focus.clone()
     }
 
+    /// The diff on show.
+    #[cfg(test)]
+    pub(crate) fn diff_for_test(&self) -> &Diff {
+        &self.diff
+    }
+
     #[cfg(test)]
     pub(crate) fn side_scroll_for_test(&self) -> Pixels {
         self.side_scroll.x()

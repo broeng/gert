@@ -272,6 +272,7 @@ fn diff_page_loading_as(
             let text = match ev {
                 super::DiffPageEvent::Unauthorized => "unauthorized".to_owned(),
                 super::DiffPageEvent::OpenFile(r) => format!("open {}", r.path),
+                super::DiffPageEvent::Compare(r) => format!("compare {:?} {}", r.base, r.path),
                 super::DiffPageEvent::Reply(_) => "reply".to_owned(),
                 super::DiffPageEvent::Actions(_) => "actions".to_owned(),
                 super::DiffPageEvent::UpToChange => "up".to_owned(),
@@ -1988,5 +1989,336 @@ fn a_local_version_of_a_gerrit_change_is_named_in_the_header_and_cannot_be_repli
     assert!(p.events.lock().expect("log").is_empty());
     for r in p.http.requested() {
         assert!(!r.contains(&sha), "{r}");
+    }
+}
+
+// ---- local changes and local versions ----
+
+/// The diff page of local changes and local versions of a Gerrit change,
+/// over a real checkout with the session able to sync: only the guards
+/// keep it off the network, and the fake client panics on a synthetic
+/// number.
+mod local_versions {
+    use local_git::testutil::{TEST_EMAIL, TestRepo};
+    use store::{LocalChangeUpsert, LocalOp, NewLocalPatchSet, ServerId};
+
+    use super::*;
+    use crate::{diff_load::DiffSource, session::ProjectSettings};
+
+    const SERVER: ServerId = ServerId(1);
+
+    /// A checkout: `base`, then `local` (Change-Id I1) changing `README`
+    /// and adding `src/new.rs`.
+    struct Checkout {
+        repo: TestRepo,
+        base: String,
+        local: String,
+    }
+
+    fn checkout() -> Checkout {
+        let repo = TestRepo::new();
+        repo.write("README", b"one\n");
+        let base = repo.commit("Base");
+        repo.write("README", b"two\n");
+        repo.write("src/new.rs", b"fn main() {}\n");
+        let local = repo.commit("Add the new thing\n\nIt is new.\n\nChange-Id: I1");
+        Checkout { repo, base, local }
+    }
+
+    impl Checkout {
+        /// A second version of the change on another parent (a rebase).
+        fn rebased(&self) -> (String, String) {
+            self.repo
+                .git(&["checkout", "-q", "-b", "other", &self.base]);
+            self.repo.write("OTHER", b"upstream\n");
+            let parent = self.repo.commit("Upstream moved");
+            self.repo.write("README", b"two\n");
+            self.repo.write("src/new.rs", b"fn main() {}\n");
+            let v2 = self
+                .repo
+                .commit("Add the new thing\n\nIt is new.\n\nChange-Id: I1");
+            (parent, v2)
+        }
+    }
+
+    /// A row of change `change_id` (`gerrit` `None`: a local change) with
+    /// the versions `shas`, seen one after the other.
+    fn row(change_id: &str, gerrit: Option<ChangeNumber>, shas: &[&str]) -> LocalOp {
+        LocalOp::Upsert(LocalChangeUpsert {
+            seen: None,
+            branch: Some("main".into()),
+            change_id: change_id.into(),
+            gerrit_number: gerrit,
+            subject: "Add the new thing".into(),
+            author_name: "Test Author".into(),
+            author_email: TEST_EMAIL.into(),
+            updated: now(),
+            state: Some(model::LocalChangeState::Local),
+            patch_sets: shas
+                .iter()
+                .zip(0..)
+                .map(|(sha, i)| NewLocalPatchSet {
+                    sha: (*sha).into(),
+                    parent_sha: None,
+                    seen_at: now() + jiff::SignedDuration::from_secs(i),
+                })
+                .collect(),
+        })
+    }
+
+    fn store_with(ops: &[LocalOp], seed: impl FnOnce(&mut Store)) -> Store {
+        let mut store = Store::open_in_memory().expect("store");
+        assert_eq!(store.server_id(URL).expect("server"), SERVER);
+        seed(&mut store);
+        store
+            .reconcile_local(SERVER, "p", ops, now())
+            .expect("reconcile");
+        store
+    }
+
+    /// The local change I1 and its versions' numbers.
+    fn local_change(store: &Store) -> (ChangeNumber, Vec<PatchSetNumber>) {
+        let row = store
+            .local_changes_by_change_id(SERVER, "I1")
+            .expect("rows")
+            .remove(0);
+        let versions = store.local_patch_sets(SERVER, row.id).expect("versions");
+        (row.number, versions.iter().map(|v| v.number).collect())
+    }
+
+    /// Change 7 of project `p` with patch sets 1..=3 (commits not in the
+    /// checkout).
+    fn seed_change_7(store: &mut Store) {
+        let mut d = detail(7, 3, 3);
+        d.summary.project = "p".into();
+        d.summary.change_id = Some("I7".into());
+        store.save_change_detail(SERVER, &d, now()).expect("detail");
+    }
+
+    fn open_page(
+        cx: &mut TestAppContext,
+        store: Store,
+        route: DiffRoute,
+        ck: &Checkout,
+        local: LocalDiff,
+    ) -> Page {
+        let project = ProjectSettings {
+            local_changes: true,
+            ..ProjectSettings::new("p", ck.repo.path().to_string_lossy())
+        };
+        let p = diff_page_loading_as(
+            cx,
+            store,
+            route,
+            RouteHttpClient::new(),
+            Some(signed_in()),
+            Vec::new(),
+            Vec::new(),
+            local,
+            vec![project],
+        );
+        cx.run_until_parked();
+        // The checkout opens and git runs on real threads.
+        for _ in 0..100 {
+            let settled = p.page.read_with(cx, |p, _| {
+                p.shown_for_test().is_some() || p.error_for_test().is_some()
+            });
+            if settled {
+                break;
+            }
+            cx.executor().allow_parking();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        cx.update_window(p.window, |_, window, cx| window.render_frame(cx))
+            .expect("frame");
+        cx.run_until_parked();
+        p
+    }
+
+    fn source(cx: &TestAppContext, p: &Page) -> Option<DiffSource> {
+        p.page.read_with(cx, |p, _| {
+            p.view_for_test().and_then(|_| p.source_for_test())
+        })
+    }
+
+    fn drawn(cx: &mut TestAppContext, p: &Page, selector: &'static str) -> bool {
+        let mut visual = gpui_kit::VisualTestContext::from_window(p.window, cx);
+        visual.run_until_parked();
+        visual.debug_bounds(selector).is_some()
+    }
+
+    fn local_route(change: ChangeNumber, target: PatchSetNumber, path: &str) -> DiffRoute {
+        DiffRoute {
+            change,
+            base: None,
+            target,
+            path: path.into(),
+            thread: None,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_local_change_is_diffed_in_the_checkout_without_a_request(cx: &mut TestAppContext) {
+        let ck = checkout();
+        let store = store_with(&[row("I1", None, &[&ck.local])], |_| {});
+        let (number, versions) = local_change(&store);
+        let p = open_page(
+            cx,
+            store,
+            local_route(number, versions[0], "README"),
+            &ck,
+            LocalDiff::default(),
+        );
+        assert_eq!(source(cx, &p), Some(DiffSource::Local));
+        p.page.read_with(cx, |p, _| {
+            assert_eq!(
+                p.file_paths_for_test(),
+                ["/COMMIT_MSG", "README", "src/new.rs"]
+            );
+            assert_eq!(p.files_local_for_test(), Some(ck.repo.path()));
+        });
+        assert!(drawn(cx, &p, "diff-change: Local change:"));
+        assert!(drawn(cx, &p, "diff-pair: Base \u{2192} local 1"));
+
+        // `]` and `[` step through the checkout's list.
+        press(cx, p.window, &["]", "["]);
+        assert_eq!(opened(&p), ["open src/new.rs", "open /COMMIT_MSG"]);
+
+        // No reviewed marks: Gerrit keeps them, and has no local version.
+        press(cx, p.window, &["r"]);
+        let hint = p.page.read_with(cx, |p, _| p.hint_for_test());
+        assert_eq!(hint.map(|h| h.0).as_deref(), Some(crate::reviewed::LOCAL));
+        p.page
+            .read_with(cx, |p, _| assert!(!p.is_reviewed_for_test()));
+        assert!(p.http.requested().is_empty(), "{:?}", p.http.requested());
+    }
+
+    #[gpui_kit::test]
+    fn the_commit_message_of_a_local_change_comes_from_the_checkout(cx: &mut TestAppContext) {
+        let ck = checkout();
+        let store = store_with(&[row("I1", None, &[&ck.local])], |_| {});
+        let (number, versions) = local_change(&store);
+        let p = open_page(
+            cx,
+            store,
+            local_route(number, versions[0], "/COMMIT_MSG"),
+            &ck,
+            LocalDiff::default(),
+        );
+        assert_eq!(source(cx, &p), Some(DiffSource::Local));
+        let text = cx.update(|cx| {
+            let view = p.page.read(cx).view_for_test().expect("a view");
+            format!("{:?}", view.read(cx).diff_for_test().chunks)
+        });
+        assert!(text.contains("It is new."), "{text}");
+        assert!(p.http.requested().is_empty(), "{:?}", p.http.requested());
+    }
+
+    #[gpui_kit::test]
+    fn the_files_ahead_are_highlighted_from_the_checkout_never_from_gerrit(
+        cx: &mut TestAppContext,
+    ) {
+        let ck = checkout();
+        let store = store_with(&[row("I1", None, &[&ck.local])], |_| {});
+        let (number, versions) = local_change(&store);
+        let p = open_page(
+            cx,
+            store,
+            local_route(number, versions[0], "README"),
+            &ck,
+            LocalDiff::default(),
+        );
+        // The syntax worker has the next file, a local key.
+        let queue = cx.update(|cx| p.syntax.read(cx).last_queue_for_test().to_vec());
+        assert_eq!(
+            queue.iter().map(|k| k.path.as_str()).collect::<Vec<_>>(),
+            ["src/new.rs"]
+        );
+        assert!(queue.iter().all(DiffKey::is_local));
+        // It gets the diff from the checkout and highlights it.
+        let mut done = false;
+        for _ in 0..100 {
+            done = p.syntax.update(cx, |c, _| c.get(&queue[0]).is_some());
+            if done {
+                break;
+            }
+            cx.executor().allow_parking();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        assert!(done, "the next file was not highlighted");
+        assert!(p.http.requested().is_empty(), "{:?}", p.http.requested());
+
+        // With highlighting off the next file would be prefetched, but
+        // Gerrit has nothing to give for a local version.
+        let ck = checkout();
+        let store = store_with(&[row("I1", None, &[&ck.local])], |_| {});
+        let (number, versions) = local_change(&store);
+        let p = open_page(
+            cx,
+            store,
+            local_route(number, versions[0], "README"),
+            &ck,
+            syntax_off(),
+        );
+        assert_eq!(source(cx, &p), Some(DiffSource::Local));
+        press(cx, p.window, &["]"]);
+        assert!(p.http.requested().is_empty(), "{:?}", p.http.requested());
+    }
+
+    #[gpui_kit::test]
+    fn a_local_version_of_a_gerrit_change_is_diffed_in_the_checkout(cx: &mut TestAppContext) {
+        let ck = checkout();
+        let store = store_with(
+            &[row("I7", Some(ChangeNumber(7)), &[&ck.local])],
+            seed_change_7,
+        );
+        let target = store
+            .local_patch_sets_by_sha(SERVER, &ck.local.clone().into())
+            .expect("versions")[0]
+            .number;
+        let p = open_page(
+            cx,
+            store,
+            local_route(ChangeNumber(7), target, "src/new.rs"),
+            &ck,
+            LocalDiff::default(),
+        );
+        assert_eq!(source(cx, &p), Some(DiffSource::Local));
+        assert!(drawn(cx, &p, "diff-change: Change 7:"));
+        assert!(drawn(cx, &p, "diff-pair: Base \u{2192} local 1"));
+        press(cx, p.window, &["r", "["]);
+        assert_eq!(opened(&p), ["open README"]);
+        // The change's comments may be asked for; nothing about the local
+        // version is.
+        for r in p.http.requested() {
+            assert!(!r.contains(&ck.local), "{r}");
+            assert!(!r.contains("/diff") && !r.contains("/files"), "{r}");
+        }
+        assert!(!p.http.sent().iter().any(|r| r.method == "PUT"));
+    }
+
+    #[gpui_kit::test]
+    fn local_versions_on_different_parents_say_why_they_cannot_be_compared(
+        cx: &mut TestAppContext,
+    ) {
+        let ck = checkout();
+        let (_, v2) = ck.rebased();
+        let store = store_with(&[row("I1", None, &[&ck.local, &v2])], |_| {});
+        let (number, versions) = local_change(&store);
+        let route = DiffRoute {
+            base: Some(versions[0]),
+            ..local_route(number, versions[1], "README")
+        };
+        let p = open_page(cx, store, route, &ck, LocalDiff::default());
+        assert!(drawn(cx, &p, "diff-parents-differ"));
+        assert!(drawn(cx, &p, "diff-pair: local 1 \u{2192} local 2"));
+        p.page
+            .read_with(cx, |p, _| assert!(p.view_for_test().is_none()));
+        // The way out: the same file against the parent.
+        p.page.update(cx, |p, cx| p.compare_with_parent(cx));
+        assert_eq!(opened(&p), ["compare None README"]);
+        assert!(p.http.requested().is_empty(), "{:?}", p.http.requested());
     }
 }

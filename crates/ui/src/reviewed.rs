@@ -18,8 +18,9 @@ pub enum Outcome {
     Failed(String),
 }
 
-/// Why `r` does nothing on a local version: the marks are Gerrit's.
-pub const LOCAL: &str = "Local versions have no reviewed marks";
+/// Why `r` does nothing on a local version: the marks are Gerrit's, and
+/// it has no place for them until the version is uploaded.
+pub const LOCAL: &str = "Reviewed marks are kept by Gerrit; available once uploaded";
 
 /// Why the mark cannot be set now, as a note for the user.
 pub fn unavailable(session: &Session) -> Option<&'static str> {

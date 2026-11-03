@@ -19,6 +19,7 @@ use store::{LocalChangeUpsert, LocalOp, NewLocalPatchSet, ServerId, Store};
 use super::{ChangeEvent, ChangePage, state::Block, view::patch_set_menu};
 use crate::{
     LocalDiff,
+    diff_load::DiffSource,
     nav::ChangeView,
     outbox::DraftOutbox,
     session::{ProjectSettings, Session},
@@ -376,12 +377,17 @@ fn a_local_change_shows_its_header_files_and_message_without_the_network(cx: &mu
     assert_eq!(f.hint(cx).as_deref(), Some(crate::action_menu::LOCAL));
     f.press(cx, "r");
     assert_eq!(f.hint(cx).as_deref(), Some(crate::reviewed::LOCAL));
-    // Expanding a file diffs it in the checkout; /COMMIT_MSG is not served
-    // locally yet, and Gerrit is not asked for it.
+    // Expanding a file diffs it in the checkout, the commit message too.
     f.press(cx, "shift-i");
     cx.update(|cx| {
         let p = f.page.read(cx);
-        assert!(p.inline_ready("README") && p.inline_ready("src/new.rs"));
+        for path in ["/COMMIT_MSG", "README", "src/new.rs"] {
+            assert!(p.inline_ready(path), "{path}");
+            assert_eq!(p.inline_source(path), Some(DiffSource::Local), "{path}");
+        }
+        let view = p.inline_view("/COMMIT_MSG").expect("a view");
+        let text = format!("{:?}", view.read(cx).diff_for_test().chunks);
+        assert!(text.contains("It is new."), "{text}");
     });
     // A refresh reads the store again, still without the network.
     f.press(cx, "shift-r");
@@ -703,4 +709,68 @@ fn a_checkout_that_breaks_costs_one_git_read_per_refresh(cx: &mut TestAppContext
         });
     }
     assert!(f.http.requested().is_empty());
+}
+
+#[gpui_kit::test]
+fn a_patch_set_and_a_rebased_local_version_say_why_they_cannot_be_compared(
+    cx: &mut TestAppContext,
+) {
+    let ck = checkout();
+    // PS 1 of change 7 is `local`; the local version is the same change
+    // rebased onto a newer upstream commit.
+    ck.repo.git(&["checkout", "-q", "-b", "other", &ck.base]);
+    ck.repo.write("OTHER", b"upstream\n");
+    let upstream = ck.repo.commit("Upstream moved");
+    ck.repo.write("README", b"two\n");
+    let rebased = ck.repo.commit("Add the new thing\n\nChange-Id: I7");
+    let store = store_with(
+        &[row(
+            "I7",
+            Some(ChangeNumber(7)),
+            LocalChangeState::Local,
+            &[&rebased],
+            &upstream,
+        )],
+        |store| {
+            let mut d = detail(7, 1, 1);
+            d.summary.project = "p".into();
+            d.summary.change_id = Some("I7".into());
+            d.revisions[0].sha = ck.local.clone().into();
+            d.revisions[0].created = Some(at(10));
+            d.current_revision = Some(ck.local.clone().into());
+            store
+                .save_change_detail(SERVER, &d, Timestamp::now())
+                .expect("detail");
+        },
+    );
+    let f = page(cx, store, ChangeNumber(7), &ck, |_| {});
+    let local = f.local_patch_set(cx, 1);
+    f.pick(cx, |s, d| s.set_target(d, local));
+    f.pick(cx, |s, d| s.set_base(d, Some(PatchSetNumber(1))));
+    // The resolve runs on real threads.
+    for _ in 0..100 {
+        if cx.update(|cx| f.page.read(cx).parents_differ()) {
+            break;
+        }
+        cx.executor().allow_parking();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert!(p.parents_differ());
+        assert_eq!(
+            p.files_notice_text(),
+            (crate::pages::diff::PARENTS_DIFFER.to_owned(), false)
+        );
+        assert_eq!(p.files_error_for_test(), None);
+    });
+    // "Compare with Base": the checkout lists that.
+    f.pick(cx, |s, d| s.set_base(d, None));
+    cx.update(|cx| {
+        let p = f.page.read(cx);
+        assert!(!p.parents_differ());
+        assert_eq!(p.file_paths(), ["/COMMIT_MSG", "README"]);
+    });
+    f.assert_nothing_local_sent(&[&rebased]);
 }

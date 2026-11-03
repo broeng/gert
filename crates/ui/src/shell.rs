@@ -1938,6 +1938,9 @@ impl Shell {
                 // Like PolyGerrit, stepping through files does not stack
                 // history entries: Back from any file leads to the change.
                 DiffPageEvent::UpToChange => this.go_up(&GoUp, window, cx),
+                DiffPageEvent::Compare(route) => {
+                    this.navigate(Route::Diff(route.clone()), window, cx)
+                }
                 DiffPageEvent::OpenFile(route) => {
                     this.nav.replace(Route::Diff(route.clone()));
                     this.show(window, cx)

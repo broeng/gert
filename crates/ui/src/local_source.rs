@@ -19,7 +19,7 @@ use futures::{
 
 use gpui_kit::component::{ActiveTheme as _, tooltip::Tooltip};
 use gpui_kit::*;
-use local_git::{Comparison, Local, Repo};
+use local_git::{Comparison, Local, NotLocal, Repo};
 use model::{COMMIT_MSG_PATH, Diff, DiffKey, FileEntry, FilesKey, RevisionId};
 
 use crate::checkouts::{CheckoutState, Checkouts};
@@ -33,6 +33,24 @@ struct Core {
     /// Gerrit does not have it, so the checkout serves `/COMMIT_MSG` too.
     local: bool,
 }
+
+/// Why the checkout does not serve a comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unserved {
+    /// No checkout is configured for the project, it cannot be opened, or
+    /// it did not answer in time.
+    NoCheckout,
+    /// The two patch sets have different parents (one was rebased). Gerrit
+    /// marks the edits that come from the rebase, which git cannot, so the
+    /// checkout leaves such a comparison to Gerrit; for a local version
+    /// nobody can show it.
+    ParentsDiffer,
+    /// Anything else: a commit is missing, a merge commit, git failed.
+    Other,
+}
+
+/// What resolving a comparison in the checkout gives.
+pub type Resolved = Result<LocalSource, Unserved>;
 
 /// See the module comment.
 #[derive(Clone)]
@@ -56,14 +74,14 @@ impl std::fmt::Debug for LocalSource {
 }
 
 impl LocalSource {
-    /// Resolves `files` in `repo`. `None` when the checkout cannot serve
-    /// the comparison (a commit is missing, a merge commit, patch sets with
-    /// different parents) or git failed; both are logged, neither is an
-    /// error for the page. Blocking.
-    pub fn resolve(repo: Repo, files: &FilesKey) -> Option<Self> {
+    /// Resolves `files` in `repo`. An [`Unserved`] reason when the
+    /// checkout cannot serve the comparison (a commit is missing, a merge
+    /// commit, patch sets with different parents) or git failed; both are
+    /// logged, neither is an error for the page. Blocking.
+    pub fn resolve(repo: Repo, files: &FilesKey) -> Resolved {
         let base = files.base.as_ref().map(|b| &b.sha);
         match repo.resolve(&files.target.sha, base) {
-            Ok(Local::Available(comparison)) => Some(Self {
+            Ok(Local::Available(comparison)) => Ok(Self {
                 core: Arc::new(Core {
                     repo,
                     comparison,
@@ -79,7 +97,10 @@ impl LocalSource {
                     files.change,
                     repo.path().display()
                 );
-                None
+                Err(match why {
+                    NotLocal::ParentsDiffer => Unserved::ParentsDiffer,
+                    _ => Unserved::Other,
+                })
             }
             Err(e) => {
                 log::warn!(
@@ -87,7 +108,7 @@ impl LocalSource {
                     files.change,
                     repo.path().display()
                 );
-                None
+                Err(Unserved::Other)
             }
         }
     }
@@ -208,7 +229,7 @@ enum Base {
 }
 
 /// A resolve in flight: the comparison without renames.
-pub type SharedSource = Shared<Task<Option<LocalSource>>>;
+pub type SharedSource = Shared<Task<Resolved>>;
 
 impl LocalLazy {
     /// Nothing local: Gerrit serves it all.
@@ -236,7 +257,7 @@ impl LocalLazy {
     pub async fn get(self) -> Option<LocalSource> {
         let source = match self.base? {
             Base::Ready(s) => s,
-            Base::Pending(p) => p.await?,
+            Base::Pending(p) => p.await.ok()?,
         };
         Some(match self.renames {
             Some(r) => source.with_renames(r),
@@ -253,15 +274,24 @@ pub enum LocalState {
     Unknown,
     /// Resolving in the background.
     Resolving(FilesKey, SharedSource),
-    /// Resolved for this comparison: `None` means Gerrit serves it all.
-    Ready(FilesKey, Option<LocalSource>),
+    /// Resolved for this comparison: an [`Unserved`] reason means Gerrit
+    /// serves it all (or, for a local version, nobody).
+    Ready(FilesKey, Resolved),
 }
 
 impl LocalState {
     /// The resolved source (without renames) for `files`.
     pub fn source_for(&self, files: &FilesKey) -> Option<&LocalSource> {
         match self {
-            Self::Ready(k, Some(s)) if k == files => Some(s),
+            Self::Ready(k, Ok(s)) if k == files => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Why the checkout does not serve `files`, once that is known.
+    pub fn unserved(&self, files: &FilesKey) -> Option<Unserved> {
+        match self {
+            Self::Ready(k, Err(why)) if k == files => Some(*why),
             _ => None,
         }
     }
@@ -278,7 +308,7 @@ impl LocalState {
     pub fn lazy(&self, files: &FilesKey, renames: &Arc<Renames>) -> LocalLazy {
         match self {
             Self::Resolving(k, p) if k == files => LocalLazy::pending(p.clone(), renames.clone()),
-            Self::Ready(k, s) if k == files => LocalLazy::ready(s.clone(), renames.clone()),
+            Self::Ready(k, s) if k == files => LocalLazy::ready(s.clone().ok(), renames.clone()),
             _ => LocalLazy::none(),
         }
     }
@@ -322,7 +352,7 @@ pub fn lookup(
     let (checkouts, project, files) = (checkouts.clone(), project.to_owned(), files.clone());
     let task = cx.spawn(async move |cx| {
         let source = resolve_source(&checkouts, &project, &files, cx).await;
-        if let Some(s) = &source {
+        if let Ok(s) = &source {
             checkouts.update(cx, |c, _| c.memoize(&project, &files, s.clone()));
         }
         source
@@ -331,20 +361,22 @@ pub fn lookup(
 }
 
 /// Opens (waiting for an open in flight) the checkout of `project` and
-/// resolves `files` in it. `None` when there is no usable checkout, it
-/// cannot serve the comparison, or this takes longer than
-/// [`RESOLVE_TIMEOUT`] (logged).
+/// resolves `files` in it. [`Unserved::NoCheckout`] when there is no usable
+/// checkout or this takes longer than [`RESOLVE_TIMEOUT`] (logged), the
+/// resolve's reason when it cannot serve the comparison.
 async fn resolve_source(
     checkouts: &Entity<Checkouts>,
     project: &str,
     files: &FilesKey,
     cx: &mut AsyncApp,
-) -> Option<LocalSource> {
+) -> Resolved {
     let timer = cx.background_executor().timer(RESOLVE_TIMEOUT);
     let work = async {
-        let ck = Checkouts::opened(checkouts, project, cx).await?;
+        let Some(ck) = Checkouts::opened(checkouts, project, cx).await else {
+            return Err(Unserved::NoCheckout);
+        };
         let CheckoutState::Open(repo) = ck.state else {
-            return None;
+            return Err(Unserved::NoCheckout);
         };
         let files = files.clone();
         cx.background_spawn(async move { LocalSource::resolve(repo, &files) })
@@ -357,7 +389,7 @@ async fn resolve_source(
                 "the local checkout of {project} did not answer in {RESOLVE_TIMEOUT:?}; \
                  asking Gerrit"
             );
-            None
+            Err(Unserved::NoCheckout)
         }
     }
 }

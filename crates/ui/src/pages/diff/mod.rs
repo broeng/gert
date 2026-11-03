@@ -48,7 +48,8 @@ use crate::{
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
     local_source::{
-        LocalSource, LocalState, Lookup, Renames, local_file_list, local_marker, lookup, renames_of,
+        LocalSource, LocalState, Lookup, Renames, Resolved, Unserved, local_file_list,
+        local_marker, lookup, renames_of,
     },
     nav::DiffRoute,
     outbox::DraftOutbox,
@@ -75,6 +76,8 @@ pub enum DiffPageEvent {
     Unauthorized,
     /// Move to another file of the same comparison.
     OpenFile(DiffRoute),
+    /// Show another comparison of the same file (a new history entry).
+    Compare(DiffRoute),
     /// The breadcrumb was clicked: same as `u`.
     UpToChange,
     /// `a`: open the reply dialog for this change.
@@ -312,7 +315,7 @@ impl DiffPage {
         self.files_pending = 0;
         self.probe_stored_diff(&key, cx);
         self.ensure_local(&key, cx);
-        if !matches!(self.local, LocalState::Ready(_, None)) {
+        if !matches!(self.local, LocalState::Ready(_, Err(_))) {
             let lazy = self.local.lazy(&key, &Arc::default());
             self.files_pending += 1;
             let task_key = key.clone();
@@ -694,8 +697,8 @@ impl DiffPage {
         };
         self.local_task = None;
         self.local = match found {
-            Lookup::Unconfigured => LocalState::Ready(files.clone(), None),
-            Lookup::Ready(s) => LocalState::Ready(files.clone(), Some(s)),
+            Lookup::Unconfigured => LocalState::Ready(files.clone(), Err(Unserved::NoCheckout)),
+            Lookup::Ready(s) => LocalState::Ready(files.clone(), Ok(s)),
             Lookup::Pending(p) => {
                 let key = files.clone();
                 let shared = p.clone();
@@ -709,12 +712,7 @@ impl DiffPage {
         };
     }
 
-    fn local_resolved(
-        &mut self,
-        files: &FilesKey,
-        source: Option<LocalSource>,
-        cx: &mut Context<Self>,
-    ) {
+    fn local_resolved(&mut self, files: &FilesKey, source: Resolved, cx: &mut Context<Self>) {
         if !matches!(&self.local, LocalState::Resolving(k, _) if k == files) {
             return;
         }
@@ -730,6 +728,26 @@ impl DiffPage {
     fn local_source(&self) -> Option<LocalSource> {
         let source = self.local.source_for(self.files_key.as_ref()?)?;
         Some(source.with_renames(self.renames.clone()))
+    }
+
+    /// Whether the comparison involves a local version whose two sides
+    /// have different parents (a rebase). Gerrit marks the edits a rebase
+    /// brings, which git cannot, so the checkout leaves such a comparison
+    /// to Gerrit, and Gerrit does not have the local version: nobody can
+    /// show it.
+    fn parents_differ(&self) -> bool {
+        self.files_key.as_ref().is_some_and(|k| {
+            k.is_local() && self.local.unserved(k) == Some(Unserved::ParentsDiffer)
+        })
+    }
+
+    /// The same file against the parent, which the checkout can show.
+    fn compare_with_parent(&mut self, cx: &mut Context<Self>) {
+        cx.emit(DiffPageEvent::Compare(DiffRoute {
+            base: None,
+            thread: None,
+            ..self.route.clone()
+        }));
     }
 
     /// Names the server's checkouts, so diffs can come from the project's
@@ -964,6 +982,13 @@ impl DiffPage {
     /// changes on screen at once; if the request fails it goes back and a
     /// note says why.
     fn toggle_reviewed(&mut self, _: &ToggleReviewed, _: &mut Window, cx: &mut Context<Self>) {
+        // Known from the route, also before the detail is loaded and when
+        // signed out.
+        let r = &self.route;
+        if r.change.is_local() || r.target.is_local() || r.base.is_some_and(|b| b.is_local()) {
+            self.hint.say(reviewed::LOCAL, false, cx, |p| &mut p.hint);
+            return;
+        }
         if let Some(why) = reviewed::unavailable(&self.session) {
             self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
@@ -971,10 +996,6 @@ impl DiffPage {
         let Some(key) = self.files_key.clone() else {
             return;
         };
-        if key.is_local() {
-            self.hint.say(reviewed::LOCAL, false, cx, |p| &mut p.hint);
-            return;
-        }
         if (self.files_pending > 0 && !self.files_loaded) || self.files_local.is_some() {
             // Gerrit's list, computed before the mark, would replace it.
             self.hint.say(
@@ -1351,6 +1372,36 @@ impl DiffPage {
             )
     }
 
+    /// In place of the diff when [`Self::parents_differ`]: why, and the
+    /// way to a diff that can be shown.
+    fn render_parents_differ(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let revisions = self.detail.as_ref().map_or(&[][..], |d| &d.revisions);
+        let target = patch_set_label(revisions, self.route.target);
+        v_flex()
+            .p_4()
+            .gap_2()
+            .items_start()
+            .child(
+                div()
+                    .child(PARENTS_DIFFER)
+                    .debug_selector(|| "diff-parents-differ".to_owned()),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(PARENTS_DIFFER_HINT),
+            )
+            .child(
+                Button::new("diff-against-parent")
+                    .label(format!("Compare Base \u{2192} {target}"))
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| this.compare_with_parent(cx))),
+            )
+            .into_any_element()
+    }
+
     fn render_prefs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let p = self.prefs(cx);
@@ -1475,6 +1526,14 @@ impl DiffPage {
     }
 }
 
+/// Why a comparison of a local version with another patch set cannot be
+/// shown (see [`DiffPage::parents_differ`]).
+pub(crate) const PARENTS_DIFFER: &str =
+    "Not available locally: the two versions have different parents (rebased).";
+/// What to do instead.
+pub(crate) const PARENTS_DIFFER_HINT: &str = "Gerrit marks the edits a rebase brings, which the checkout cannot, and Gerrit does not have \
+     the local version. Compare against the parent (Base) instead.";
+
 /// The breadcrumb's name of the change: `Change 123:`, or `Local change:`
 /// (its number is synthetic).
 fn change_heading(number: model::ChangeNumber) -> String {
@@ -1585,6 +1644,7 @@ impl Render for DiffPage {
         let theme = cx.theme().clone();
         let body: AnyElement = match (&self.view, &self.error) {
             (Some(view), _) => div().size_full().child(view.clone()).into_any_element(),
+            (None, _) if self.parents_differ() => self.render_parents_differ(cx),
             (None, Some(e)) => div()
                 .p_4()
                 .text_color(theme.danger)

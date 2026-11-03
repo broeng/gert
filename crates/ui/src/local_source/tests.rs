@@ -192,7 +192,10 @@ fn a_missing_commit_means_no_local_source_and_gerrit_answers(_cx: &mut TestAppCo
     let f = fixture();
     let repo = local_git::Repo::open(f.repo.path()).expect("open");
     let missing = "0123456789012345678901234567890123456789";
-    assert!(LocalSource::resolve(repo, &files_key(missing)).is_none());
+    assert_eq!(
+        LocalSource::resolve(repo, &files_key(missing)).err(),
+        Some(super::Unserved::Other)
+    );
     let http = gerrit_diff();
     let s = session(fresh_store(), &http, true);
     let (_, from) = run(load_diff(
@@ -308,7 +311,7 @@ fn a_stored_diff_does_not_wait_for_the_resolve(cx: &mut TestAppContext) {
     let stuck = cx.update(|cx| {
         cx.spawn(async move |_| {
             std::future::pending::<()>().await;
-            None::<LocalSource>
+            Err::<LocalSource, _>(super::Unserved::NoCheckout)
         })
     });
     let local = LocalLazy::pending(stuck.shared(), renames_of(&paths()));

@@ -25,7 +25,10 @@ use crate::{
     diff_load::DiffSource,
     filters::{FileStyle, FilterAction},
     local_source::{local_chip, local_marker},
-    pages::list::Status,
+    pages::{
+        diff::{PARENTS_DIFFER, PARENTS_DIFFER_HINT},
+        list::Status,
+    },
     row::{browser_url, chips, has_merge_conflict, local_state_note},
     search_link::{account_query, person_query, project_query, search_link},
     theme::chip_colors,
@@ -914,7 +917,9 @@ impl ChangePage {
     /// What the notice in place of the file rows says, and whether it is an
     /// error.
     pub(super) fn files_notice_text(&self) -> (String, bool) {
-        if let Some(e) = &self.files.error {
+        if self.parents_differ() {
+            (PARENTS_DIFFER.to_owned(), false)
+        } else if let Some(e) = &self.files.error {
             (format!("Could not load the files: {e}"), true)
         } else if self.files.loaded && !self.files.list.is_empty() {
             let n = self.files.list.len();
@@ -929,7 +934,7 @@ impl ChangePage {
     fn files_notice(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let (text, error) = self.files_notice_text();
-        div()
+        let notice = div()
             .py_1()
             .text_sm()
             .text_color(if error {
@@ -937,7 +942,29 @@ impl ChangePage {
             } else {
                 theme.muted_foreground
             })
-            .child(text)
+            .child(text);
+        if !self.parents_differ() {
+            return notice.into_any_element();
+        }
+        v_flex()
+            .gap_1()
+            .items_start()
+            .child(notice)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(PARENTS_DIFFER_HINT),
+            )
+            .child(
+                Button::new("files-against-parent")
+                    .label("Compare with Base")
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.change_patch_sets(|s, d| s.set_base(d, None), cx)
+                    })),
+            )
+            .py_1()
             .into_any_element()
     }
 

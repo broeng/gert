@@ -58,7 +58,8 @@ use crate::{
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
     local_source::{
-        LocalLazy, LocalSource, LocalState, Lookup, Renames, local_file_list, lookup, renames_of,
+        LocalLazy, LocalSource, LocalState, Lookup, Renames, Resolved, Unserved, local_file_list,
+        lookup, renames_of,
     },
     nav::{ChangeView, DiffRoute},
     outbox::DraftOutbox,
@@ -872,7 +873,7 @@ impl ChangePage {
             return;
         }
         self.update_local(cx);
-        if matches!(&self.local, LocalState::Ready(_, None)) {
+        if matches!(&self.local, LocalState::Ready(_, Err(_))) {
             // No checkout, or it cannot serve this comparison.
             self.no_local_list(key, cx);
             return;
@@ -899,6 +900,12 @@ impl ChangePage {
     /// for a local version, which Gerrit does not have: then the notice
     /// says so (never one of Gerrit's errors).
     fn no_local_list(&mut self, key: &FilesKey, cx: &mut Context<Self>) {
+        if self.parents_differ() {
+            // The notice says so, in place of an error.
+            self.rebuild_blocks();
+            cx.notify();
+            return;
+        }
         if key.is_local() && self.files.key.as_ref() == Some(key) && !self.files.loaded {
             self.files.error = Some(LOCAL_FILES_UNAVAILABLE.to_owned());
             self.rebuild_blocks();
@@ -968,8 +975,8 @@ impl ChangePage {
         }
         self.local_task = None;
         self.local = match lookup(&self.checkouts, &project, &files, cx) {
-            Lookup::Unconfigured => LocalState::Ready(files, None),
-            Lookup::Ready(s) => LocalState::Ready(files, Some(s)),
+            Lookup::Unconfigured => LocalState::Ready(files, Err(Unserved::NoCheckout)),
+            Lookup::Ready(s) => LocalState::Ready(files, Ok(s)),
             Lookup::Pending(p) => {
                 let (key, shared) = (files.clone(), p.clone());
                 self.local_task = Some(cx.spawn(async move |this, cx| {
@@ -982,18 +989,30 @@ impl ChangePage {
         };
     }
 
-    fn local_resolved(
-        &mut self,
-        files: &FilesKey,
-        source: Option<LocalSource>,
-        cx: &mut Context<Self>,
-    ) {
+    fn local_resolved(&mut self, files: &FilesKey, source: Resolved, cx: &mut Context<Self>) {
         if !matches!(&self.local, LocalState::Resolving(k, _) if k == files) {
             return;
         }
         self.local = LocalState::Ready(files.clone(), source);
         self.local_task = None;
+        if self.parents_differ() {
+            // Not the checkout's fault, whatever the list's request said.
+            self.files.error = None;
+            self.remeasure(Block::FilesNotice);
+        }
         cx.notify(); // the "local" marker
+    }
+
+    /// Whether the file list in use is a comparison with a local version
+    /// whose two sides have different parents (a rebase), which nobody can
+    /// show: the checkout leaves it to Gerrit, which marks the edits a
+    /// rebase brings, and Gerrit does not have the local version.
+    pub(super) fn parents_differ(&self) -> bool {
+        self.files.key.as_ref().is_some_and(|k| {
+            k.is_local()
+                && !self.files.loaded
+                && self.local.unserved(k) == Some(Unserved::ParentsDiffer)
+        })
     }
 
     fn load_related(&mut self, sha: RevisionId, network: bool, cx: &mut Context<Self>) {
@@ -2011,12 +2030,12 @@ impl ChangePage {
     /// The mark changes on screen at once; if the request fails it goes
     /// back and a note says why.
     fn toggle_reviewed(&mut self, _: &ToggleReviewed, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(why) = reviewed::unavailable(&self.session) {
-            self.hint.say(why, false, cx, |p| &mut p.hint);
+        if self.number.is_local() || self.files.key.as_ref().is_some_and(FilesKey::is_local) {
+            self.hint.say(reviewed::LOCAL, false, cx, |p| &mut p.hint);
             return;
         }
-        if self.files.key.as_ref().is_some_and(FilesKey::is_local) {
-            self.hint.say(reviewed::LOCAL, false, cx, |p| &mut p.hint);
+        if let Some(why) = reviewed::unavailable(&self.session) {
+            self.hint.say(why, false, cx, |p| &mut p.hint);
             return;
         }
         if !self.files.loaded || self.files.local.is_some() {
