@@ -1,5 +1,6 @@
 //! Refreshes the local cache from the server. GPUI-free and
-//! runtime-agnostic: no timers and no spawning here.
+//! runtime-agnostic: no spawning here, and no timers except the deadline
+//! on consolidation's posts (`async-io`, which works on any executor).
 //!
 //! The UI reads from [`store`] (via [`Syncer::cached_query`] and friends)
 //! and calls the `refresh_*` / `load_more` futures to update it. It asks
@@ -22,7 +23,7 @@ pub use events::diff_change;
 pub use poll::{PollPolicy, PollState};
 pub use syncer::{
     CLAIM_STALE, ChainCommit, CommentsView, ConsolidateOptions, ConsolidateReport,
-    ConsolidationTiming, DraftCounts, DraftSave, FoundChange, NewChange, PostOutcome, PostReport,
-    PublishOutcome, QueryUpdate, RefreshSource, RetryReport, ReviewerAdded, SLOW_RECHECK, Syncer,
-    WatchOptions,
+    ConsolidationTiming, DraftCounts, DraftSave, FoundChange, NewChange, POST_DEADLINE,
+    PostOutcome, PostReport, PublishOutcome, QueryUpdate, RefreshSource, RetryReport,
+    ReviewerAdded, SLOW_RECHECK, Syncer, WatchOptions,
 };

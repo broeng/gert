@@ -7304,6 +7304,7 @@ dependencies = [
 name = "sync"
 version = "0.2.0"
 dependencies = [
+ "async-io",
  "base64 0.22.1",
  "futures",
  "gerrit-api",

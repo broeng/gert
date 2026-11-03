@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-io.workspace = true
 futures.workspace = true
 gerrit-api.workspace = true
 jiff.workspace = true

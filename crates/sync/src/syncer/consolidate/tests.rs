@@ -30,7 +30,7 @@ type Queued = (String, VecDeque<(u16, String)>);
 /// Path-routed replies (a [`RouteHttpClient`], which records every request
 /// and panics on a local number), plus queued replies per needle that win
 /// while they last: for a refusal followed by success, or a lost
-/// connection. Status 0 is a transport error.
+/// connection. Status 0 is a transport error, 1 no answer at all.
 #[derive(Clone, Default)]
 struct Http {
     routes: RouteHttpClient,
@@ -136,6 +136,8 @@ impl HttpClient for Http {
             let routed = routed.await;
             match over {
                 Some((0, why)) => Err(HttpError(why)),
+                // A server that never answers.
+                Some((1, _)) => futures::future::pending().await,
                 Some((status, body)) => Ok(http::Response::builder()
                     .status(status)
                     .body(body.into_bytes())
@@ -1496,4 +1498,64 @@ fn known_changes_are_asked_about_in_one_query() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert!(sent[0].contains("ALL_REVISIONS"), "{sent:?}");
     f.assert_nothing_local(&["l1", "l2"]);
+}
+
+// ---- bounded posts ----
+
+#[test]
+fn a_post_without_an_answer_is_given_up_and_left_for_the_tag_check() {
+    let f = fx_with(ConsolidationTiming {
+        post_deadline: std::time::Duration::from_millis(50),
+        ..quick()
+    });
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let d = f.draft(&row, &v[0], "a comment");
+    let r = f.review(&v[0], &[("Code-Review", 1)], "");
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.http.queue("POST /changes/7/revisions/", 1, "");
+    let report = f.run();
+    assert!(
+        matches!(report.stopped, Some(Error::PostTimedOut)),
+        "{report:?}"
+    );
+    // The claim stays: the next run checks the change's messages.
+    assert_eq!(f.reloaded(&r).state, PendingReviewState::Sending);
+    assert!(f.load_draft(&d).is_some());
+    assert_eq!(
+        f.syncer
+            .store()
+            .unfinished_local_posts(f.syncer.server)
+            .unwrap()
+            .len(),
+        1
+    );
+    let tag = first_tag(&f);
+    f.gerrit(
+        "NEW",
+        &["s1"],
+        json!([{"id": "m1", "author": {"_account_id": ME}, "date": "2024-01-03 00:00:00.000000000",
+                "message": "Patch Set 1: Code-Review+1", "tag": tag, "_revision_number": 1}]),
+    );
+    f.run();
+    assert_eq!(f.http.posts().len(), 1, "it arrived: not posted again");
+    assert_eq!(f.reloaded(&r).state, PendingReviewState::Sent);
+}
+
+#[test]
+fn a_second_run_in_the_same_process_waits_for_the_first() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    f.review(&v[0], &[("Code-Review", 1)], "");
+    // A run of this store and server is going on in this process (it may
+    // be asleep in a post); the lease alone would not tell, since its
+    // clock may have jumped.
+    let key = (Arc::as_ptr(&f.syncer.store) as usize, f.syncer.server.0);
+    let running = Running::start(key).unwrap();
+    let report = f.run();
+    assert!(!report.ran);
+    assert!(f.http.routes.requested().is_empty());
+    drop(running);
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.posts_apply(json!({"Code-Review": 1}), 1);
+    assert!(f.run().ran);
 }

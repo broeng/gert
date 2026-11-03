@@ -20,6 +20,10 @@ pub enum Error {
     /// it stopped before sending anything more.
     #[error("another consolidation run took over")]
     LeaseLost,
+    /// Gerrit did not answer a consolidation post in time; the request was
+    /// given up. Whether it arrived is checked by the next run.
+    #[error("Gerrit did not answer in time")]
+    PostTimedOut,
 }
 
 impl Error {

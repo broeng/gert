@@ -10,13 +10,27 @@
 //! A run holds the server's consolidation lease in the store
 //! (`consolidation_leases`) and renews it before every post, so one run per
 //! server goes on at a time, also across processes on one cache (a second
-//! `gert`, a new session after a re-login). Every claim of a post records
-//! the run's owner token and the time; a run recovers only the posts of
-//! other runs that are older than [`CLAIM_STALE`], so a request still in
-//! flight is never posted a second time. That assumes that a request not
-//! answered within that time never reaches the server; the lease lasts as
-//! long, so a run held up that long loses it and stops before posting
-//! again ([`Error::LeaseLost`]).
+//! `gert`, a new session after a re-login); within one process a run also
+//! marks its server as running, so a second run there returns at once.
+//! Every claim of a post records the run's owner token and the time, and
+//! is on disk before the post goes out. Every post has a deadline
+//! ([`POST_DEADLINE`], 2 minutes): when it passes, the request is dropped
+//! (which aborts it), the claim stays and the run ends; the next run's
+//! recovery checks the tag. A run recovers only the posts of other runs
+//! that are older than [`CLAIM_STALE`] (15 minutes, well above the
+//! deadline and Gerrit's processing time), so a request still in flight
+//! is never posted a second time; the lease lasts as long, so a run held
+//! up that long loses it and stops before posting again
+//! ([`Error::LeaseLost`]).
+//!
+//! The deadline is a monotonic timer, which stops while the machine
+//! sleeps, while the lease and claims use the wall clock. So a run must
+//! never start on a server while that server's previous run is still
+//! alive in the same process (it may be asleep in a post whose deadline
+//! has not passed in its own time): [`Syncer::consolidate`] enforces this
+//! per store and server. Another process waking from the same sleep can
+//! still adopt a claim whose request is being completed; that residual
+//! risk is accepted (and the tag check catches a post that did arrive).
 //!
 //! # A run
 //!
@@ -132,9 +146,12 @@ const LOOKUP_LIMIT: u32 = 500;
 const SKEW: SignedDuration = SignedDuration::from_mins(5);
 /// How long the consolidation lease lasts without renewal, and how old a
 /// claim of another run must be before it is recovered (by default): far
-/// beyond any request's life (the HTTP client gives up connecting after
-/// 10 s, and Gerrit answers a review within seconds).
+/// beyond a post's life, which [`POST_DEADLINE`] bounds (in awake time),
+/// plus Gerrit's time to process it (seconds).
 pub const CLAIM_STALE: SignedDuration = SignedDuration::from_mins(15);
+/// How long a consolidation post may take before it is given up (and the
+/// request aborted), by default.
+pub const POST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 /// How often a local change with nothing that could be sent (only held or
 /// failed items, or a closed change) is asked about (by default).
 pub const SLOW_RECHECK: SignedDuration = SignedDuration::from_mins(30);
@@ -146,6 +163,8 @@ pub struct ConsolidationTiming {
     pub claim_stale: SignedDuration,
     /// How often a change with nothing that could be sent is asked about.
     pub slow_recheck: SignedDuration,
+    /// How long a post may take.
+    pub post_deadline: std::time::Duration,
 }
 
 impl Default for ConsolidationTiming {
@@ -153,7 +172,34 @@ impl Default for ConsolidationTiming {
         Self {
             claim_stale: CLAIM_STALE,
             slow_recheck: SLOW_RECHECK,
+            post_deadline: POST_DEADLINE,
         }
+    }
+}
+
+/// The servers (per store) with a consolidation run going on in this
+/// process.
+static RUNNING: std::sync::Mutex<Vec<(usize, i64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Marks a store's server as running a consolidation until dropped.
+struct Running((usize, i64));
+
+impl Running {
+    /// `None` if a run on this store and server is going on already.
+    fn start(key: (usize, i64)) -> Option<Self> {
+        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        if running.contains(&key) {
+            return None;
+        }
+        running.push(key);
+        Some(Self(key))
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        running.retain(|k| *k != self.0);
     }
 }
 
@@ -285,7 +331,7 @@ impl From<Error> for Problem {
     fn from(e: Error) -> Self {
         let ends_run = match &e {
             Error::Api(a) => a.is_retryable() || a.is_unauthorized(),
-            Error::Store(_) | Error::LeaseLost => true,
+            Error::Store(_) | Error::LeaseLost | Error::PostTimedOut => true,
             Error::DraftsNotUploaded(_) | Error::Local(_) => false,
         };
         if ends_run {
@@ -456,6 +502,10 @@ impl Syncer {
             report.ran = true;
             return report;
         }
+        let key = (std::sync::Arc::as_ptr(&self.store) as usize, self.server.0);
+        let Some(_running) = Running::start(key) else {
+            return report;
+        };
         let owner = format!("{}-{}", std::process::id(), new_nonce());
         match self.renew_lease(&owner) {
             Ok(()) => {}
@@ -1336,7 +1386,10 @@ impl Syncer {
             return Err(e.into());
         }
         let sent_votes: Votes = input.labels.clone().into_iter().collect();
-        let answer = match self.client.post_review(number, &rev.sha, &input).await {
+        let answer = match self
+            .post_review_by_deadline(number, &rev.sha, &input)
+            .await?
+        {
             Err(e) if is_closed_answer(&e) => {
                 self.give_up(row, &post, nonce, PendingReviewState::Pending, None, None)?;
                 return Err(Problem::Closed);
@@ -1352,7 +1405,10 @@ impl Syncer {
                 if bare.comments.is_empty() {
                     Ok((Some(failed), None))
                 } else {
-                    match self.client.post_review(number, &rev.sha, &bare).await {
+                    match self
+                        .post_review_by_deadline(number, &rev.sha, &bare)
+                        .await?
+                    {
                         Ok(result) => Ok((Some(failed), result.current_patch_set)),
                         Err(e) => Err(e),
                     }
@@ -1406,6 +1462,26 @@ impl Syncer {
                 run.report.posts.push(entry);
                 Ok(())
             }
+        }
+    }
+
+    /// Posts a review, giving up after the post deadline: the request is
+    /// dropped (which aborts it) and the run ends with
+    /// [`Error::PostTimedOut`], leaving the claim for the next run's tag
+    /// check.
+    async fn post_review_by_deadline(
+        &self,
+        number: ChangeNumber,
+        revision: &model::RevisionId,
+        input: &ReviewInput,
+    ) -> Result<Result<ReviewResult, ApiError>, Problem> {
+        let post = Box::pin(self.client.post_review(number, revision, input));
+        let deadline = Box::pin(async_io::Timer::after(
+            self.consolidation_timing.post_deadline,
+        ));
+        match futures::future::select(post, deadline).await {
+            futures::future::Either::Left((answer, _)) => Ok(answer),
+            futures::future::Either::Right(_) => Err(Problem::Stop(Error::PostTimedOut)),
         }
     }
 
