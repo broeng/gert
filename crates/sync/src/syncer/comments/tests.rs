@@ -1239,7 +1239,10 @@ fn a_refresh_leaves_reserved_held_and_sealed_drafts_alone() {
     assert!(added[0].is_ordinary());
     assert!(view.drafts.iter().any(|d| d.local_id == added[0].local_id));
 
-    // The server's list empties: only the server draft goes.
+    // The server's list empties: only the server draft goes. (A draft synced
+    // in the same millisecond as a fetch starts counts as uploaded while the
+    // fetch was in flight and is kept, so let the clock move on first.)
+    std::thread::sleep(std::time::Duration::from_millis(5));
     http.route("/changes/7/drafts", 200, xssi(&json!({})));
     block_on(f.syncer.refresh_comments(CHANGE)).unwrap();
     assert_eq!(all_drafts(&f), before);
