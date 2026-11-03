@@ -24,7 +24,7 @@ pub(crate) struct Me {
 }
 
 impl Me {
-    fn of(account: &Account) -> Self {
+    pub(crate) fn of(account: &Account) -> Self {
         Self {
             id: account.id,
             handles: [&account.username, &account.email]

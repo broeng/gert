@@ -13,8 +13,8 @@
 //! server becomes active and after each background poll of an inactive
 //! server; the dashboard asks when it is shown and on its poll tick; the
 //! scanner asks itself whenever its [`Checkouts`] notify (a checkout
-//! finished opening, the projects were saved) and when the account's email
-//! becomes known. A request while a round runs is remembered and runs once
+//! finished opening, the projects were saved), and the shell asks again
+//! when it learns the account's email. A request while a round runs is remembered and runs once
 //! that one is done, so there is never more than one scan of a project at a
 //! time. Requests are cheap: a round skips every project whose skip key is
 //! unchanged after one `for-each-ref`.
@@ -23,12 +23,14 @@
 //!
 //! For every project with the option on and an open checkout:
 //!
-//! 1. [`Repo::refs_fingerprint`] (one git call) and the generation
+//! 1. [`Repo::refs_fingerprint`] (one git call), the author emails (the
+//!    checkout's `git config`, and the account's as the cache has it,
+//!    [`Syncer::account_email`]) and the generation
 //!    ([`sync::Syncer::local_generation`]: the project's rows and the
 //!    cached Gerrit changes with the last scan's or the rows' Change-Ids);
 //!    with the author emails and the enabled flag that is the skip key.
 //!    Equal to the one recorded: nothing to do.
-//! 2. Otherwise [`Repo::scan`], the checkout's author emails, and the
+//! 2. Otherwise [`Repo::scan`] and the
 //!    reconcile ([`sync::Syncer::reconcile_local_keyed`], which also
 //!    returns the generation after its writes). The key is recorded only
 //!    when the report
@@ -85,10 +87,6 @@ struct Memo {
     /// The Change-Ids of that scan's commits, sorted, each once: the input
     /// of the next pre-check's cache generation.
     change_ids: Vec<String>,
-    /// The checkout's own author emails as of that scan. Read again with
-    /// every full scan only, so that the pre-check stays one git call; a
-    /// changed `user.email` is picked up when the refs or the cache move.
-    repo_emails: Vec<String>,
 }
 
 /// What one round needs, gathered on the main thread.
@@ -96,7 +94,6 @@ struct Round {
     syncer: Syncer,
     /// How many commits a scan looks at ([`SCAN_LIMIT`]).
     limit: usize,
-    account_email: Option<String>,
     /// The projects with the option on and an open checkout.
     open: Vec<(String, Repo)>,
     /// Every project with the option on, open or not.
@@ -117,11 +114,6 @@ pub struct LocalScanner {
     /// `None`: no session, or an anonymous one; nothing is scanned.
     syncer: Option<Syncer>,
     username: Option<String>,
-    can_sync: bool,
-    /// The signed-in account's email: `None` until asked, `Some(None)` for
-    /// an account without one.
-    account_email: Option<Option<String>>,
-    email_task: Option<Task<()>>,
     memos: HashMap<String, Memo>,
     /// [`SCAN_LIMIT`]; smaller in tests.
     limit: usize,
@@ -145,9 +137,6 @@ impl LocalScanner {
             checkouts,
             syncer: None,
             username: None,
-            can_sync: false,
-            account_email: None,
-            email_task: None,
             memos: HashMap::new(),
             limit: SCAN_LIMIT,
             epoch: 0,
@@ -166,12 +155,9 @@ impl LocalScanner {
         let username = session.and_then(|s| s.username.clone());
         if username != self.username {
             self.username = username;
-            self.account_email = None;
-            self.email_task = None;
             self.memos.clear();
             self.epoch += 1;
         }
-        self.can_sync = session.is_some_and(Session::can_sync);
         self.syncer = session.map(|s| s.syncer().clone());
     }
 
@@ -202,7 +188,6 @@ impl LocalScanner {
             self.again = true;
             return;
         }
-        self.fetch_email(&syncer, cx);
         let (open, enabled) = self.checkouts.update(cx, |c, cx| {
             let names: Vec<String> = c.local_change_projects().map(|p| p.name.clone()).collect();
             let open: Vec<(String, Repo)> = names
@@ -217,7 +202,6 @@ impl LocalScanner {
         let round = Round {
             syncer,
             limit: self.limit,
-            account_email: self.account_email.clone().flatten(),
             open,
             enabled,
             memos: self.memos.clone(),
@@ -244,41 +228,6 @@ impl LocalScanner {
             self.request(cx);
         }
     }
-
-    /// Asks the server for the account's email once per account, when the
-    /// session can talk to it. A failure is tried again with the next
-    /// request; the answer starts another round, since it changes the
-    /// skip keys.
-    fn fetch_email(&mut self, syncer: &Syncer, cx: &mut Context<Self>) {
-        if self.account_email.is_some() || self.email_task.is_some() || !self.can_sync {
-            return;
-        }
-        let syncer = syncer.clone();
-        let epoch = self.epoch;
-        self.email_task = Some(cx.spawn(async move |this, cx| {
-            let account = cx
-                .background_spawn(async move { syncer.account_self().await })
-                .await;
-            this.update(cx, |this, cx| {
-                this.email_task = None;
-                if epoch != this.epoch {
-                    return;
-                }
-                match account {
-                    Ok(account) => {
-                        let email = account.email.filter(|e| !e.trim().is_empty());
-                        let known = email.is_some();
-                        this.account_email = Some(email);
-                        if known {
-                            this.request(cx);
-                        }
-                    }
-                    Err(e) => log::debug!("reading the account for local changes: {e}"),
-                }
-            })
-            .ok();
-        }));
-    }
 }
 
 /// The normalized, sorted union of the account's and the checkout's
@@ -300,7 +249,6 @@ fn run(round: Round) -> Ran {
     let Round {
         syncer,
         limit,
-        account_email,
         open,
         enabled,
         mut memos,
@@ -310,6 +258,10 @@ fn run(round: Round) -> Ran {
         changed: false,
         full_scans: 0,
     };
+    let account_email = syncer.account_email().unwrap_or_else(|e| {
+        log::warn!("reading the account email: {e}");
+        None
+    });
     for (project, repo) in &open {
         match scan_project(
             &syncer,
@@ -374,10 +326,11 @@ fn scan_project(
     memo: Option<Memo>,
 ) -> Result<Outcome, ScanError> {
     let refs = repo.refs_fingerprint()?;
+    let emails = author_emails(account_email, &repo.author_emails()?);
     if let Some(memo) = memo {
         let key = SkipKey {
             refs,
-            emails: author_emails(account_email, &memo.repo_emails),
+            emails: emails.clone(),
             enabled: true,
             generation: syncer.local_generation(project, &memo.change_ids)?,
         };
@@ -390,8 +343,6 @@ fn scan_project(
         }
     }
     let scan = repo.scan(limit)?;
-    let repo_emails = repo.author_emails()?;
-    let emails = author_emails(account_email, &repo_emails);
     let change_ids = scan_change_ids(&scan);
     // The generation is read under the reconcile's store lock, after its
     // writes: what the next pre-check compares with.
@@ -404,7 +355,6 @@ fn scan_project(
             generation,
         },
         change_ids,
-        repo_emails,
     });
     Ok(Outcome {
         memo,

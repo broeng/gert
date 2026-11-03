@@ -694,6 +694,16 @@ impl Shell {
             outbox
         });
         if let Some(entry) = self.servers.get_mut(key) {
+            let old_user = entry.session.as_ref().and_then(|s| s.username.clone());
+            let new_user = session.as_ref().and_then(|s| s.username.clone());
+            if new_user.is_some() && new_user != old_user && entry.me.is_some() {
+                // Another account signed in: what we knew is not theirs.
+                entry.me = None;
+            }
+            // A new session may try at once.
+            entry.account_task = None;
+            entry.account_failures = 0;
+            entry.account_retry = None;
             entry.session = session;
             entry.outbox = outbox;
             entry.outbox_subs = subs;
@@ -893,6 +903,14 @@ impl Shell {
     fn found_events(&mut self, key: &ServerKey, ran: Ran, cx: &mut Context<Self>) {
         let Ran { me, found } = ran;
         let current = self.current_change();
+        // The watch read the account (and cached its email) before the
+        // shell's own fetch did: the scanner looks again with it.
+        if self.servers.get(key).is_some_and(|e| e.me.is_none()) {
+            if let Some(entry) = self.servers.get_mut(key) {
+                entry.me = Some(me.clone());
+            }
+            self.scan_local(key, cx);
+        }
         let Some(entry) = self.servers.get_mut(key) else {
             return;
         };
@@ -1061,10 +1079,10 @@ impl Shell {
                 if let Some(e) = self.servers.get_mut(key) {
                     e.attention_count = Some(n);
                 }
-                self.server_reachable(key, cx);
+                self.server_reachable(key, window, cx);
             }
             // It answered, so it is reachable even without a result.
-            Polled::Refused => self.server_reachable(key, cx),
+            Polled::Refused => self.server_reachable(key, window, cx),
             Polled::Offline => self.servers.set_connection(key, Connection::Offline),
             Polled::Unauthorized => {
                 self.unauthorized_for(key, window, cx);
@@ -1076,11 +1094,80 @@ impl Shell {
     }
 
     /// A refresh of server `key` worked, so it is reachable: upload its
-    /// drafts that waited.
-    fn server_reachable(&mut self, key: &ServerKey, cx: &mut Context<Self>) {
+    /// drafts that waited, and read the account if it is not known yet.
+    fn server_reachable(&mut self, key: &ServerKey, window: &mut Window, cx: &mut Context<Self>) {
         self.servers.set_connection(key, Connection::Online);
         if let Some(outbox) = self.servers.get(key).and_then(|e| e.outbox.clone()) {
             outbox.update(cx, |o, cx| o.retry_all(cx));
+        }
+        self.fetch_account(key, window, cx);
+    }
+
+    /// Fetches the signed-in account of server `key` (`me`) unless it is
+    /// known: once per session, only while the server answers, and after a
+    /// failure no sooner than the poll interval, doubled per failure like
+    /// the polls. The account's email lands in the cache on the way
+    /// (`Syncer::account_self`), and the local change scanner looks again
+    /// with it. Refused credentials go the usual way.
+    fn fetch_account(&mut self, key: &ServerKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.servers.get(key) else {
+            return;
+        };
+        let due = entry
+            .account_retry
+            .is_none_or(|t| std::time::Instant::now() >= t);
+        let Some(syncer) = entry
+            .session
+            .as_ref()
+            .filter(|s| s.can_sync() && s.username.is_some())
+            .filter(|_| entry.me.is_none() && entry.account_task.is_none() && due)
+            .filter(|_| {
+                !matches!(
+                    entry.connection,
+                    Connection::Offline | Connection::Unauthorized
+                )
+            })
+            .map(|s| s.syncer().clone())
+        else {
+            return;
+        };
+        let owner = key.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let account = cx
+                .background_spawn(async move { syncer.account_self().await })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let focused = this.window_active;
+                let Some(entry) = this.servers.get_mut(&owner) else {
+                    return;
+                };
+                entry.account_task = None;
+                match account {
+                    Ok(account) => {
+                        entry.me = Some(watching::Me::of(&account));
+                        entry.account_failures = 0;
+                        entry.account_retry = None;
+                        this.scan_local(&owner, cx);
+                    }
+                    Err(e) if e.is_unauthorized() => this.unauthorized_for(&owner, window, cx),
+                    Err(e) => {
+                        log::debug!("reading the account of {owner}: {e}");
+                        entry.account_failures = entry.account_failures.saturating_add(1);
+                        let state = sync::PollState {
+                            last_attempt: None,
+                            window_focused: focused,
+                            visible: true,
+                            consecutive_failures: entry.account_failures,
+                        };
+                        let wait = sync::PollPolicy::default().interval(&state);
+                        entry.account_retry = Some(std::time::Instant::now() + wait);
+                    }
+                }
+            })
+            .ok();
+        });
+        if let Some(entry) = self.servers.get_mut(key) {
+            entry.account_task = Some(task);
         }
     }
 
@@ -1566,7 +1653,7 @@ impl Shell {
                 ListEvent::Search(q) => this.search(q.clone(), window, cx),
                 ListEvent::SaveBookmarks(list) => this.save_bookmarks(list.clone(), cx),
                 ListEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
-                ListEvent::Refreshed => this.server_reachable(&owner, cx),
+                ListEvent::Refreshed => this.server_reachable(&owner, window, cx),
             },
         ));
         Page::List(page)
@@ -1772,7 +1859,7 @@ impl Shell {
             move |this, _, ev: &ChangeEvent, window, cx| match ev {
                 ChangeEvent::Unauthorized => this.unauthorized_for(&owner, window, cx),
                 ChangeEvent::Refreshed => {
-                    this.server_reachable(&owner, cx);
+                    this.server_reachable(&owner, window, cx);
                     this.drain_notifications(&owner, cx);
                 }
                 ChangeEvent::Reply(detail) => this.open_reply((**detail).clone(), window, cx),

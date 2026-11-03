@@ -97,6 +97,18 @@ fn start(
     local_changes: bool,
 ) -> Started {
     let mut store = Store::open_in_memory().expect("store");
+    store.server_id(URL).expect("server id");
+    start_with(cx, f, store, username, local_changes)
+}
+
+/// [`start`] on `store`, whose server row for [`URL`] exists.
+fn start_with(
+    cx: &mut TestAppContext,
+    f: &Fixture,
+    mut store: Store,
+    username: Option<&str>,
+    local_changes: bool,
+) -> Started {
     assert_eq!(store.server_id(URL).expect("server id"), SERVER);
     let mut env = env_with(store, &f.http);
     env.backend = Arc::new(FakeBackend {
@@ -208,16 +220,79 @@ fn own_commits_show_in_the_dashboard_and_other_authors_do_not(cx: &mut TestAppCo
     s.assert_no_local_number_sent(&f);
 }
 
+/// How many times the account was asked for.
+fn account_reads(f: &Fixture) -> usize {
+    f.http
+        .requested()
+        .iter()
+        .filter(|r| r.contains("/accounts/self/detail"))
+        .count()
+}
+
 #[gpui_kit::test]
-fn the_account_email_counts_as_the_users_own(cx: &mut TestAppContext) {
+fn the_account_email_arriving_brings_in_its_commits(cx: &mut TestAppContext) {
     let f = fixture();
+    f.by("Me <ME@corp.example>", "Under the account email", ID_A);
+    // The server does not answer yet: the account is not asked for, and
+    // only the checkout's email counts.
+    let s = start(cx, &f, Some("u"), true);
+    assert!(s.subjects(cx).is_empty());
+    assert_eq!(account_reads(&f), 0);
+    let scans = s.full_scans(cx);
+
+    // It answers: the first refresh that works reads the account once, and
+    // the email starts another round.
+    f.http.route_json("/changes/", "[]");
     f.http.route_json(
-        "/accounts/self",
+        "/accounts/self/detail",
         r#"{"_account_id": 1, "email": "me@corp.example"}"#,
     );
-    f.by("Me <ME@corp.example>", "Under the account email", ID_A);
-    let s = start(cx, &f, Some("u"), true);
+    s.press(cx, "shift-r");
+    cx.run_until_parked();
+    assert_eq!(account_reads(&f), 1);
+    assert_eq!(s.full_scans(cx), scans + 1);
     assert_eq!(s.subjects(cx), ["Under the account email"]);
+    assert_eq!(
+        s.store
+            .lock()
+            .expect("store")
+            .account_email(SERVER)
+            .expect("email")
+            .as_deref(),
+        Some("me@corp.example")
+    );
+    s.press(cx, "shift-r");
+    cx.run_until_parked();
+    assert_eq!(account_reads(&f), 1, "known now");
+}
+
+#[gpui_kit::test]
+fn the_cached_account_email_counts_offline(cx: &mut TestAppContext) {
+    let f = fixture();
+    f.by("Me <me@corp.example>", "Under the account email", ID_A);
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server id");
+    store
+        .set_account_email(server, Some("me@corp.example"))
+        .expect("email");
+    let s = start_with(cx, &f, store, Some("u"), true);
+    assert_eq!(s.subjects(cx), ["Under the account email"]);
+    assert_eq!(account_reads(&f), 0);
+}
+
+#[gpui_kit::test]
+fn a_failing_account_read_waits_for_the_poll_interval(cx: &mut TestAppContext) {
+    let f = fixture();
+    f.http.route_json("/changes/", "[]");
+    f.http.route("/accounts/self/detail", 500, "broken");
+    let s = start(cx, &f, Some("u"), true);
+    assert_eq!(account_reads(&f), 1);
+    // More refreshes work, but the account is not asked for again yet.
+    s.press(cx, "shift-r");
+    cx.run_until_parked();
+    s.press(cx, "shift-r");
+    cx.run_until_parked();
+    assert_eq!(account_reads(&f), 1);
 }
 
 #[gpui_kit::test]

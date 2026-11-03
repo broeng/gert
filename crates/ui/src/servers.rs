@@ -159,8 +159,17 @@ pub(crate) struct ServerEntry {
     /// The background poll of `attention_count`; present exactly while the
     /// server is polled (inactive, signed in). Dropping it stops the poll.
     pub attention_task: Option<Task<()>>,
-    /// The signed-in user, from the notification watch's first pass.
+    /// The signed-in user, from the notification watch's first pass or the
+    /// shell's own fetch ([`crate::shell`]'s `fetch_account`), whichever
+    /// came first. Fetching it also keeps the account's email in the cache
+    /// (`Syncer::account_email`), where the local change scanner reads it.
     pub me: Option<Me>,
+    /// The shell's fetch of `me`, while it runs.
+    pub account_task: Option<Task<()>>,
+    /// Failed fetches of `me` in a row, and when the next may start: they
+    /// back off like the polls do.
+    pub account_failures: u32,
+    pub account_retry: Option<std::time::Instant>,
     /// Keys of the events already shown in this run. The watch and the
     /// drain after a change refresh can both see an event before its
     /// acknowledgement lands; this keeps it from being shown twice.
@@ -188,6 +197,9 @@ impl ServerEntry {
             attention_count: None,
             attention_task: None,
             me: None,
+            account_task: None,
+            account_failures: 0,
+            account_retry: None,
             notified: HashSet::new(),
             watch_task: None,
         }
