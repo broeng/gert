@@ -16,14 +16,16 @@ mod events;
 pub mod local;
 pub mod notify;
 mod poll;
+mod port;
 mod syncer;
 
 pub use error::{Error, PendingDraft};
 pub use events::diff_change;
 pub use poll::{PollPolicy, PollState};
+pub use port::{NotLocalPath, PathMap, PortCommit, PortError, PortMaps, PortSource};
 pub use syncer::{
     CLAIM_STALE, ChainCommit, CommentsView, ConsolidateOptions, ConsolidateReport,
-    ConsolidationTiming, DraftCounts, DraftSave, FoundChange, NewChange, POST_DEADLINE,
+    ConsolidationTiming, DraftCounts, DraftSave, FoundChange, NewChange, POST_DEADLINE, Ported,
     PostOutcome, PostReport, PublishOutcome, QueryUpdate, RefreshSource, RetryReport,
     ReviewerAdded, SLOW_RECHECK, StopFlag, Syncer, WatchOptions,
 };

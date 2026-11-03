@@ -59,8 +59,16 @@
 //! 5. **Found open:** each local version that is a Gerrit patch set (an
 //!    *exact* match) has its drafts and pending reviews moved onto that
 //!    patch set in one store transaction; moved drafts are reserved for
-//!    the post. A version that is not a Gerrit patch set stays as it is,
-//!    unsent and not held: porting it is LC5b's.
+//!    the post. In the same transaction, a version that is not a Gerrit
+//!    patch set and never will be (a version seen later is one, or the
+//!    change vanished from the checkout) is *ported*: through a
+//!    [`PortSource`] (the checkout), each of its drafts moves onto the
+//!    current patch set where its lines are unchanged (onto the newest
+//!    patch set in the checkout when the current one is not there), or is
+//!    held with the reason (see the `port` module); its pending reviews go
+//!    along. With no patch set in the checkout, everything is held. A
+//!    newer version that is not on Gerrit yet waits for its own patch set,
+//!    and without a port source or a checkout nothing is ported or held.
 //! 6. **Send.** Per revision, the pending reviews in creation order, each
 //!    in one `POST …/review`: the reserved comments on that revision inline
 //!    (`comments`; the first post of a revision takes them all), the
@@ -133,21 +141,26 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use gerrit_api::{ChangeOption, ChangeQuery, Error as ApiError};
 use jiff::{SignedDuration, Timestamp};
 use model::{
     AccountId, ChangeDetail, ChangeNumber, ChangeStatus, ChangeSummary, Draft, DraftHandling,
-    DraftSync, LocalApproval, LocalChange, LocalChangeId, LocalChangeState, LocalDraftId,
-    LocalPatchSet, PatchSetNumber, PendingReview, PendingReviewId, PendingReviewState, ReviewInput,
-    ReviewResult, Revision,
+    DraftSync, FileEntry, LocalApproval, LocalChange, LocalChangeId, LocalChangeState,
+    LocalDraftId, LocalPatchSet, PatchSetNumber, PendingReview, PendingReviewId,
+    PendingReviewState, ReviewInput, ReviewResult, Revision, RevisionId, Side,
 };
 use store::{Claimant, ConsolidationRewrite, LocalPost, PatchSetMove, ReviewStateChange};
 
 use super::Syncer;
-use crate::Error;
+use crate::{Error, PortCommit, PortError, PortMaps, PortSource};
+
+mod port;
 
 /// Votes as label and value, sorted by label.
 type Votes = Vec<(String, i32)>;
@@ -244,16 +257,28 @@ impl PartialEq for StopFlag {
 impl Eq for StopFlag {}
 
 /// What [`Syncer::consolidate`] takes besides the store.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct ConsolidateOptions {
     /// The `local_approval` setting of each project as it is now. A
     /// project that is not listed counts as `exact`, the strictest.
     pub local_approval: BTreeMap<String, LocalApproval>,
     /// Stops the run before its next post (see [`StopFlag`]).
     pub stop: StopFlag,
-    // LC5b adds the `PortSource` here: what ports the comments of versions
-    // that never reached Gerrit onto a Gerrit patch set (see
-    // `Syncer::exact_moves`, where those versions are skipped now).
+    /// The checkouts, for porting the comments of versions that never
+    /// reached Gerrit onto a Gerrit patch set. Without it nothing is
+    /// ported: those versions stay as they are, and nothing is held for
+    /// them.
+    pub port: Option<Arc<dyn PortSource>>,
+}
+
+impl std::fmt::Debug for ConsolidateOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsolidateOptions")
+            .field("local_approval", &self.local_approval)
+            .field("stop", &self.stop)
+            .field("port", &self.port.is_some())
+            .finish()
+    }
 }
 
 /// A local change found on Gerrit in a run.
@@ -304,6 +329,27 @@ pub struct PostReport {
     pub outcome: PostOutcome,
 }
 
+/// What a run did with a local version that never reached Gerrit: its
+/// comments and pending reviews ported onto a Gerrit patch set, or held.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ported {
+    pub local_change: LocalChangeId,
+    pub change: ChangeNumber,
+    /// The local version.
+    pub from: PatchSetNumber,
+    /// Where its comments and reviews went; `None` when no patch set of
+    /// the change is in the checkout, and everything was held.
+    pub to: Option<PatchSetNumber>,
+    /// Drafts moved onto `to`, to be posted with the change's next post.
+    pub drafts: usize,
+    /// Pending reviews moved onto `to`.
+    pub reviews: usize,
+    /// Drafts held on the local version, with the reason.
+    pub held: Vec<(LocalDraftId, String)>,
+    /// Pending reviews held on the local version.
+    pub held_reviews: usize,
+}
+
 /// What a [`Syncer::consolidate`] run did, for the pages to refresh and
 /// redirect.
 #[derive(Debug, Default)]
@@ -329,6 +375,9 @@ pub struct ConsolidateReport {
     /// up as before and nothing about them moved.
     pub state_changed: Vec<LocalChangeId>,
     pub posts: Vec<PostReport>,
+    /// Local versions that never reached Gerrit, ported or held (as
+    /// planned: a draft edited meanwhile stays where it is).
+    pub ported: Vec<Ported>,
     /// Local changes with nothing unsent left, all of whose versions are
     /// Gerrit patch sets: tombstones now.
     pub consolidated: Vec<(LocalChangeId, ChangeNumber)>,
@@ -347,6 +396,7 @@ impl ConsolidateReport {
         out.extend(self.closed.iter().map(|c| c.1));
         out.extend(self.reopened.iter().map(|c| c.1));
         out.extend(self.posts.iter().map(|p| p.change));
+        out.extend(self.ported.iter().map(|p| p.change));
         out.extend(self.consolidated.iter().map(|c| c.1));
         out
     }
@@ -501,6 +551,40 @@ impl RowData {
             .iter()
             .any(|r| r.state == PendingReviewState::Pending && !r.patch_set.is_local())
             || self.reserved.iter().any(postable)
+    }
+
+    /// The versions whose data is ported now: not a patch set of the change
+    /// (`on_gerrit` tells), with a draft that moves or a pending review on
+    /// them, and superseded: a version seen later is a patch set of the
+    /// change, or the change vanished from the checkout. Only such a
+    /// version "never reaches Gerrit"; a newer version that is not on
+    /// Gerrit yet waits for its own patch set (its drafts say "sent when
+    /// this version is on Gerrit"). In order of the versions.
+    fn to_port(
+        &self,
+        on_gerrit: impl Fn(&RevisionId) -> bool,
+        vanished: bool,
+    ) -> Vec<&LocalPatchSet> {
+        self.versions
+            .iter()
+            .filter(|v| !on_gerrit(&v.sha))
+            .filter(|v| {
+                self.on_versions
+                    .iter()
+                    .any(|d| d.patch_set == v.number && movable(d))
+                    || self
+                        .reviews
+                        .iter()
+                        .any(|r| r.patch_set == v.number && r.state == PendingReviewState::Pending)
+            })
+            .filter(|v| {
+                vanished
+                    || self
+                        .versions
+                        .iter()
+                        .any(|w| w.ordinal > v.ordinal && on_gerrit(&w.sha))
+            })
+            .collect()
     }
 
     /// Something sits on a version that is one of `shas`: an exact match
@@ -936,7 +1020,14 @@ impl Syncer {
             .versions
             .iter()
             .any(|v| v.gerrit_patch_set.is_none() && shas.contains(&&v.sha));
-        if newly_pushed || data.exact_work(&shas) || data.moved_sendable() {
+        let port_work = run.options.port.is_some()
+            && !data
+                .to_port(
+                    |sha| shas.contains(&sha),
+                    row.state == LocalChangeState::Vanished,
+                )
+                .is_empty();
+        if newly_pushed || data.exact_work(&shas) || data.moved_sendable() || port_work {
             let detail = self.refresh_change(number).await?;
             if detail.summary.status != ChangeStatus::New {
                 return self.hold_closed(row, number, &detail.summary.status, run);
@@ -1013,7 +1104,10 @@ impl Syncer {
                 row.gerrit_number.map_or(0, |g| g.0)
             )));
         }
-        let (moves, all_on_gerrit) = self.exact_moves(&row, &detail)?;
+        let data = self.row_data(&row)?;
+        let (mut moves, all_on_gerrit) = exact_moves(&data, &detail);
+        let plan = self.port_plan(&row, number, &detail, &data, run).await?;
+        moves.extend(plan.moves);
         // Looked up: local now. A vanished row keeps its state for LC5b.
         let settled = (row.state == LocalChangeState::Checking).then_some(LocalChangeState::Local);
         let (state, else_state) = if all_on_gerrit {
@@ -1021,7 +1115,16 @@ impl Syncer {
         } else {
             (settled, None)
         };
-        self.rewrite(&row, number, moves, state, else_state, Vec::new())?;
+        self.rewrite(
+            &row,
+            number,
+            moves,
+            plan.keep,
+            state,
+            else_state,
+            plan.review_states,
+        )?;
+        run.report.ported.extend(plan.report);
         let posted_before = run.report.posts.len();
         let mut unverified = Vec::new();
         let sent = self.send(&row, number, &detail, &mut unverified, run).await;
@@ -1035,11 +1138,13 @@ impl Syncer {
         self.finish_change(&row, number, run)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rewrite(
         &self,
         row: &LocalChange,
         number: ChangeNumber,
         moves: Vec<PatchSetMove>,
+        keep: Vec<(LocalDraftId, String)>,
         state: Option<LocalChangeState>,
         else_state: Option<LocalChangeState>,
         review_states: Vec<ReviewStateChange>,
@@ -1048,7 +1153,7 @@ impl Syncer {
             local_change: row.id,
             gerrit_number: number,
             moves,
-            keep: Vec::new(),
+            keep,
             review_states,
             state,
             else_state,
@@ -1060,60 +1165,6 @@ impl Syncer {
             }
             Err(e) => Err(e.into()),
         }
-    }
-
-    /// The moves of `row`'s versions that are patch sets of `detail` (exact
-    /// matches): each version's drafts and pending reviews onto its patch
-    /// set. Also whether every version is a Gerrit patch set.
-    ///
-    /// LC5b: the versions that are not (amended before the upload) are
-    /// skipped here; porting them is where a `PortSource` comes in.
-    fn exact_moves(
-        &self,
-        row: &LocalChange,
-        detail: &ChangeDetail,
-    ) -> Result<(Vec<PatchSetMove>, bool), Problem> {
-        let data = self.row_data(row)?;
-        let mut moves = Vec::new();
-        let mut all_on_gerrit = true;
-        for v in &data.versions {
-            let Some(target) = detail
-                .revisions
-                .iter()
-                .find(|r| r.sha == v.sha && !r.number.is_local())
-            else {
-                all_on_gerrit = false;
-                continue;
-            };
-            let drafts: Vec<(LocalDraftId, Option<store::DraftAnchor>)> = data
-                .on_versions
-                .iter()
-                .filter(|d| d.patch_set == v.number && movable(d))
-                .map(|d| (d.local_id, None))
-                .collect();
-            let reviews: Vec<PendingReviewId> = data
-                .reviews
-                .iter()
-                .filter(|r| {
-                    r.patch_set == v.number
-                        && matches!(
-                            r.state,
-                            PendingReviewState::Pending
-                                | PendingReviewState::Held
-                                | PendingReviewState::Failed
-                        )
-                })
-                .map(|r| r.id)
-                .collect();
-            moves.push(PatchSetMove {
-                from: v.number,
-                to: target.as_ref(),
-                exact: true,
-                drafts,
-                reviews,
-            });
-        }
-        Ok((moves, all_on_gerrit))
     }
 
     /// Marks the row consolidated if all its versions are Gerrit patch
@@ -1231,9 +1282,96 @@ impl Syncer {
             }
         }
         if !changes.is_empty() {
-            self.rewrite(row, number, Vec::new(), None, None, changes)?;
+            self.rewrite(row, number, Vec::new(), Vec::new(), None, None, changes)?;
         }
         Ok(())
+    }
+
+    // ---- porting ----
+
+    /// Ports the versions of `row` that never reached Gerrit
+    /// ([`RowData::to_port`]) onto one patch set of `detail`: the current
+    /// one if its commit is in the checkout, else the newest one that is.
+    /// Each draft goes where [`port::port_draft`] says or is held with the
+    /// reason; the pending reviews go along (their votes are decided when
+    /// they are posted, see [`casts`]). With no patch set in the checkout,
+    /// everything is held. Without a port source or a checkout, or when
+    /// `git` fails, those versions stay as they are.
+    async fn port_plan(
+        &self,
+        row: &LocalChange,
+        number: ChangeNumber,
+        detail: &ChangeDetail,
+        data: &RowData,
+        run: &mut Run<'_>,
+    ) -> Result<PortPlan, Problem> {
+        let mut plan = PortPlan::default();
+        let on_gerrit = |sha: &RevisionId| {
+            detail
+                .revisions
+                .iter()
+                .any(|r| &r.sha == sha && !r.number.is_local())
+        };
+        let versions = data.to_port(on_gerrit, row.state == LocalChangeState::Vanished);
+        if versions.is_empty() {
+            return Ok(plan);
+        }
+        let Some(source) = run.options.port.clone() else {
+            return Ok(plan);
+        };
+        let (rev, commit) = match port_target(&*source, &row.project, detail) {
+            Ok(Some(target)) => target,
+            Ok(None) => {
+                let why = format!(
+                    "No patch set of change {number} is in the checkout, so this could not be \
+                     carried over from the local version."
+                );
+                for v in versions {
+                    plan.hold_version(row, detail, data, v, &why, run.options);
+                }
+                return Ok(plan);
+            }
+            Err(PortError::NoCheckout) => return Ok(plan),
+            Err(e) => {
+                run.report
+                    .errors
+                    .push((row.id, format!("porting the local versions: {e}")));
+                return Ok(plan);
+            }
+        };
+        // Gerrit takes comments only on the files its patch set changes.
+        let files = match self.client.get_files(number, &rev.sha, None).await {
+            Ok(files) => files,
+            Err(e) => {
+                let why = skip_or_stop(e.into())?;
+                run.report.errors.push((row.id, why));
+                return Ok(plan);
+            }
+        };
+        for v in versions {
+            match port_version(&*source, row, v, rev, &commit, &files, data) {
+                Ok((m, keep)) => {
+                    plan.report.push(Ported {
+                        local_change: row.id,
+                        change: number,
+                        from: v.number,
+                        to: Some(rev.number),
+                        drafts: m.drafts.len(),
+                        reviews: m.reviews.len(),
+                        held: keep.clone(),
+                        held_reviews: 0,
+                    });
+                    plan.moves.push(m);
+                    plan.keep.extend(keep);
+                }
+                Err(PortError::NoCheckout) => {}
+                Err(e) => run
+                    .report
+                    .errors
+                    .push((row.id, format!("porting PS {}: {e}", v.number.0))),
+            }
+        }
+        Ok(plan)
     }
 
     // ---- sending ----
@@ -1920,6 +2058,225 @@ impl Syncer {
     }
 }
 
+/// The moves of a row's versions that are patch sets of `detail` (exact
+/// matches): each version's drafts and pending reviews onto its patch set.
+/// Also whether every version is a Gerrit patch set. The other versions
+/// are ported, or wait ([`RowData::to_port`]).
+fn exact_moves(data: &RowData, detail: &ChangeDetail) -> (Vec<PatchSetMove>, bool) {
+    let mut moves = Vec::new();
+    let mut all_on_gerrit = true;
+    for v in &data.versions {
+        let Some(target) = detail
+            .revisions
+            .iter()
+            .find(|r| r.sha == v.sha && !r.number.is_local())
+        else {
+            all_on_gerrit = false;
+            continue;
+        };
+        let drafts: Vec<(LocalDraftId, Option<store::DraftAnchor>)> = data
+            .on_versions
+            .iter()
+            .filter(|d| d.patch_set == v.number && movable(d))
+            .map(|d| (d.local_id, None))
+            .collect();
+        let reviews: Vec<PendingReviewId> = data
+            .reviews
+            .iter()
+            .filter(|r| {
+                r.patch_set == v.number
+                    && matches!(
+                        r.state,
+                        PendingReviewState::Pending
+                            | PendingReviewState::Held
+                            | PendingReviewState::Failed
+                    )
+            })
+            .map(|r| r.id)
+            .collect();
+        moves.push(PatchSetMove {
+            from: v.number,
+            to: target.as_ref(),
+            exact: true,
+            drafts,
+            reviews,
+        });
+    }
+    (moves, all_on_gerrit)
+}
+
+/// What porting decided for one change, for its rewrite.
+#[derive(Default)]
+struct PortPlan {
+    moves: Vec<PatchSetMove>,
+    keep: Vec<(LocalDraftId, String)>,
+    review_states: Vec<ReviewStateChange>,
+    report: Vec<Ported>,
+}
+
+impl PortPlan {
+    /// Holds everything of version `v` that would have been ported, with
+    /// `why`: its drafts, and its pending reviews with their votes
+    /// (approvals drop-only where the rules say so).
+    fn hold_version(
+        &mut self,
+        row: &LocalChange,
+        detail: &ChangeDetail,
+        data: &RowData,
+        v: &LocalPatchSet,
+        why: &str,
+        options: &ConsolidateOptions,
+    ) {
+        let held: Vec<(LocalDraftId, String)> = data
+            .on_versions
+            .iter()
+            .filter(|d| d.patch_set == v.number && movable(d))
+            .map(|d| (d.local_id, why.to_owned()))
+            .collect();
+        let mut reviews = 0;
+        for r in data
+            .reviews
+            .iter()
+            .filter(|r| r.patch_set == v.number && r.state == PendingReviewState::Pending)
+        {
+            let votes: Votes = r.labels.iter().map(|(l, v)| (l.clone(), *v)).collect();
+            let drop_only = drop_only_labels(row, detail, Some(r), &votes, options);
+            let mut change = ReviewStateChange::new(
+                r.id,
+                &[PendingReviewState::Pending],
+                PendingReviewState::Held,
+                Some(format!("{why}{}", vote_actions(&votes, &drop_only))),
+            );
+            change.drop_only = drop_only;
+            self.review_states.push(change);
+            reviews += 1;
+        }
+        self.report.push(Ported {
+            local_change: row.id,
+            change: detail.summary.number,
+            from: v.number,
+            to: None,
+            drafts: 0,
+            reviews: 0,
+            held: held.clone(),
+            held_reviews: reviews,
+        });
+        self.keep.extend(held);
+    }
+}
+
+/// The patch set to port onto: the current one of `detail` if its commit
+/// is in the checkout, else the newest one that is; with the commit as the
+/// checkout has it. `None` when no patch set is in the checkout.
+fn port_target<'a>(
+    source: &dyn PortSource,
+    project: &str,
+    detail: &'a ChangeDetail,
+) -> Result<Option<(&'a Revision, PortCommit)>, PortError> {
+    let mut revisions: Vec<&Revision> = detail
+        .revisions
+        .iter()
+        .filter(|r| !r.number.is_local())
+        .collect();
+    revisions.sort_by_key(|r| std::cmp::Reverse(r.number));
+    if let Some(at) = revisions
+        .iter()
+        .position(|r| Some(r.number) == detail.current_patch_set)
+    {
+        let current = revisions.remove(at);
+        revisions.insert(0, current);
+    }
+    for rev in revisions {
+        if let Some(commit) = source.commit(project, &rev.sha)? {
+            return Ok(Some((rev, commit)));
+        }
+    }
+    Ok(None)
+}
+
+/// The move of version `v`'s drafts and pending reviews onto `rev` (whose
+/// commit is `commit` and whose files Gerrit lists as `files`), and the
+/// drafts held with the reason. One `line_maps` call for the revision side
+/// and one for the parent side, as needed. `Err` leaves the version as it
+/// is (no checkout, `git` failing); a commit missing from the checkout
+/// holds what it covers.
+fn port_version(
+    source: &dyn PortSource,
+    row: &LocalChange,
+    v: &LocalPatchSet,
+    rev: &Revision,
+    commit: &PortCommit,
+    files: &[FileEntry],
+    data: &RowData,
+) -> Result<(PatchSetMove, Vec<(LocalDraftId, String)>), PortError> {
+    let drafts: Vec<&Draft> = data
+        .on_versions
+        .iter()
+        .filter(|d| d.patch_set == v.number && movable(d))
+        .collect();
+    let paths = |side: Side| -> Vec<String> {
+        let set: BTreeSet<&str> = drafts
+            .iter()
+            .filter(|d| d.side == side && d.path != model::PATCHSET_LEVEL_PATH)
+            .map(|d| d.path.as_str())
+            .collect();
+        set.into_iter().map(str::to_owned).collect()
+    };
+    let (revision_paths, parent_paths) = (paths(Side::Revision), paths(Side::Parent));
+    let revision = if revision_paths.is_empty() {
+        Ok(PortMaps::new())
+    } else {
+        side_maps(source.line_maps(&row.project, &v.sha, &rev.sha, &revision_paths))?
+    };
+    let parent = if parent_paths.is_empty() {
+        Ok(PortMaps::new())
+    } else {
+        match (&v.parent_sha, &commit.parent) {
+            (Some(from), Some(to)) => {
+                side_maps(source.line_maps(&row.project, from, to, &parent_paths))?
+            }
+            _ => Err("A root commit has no base side to carry a comment over to.".to_owned()),
+        }
+    };
+    let mut moved = Vec::new();
+    let mut keep = Vec::new();
+    for d in drafts {
+        match port::port_draft(d, rev.number, files, &revision, &parent) {
+            Ok(anchor) => moved.push((d.local_id, Some(anchor))),
+            Err(why) => keep.push((d.local_id, why)),
+        }
+    }
+    let reviews = data
+        .reviews
+        .iter()
+        .filter(|r| r.patch_set == v.number && r.state == PendingReviewState::Pending)
+        .map(|r| r.id)
+        .collect();
+    Ok((
+        PatchSetMove {
+            from: v.number,
+            to: rev.as_ref(),
+            exact: false,
+            drafts: moved,
+            reviews,
+        },
+        keep,
+    ))
+}
+
+/// One side's answer of the checkout: the maps, or (a commit missing from
+/// the checkout) why the drafts on that side are held. Other errors leave
+/// the version as it is.
+fn side_maps(answer: Result<PortMaps, PortError>) -> Result<port::SideMaps, PortError> {
+    match answer {
+        Ok(maps) => Ok(Ok(maps)),
+        Err(e @ PortError::MissingCommit(_)) => Ok(Err(format!(
+            "The local version cannot be compared with the patch set: {e}."
+        ))),
+        Err(e) => Err(e),
+    }
+}
+
 /// The newest change message by `me` whose tag `matches`.
 fn mine_tagged(
     detail: &ChangeDetail,
@@ -2212,10 +2569,6 @@ fn ported_held_reason(
     votes: &[(String, i32)],
     drop_only: &BTreeSet<String>,
 ) -> String {
-    let (fixed, others): (Votes, Votes) = votes
-        .iter()
-        .cloned()
-        .partition(|(l, _)| drop_only.contains(l));
     let mut reason = format!(
         "These votes were given on local commit {}, which never reached Gerrit; the review \
          was carried over to PS {}, so they were not sent.",
@@ -2240,20 +2593,33 @@ fn ported_held_reason(
             }
         }
     }
+    reason.push_str(&vote_actions(votes, drop_only));
+    reason
+}
+
+/// What the user may do with held votes that were given on another commit
+/// than the one they would go to, as a sentence for each kind (with a
+/// leading blank); empty without votes.
+fn vote_actions(votes: &[(String, i32)], drop_only: &BTreeSet<String>) -> String {
+    let (fixed, others): (Votes, Votes) = votes
+        .iter()
+        .cloned()
+        .partition(|(l, _)| drop_only.contains(l));
+    let mut out = String::new();
     if !fixed.is_empty() {
-        reason.push_str(&format!(
+        out.push_str(&format!(
             " {}: an approval goes only onto the commit it was given on, so it can only be \
              dropped.",
             describe_votes(&fixed)
         ));
     }
     if !others.is_empty() {
-        reason.push_str(&format!(
+        out.push_str(&format!(
             " {}: publish onto the current patch set, or drop.",
             describe_votes(&others)
         ));
     }
-    reason
+    out
 }
 
 /// Why the votes of a review on non-current patch set `ps` are held, and

@@ -2192,3 +2192,882 @@ fn recovery_of_a_ported_review_whose_votes_were_held_holds_them_again() {
     assert_eq!(r.state, PendingReviewState::Held);
     assert_eq!(r.drop_only, BTreeSet::from(["Code-Review".to_owned()]));
 }
+
+// ---- porting ----
+
+use crate::{NotLocalPath, PathMap, PortCommit, PortError, PortMaps, PortSource};
+use model::{CommentRange, LineMap};
+
+/// A checkout: commits with their parents, and line maps per pair of
+/// commits. Records every `line_maps` call.
+#[derive(Default)]
+struct FakePort {
+    commits: BTreeMap<String, Option<String>>,
+    maps: BTreeMap<(String, String), PortMaps>,
+    calls: Mutex<Vec<(String, String, Vec<String>)>>,
+    no_checkout: bool,
+}
+
+impl FakePort {
+    /// Commits `l1`, `s1` and `s2` on `base`, and `base` itself.
+    fn new() -> Self {
+        let mut p = Self::default();
+        for c in ["l1", "s1", "s2"] {
+            p.commits.insert(c.into(), Some("base".into()));
+        }
+        p.commits.insert("base".into(), None);
+        p
+    }
+
+    fn map(mut self, from: &str, to: &str, path: &str, map: PathMap) -> Self {
+        self.maps
+            .entry((from.into(), to.into()))
+            .or_default()
+            .insert(path.into(), map);
+        self
+    }
+
+    fn without(mut self, commit: &str) -> Self {
+        self.commits.remove(commit);
+        self
+    }
+
+    fn options(self) -> (Arc<Self>, ConsolidateOptions) {
+        let port = Arc::new(self);
+        let options = ConsolidateOptions {
+            port: Some(port.clone() as Arc<dyn PortSource>),
+            ..Default::default()
+        };
+        (port, options)
+    }
+}
+
+impl PortSource for FakePort {
+    fn commit(&self, project: &str, sha: &RevisionId) -> Result<Option<PortCommit>, PortError> {
+        assert_eq!(project, "p");
+        if self.no_checkout {
+            return Err(PortError::NoCheckout);
+        }
+        Ok(self.commits.get(sha.as_str()).map(|parent| PortCommit {
+            parent: parent.as_deref().map(Into::into),
+        }))
+    }
+
+    fn line_maps(
+        &self,
+        project: &str,
+        from: &RevisionId,
+        to: &RevisionId,
+        paths: &[String],
+    ) -> Result<PortMaps, PortError> {
+        assert_eq!(project, "p");
+        self.calls
+            .lock()
+            .unwrap()
+            .push((from.to_string(), to.to_string(), paths.to_vec()));
+        if self.no_checkout {
+            return Err(PortError::NoCheckout);
+        }
+        for c in [from, to] {
+            if !self.commits.contains_key(c.as_str()) {
+                return Err(PortError::MissingCommit(c.clone()));
+            }
+        }
+        let maps = self.maps.get(&(from.to_string(), to.to_string()));
+        Ok(paths
+            .iter()
+            .filter_map(|p| {
+                if from == to {
+                    return Some((p.clone(), PathMap::Lines(LineMap::identity(p.clone(), 100))));
+                }
+                Some((p.clone(), maps?.get(p)?.clone()))
+            })
+            .collect())
+    }
+}
+
+/// Line 7 is line 9 now (two lines inserted above); line 3 changed.
+fn shifted(path: &str) -> PathMap {
+    let mut map: Vec<Option<u32>> = (1..=20).map(|l| Some(l + 2)).collect();
+    map[2] = None;
+    PathMap::Lines(LineMap::mapped(path, map))
+}
+
+/// Gerrit's files of PS 1 (`s1`) and PS 2 (`s2`) against their parent.
+fn route_files(f: &Fx) {
+    let files = json!({
+        "/COMMIT_MSG": {"status": "A"},
+        "src/a.rs": {"lines_inserted": 2},
+        "src/new.rs": {"status": "R", "old_path": "src/old.rs"},
+        "del.rs": {"status": "D"},
+        "gone.rs": {"status": "D"},
+        "logo.png": {"binary": true},
+    })
+    .to_string();
+    for sha in ["s1", "s2"] {
+        f.http
+            .routes
+            .route_json(&format!("/revisions/{sha}/files"), &files);
+    }
+}
+
+fn input(path: &str, side: Side, location: Location, message: &str) -> DraftInput {
+    DraftInput {
+        path: path.into(),
+        side,
+        parent: None,
+        location,
+        in_reply_to: None,
+        message: message.into(),
+        unresolved: false,
+    }
+}
+
+impl Fx {
+    /// A local change on Gerrit change 7 (known, or found by the lookup
+    /// when `known` is false) with versions `(sha, parent)`, in the order
+    /// they were seen.
+    fn local_on(
+        &self,
+        known: bool,
+        versions: &[(&str, &str)],
+    ) -> (LocalChange, Vec<LocalPatchSet>) {
+        let mut store = self.syncer.store();
+        let upsert = LocalChangeUpsert {
+            seen: None,
+            branch: Some("main".into()),
+            change_id: CID.into(),
+            gerrit_number: known.then_some(CHANGE),
+            subject: "local".into(),
+            author_name: "Me".into(),
+            author_email: "me@example.com".into(),
+            updated: ts("2024-01-01T00:00:00Z"),
+            state: None,
+            patch_sets: versions
+                .iter()
+                .map(|(sha, parent)| NewLocalPatchSet {
+                    sha: (*sha).into(),
+                    parent_sha: Some((*parent).into()),
+                    seen_at: ts("2023-12-01T00:00:00Z"),
+                })
+                .collect(),
+        };
+        store
+            .reconcile_local(
+                self.syncer.server,
+                "p",
+                &[LocalOp::Upsert(upsert)],
+                ts("2023-12-01T00:00:00Z"),
+            )
+            .unwrap();
+        let row = store
+            .local_changes_by_change_id(self.syncer.server, CID)
+            .unwrap()
+            .remove(0);
+        let versions = store.local_patch_sets(self.syncer.server, row.id).unwrap();
+        (row, versions)
+    }
+
+    fn draft_with(&self, row: &LocalChange, v: &LocalPatchSet, input: DraftInput) -> Draft {
+        self.syncer
+            .save_draft_local(DraftSave::Create {
+                change: row.gerrit_number.unwrap_or(row.number),
+                patch_set: PatchSetRef {
+                    number: v.number,
+                    sha: v.sha.clone(),
+                },
+                input,
+            })
+            .unwrap()
+            .unwrap()
+    }
+
+    /// What became of draft `d`.
+    fn fate(&self, d: &Draft) -> Fate {
+        match self.load_draft(d) {
+            None => {
+                let posts = self.http.posts();
+                let found = posts.iter().find_map(|p| {
+                    p["comments"].as_object()?.iter().find_map(|(path, list)| {
+                        list.as_array()?
+                            .iter()
+                            .find(|c| c["message"] == d.message.as_str())
+                            .map(|c| {
+                                let mut c = c.clone();
+                                c["path"] = json!(path);
+                                c
+                            })
+                    })
+                });
+                Fate::Posted(found.expect("a draft that is gone was posted"))
+            }
+            Some(now) => match now.held_reason {
+                Some(why) => Fate::Held(why),
+                None => Fate::Stayed(Box::new(now)),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Fate {
+    Posted(Value),
+    Held(String),
+    Stayed(Box<Draft>),
+}
+
+impl Fate {
+    fn posted(self) -> Value {
+        match self {
+            Fate::Posted(c) => c,
+            other => panic!("not posted: {other:?}"),
+        }
+    }
+
+    fn held(self) -> String {
+        match self {
+            Fate::Held(why) => why,
+            other => panic!("not held: {other:?}"),
+        }
+    }
+}
+
+/// Local version `l1` (amended, never pushed) and `s1` (pushed as PS 1,
+/// seen later) of Gerrit change 7, a draft `input` on `l1`, and a run with
+/// `port` (PS 1 is current): what became of the draft.
+fn port_one(port: FakePort, input: DraftInput) -> (Fx, Fate) {
+    let f = fx();
+    let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+    let d = f.draft_with(&row, &v[0], input);
+    f.gerrit("NEW", &["s1"], json!([]));
+    route_files(&f);
+    f.posts_apply(json!({}), 1);
+    let (_, options) = port.options();
+    let report = f.run_with(&options);
+    assert!(
+        report.stopped.is_none() && report.errors.is_empty(),
+        "{report:?}"
+    );
+    f.assert_nothing_local(&["l1"]);
+    let fate = f.fate(&d);
+    (f, fate)
+}
+
+#[test]
+fn porting_moves_a_comment_on_an_unchanged_line() {
+    let port = FakePort::new().map("l1", "s1", "src/a.rs", shifted("src/a.rs"));
+    let (f, fate) = port_one(
+        port,
+        input("src/a.rs", Side::Revision, Location::Line(7), "moved"),
+    );
+    let c = fate.posted();
+    assert_eq!(c["path"], "src/a.rs");
+    assert_eq!(c["line"], 9);
+    assert_eq!(c["side"], "REVISION");
+    // Posted inline on PS 1, not on the local commit.
+    assert!(f.http.post_targets()[0].contains("/changes/7/revisions/s1/review"));
+}
+
+#[test]
+fn porting_holds_a_comment_on_a_changed_line() {
+    let port = FakePort::new().map("l1", "s1", "src/a.rs", shifted("src/a.rs"));
+    let (f, fate) = port_one(
+        port,
+        input("src/a.rs", Side::Revision, Location::Line(3), "x"),
+    );
+    let why = fate.held();
+    assert!(why.contains("Line 3 of src/a.rs changed in PS 1"), "{why}");
+    // Nothing to post.
+    assert!(f.http.posts().is_empty());
+}
+
+#[test]
+fn porting_holds_a_range_crossing_a_change_and_moves_one_inside_unchanged_lines() {
+    let range = |start_line, end_line| {
+        Location::Range(CommentRange {
+            start_line,
+            start_character: 1,
+            end_line,
+            end_character: 4,
+        })
+    };
+    let port = || FakePort::new().map("l1", "s1", "src/a.rs", shifted("src/a.rs"));
+    let (_, fate) = port_one(port(), input("src/a.rs", Side::Revision, range(2, 4), "x"));
+    let why = fate.held();
+    assert!(why.contains("commented lines of src/a.rs changed"), "{why}");
+    let (_, fate) = port_one(port(), input("src/a.rs", Side::Revision, range(5, 6), "x"));
+    let c = fate.posted();
+    assert_eq!(
+        c["range"],
+        json!({"start_line": 7, "start_character": 1, "end_line": 8, "end_character": 4})
+    );
+}
+
+#[test]
+fn porting_follows_a_rename() {
+    let port = FakePort::new().map(
+        "l1",
+        "s1",
+        "src/old.rs",
+        PathMap::Lines(LineMap::identity("src/new.rs", 20)),
+    );
+    let (_, fate) = port_one(
+        port,
+        input("src/old.rs", Side::Revision, Location::Line(4), "x"),
+    );
+    let c = fate.posted();
+    assert_eq!(
+        (c["path"].as_str(), c["line"].as_u64()),
+        (Some("src/new.rs"), Some(4))
+    );
+}
+
+#[test]
+fn porting_holds_comments_on_a_deleted_file() {
+    for location in [Location::Line(1), Location::File] {
+        let port = FakePort::new().map("l1", "s1", "gone.rs", PathMap::Lines(LineMap::file_gone()));
+        let (_, fate) = port_one(port, input("gone.rs", Side::Revision, location, "x"));
+        let why = fate.held();
+        assert!(why.contains("gone.rs is deleted in PS 1"), "{why}");
+    }
+}
+
+#[test]
+fn porting_moves_a_file_comment_on_a_file_both_delete() {
+    let deleted = || {
+        FakePort::new().map(
+            "l1",
+            "s1",
+            "del.rs",
+            PathMap::NotLocal(NotLocalPath::NotAFile),
+        )
+    };
+    let (_, fate) = port_one(
+        deleted(),
+        input("del.rs", Side::Revision, Location::File, "x"),
+    );
+    let c = fate.posted();
+    assert_eq!(c["path"], "del.rs");
+    assert!(c.get("line").is_none());
+    // PS 1 does not delete it: held.
+    let port = FakePort::new().map(
+        "l1",
+        "s1",
+        "kept.rs",
+        PathMap::NotLocal(NotLocalPath::NotAFile),
+    );
+    let (_, fate) = port_one(port, input("kept.rs", Side::Revision, Location::File, "x"));
+    let why = fate.held();
+    assert!(why.contains("does not delete it"), "{why}");
+    // A line comment cannot be on a file the local version deletes.
+    let (_, fate) = port_one(
+        deleted(),
+        input("del.rs", Side::Revision, Location::Line(2), "x"),
+    );
+    fate.held();
+}
+
+#[test]
+fn porting_always_moves_a_patch_set_level_comment() {
+    // Even without any map, and without asking the checkout about it.
+    let (port, options) = FakePort::new().options();
+    let f = fx();
+    let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+    let d = f.draft_with(
+        &row,
+        &v[0],
+        input(
+            PATCHSET_LEVEL_PATH,
+            Side::Revision,
+            Location::File,
+            "overall",
+        ),
+    );
+    f.gerrit("NEW", &["s1"], json!([]));
+    route_files(&f);
+    f.posts_apply(json!({}), 1);
+    f.run_with(&options);
+    let c = f.fate(&d).posted();
+    assert_eq!(c["path"], PATCHSET_LEVEL_PATH);
+    assert!(port.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn porting_maps_the_commit_message() {
+    let port = FakePort::new().map("l1", "s1", "/COMMIT_MSG", shifted("/COMMIT_MSG"));
+    let (_, fate) = port_one(
+        port,
+        input("/COMMIT_MSG", Side::Revision, Location::Line(8), "x"),
+    );
+    let c = fate.posted();
+    assert_eq!(
+        (c["path"].as_str(), c["line"].as_u64()),
+        (Some("/COMMIT_MSG"), Some(10))
+    );
+    let port = FakePort::new().map("l1", "s1", "/COMMIT_MSG", shifted("/COMMIT_MSG"));
+    let (_, fate) = port_one(
+        port,
+        input("/COMMIT_MSG", Side::Revision, Location::Line(3), "x"),
+    );
+    fate.held();
+}
+
+#[test]
+fn porting_moves_a_parent_side_comment_only_when_the_parent_is_unchanged() {
+    // Same parent (`base` on both sides): the base side is the same.
+    let (port, options) = FakePort::new().options();
+    let f = fx();
+    let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+    let d = f.draft_with(
+        &row,
+        &v[0],
+        input("src/a.rs", Side::Parent, Location::Line(5), "base"),
+    );
+    f.gerrit("NEW", &["s1"], json!([]));
+    route_files(&f);
+    f.posts_apply(json!({}), 1);
+    f.run_with(&options);
+    let c = f.fate(&d).posted();
+    assert_eq!(
+        (c["side"].as_str(), c["line"].as_u64()),
+        (Some("PARENT"), Some(5))
+    );
+    // Asked about the parents, not the revisions.
+    assert_eq!(
+        *port.calls.lock().unwrap(),
+        [(
+            "base".to_owned(),
+            "base".to_owned(),
+            vec!["src/a.rs".to_owned()]
+        )]
+    );
+
+    // Rebased onto `base2`, where src/a.rs differs: held. Where it is the
+    // same, the comment moves.
+    for (map, moves) in [
+        (shifted("src/a.rs"), false),
+        (PathMap::Lines(LineMap::identity("src/a.rs", 30)), true),
+    ] {
+        let mut port = FakePort::new().map("base", "base2", "src/a.rs", map);
+        port.commits.insert("s1".into(), Some("base2".into()));
+        port.commits.insert("base2".into(), None);
+        let (_, options) = port.options();
+        let f = fx();
+        let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base2")]);
+        let d = f.draft_with(
+            &row,
+            &v[0],
+            input("src/a.rs", Side::Parent, Location::Line(5), "b"),
+        );
+        f.gerrit("NEW", &["s1"], json!([]));
+        route_files(&f);
+        f.posts_apply(json!({}), 1);
+        f.run_with(&options);
+        match f.fate(&d) {
+            Fate::Posted(c) if moves => assert_eq!(c["line"], 5),
+            Fate::Held(why) if !moves => {
+                assert!(
+                    why.contains("The base of src/a.rs differs in PS 1"),
+                    "{why}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn porting_holds_what_the_checkout_cannot_read() {
+    let port = FakePort::new().map(
+        "l1",
+        "s1",
+        "src/a.rs",
+        PathMap::NotLocal(NotLocalPath::MissingContent),
+    );
+    let (_, fate) = port_one(
+        port,
+        input("src/a.rs", Side::Revision, Location::Line(7), "x"),
+    );
+    let why = fate.held();
+    assert!(
+        why.contains("content of src/a.rs is not in the checkout"),
+        "{why}"
+    );
+
+    // The amended commit is gone from the checkout (after a `git gc`).
+    let port = FakePort::new().without("l1");
+    let (_, fate) = port_one(
+        port,
+        input("src/a.rs", Side::Revision, Location::Line(7), "x"),
+    );
+    let why = fate.held();
+    assert!(why.contains("commit l1 is not in the checkout"), "{why}");
+
+    // A binary file that changed, and a file PS 1 does not change (Gerrit
+    // would refuse the whole post).
+    let port = FakePort::new().map(
+        "l1",
+        "s1",
+        "logo.png",
+        PathMap::Lines(LineMap::opaque("logo.png")),
+    );
+    let (_, fate) = port_one(
+        port,
+        input("logo.png", Side::Revision, Location::Line(1), "x"),
+    );
+    let why = fate.held();
+    assert!(why.contains("binary file"), "{why}");
+    let port = FakePort::new().map(
+        "l1",
+        "s1",
+        "lib.rs",
+        PathMap::Lines(LineMap::identity("lib.rs", 9)),
+    );
+    let (_, fate) = port_one(
+        port,
+        input("lib.rs", Side::Revision, Location::Line(1), "x"),
+    );
+    let why = fate.held();
+    assert!(why.contains("PS 1 does not change lib.rs"), "{why}");
+}
+
+#[test]
+fn without_a_port_source_or_a_checkout_nothing_is_ported_or_held() {
+    for options in [
+        ConsolidateOptions::default(),
+        FakePort {
+            no_checkout: true,
+            ..FakePort::new()
+        }
+        .options()
+        .1,
+    ] {
+        let f = fx();
+        let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+        let d = f.draft_with(
+            &row,
+            &v[0],
+            input("src/a.rs", Side::Revision, Location::Line(7), "x"),
+        );
+        let r = f.review(&v[0], &[("Code-Review", 1)], "msg");
+        f.gerrit("NEW", &["s1"], json!([]));
+        route_files(&f);
+        let report = f.run_with(&options);
+        assert!(
+            report.errors.is_empty() && report.ported.is_empty(),
+            "{report:?}"
+        );
+        assert!(f.http.posts().is_empty());
+        let Fate::Stayed(now) = f.fate(&d) else {
+            panic!("moved or held");
+        };
+        assert_eq!(now.patch_set, v[0].number);
+        let r = f.reloaded(&r);
+        assert_eq!(
+            (r.state, r.patch_set),
+            (PendingReviewState::Pending, v[0].number)
+        );
+    }
+}
+
+#[test]
+fn a_newer_version_that_is_not_on_gerrit_yet_waits_for_its_own_patch_set() {
+    // s1 is PS 1; l2 was amended after it and not pushed (yet).
+    let (_, options) = FakePort::new()
+        .map("l2", "s1", "src/a.rs", shifted("src/a.rs"))
+        .options();
+    let f = fx();
+    let (row, v) = f.local_on(true, &[("s1", "base"), ("l2", "base")]);
+    let d = f.draft_with(
+        &row,
+        &v[1],
+        input("src/a.rs", Side::Revision, Location::Line(7), "x"),
+    );
+    f.gerrit("NEW", &["s1"], json!([]));
+    route_files(&f);
+    let report = f.run_with(&options);
+    assert!(report.ported.is_empty(), "{report:?}");
+    assert!(matches!(f.fate(&d), Fate::Stayed(_)));
+    assert!(f.http.posts().is_empty());
+}
+
+#[test]
+fn the_port_goes_to_the_current_patch_set_when_the_checkout_has_it() {
+    let port = FakePort::new().map("l1", "s2", "src/a.rs", shifted("src/a.rs"));
+    let (_, options) = port.options();
+    let f = fx();
+    let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+    let d = f.draft_with(
+        &row,
+        &v[0],
+        input("src/a.rs", Side::Revision, Location::Line(7), "x"),
+    );
+    f.gerrit("NEW", &["s1", "s2"], json!([]));
+    route_files(&f);
+    f.posts_apply(json!({}), 2);
+    let report = f.run_with(&options);
+    assert_eq!(f.fate(&d).posted()["line"], 9);
+    assert!(f.http.post_targets()[0].contains("/revisions/s2/review"));
+    assert_eq!(report.ported.len(), 1);
+    assert_eq!(report.ported[0].to, Some(PatchSetNumber(2)));
+}
+
+#[test]
+fn the_port_goes_to_the_newest_patch_set_in_the_checkout_and_its_votes_wait() {
+    // PS 2 was uploaded elsewhere and is not fetched: PS 1 it is.
+    let port = FakePort::new()
+        .without("s2")
+        .map("l1", "s1", "src/a.rs", shifted("src/a.rs"));
+    let (_, options) = port.options();
+    let f = fx();
+    let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+    let d = f.draft_with(
+        &row,
+        &v[0],
+        input("src/a.rs", Side::Revision, Location::Line(7), "x"),
+    );
+    let r = f.review_with(
+        &v[0],
+        &[("Code-Review", 2)],
+        "msg",
+        LocalApproval::Follow,
+        ts(PURELY_LOCAL),
+    );
+    f.gerrit("NEW", &["s1", "s2"], json!([]));
+    route_files(&f);
+    f.posts_apply(json!({}), 2);
+    let options = ConsolidateOptions {
+        local_approval: BTreeMap::from([("p".to_owned(), LocalApproval::Follow)]),
+        ..options
+    };
+    f.run_with(&options);
+    assert_eq!(f.fate(&d).posted()["line"], 9);
+    assert!(f.http.post_targets()[0].contains("/revisions/s1/review"));
+    assert!(f.http.posts()[0].get("labels").is_none());
+    // Follow, but PS 1 is not current: held, publishable.
+    let r = f.reloaded(&r);
+    assert_eq!(
+        (r.state, r.patch_set),
+        (PendingReviewState::Held, PatchSetNumber(1))
+    );
+    assert!(r.drop_only.is_empty());
+}
+
+#[test]
+fn with_no_patch_set_in_the_checkout_everything_is_held() {
+    let port = FakePort::new().without("s1").without("s2");
+    let (_, options) = port.options();
+    let f = fx();
+    // Only the amended version; the change vanished from the checkout.
+    let (row, v) = f.local_on(true, &[("l1", "base")]);
+    let d = f.draft_with(
+        &row,
+        &v[0],
+        input("src/a.rs", Side::Revision, Location::Line(7), "x"),
+    );
+    let r = f.review(&v[0], &[("Code-Review", 2), ("Verified", -1)], "msg");
+    f.syncer
+        .store()
+        .set_local_change_state(f.syncer.server, row.id, LocalChangeState::Vanished)
+        .unwrap();
+    f.gerrit("NEW", &["s1", "s2"], json!([]));
+    route_files(&f);
+    let report = f.run_with(&options);
+    assert!(f.http.posts().is_empty());
+    let why = f.fate(&d).held();
+    assert_eq!(
+        why,
+        "No patch set of change 7 is in the checkout, so this could not be carried over from \
+         the local version."
+    );
+    let r = f.reloaded(&r);
+    assert_eq!(
+        (r.state, r.patch_set),
+        (PendingReviewState::Held, v[0].number)
+    );
+    // Not purely local (given now): the approval only drops.
+    assert_eq!(r.drop_only, BTreeSet::from(["Code-Review".to_owned()]));
+    let reason = r.held_reason.unwrap();
+    assert!(
+        reason.contains("Verified -1: publish onto the current patch set"),
+        "{reason}"
+    );
+    assert_eq!(report.ported.len(), 1);
+    assert_eq!(
+        (report.ported[0].to, report.ported[0].held_reviews),
+        (None, 1)
+    );
+    // Shown on the Gerrit change's held card.
+    let items = f
+        .syncer
+        .store()
+        .held_items(f.syncer.server, CHANGE)
+        .unwrap();
+    assert_eq!((items.drafts.len(), items.reviews.len()), (1, 1));
+    assert!(report.changed_gerrit_changes().contains(&CHANGE));
+}
+
+#[test]
+fn a_vanished_change_is_ported() {
+    let port = FakePort::new().map("l1", "s1", "src/a.rs", shifted("src/a.rs"));
+    let (_, options) = port.options();
+    let f = fx();
+    let (row, v) = f.local_on(true, &[("l1", "base")]);
+    let d = f.draft_with(
+        &row,
+        &v[0],
+        input("src/a.rs", Side::Revision, Location::Line(7), "x"),
+    );
+    f.syncer
+        .store()
+        .set_local_change_state(f.syncer.server, row.id, LocalChangeState::Vanished)
+        .unwrap();
+    f.gerrit("NEW", &["s1"], json!([]));
+    route_files(&f);
+    f.posts_apply(json!({}), 1);
+    f.run_with(&options);
+    assert_eq!(f.fate(&d).posted()["line"], 9);
+}
+
+#[test]
+fn follow_casts_the_votes_even_when_some_comments_were_held() {
+    let port = FakePort::new().map("l1", "s1", "src/a.rs", shifted("src/a.rs"));
+    let (_, options) = port.options();
+    let options = ConsolidateOptions {
+        local_approval: BTreeMap::from([("p".to_owned(), LocalApproval::Follow)]),
+        ..options
+    };
+    let f = fx();
+    let (row, v) = f.local_on(true, &[("l1", "base"), ("s1", "base")]);
+    let held = f.draft_with(
+        &row,
+        &v[0],
+        input("src/a.rs", Side::Revision, Location::Line(3), "held"),
+    );
+    let r = f.review_with(
+        &v[0],
+        &[("Code-Review", 2)],
+        "LGTM",
+        LocalApproval::Follow,
+        ts(PURELY_LOCAL),
+    );
+    f.gerrit("NEW", &["s1"], json!([]));
+    route_files(&f);
+    f.posts_apply(json!({"Code-Review": 2}), 1);
+    f.run_with(&options);
+    f.fate(&held).held();
+    let posts = f.http.posts();
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0]["labels"], json!({"Code-Review": 2}));
+    assert_eq!(f.reloaded(&r).state, PendingReviewState::Sent);
+}
+
+#[test]
+fn an_amended_version_is_ported_once_a_later_version_is_pushed() {
+    // End to end: the user committed l1 and reviewed it locally, then
+    // amended it to s1 (seen by the scanner) and pushed s1 as PS 1.
+    let port = FakePort::new()
+        .map("l1", "s1", "src/a.rs", shifted("src/a.rs"))
+        .map(
+            "l1",
+            "s1",
+            "/COMMIT_MSG",
+            PathMap::Lines(LineMap::identity("/COMMIT_MSG", 12)),
+        );
+    let (port, options) = port.options();
+    for (strategy, voted_at, cast) in [
+        (LocalApproval::Follow, PURELY_LOCAL, true),
+        (LocalApproval::Follow, STRICT, false),
+        (LocalApproval::Exact, PURELY_LOCAL, false),
+    ] {
+        port.calls.lock().unwrap().clear();
+        let options = ConsolidateOptions {
+            local_approval: BTreeMap::from([("p".to_owned(), strategy)]),
+            ..options.clone()
+        };
+        let f = fx();
+        let (row, v) = f.local_on(false, &[("l1", "base"), ("s1", "base")]);
+        let moved = f.draft_with(
+            &row,
+            &v[0],
+            input("src/a.rs", Side::Revision, Location::Line(7), "moved"),
+        );
+        let held = f.draft_with(
+            &row,
+            &v[0],
+            input("src/a.rs", Side::Revision, Location::Line(3), "held"),
+        );
+        let msg = f.draft_with(
+            &row,
+            &v[0],
+            input("/COMMIT_MSG", Side::Revision, Location::Line(6), "subject"),
+        );
+        let r = f.review_with(
+            &v[0],
+            &[("Code-Review", 2), ("Verified", -1)],
+            "LGTM",
+            strategy,
+            ts(voted_at),
+        );
+        f.query_finds(&[(7, "main", "NEW")]);
+        f.gerrit("NEW", &["s1"], json!([]));
+        route_files(&f);
+        f.posts_apply(json!({"Code-Review": 2, "Verified": -1}), 1);
+        let report = f.run_with(&options);
+        assert!(
+            report.stopped.is_none() && report.errors.is_empty(),
+            "{report:?}"
+        );
+        assert_eq!(report.found.len(), 1);
+        // One call for the pair of commits, with every path needed.
+        assert_eq!(
+            *port.calls.lock().unwrap(),
+            [(
+                "l1".to_owned(),
+                "s1".to_owned(),
+                vec!["/COMMIT_MSG".to_owned(), "src/a.rs".to_owned()]
+            )]
+        );
+        // One post on PS 1: the ported comments and the message.
+        let posts = f.http.posts();
+        assert_eq!(posts.len(), 1, "{posts:?}");
+        assert!(f.http.post_targets()[0].contains("/changes/7/revisions/s1/review"));
+        assert_eq!(f.fate(&moved).posted()["line"], 9);
+        assert_eq!(f.fate(&msg).posted()["line"], 6);
+        assert_eq!(
+            posts[0]["comments"][PATCHSET_LEVEL_PATH][0]["message"],
+            "LGTM"
+        );
+        let why = f.fate(&held).held();
+        assert!(why.contains("Line 3 of src/a.rs changed in PS 1"), "{why}");
+        let r = f.reloaded(&r);
+        if cast {
+            assert_eq!(
+                posts[0]["labels"],
+                json!({"Code-Review": 2, "Verified": -1})
+            );
+            assert_eq!(r.state, PendingReviewState::Sent);
+        } else {
+            assert!(posts[0].get("labels").is_none());
+            assert_eq!(r.state, PendingReviewState::Held);
+            assert_eq!(r.drop_only, BTreeSet::from(["Code-Review".to_owned()]));
+        }
+        // The held draft keeps the change open; it shows on the held card.
+        assert_eq!(f.row(&row).state, LocalChangeState::Local);
+        let items = f
+            .syncer
+            .store()
+            .held_items(f.syncer.server, CHANGE)
+            .unwrap();
+        assert_eq!(items.drafts.len(), 1);
+        assert_eq!(report.ported.len(), 1);
+        assert_eq!(report.ported[0].held.len(), 1);
+        f.assert_nothing_local(&["l1"]);
+        // A second run has nothing more to do.
+        let again = f.run_with(&options);
+        assert!(
+            again.ported.is_empty() && f.http.posts().len() == 1,
+            "{again:?}"
+        );
+    }
+}
