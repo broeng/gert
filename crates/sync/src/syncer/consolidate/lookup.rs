@@ -293,7 +293,7 @@ fn classify_hits(row: &LocalChange, hits: &[ChangeSummary], more: bool) -> Looku
     }
 }
 
-pub(super) fn found(row: &LocalChange, gerrit: ChangeNumber) -> FoundChange {
+fn found(row: &LocalChange, gerrit: ChangeNumber) -> FoundChange {
     FoundChange {
         local_change: row.id,
         local_number: row.number,

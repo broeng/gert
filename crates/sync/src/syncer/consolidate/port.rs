@@ -22,6 +22,9 @@
 //!   other, so a comment whose file the target does not change is held.
 //! - What the checkout cannot read (a commit removed by `git gc`, a file
 //!   whose content a partial clone lacks) is held, with the reason.
+//!
+//! `Syncer::port_plan` applies the rules to a change's versions that never
+//! reached Gerrit, with a back-off for checkouts that keep failing.
 
 use model::{
     COMMIT_MSG_PATH, Draft, FileEntry, FileStatus, Location, PATCHSET_LEVEL_PATH, PatchSetNumber,

@@ -1,5 +1,5 @@
-//! Recovery: posts whose answer was lost, found again by their tag, and
-//! changes found on Gerrit settled.
+//! Recovery: posts whose answer was lost, found again on Gerrit by their
+//! tag, and a post found there already settled.
 
 use super::*;
 
