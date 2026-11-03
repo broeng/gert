@@ -102,6 +102,18 @@ impl LineMap {
         )
     }
 
+    /// Whether the file changed in a way whose lines cannot be mapped (a
+    /// binary file): no line maps, only the file as a whole carries over.
+    pub fn is_opaque(&self) -> bool {
+        matches!(
+            self.target,
+            Target::File {
+                lines: Lines::Opaque,
+                ..
+            }
+        )
+    }
+
     /// Where line `line` of `from` is in `to`, if it is there unchanged.
     /// `None` for line 0 and lines past the end of the file.
     pub fn map_line(&self, line: u32) -> Option<u32> {
@@ -170,7 +182,7 @@ mod tests {
     #[test]
     fn identity_maps_every_line_of_the_file_to_itself() {
         let m = LineMap::identity("new.rs", 3);
-        assert!(m.is_identity());
+        assert!(m.is_identity() && !m.is_opaque());
         assert_eq!(m.target_path(), Some("new.rs"));
         assert_eq!(
             (1..=4).map(|l| m.map_line(l)).collect::<Vec<_>>(),
@@ -212,8 +224,10 @@ mod tests {
         assert_eq!(gone.map_line(1), None);
         assert_eq!(gone.map_location(Location::File), None);
 
+        assert!(!gone.is_opaque());
+
         let bin = LineMap::opaque("logo.png");
-        assert!(!bin.is_file_gone());
+        assert!(bin.is_opaque() && !bin.is_file_gone());
         assert_eq!(bin.map_line(1), None);
         assert_eq!(bin.map_location(Location::File), Some(Location::File));
     }
