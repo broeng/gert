@@ -166,12 +166,12 @@ fn a_rewrite_moves_reserves_and_holds_what_it_is_told() {
         ],
     );
     rw.keep = vec![(held.local_id, "line changed".into())];
-    rw.review_states = vec![ReviewStateChange {
-        review: r1.id,
-        from: vec![Pending],
-        state: Held,
-        note: Some("approval not on this commit".into()),
-    }];
+    rw.review_states = vec![ReviewStateChange::new(
+        r1.id,
+        &[Pending],
+        Held,
+        Some("approval not on this commit".into()),
+    )];
     rw.state = Some(LocalChangeState::Consolidated);
     rw.else_state = Some(LocalChangeState::Local);
     let report = s.rewrite_local_change(id, &rw).unwrap().unwrap();
@@ -372,12 +372,12 @@ fn moves_that_do_not_fit_are_skipped() {
     }
     // Review states only touch this change's reviews.
     let mut rw = rewrite(&c, vec![]);
-    rw.review_states = vec![ReviewStateChange {
-        review: foreign_review.id,
-        from: vec![PendingReviewState::Pending],
-        state: PendingReviewState::Held,
-        note: None,
-    }];
+    rw.review_states = vec![ReviewStateChange::new(
+        foreign_review.id,
+        &[PendingReviewState::Pending],
+        PendingReviewState::Held,
+        None,
+    )];
     let report = s.rewrite_local_change(id, &rw).unwrap().unwrap();
     assert_eq!(report.review_states, 0);
 }
@@ -459,12 +459,7 @@ fn finishing_the_post_removes_what_was_sent_and_then_it_consolidates() {
         .unwrap()
         .unwrap();
     assert_eq!(edited.reserved_by, Some(c.id));
-    let done = vec![ReviewStateChange {
-        review: claimed.id,
-        from: vec![Sending],
-        state: Sent,
-        note: None,
-    }];
+    let done = vec![ReviewStateChange::new(claimed.id, &[Sending], Sent, None)];
     let report = s
         .finish_local_post(id, c.id, "n", &post, &done)
         .unwrap()
@@ -898,12 +893,7 @@ fn only_claims_of_gone_runs_that_are_old_enough_are_recovered() {
         None
     );
     // Finishing clears the claim.
-    let sent = ReviewStateChange {
-        review: r.id,
-        from: vec![Sending],
-        state: Sent,
-        note: None,
-    };
+    let sent = ReviewStateChange::new(r.id, &[Sending], Sent, None);
     s.finish_local_post(id, c.id, "n1", &[], &[sent])
         .unwrap()
         .unwrap();
@@ -939,4 +929,104 @@ fn a_claim_recorded_by_no_run_is_recoverable() {
         .query_row("SELECT COUNT(*) FROM local_post_claims", [], |r| r.get(0))
         .unwrap();
     assert_eq!(left, 0);
+}
+
+#[test]
+fn finishing_a_post_keeps_the_votes_that_did_not_reach_gerrit() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (a, r, _) = moved(&mut s, id, &c, &v1, &v2);
+    s.set_review_label(id, r.id, "Verified", 1, LocalApproval::Exact, ts(T1))
+        .unwrap()
+        .unwrap();
+    let post = s
+        .claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
+        .unwrap()
+        .unwrap();
+    let posted: Vec<(LocalDraftId, u32)> = post
+        .drafts
+        .iter()
+        .map(|d| (d.local_id, d.version))
+        .collect();
+    let mut held = ReviewStateChange::new(r.id, &[Sending], Held, Some("cast on PS 1".into()));
+    held.labels = Some(BTreeMap::from([("Code-Review".to_owned(), 2)]));
+    held.drop_only = ["Code-Review".to_owned()].into();
+    s.finish_local_post(id, c.id, "n1", &posted, &[held])
+        .unwrap()
+        .unwrap();
+    let r = s.load_pending_review(id, r.id).unwrap().unwrap();
+    assert_eq!(
+        (r.state, r.held_reason.as_deref()),
+        (Held, Some("cast on PS 1"))
+    );
+    assert_eq!(r.labels, BTreeMap::from([("Code-Review".to_owned(), 2)]));
+    assert_eq!(r.drop_only, ["Code-Review".to_owned()].into());
+    assert_eq!(s.load_draft(id, a.local_id).unwrap(), None);
+    // Claiming it again (a manual publish) clears the marker.
+    let again = s
+        .claim_local_post(id, c.id, Some((r.id, &[Held][..])), "n2", &who())
+        .unwrap()
+        .unwrap();
+    assert!(again.review.unwrap().drop_only.is_empty());
+}
+
+#[test]
+fn abandoning_a_refused_post_fails_the_review_and_holds_its_comments_at_once() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (a, r, _) = moved(&mut s, id, &c, &v1, &v2);
+    s.claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
+        .unwrap()
+        .unwrap();
+    let failed = ReviewStateChange::new(r.id, &[Sending], Failed, Some("400 bad line".into()));
+    let released = s
+        .abandon_local_post(
+            id,
+            c.id,
+            "n1",
+            Some(&failed),
+            Some("Gerrit refused the post"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(released, 2);
+    let r = s.load_pending_review(id, r.id).unwrap().unwrap();
+    assert_eq!(
+        (r.state, r.error.as_deref()),
+        (Failed, Some("400 bad line"))
+    );
+    let d = s.load_draft(id, a.local_id).unwrap().unwrap();
+    assert_eq!(d.held_reason.as_deref(), Some("Gerrit refused the post"));
+    assert_eq!(posting_nonce(&s, a.local_id), None);
+    // The sealed message is not held on its own: it goes with its review.
+    let msg = s.load_draft(id, r.message_draft.unwrap()).unwrap().unwrap();
+    assert_eq!(msg.held_reason, None);
+    assert!(s.unfinished_local_posts(id).unwrap().is_empty());
+    let held = s.held_items(id, ChangeNumber(42)).unwrap();
+    assert_eq!(held.drafts.len(), 1);
+    assert_eq!(held.reviews.len(), 1);
+
+    // Given up before sending: back to pending, nothing held.
+    let (mut s, id, c, v1, v2) = setup();
+    let (a, r, _) = moved(&mut s, id, &c, &v1, &v2);
+    s.claim_local_post(id, c.id, Some((r.id, &[Pending][..])), "n1", &who())
+        .unwrap()
+        .unwrap();
+    let back = ReviewStateChange::new(r.id, &[Sending], Pending, None);
+    s.abandon_local_post(id, c.id, "n1", Some(&back), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.load_pending_review(id, r.id).unwrap().unwrap().state,
+        Pending
+    );
+    assert_eq!(
+        s.load_draft(id, a.local_id).unwrap().unwrap().held_reason,
+        None
+    );
+    assert_eq!(
+        s.abandon_local_post(id, LocalChangeId(999), "n1", None, None)
+            .unwrap(),
+        None
+    );
 }

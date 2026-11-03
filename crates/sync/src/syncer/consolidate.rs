@@ -933,13 +933,15 @@ impl Syncer {
         let states: Vec<ReviewStateChange> = post
             .review
             .iter()
-            .map(|r| ReviewStateChange {
-                review: r.id,
-                from: vec![PendingReviewState::Sending],
-                state: settled
-                    .as_ref()
-                    .map_or(PendingReviewState::Sent, |s| s.state),
-                note: settled.as_ref().and_then(|s| s.note.clone()),
+            .map(|r| {
+                ReviewStateChange::new(
+                    r.id,
+                    &[PendingReviewState::Sending],
+                    settled
+                        .as_ref()
+                        .map_or(PendingReviewState::Sent, |s| s.state),
+                    settled.as_ref().and_then(|s| s.note.clone()),
+                )
             })
             .collect();
         store.finish_local_post(self.server, row.id, nonce, posted, &states)?;

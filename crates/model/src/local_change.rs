@@ -9,7 +9,10 @@
 //! numbers never go to a server. When the change shows up on Gerrit, its
 //! drafts and pending reviews are moved onto the server's change and sent.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -227,6 +230,13 @@ pub struct PendingReview {
     pub error: Option<String>,
     /// Why it is held (in `Held`).
     pub held_reason: Option<String>,
+    /// The labels of a `Held` review whose votes may only be dropped, never
+    /// published or moved: approvals held under the strict rule (a local
+    /// patch set of a Gerrit change) or the `exact` strategy, and approvals
+    /// already cast on a patch set that was no longer current. Empty in
+    /// every other state.
+    #[serde(default)]
+    pub drop_only: BTreeSet<String>,
     pub created: Timestamp,
     /// When the votes were last given or changed (at creation, and by an
     /// edit that changes the labels). The "purely local" test compares

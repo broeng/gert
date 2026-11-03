@@ -82,7 +82,7 @@ pub struct PendingReviewEdit {
 
 const COLUMNS: &str = "r.id, r.local_change_id, r.change_number, r.patch_set, r.revision_sha, \
      r.given_on_sha, r.labels, r.strategy, r.state, r.error, r.held_reason, r.created_ms, \
-     r.voted_at_ms, r.nonce, d.message, d.id, d.unresolved";
+     r.voted_at_ms, r.nonce, d.message, d.id, d.unresolved, r.drop_only";
 
 const FROM: &str = "pending_reviews r LEFT JOIN drafts d ON d.pending_review_id = r.id";
 
@@ -115,6 +115,10 @@ fn review_from_row(r: &Row<'_>) -> rusqlite::Result<PendingReview> {
         message: r.get(14)?,
         message_draft: r.get::<_, Option<i64>>(15)?.map(LocalDraftId),
         unresolved: r.get::<_, Option<bool>>(16)?.unwrap_or(false),
+        drop_only: match r.get::<_, Option<String>>(17)? {
+            Some(json) => serde_json::from_str(&json).map_err(|_| bad(17, &json))?,
+            None => Default::default(),
+        },
     })
 }
 
@@ -167,7 +171,7 @@ pub(crate) fn transition(
     let error = (to == PendingReviewState::Failed).then_some(note).flatten();
     let held = (to == PendingReviewState::Held).then_some(note).flatten();
     conn.execute(
-        "UPDATE pending_reviews SET state = ?4, error = ?5, held_reason = ?6
+        "UPDATE pending_reviews SET state = ?4, error = ?5, held_reason = ?6, drop_only = NULL
          WHERE server_id = ?1 AND id = ?2 AND state = ?3",
         params![
             server.0,
@@ -178,6 +182,45 @@ pub(crate) fn transition(
             held
         ],
     )?;
+    Ok(true)
+}
+
+/// Applies `change` (see [`crate::ReviewStateChange`]) to a review of
+/// local change `owner`: the transition, then the votes it keeps and which
+/// of them may only be dropped. Returns whether it moved.
+pub(crate) fn apply_change(
+    conn: &Connection,
+    server: ServerId,
+    owner: Option<LocalChangeId>,
+    change: &crate::ReviewStateChange,
+) -> Result<bool, Error> {
+    if !transition(
+        conn,
+        server,
+        change.review,
+        owner,
+        &change.from,
+        change.state,
+        change.note.as_deref(),
+    )? {
+        return Ok(false);
+    }
+    if let Some(labels) = &change.labels {
+        conn.execute(
+            "UPDATE pending_reviews SET labels = ?3 WHERE server_id = ?1 AND id = ?2",
+            params![server.0, change.review.0, serde_json::to_string(labels)?],
+        )?;
+    }
+    if change.state == PendingReviewState::Held && !change.drop_only.is_empty() {
+        conn.execute(
+            "UPDATE pending_reviews SET drop_only = ?3 WHERE server_id = ?1 AND id = ?2",
+            params![
+                server.0,
+                change.review.0,
+                serde_json::to_string(&change.drop_only)?
+            ],
+        )?;
+    }
     Ok(true)
 }
 
@@ -473,7 +516,7 @@ impl Store {
         }
         tx.execute(
             "UPDATE pending_reviews SET state = 'sending', nonce = ?3, error = NULL,
-                 held_reason = NULL
+                 held_reason = NULL, drop_only = NULL
              WHERE server_id = ?1 AND id = ?2",
             params![server.0, id.0, nonce],
         )?;

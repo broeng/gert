@@ -27,7 +27,7 @@
 //! run's snapshot stays where it is and counts as unsent, so the change is
 //! not consolidated and the next run handles it.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use model::{
     ChangeNumber, Draft, LocalChange, LocalChangeId, LocalChangeState, LocalDraftId, Location,
@@ -83,6 +83,32 @@ pub struct ReviewStateChange {
     pub from: Vec<PendingReviewState>,
     pub state: PendingReviewState,
     pub note: Option<String>,
+    /// The votes the review keeps (those that did not reach Gerrit);
+    /// `None` keeps them as they are.
+    pub labels: Option<BTreeMap<String, i32>>,
+    /// For a `Held` review: the labels whose votes may only be dropped
+    /// ([`PendingReview::drop_only`]). Ignored in other states.
+    pub drop_only: BTreeSet<String>,
+}
+
+impl ReviewStateChange {
+    /// `review` from one of `from` to `state` with `note`, votes as they
+    /// are.
+    pub fn new(
+        review: PendingReviewId,
+        from: &[PendingReviewState],
+        state: PendingReviewState,
+        note: Option<String>,
+    ) -> Self {
+        Self {
+            review,
+            from: from.to_vec(),
+            state,
+            note,
+            labels: None,
+            drop_only: BTreeSet::new(),
+        }
+    }
 }
 
 /// One consolidation step for a local change, applied in one transaction
@@ -315,15 +341,7 @@ impl Store {
             )?;
         }
         for s in &rewrite.review_states {
-            if pending_reviews::transition(
-                &tx,
-                server,
-                s.review,
-                Some(change.id),
-                &s.from,
-                s.state,
-                s.note.as_deref(),
-            )? {
+            if pending_reviews::apply_change(&tx, server, Some(change.id), s)? {
                 report.review_states += 1;
             }
         }
@@ -405,7 +423,7 @@ impl Store {
                 }
                 tx.execute(
                     "UPDATE pending_reviews SET state = 'sending', nonce = ?3, error = NULL,
-                         held_reason = NULL
+                         held_reason = NULL, drop_only = NULL
                      WHERE server_id = ?1 AND id = ?2",
                     params![server.0, id.0, nonce],
                 )?;
@@ -547,6 +565,41 @@ impl Store {
         Ok(n)
     }
 
+    /// Gives up a claimed post that did not reach the server, in one
+    /// transaction: applies `review` (the review back to `Pending`, or
+    /// `Failed` with the server's refusal), holds the post's comments with
+    /// `hold_comments` as their reason if given (the server refused them:
+    /// they wait for the user and block nothing), and clears the claim.
+    /// `None`, writing nothing, if the change is gone; else how many drafts
+    /// were released.
+    pub fn abandon_local_post(
+        &mut self,
+        server: ServerId,
+        change: LocalChangeId,
+        nonce: &str,
+        review: Option<&ReviewStateChange>,
+        hold_comments: Option<&str>,
+    ) -> Result<Option<usize>, Error> {
+        let tx = self.conn.transaction()?;
+        if load_change(&tx, server, change)?.is_none() {
+            return Ok(None);
+        }
+        if let Some(reason) = hold_comments {
+            tx.execute(
+                "UPDATE drafts SET held_reason = ?4
+                 WHERE server_id = ?1 AND reserved_by = ?2 AND posting_nonce = ?3
+                   AND pending_review_id IS NULL",
+                params![server.0, change.0, nonce, reason],
+            )?;
+        }
+        let released = release_drafts(&tx, server, change, nonce)?;
+        if let Some(r) = review {
+            pending_reviews::apply_change(&tx, server, Some(change), r)?;
+        }
+        tx.commit()?;
+        Ok(Some(released))
+    }
+
     /// The consolidation posts that were claimed and not finished or
     /// released: `(local change, nonce)` from drafts carrying a posting
     /// nonce and from reviews being sent. After a crash, the caller checks
@@ -617,15 +670,7 @@ impl Store {
         // What stays is free for the next post.
         release_drafts(&tx, server, change, nonce)?;
         for s in review_states {
-            if pending_reviews::transition(
-                &tx,
-                server,
-                s.review,
-                Some(change),
-                &s.from,
-                s.state,
-                s.note.as_deref(),
-            )? {
+            if pending_reviews::apply_change(&tx, server, Some(change), s)? {
                 report.review_states += 1;
             }
         }

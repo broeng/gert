@@ -435,6 +435,7 @@ mod tests {
             state,
             error: None,
             held_reason: None,
+            drop_only: Default::default(),
             created: Timestamp::UNIX_EPOCH,
             voted_at: Timestamp::UNIX_EPOCH,
             nonce: None,
