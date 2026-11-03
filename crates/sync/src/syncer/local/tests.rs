@@ -714,39 +714,65 @@ fn chain_commits_in_the_corners() {
     assert_eq!(http.requests().len(), 2);
 }
 
+/// The local versions of change 42 (`I2`) with commits `shas`, seen at
+/// minutes 1, 2, ... of `t(0)`.
+fn versions_of_42(shas: &[&str]) -> store::LocalOp {
+    store::LocalOp::Upsert(store::LocalChangeUpsert {
+        seen: None,
+        branch: Some("main".into()),
+        change_id: "I2".into(),
+        gerrit_number: Some(ChangeNumber(42)),
+        subject: "s".into(),
+        author_name: "Me".into(),
+        author_email: "me@example.com".into(),
+        updated: Timestamp::UNIX_EPOCH,
+        state: Some(LocalChangeState::Local),
+        patch_sets: shas
+            .iter()
+            .zip(1..)
+            .map(|(sha, m)| store::NewLocalPatchSet {
+                sha: (*sha).into(),
+                parent_sha: None,
+                seen_at: Timestamp::UNIX_EPOCH + jiff::SignedDuration::from_mins(m),
+            })
+            .collect(),
+    })
+}
+
+fn newer(syncer: &Syncer, on_branches: Option<&[RevisionId]>) -> Option<String> {
+    syncer
+        .newer_local_version(ChangeNumber(42), on_branches)
+        .unwrap()
+        .map(|v| format!("{} local {}", v.sha, v.ordinal))
+}
+
 #[test]
-fn the_newer_local_version_is_the_newest_one_still_in_the_checkout() {
+fn the_newer_local_version_is_the_one_on_a_branch_nearest_its_tip() {
     let (http, syncer) = syncer();
     http.push_response(200, change_42());
     block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
-    let created: Timestamp = "2024-02-01T09:59:32Z".parse().unwrap();
-    assert_eq!(
-        syncer
-            .newer_local_version(ChangeNumber(42), Some(created))
-            .unwrap(),
-        None
-    );
+    assert_eq!(newer(&syncer, None), None);
+    let ops = [versions_of_42(&["amended", "amended2"])];
+    syncer
+        .store()
+        .reconcile_local(syncer.server, "p", &ops, Timestamp::UNIX_EPOCH)
+        .unwrap();
 
-    // Two local versions of 42 (I2), seen after its patch set 1.
-    let sc = scan(vec![commit("amended", "I2")]);
-    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
-    let sc = scan(vec![commit("amended2", "I2")]);
-    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
-    let newer = syncer
-        .newer_local_version(ChangeNumber(42), Some(created))
-        .unwrap()
-        .expect("a newer version");
-    assert_eq!(newer.sha.as_str(), "amended2");
-    assert_eq!(newer.ordinal, 2);
-
-    // Not when they were seen before the current patch set was made.
-    let later = Timestamp::now() + jiff::SignedDuration::from_secs(60);
+    // A fresh scan: the first of its commits (newest first) that is a
+    // version, whichever was seen last.
+    let shas: Vec<RevisionId> = vec!["other".into(), "amended".into(), "amended2".into()];
     assert_eq!(
-        syncer
-            .newer_local_version(ChangeNumber(42), Some(later))
-            .unwrap(),
-        None
+        newer(&syncer, Some(&shas)).as_deref(),
+        Some("amended local 1")
     );
+    assert_eq!(
+        newer(&syncer, Some(&shas[2..])).as_deref(),
+        Some("amended2 local 2")
+    );
+    // Neither on a branch any more.
+    assert_eq!(newer(&syncer, Some(&shas[..1])), None);
+    // No scan: the newest seen, as no version reached Gerrit.
+    assert_eq!(newer(&syncer, None).as_deref(), Some("amended2 local 2"));
     // Not for a local change's number.
     let own = ChangeNumber(ChangeNumber::LOCAL_BASE + 1);
     assert_eq!(syncer.newer_local_version(own, None).unwrap(), None);
@@ -755,9 +781,138 @@ fn the_newer_local_version_is_the_newest_one_still_in_the_checkout() {
     syncer
         .reconcile_local("p", &scan(vec![]), &emails(), true)
         .unwrap();
-    assert_eq!(
-        syncer.newer_local_version(ChangeNumber(42), None).unwrap(),
-        None
-    );
+    assert_eq!(newer(&syncer, None), None);
     assert_eq!(http.requests().len(), 1);
+}
+
+#[test]
+fn a_patch_set_made_on_gerrit_after_the_version_does_not_hide_it() {
+    let (http, syncer) = syncer();
+    // 42's current patch set was made long after the local version was
+    // seen (a rebase on Gerrit, or a co-author's upload), by a server
+    // whose clock is ahead: it still counts.
+    let body = json!({
+        "_number": 42, "branch": "main", "change_id": "I2", "project": "p",
+        "created": "2024-02-01 09:59:32.126000000", "owner": {"_account_id": 1},
+        "status": "NEW", "subject": "s", "updated": "2099-02-01 10:00:00.000000000",
+        "mergeable": true, "current_revision": "rebased",
+        "revisions": {
+            "pushed": {"_number": 1, "created": "2024-02-01 09:59:32.126000000"},
+            "rebased": {"_number": 2, "created": "2099-02-01 10:00:00.000000000"}
+        }
+    });
+    http.push_response(200, format!(")]}}'\n{body}"));
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    let ops = [versions_of_42(&["amended"])];
+    syncer
+        .store()
+        .reconcile_local(syncer.server, "p", &ops, Timestamp::UNIX_EPOCH)
+        .unwrap();
+    assert_eq!(newer(&syncer, None).as_deref(), Some("amended local 1"));
+    assert_eq!(
+        newer(&syncer, Some(&["amended".into()])).as_deref(),
+        Some("amended local 1")
+    );
+}
+
+#[test]
+fn without_a_scan_only_versions_after_the_last_push_count() {
+    let (http, syncer) = syncer();
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    // `old` (minute 1), then `pushed` (minute 2), which reached Gerrit.
+    let ops = [versions_of_42(&["old", "pushed"])];
+    let mut store = syncer.store();
+    store
+        .reconcile_local(syncer.server, "p", &ops, Timestamp::UNIX_EPOCH)
+        .unwrap();
+    let row = store
+        .local_changes_by_change_id(syncer.server, "I2")
+        .unwrap()
+        .remove(0);
+    let pushed = store.local_patch_sets(syncer.server, row.id).unwrap()[1].id;
+    let map = store::LocalOp::MapPatchSet {
+        patch_set: pushed,
+        gerrit_patch_set: model::PatchSetNumber(2),
+    };
+    store
+        .reconcile_local(syncer.server, "p", &[map], Timestamp::UNIX_EPOCH)
+        .unwrap();
+    drop(store);
+    assert_eq!(newer(&syncer, None), None, "older than the push");
+    // A scan still sees `old` on a branch.
+    assert_eq!(
+        newer(&syncer, Some(&["old".into()])).as_deref(),
+        Some("old local 1")
+    );
+    // Amended after the push (minute 3).
+    let ops = [versions_of_42(&["old", "pushed", "new"])];
+    syncer
+        .store()
+        .reconcile_local(syncer.server, "p", &ops, Timestamp::UNIX_EPOCH)
+        .unwrap();
+    assert_eq!(newer(&syncer, None).as_deref(), Some("new local 3"));
+}
+
+#[test]
+fn a_submit_looks_down_the_cached_chain() {
+    let (http, syncer) = syncer();
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    let ops = [versions_of_42(&["amended"])];
+    syncer
+        .store()
+        .reconcile_local(syncer.server, "p", &ops, Timestamp::UNIX_EPOCH)
+        .unwrap();
+    let related = |n: u64, status| model::RelatedChange {
+        project: "p".into(),
+        change_id: None,
+        number: ChangeNumber(n),
+        patch_set: model::PatchSetNumber(1),
+        current_patch_set: None,
+        status: Some(status),
+        submittable: None,
+        work_in_progress: false,
+        commit: None,
+    };
+    // 50 is built on 42, which is on 41 (merged).
+    let chain = [
+        related(50, ChangeStatus::New),
+        related(42, ChangeStatus::New),
+        related(41, ChangeStatus::Merged),
+    ];
+    syncer
+        .store()
+        .save_related(
+            syncer.server,
+            ChangeNumber(50),
+            &"sha50".into(),
+            &chain,
+            Timestamp::UNIX_EPOCH,
+        )
+        .unwrap();
+    let found = syncer
+        .newer_local_versions(ChangeNumber(50), &"sha50".into(), None)
+        .unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .map(|(n, v)| (n.0, v.sha.as_str()))
+            .collect::<Vec<_>>(),
+        [(42, "amended")]
+    );
+    // From 42 itself; nothing cached for another patch set.
+    assert_eq!(
+        syncer
+            .newer_local_versions(ChangeNumber(42), &"pushed".into(), None)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        syncer
+            .newer_local_versions(ChangeNumber(50), &"other".into(), None)
+            .unwrap()
+            .is_empty()
+    );
 }

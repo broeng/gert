@@ -19,7 +19,8 @@
 //! time. Requests are cheap: a round skips every project whose skip key is
 //! unchanged after one `for-each-ref` and reading `git config`.
 //! [`LocalScanner::scan_now`] scans one project in the next round whatever
-//! its key says, and answers with the reconcile's report.
+//! its key says, and answers with the reconcile's report and the commits
+//! the scan saw ([`ScanNowReport`]).
 //!
 //! # A round
 //!
@@ -53,6 +54,7 @@ use std::collections::{HashMap, HashSet};
 use futures::channel::oneshot;
 use gpui_kit::{AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use local_git::Repo;
+use model::RevisionId;
 use store::ReconcileReport;
 use sync::{Syncer, local::scan_change_ids};
 
@@ -91,7 +93,18 @@ pub enum ScanNowError {
     Gone,
 }
 
-type ScanNowReply = oneshot::Sender<Result<ReconcileReport, ScanNowError>>;
+/// What [`LocalScanner::scan_now`] answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScanNowReport {
+    pub report: ReconcileReport,
+    /// The commits of the scan, on named branches and on no
+    /// remote-tracking branch, newest first ([`model::LocalScan::commits`]);
+    /// `None` when the checkout has no remote-tracking branches, so the
+    /// scan looked at none.
+    pub commits: Option<Vec<RevisionId>>,
+}
+
+type ScanNowReply = oneshot::Sender<Result<ScanNowReport, ScanNowError>>;
 
 /// Everything a project's scan depends on. Equal keys mean a new scan would
 /// change nothing.
@@ -137,7 +150,7 @@ struct Ran {
     changed: bool,
     full_scans: usize,
     /// The outcome for each forced project.
-    reports: HashMap<String, Result<ReconcileReport, String>>,
+    reports: HashMap<String, Result<ScanNowReport, String>>,
 }
 
 /// The scanner of one server. See the module comment.
@@ -224,7 +237,7 @@ impl LocalScanner {
         &mut self,
         project: &str,
         cx: &mut Context<Self>,
-    ) -> Task<Result<ReconcileReport, ScanNowError>> {
+    ) -> Task<Result<ScanNowReport, ScanNowError>> {
         let (tx, rx) = oneshot::channel();
         if self.syncer.is_none() {
             tx.send(Err(ScanNowError::Inactive)).ok();
@@ -374,7 +387,9 @@ fn run(round: Round) -> Ran {
                     ran.memos.insert(project.clone(), memo);
                 }
                 if force && let Some(report) = outcome.report {
-                    ran.reports.insert(project.clone(), Ok(report));
+                    let commits = outcome.commits;
+                    ran.reports
+                        .insert(project.clone(), Ok(ScanNowReport { report, commits }));
                 }
             }
             Err(e) => {
@@ -412,6 +427,8 @@ struct Outcome {
     /// The reconcile's report; `None` when the skip key said there was
     /// nothing to do.
     report: Option<ReconcileReport>,
+    /// The scan's commits, when it ran (see [`ScanNowReport::commits`]).
+    commits: Option<Vec<RevisionId>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -443,6 +460,7 @@ fn scan_project(
             return Ok(Outcome {
                 memo: Some(memo),
                 report: None,
+                commits: None,
             });
         }
     }
@@ -463,6 +481,8 @@ fn scan_project(
     Ok(Outcome {
         memo,
         report: Some(report),
+        commits: (!scan.no_remotes)
+            .then(|| scan.commits.iter().map(|c| c.commit.sha.clone()).collect()),
     })
 }
 

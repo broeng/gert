@@ -363,14 +363,14 @@ pub fn menu_entries(detail: &ChangeDetail) -> Vec<MenuEntry> {
 }
 
 /// What the Submit warning knows (see [`submit_check`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Newer {
     /// Not asked, or asked again when Submit is picked next time.
     Unasked,
     Checking,
-    /// The answer: the name ("local 2": 2) of a newer version the checkout
-    /// has, or none.
-    Known(Option<u32>),
+    /// The answer: the changes the Submit takes (this one first) that have
+    /// a newer version in the checkout, each with its name ("local 2": 2).
+    Known(Vec<(ChangeNumber, u32)>),
 }
 
 /// A checkbox of the rebase confirmation.
@@ -662,14 +662,14 @@ impl ActionDialog {
         let scan = scanner.update(cx, |s, cx| s.scan_now(&self.detail.summary.project, cx));
         let syncer = self.session.syncer().clone();
         let change = self.number;
-        let since = self.detail.current().and_then(|r| r.created);
+        let revision = self.detail.current_revision.clone();
         self.check_task = Some(cx.spawn(async move |this, cx| {
-            let found = submit_check::newer_local_version(
+            let found = submit_check::newer_local_versions(
                 scan,
                 submit_check::WAIT,
                 syncer,
                 change,
-                since,
+                revision,
                 cx,
             )
             .await;
@@ -679,14 +679,15 @@ impl ActionDialog {
 
     /// The check's answer: shows the warning, or sends a Submit that was
     /// confirmed meanwhile.
-    fn newer_known(&mut self, found: Option<u32>, cx: &mut Context<Self>) {
+    fn newer_known(&mut self, found: Vec<(ChangeNumber, u32)>, cx: &mut Context<Self>) {
+        let warns = !found.is_empty();
         self.newer = Newer::Known(found);
         self.check_task = None;
         let waits = std::mem::take(&mut self.submit_waits);
         if self.step != Step::Confirm(Kind::Submit) {
             return;
         }
-        if found.is_some() {
+        if warns {
             // Enter cancels; submitting anyway takes Ctrl-Enter or the
             // button.
             self.pending_focus = Some(self.cancel_focus.clone());
@@ -696,16 +697,35 @@ impl ActionDialog {
         cx.notify();
     }
 
-    /// The Submit warning's question.
-    fn warning_text(&self, ordinal: u32) -> String {
+    /// The Submit warning's question about `found` (see [`Newer::Known`]).
+    fn warning_text(&self, found: &[(ChangeNumber, u32)]) -> String {
         let ps = self
             .detail
             .current()
             .map(|r| format!("PS {}", r.number))
             .unwrap_or_else(|| "the current patch set".to_owned());
+        if let [(n, ordinal)] = found
+            && *n == self.number
+        {
+            return format!(
+                "Your checkout has a newer version (local {ordinal}) that is not uploaded. \
+                 Submit {ps} anyway?"
+            );
+        }
+        let names: Vec<String> = found
+            .iter()
+            .map(|(n, ordinal)| {
+                if *n == self.number {
+                    format!("local {ordinal} of this change")
+                } else {
+                    format!("#{n} local {ordinal}")
+                }
+            })
+            .collect();
         format!(
-            "Your checkout has a newer version (local {ordinal}) that is not uploaded. \
-             Submit {ps} anyway?"
+            "Your checkout has newer versions that are not uploaded: {}. \
+             Submit {ps} and the changes below it anyway?",
+            names.join(", ")
         )
     }
 
@@ -723,8 +743,13 @@ impl ActionDialog {
     #[cfg(test)]
     pub(crate) fn warning_for_test(&self) -> Option<String> {
         matches!(self.step, Step::Confirm(Kind::Submit))
-            .then(|| self.warning().map(|n| self.warning_text(n)))
+            .then(|| self.warning().map(|found| self.warning_text(found)))
             .flatten()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_local_scanner_for_test(&self) -> bool {
+        self.local_scan.is_some()
     }
 
     #[cfg(test)]
@@ -732,10 +757,11 @@ impl ActionDialog {
         self.newer == Newer::Checking
     }
 
-    /// The newer local version the Submit warning is about, once known.
-    fn warning(&self) -> Option<u32> {
-        match self.newer {
-            Newer::Known(found) => found,
+    /// What the Submit warning is about, once known and when there is
+    /// anything.
+    fn warning(&self) -> Option<&[(ChangeNumber, u32)]> {
+        match &self.newer {
+            Newer::Known(found) if !found.is_empty() => Some(found),
             _ => None,
         }
     }
@@ -1413,11 +1439,11 @@ impl ActionDialog {
             .px_4()
             .py_2()
             .map(|d| match warning {
-                Some(ordinal) => d.child(
+                Some(found) => d.child(
                     div()
                         .debug_selector(|| "submit-warning".into())
                         .text_color(theme.warning)
-                        .child(self.warning_text(ordinal)),
+                        .child(self.warning_text(found)),
                 ),
                 None => d.child(div().child(intro)),
             })

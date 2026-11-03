@@ -883,6 +883,17 @@ mod in_the_shell {
         detail: model::ChangeDetail,
         http: &gerrit_api::fake::RouteHttpClient,
     ) -> (AnyWindowHandle, Entity<Shell>) {
+        on_the_change_with(cx, username, detail, http, Vec::new())
+    }
+
+    /// [`on_the_change`] with the server's project checkouts `projects`.
+    fn on_the_change_with(
+        cx: &mut TestAppContext,
+        username: Option<&str>,
+        detail: model::ChangeDetail,
+        http: &gerrit_api::fake::RouteHttpClient,
+        projects: Vec<crate::session::ProjectSettings>,
+    ) -> (AnyWindowHandle, Entity<Shell>) {
         let mut store = Store::open_in_memory().expect("store");
         let server = store.server_id(URL).expect("server");
         let now = jiff::Timestamp::now();
@@ -906,6 +917,7 @@ mod in_the_shell {
                     query: "status:open".into(),
                 }],
                 bookmarks: Vec::new(),
+                projects,
                 ..setup()
             }],
             active: None,
@@ -1181,6 +1193,40 @@ mod in_the_shell {
             hint(cx, &shell),
             Some(("Sign in to change this change".to_owned(), false))
         );
+    }
+
+    #[gpui_kit::test]
+    fn the_menu_gets_the_scanner_only_where_local_changes_are_on(cx: &mut TestAppContext) {
+        let mut d = change();
+        d.summary.project = "p".into();
+        let project = |on: bool| crate::session::ProjectSettings {
+            local_changes: on,
+            ..crate::session::ProjectSettings::new("p", "/nonexistent/checkout")
+        };
+        for (on, want) in [(true, true), (false, false)] {
+            let (window, shell) = on_the_change_with(
+                cx,
+                Some("bob"),
+                d.clone(),
+                &Default::default(),
+                vec![project(on)],
+            );
+            press(cx, window, "m");
+            let menu = cx
+                .update(|cx| shell.read(cx).menu_for_test())
+                .expect("the menu");
+            assert_eq!(
+                cx.update(|cx| menu.read(cx).has_local_scanner_for_test()),
+                want,
+                "option {on}"
+            );
+        }
+        // Anonymous: no scanner, and no menu either.
+        let (window, shell) =
+            on_the_change_with(cx, None, d, &Default::default(), vec![project(true)]);
+        press(cx, window, "m");
+        let menu = cx.update(|cx| shell.read(cx).menu_for_test());
+        assert!(menu.is_none_or(|m| !cx.update(|cx| m.read(cx).has_local_scanner_for_test())));
     }
 
     #[gpui_kit::test]

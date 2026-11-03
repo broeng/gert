@@ -684,15 +684,18 @@ fn every_state_renders_and_j_k_cross_into_the_queries(cx: &mut TestAppContext) {
 fn scan_now_scans_whatever_the_skip_key_says_and_answers(cx: &mut TestAppContext) {
     use futures::FutureExt as _;
     let f = fixture();
-    f.own("Own change", ID_A);
+    let own = f.own("Own change", ID_A);
     let s = start(cx, &f, Some("u"), true);
     let scanner = s.scanner(cx).expect("a scanner");
     let scans = s.full_scans(cx);
 
-    // Nothing moved, yet it scans, and the report says what it found.
+    // Nothing moved, yet it scans, and the report says what it found,
+    // with the scan's commits.
     let task = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
     cx.run_until_parked();
-    let report = task.now_or_never().expect("answered").expect("a report");
+    let answer = task.now_or_never().expect("answered").expect("a report");
+    assert_eq!(answer.commits, Some(vec![RevisionId(own)]));
+    let report = answer.report;
     assert!(report.is_settled());
     assert!(!report.changed());
     assert_eq!(s.full_scans(cx), scans + 1);
@@ -703,7 +706,11 @@ fn scan_now_scans_whatever_the_skip_key_says_and_answers(cx: &mut TestAppContext
     scanner.update(cx, |sc, cx| sc.request(cx));
     let task = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
     cx.run_until_parked();
-    let report = task.now_or_never().expect("answered").expect("a report");
+    let report = task
+        .now_or_never()
+        .expect("answered")
+        .expect("a report")
+        .report;
     assert!(report.inserted.is_empty(), "the running round took it");
     assert_eq!(s.full_scans(cx), scans + 3);
     assert_eq!(s.subjects(cx), ["Own change", "Second change"]);
@@ -749,7 +756,11 @@ fn scan_now_waits_for_the_checkout_to_open(cx: &mut TestAppContext) {
     // Nothing has opened the checkout yet.
     let task = scanner.update(cx, |sc, cx| sc.scan_now("p", cx));
     cx.run_until_parked();
-    let report = task.now_or_never().expect("answered").expect("a report");
+    let report = task
+        .now_or_never()
+        .expect("answered")
+        .expect("a report")
+        .report;
     assert_eq!(report.inserted.len(), 1);
 }
 

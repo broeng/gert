@@ -1,7 +1,7 @@
 //! The Submit warning against a real temporary checkout (local-git's
 //! `TestRepo`, with a bare "remote") and the scanner, on a scripted server.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use futures::future;
@@ -12,9 +12,9 @@ use store::{LocalChangeUpsert, LocalOp, NewLocalPatchSet, ServerId};
 
 use super::*;
 use crate::{
-    action_menu::submit_check::{WAIT, newer_local_version},
+    action_menu::submit_check::{WAIT, newer_local_versions},
     checkouts::Checkouts,
-    local_scan::{LocalScanner, ScanNowError},
+    local_scan::{LocalScanner, ScanNowError, ScanNowReport},
     session::ProjectSettings,
 };
 
@@ -76,8 +76,24 @@ fn dialog_with(cx: &mut TestAppContext, ck: &Checkout, scanned: bool) -> Fx {
     store
         .save_change_detail(server, &change_7(), model::Timestamp::now())
         .expect("detail");
+    dialog_in(cx, store, change_7(), ck, scanned)
+}
+
+/// The dialog of `detail` on `store` with the scanner of `ck`.
+fn dialog_on(cx: &mut TestAppContext, store: Store, detail: ChangeDetail, ck: &Checkout) -> Fx {
+    dialog_in(cx, store, detail, ck, true)
+}
+
+fn dialog_in(
+    cx: &mut TestAppContext,
+    store: Store,
+    detail: ChangeDetail,
+    ck: &Checkout,
+    scanned: bool,
+) -> Fx {
     let http = RouteHttpClient::new();
     SUBMIT_ROUTES(&http);
+    http.route("POST /a/changes/8/submit", 200, CHANGE_OK);
     let env = env_with(store, &http);
     let mut server = setup();
     server.username = Some("bob".into());
@@ -94,7 +110,7 @@ fn dialog_with(cx: &mut TestAppContext, ck: &Checkout, scanned: bool) -> Fx {
         let scanner = cx.new(|cx| LocalScanner::new(checkouts, cx));
         scanner.update(cx, |s, _| s.set_session(Some(&session)));
         let dialog = cx.new(|cx| {
-            let mut d = ActionDialog::new(session, change_7(), window, cx);
+            let mut d = ActionDialog::new(session, detail, window, cx);
             if scanned {
                 d.set_local_scanner(scanner);
             }
@@ -246,48 +262,148 @@ fn store_with_version() -> Store {
     store
 }
 
-/// What [`newer_local_version`] answers for change 7 given `scan`, checked
+/// What [`newer_local_versions`] found: (change, local version name).
+type Answer = Vec<(u64, u32)>;
+
+/// What [`newer_local_versions`] answers for change 7 given `scan`, checked
 /// before and after [`WAIT`] passes.
 fn answer_of(
     cx: &mut TestAppContext,
-    scan: impl FnOnce(&mut TestAppContext) -> Task<Result<store::ReconcileReport, ScanNowError>>,
-) -> (Option<Option<u32>>, Option<Option<u32>>) {
+    scan: impl FnOnce(&mut TestAppContext) -> Task<Result<ScanNowReport, ScanNowError>>,
+) -> (Option<Answer>, Option<Answer>) {
     let env = env_with(store_with_version(), &RouteHttpClient::new());
     let session = Session::new(&env, &setup(), None).expect("session");
     let syncer = session.syncer().clone();
     let scan = scan(cx);
-    let since = change_7().current().and_then(|r| r.created);
-    let answer = Rc::new(Cell::new(None));
+    let revision = change_7().current_revision;
+    let answer = Rc::new(RefCell::new(None));
     let put = answer.clone();
     cx.update(|cx| {
         cx.spawn(async move |cx| {
-            let found = newer_local_version(scan, WAIT, syncer, ChangeNumber(7), since, cx).await;
-            put.set(Some(found));
+            let found =
+                newer_local_versions(scan, WAIT, syncer, ChangeNumber(7), revision, cx).await;
+            *put.borrow_mut() = Some(found.into_iter().map(|(n, o)| (n.0, o)).collect());
         })
         .detach()
     });
     cx.run_until_parked();
-    let before = answer.get();
+    let before = answer.borrow().clone();
     cx.executor().advance_clock(WAIT);
     cx.run_until_parked();
-    (before, answer.get())
+    let after = answer.borrow().clone();
+    (before, after)
+}
+
+fn report(commits: Option<Vec<&str>>) -> ScanNowReport {
+    ScanNowReport {
+        report: Default::default(),
+        commits: commits.map(|c| c.into_iter().map(Into::into).collect()),
+    }
 }
 
 #[gpui_kit::test]
 fn a_scan_that_does_not_answer_in_time_leaves_it_to_the_store(cx: &mut TestAppContext) {
     let (before, after) = answer_of(cx, |cx| cx.background_executor.spawn(future::pending()));
     assert_eq!(before, None, "it waits for the scan");
-    assert_eq!(after, Some(Some(1)));
+    assert_eq!(after, Some(vec![(7, 1)]));
 }
 
 #[gpui_kit::test]
-fn a_failed_scan_leaves_it_to_the_store_and_an_unscanned_project_says_nothing(
-    cx: &mut TestAppContext,
-) {
+fn a_fresh_scan_counts_only_versions_still_on_a_branch(cx: &mut TestAppContext) {
+    let (before, _) = answer_of(cx, |_| Task::ready(Ok(report(Some(vec!["abc"])))));
+    assert_eq!(before, Some(vec![(7, 1)]));
+    let (before, _) = answer_of(cx, |_| Task::ready(Ok(report(Some(vec!["other"])))));
+    assert_eq!(before, Some(vec![]));
+    // A checkout without remote-tracking branches scans nothing: the store.
+    let (before, _) = answer_of(cx, |_| Task::ready(Ok(report(None))));
+    assert_eq!(before, Some(vec![(7, 1)]));
+}
+
+#[gpui_kit::test]
+fn a_failed_scan_or_a_checkout_that_will_not_open_leaves_it_to_the_store(cx: &mut TestAppContext) {
     let (before, _) = answer_of(cx, |_| Task::ready(Err(ScanNowError::Failed("git".into()))));
-    assert_eq!(before, Some(Some(1)));
+    assert_eq!(before, Some(vec![(7, 1)]));
+    // The shell hands a scanner over only with the option on: this is a
+    // checkout that cannot be opened now.
     let (before, _) = answer_of(cx, |_| {
         Task::ready(Err(ScanNowError::NotScanned("p".into())))
     });
-    assert_eq!(before, Some(None));
+    assert_eq!(before, Some(vec![(7, 1)]));
+    // No session: nothing is scanned, no warning.
+    let (before, _) = answer_of(cx, |_| Task::ready(Err(ScanNowError::Inactive)));
+    assert_eq!(before, Some(vec![]));
+}
+
+#[gpui_kit::test]
+fn a_confirm_during_the_check_waits_and_the_warning_stops_it(cx: &mut TestAppContext) {
+    let ck = checkout(&[&amended()]);
+    let f = dialog_with(cx, &ck, true);
+    // Submit and confirm before the scan has run.
+    for key in ["s", CONFIRM] {
+        cx.update_window(f.window, |_, window, cx| {
+            use gpui_kit::test::TestWindowExt as _;
+            window.press(key, cx)
+        })
+        .expect("press");
+    }
+    assert!(cx.update(|cx| f.dialog.read(cx).checking_for_test()));
+    assert!(writes(&f).is_empty());
+    cx.run_until_parked();
+    assert!(warning(cx, &f).is_some());
+    assert!(
+        writes(&f).is_empty(),
+        "the warning stops the waiting submit"
+    );
+    assert!(events(&f).is_empty());
+}
+
+/// Change 8, built on 7 (with [`ID_7`]), as the dialog shows it, with its
+/// relation chain cached.
+fn change_8() -> ChangeDetail {
+    let mut d = change();
+    d.summary.number = ChangeNumber(8);
+    d.summary.project = "p".into();
+    d.summary.change_id = Some("I8888888888888888888888888888888888888888".into());
+    d
+}
+
+#[gpui_kit::test]
+fn submitting_a_change_warns_of_a_newer_version_below_it(cx: &mut TestAppContext) {
+    let ck = checkout(&[&amended()]);
+    let mut store = Store::open_in_memory().expect("store");
+    let server = store.server_id(URL).expect("server");
+    store
+        .save_change_detail(server, &change_7(), model::Timestamp::now())
+        .expect("detail");
+    let related = |n: u64| model::RelatedChange {
+        project: "p".into(),
+        change_id: None,
+        number: ChangeNumber(n),
+        patch_set: model::PatchSetNumber(3),
+        current_patch_set: None,
+        status: Some(model::ChangeStatus::New),
+        submittable: None,
+        work_in_progress: false,
+        commit: None,
+    };
+    store
+        .save_related(
+            server,
+            ChangeNumber(8),
+            &"sha3".into(),
+            &[related(8), related(7)],
+            model::Timestamp::now(),
+        )
+        .expect("related");
+    let f = dialog_on(cx, store, change_8(), &ck);
+    press(cx, &f, &["s"]);
+    assert_eq!(
+        warning(cx, &f).as_deref(),
+        Some(
+            "Your checkout has newer versions that are not uploaded: #7 local 1. \
+             Submit PS 3 and the changes below it anyway?"
+        )
+    );
+    press(cx, &f, &[CONFIRM]);
+    assert_eq!(writes(&f), ["POST /a/changes/8/submit"]);
 }

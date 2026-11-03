@@ -8,8 +8,8 @@ use std::{
 
 use jiff::Timestamp;
 use model::{
-    ChangeNumber, ChangeSummary, CommitInfo, LocalChange, LocalChangeState, LocalPatchSet,
-    LocalScan, PatchSetNumber,
+    ChangeNumber, ChangeStatus, ChangeSummary, CommitInfo, LocalChange, LocalChangeState,
+    LocalPatchSet, LocalScan, PatchSetNumber, RevisionId,
 };
 use store::{BorrowedLabels, LocalChangeEntry, ReconcileReport, ServerId, Store};
 
@@ -175,37 +175,67 @@ impl Syncer {
         versions_of_gerrit_change(&self.store(), self.server, number)
     }
 
-    /// The newest version of Gerrit change `number` that only the checkout
-    /// has, first seen after `since` (the creation of the change's current
-    /// patch set, when known): what the Submit warning asks about. Of the
-    /// versions [`Syncer::local_patch_sets_of`] lists, only those of rows
-    /// still in the checkout count (checking, local or ambiguous; not
-    /// vanished or closed). `None` when there is none. Blocking (SQLite).
+    /// The version of Gerrit change `number` that only the checkout has and
+    /// that a Submit would leave behind: what the Submit warning asks
+    /// about. Of the versions [`Syncer::local_patch_sets_of`] lists, only
+    /// those of rows still in the checkout count (checking, local or
+    /// ambiguous; not vanished or closed). Then:
+    ///
+    /// * With `on_branches`, the commits of a fresh scan of the checkout
+    ///   (newest first, as [`LocalScan::commits`]), the version of those
+    ///   that comes first: the one nearest a branch tip. A version no
+    ///   longer on a named branch does not count.
+    /// * Without (the scan did not answer), the newest version first seen
+    ///   after the newest version of its row that reached Gerrit, or the
+    ///   newest of a row none of whose versions did. Both times are ours,
+    ///   so no server clock is involved: a patch set made on Gerrit after
+    ///   the version (a rebase, a co-author's upload) does not hide it.
+    ///
+    /// `None` when there is none. Blocking (SQLite).
     pub fn newer_local_version(
         &self,
         number: ChangeNumber,
-        since: Option<Timestamp>,
+        on_branches: Option<&[RevisionId]>,
     ) -> Result<Option<LocalPatchSet>, Error> {
         if number.is_local() {
             return Ok(None);
         }
         let store = self.store();
-        let present: BTreeSet<_> = store
-            .local_changes_of_gerrit_change(self.server, number)?
-            .into_iter()
-            .filter(|r| {
-                matches!(
-                    r.state,
-                    LocalChangeState::Checking
-                        | LocalChangeState::Local
-                        | LocalChangeState::Ambiguous
-                )
-            })
-            .map(|r| r.id)
-            .collect();
-        Ok(versions_of_gerrit_change(&store, self.server, number)?
-            .into_iter()
-            .rfind(|v| present.contains(&v.local_change) && since.is_none_or(|t| v.seen_at > t)))
+        newer_version_in(&store, self.server, number, on_branches)
+    }
+
+    /// [`Syncer::newer_local_version`] of Gerrit change `number` and of
+    /// each open change below its patch set `revision` in the cached
+    /// relation chain, which a Submit takes along: the ones that have such
+    /// a version, this change first, then down the chain. Without a cached
+    /// chain only this change is looked at. Blocking (SQLite).
+    pub fn newer_local_versions(
+        &self,
+        number: ChangeNumber,
+        revision: &RevisionId,
+        on_branches: Option<&[RevisionId]>,
+    ) -> Result<Vec<(ChangeNumber, LocalPatchSet)>, Error> {
+        if number.is_local() {
+            return Ok(Vec::new());
+        }
+        let store = self.store();
+        let chain = store
+            .load_related(self.server, number, revision)?
+            .map(|c| c.changes)
+            .unwrap_or_default();
+        let below = chain
+            .iter()
+            .skip_while(|c| c.number != number)
+            .skip(1)
+            .filter(|c| matches!(c.status, Some(ChangeStatus::New)))
+            .map(|c| c.number);
+        let mut out = Vec::new();
+        for n in std::iter::once(number).chain(below) {
+            if let Some(v) = newer_version_in(&store, self.server, n, on_branches)? {
+                out.push((n, v));
+            }
+        }
+        Ok(out)
     }
 
     /// What each of `commits` (a relation chain read from the checkout of
@@ -384,6 +414,49 @@ fn versions_of_gerrit_change(
             (shown && v.gerrit_patch_set.is_none()).then_some(v)
         })
         .collect())
+}
+
+/// See [`Syncer::newer_local_version`].
+fn newer_version_in(
+    store: &Store,
+    server: ServerId,
+    number: ChangeNumber,
+    on_branches: Option<&[RevisionId]>,
+) -> Result<Option<LocalPatchSet>, Error> {
+    // Each present row with the time its newest version reached Gerrit.
+    let mut present: HashMap<_, Option<Timestamp>> = HashMap::new();
+    for row in store.local_changes_of_gerrit_change(server, number)? {
+        if !matches!(
+            row.state,
+            LocalChangeState::Checking | LocalChangeState::Local | LocalChangeState::Ambiguous
+        ) {
+            continue;
+        }
+        let pushed = store
+            .local_patch_sets(server, row.id)?
+            .into_iter()
+            .filter(|v| v.gerrit_patch_set.is_some())
+            .map(|v| v.seen_at)
+            .max();
+        present.insert(row.id, pushed);
+    }
+    let candidates: Vec<LocalPatchSet> = versions_of_gerrit_change(store, server, number)?
+        .into_iter()
+        .filter(|v| present.contains_key(&v.local_change))
+        .collect();
+    Ok(match on_branches {
+        Some(shas) => shas
+            .iter()
+            .find_map(|sha| candidates.iter().find(|v| v.sha == *sha))
+            .cloned(),
+        None => candidates.into_iter().rfind(|v| {
+            present
+                .get(&v.local_change)
+                .copied()
+                .flatten()
+                .is_none_or(|pushed| v.seen_at > pushed)
+        }),
+    })
 }
 
 /// `ids` and the rows' Change-Ids, sorted, each once.
