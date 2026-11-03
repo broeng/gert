@@ -1243,6 +1243,7 @@ fn main() {
             store: Arc::new(Mutex::new(store)),
             backend: Arc::new(Demo),
             app_name: "review-demo".into(),
+            marks: Default::default(),
         },
         diff: LocalDiff {
             preferences: local,

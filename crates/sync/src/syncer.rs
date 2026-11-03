@@ -61,8 +61,9 @@ pub struct Syncer {
     /// could not be opened, `git` failing): consolidation tries again only
     /// after its slow re-check, not on every run.
     port_failed: Arc<Mutex<std::collections::HashMap<model::LocalChangeId, Timestamp>>>,
-    /// The reviewed mark requests on their way (see [`marks`]).
-    marks: Arc<Mutex<marks::MarkLedger>>,
+    /// The reviewed mark requests on their way (see [`marks`]); shared by
+    /// the syncers of the server when given [`Syncer::with_marks`].
+    marks: marks::Shared,
 }
 
 impl Syncer {
@@ -87,7 +88,14 @@ impl Syncer {
 
     /// The mark ledger. Taken before the store when both are needed.
     fn marks(&self) -> MutexGuard<'_, marks::MarkLedger> {
-        self.marks.lock().unwrap_or_else(|e| e.into_inner())
+        marks::lock(&self.marks)
+    }
+
+    /// Shares the server's reviewed mark requests on their way with the
+    /// other syncers made from `ledgers` (the next login's).
+    pub fn with_marks(mut self, ledgers: &MarkLedgers) -> Self {
+        self.marks = ledgers.for_server(self.server);
+        self
     }
 
     /// Fails with [`Error::Local`] if `sha` is a commit that exists only in
@@ -287,8 +295,13 @@ impl Syncer {
         };
         // Gerrit's marks were read before the requests still on their way
         // are done: the cache keeps what they ask for until they settle.
+        // The ledger stays locked until the list is saved, so that no
+        // request starts or settles in between. (One that starts and
+        // settles while Gerrit's marks are fetched is not seen: the list
+        // then shows the mark from before it until the next fetch.)
+        let marks = self.marks();
         let reviewed = reviewed.map(|mut paths| {
-            for (path, asked) in self.marks().asked(&key.target.sha) {
+            for (path, asked) in marks.asked(&key.target.sha) {
                 paths.retain(|p| *p != path);
                 if asked {
                     paths.push(path);
@@ -463,7 +476,7 @@ pub use consolidate::{
 };
 pub use edits::ReviewerAdded;
 pub use local::ChainCommit;
-pub use marks::MarkSettled;
+pub use marks::{MarkLedgers, MarkSettled};
 pub use store::DraftCounts;
 pub use watch::WatchOptions;
 

@@ -46,6 +46,7 @@ pub(crate) fn env_with(
         store: Arc::new(Mutex::new(store)),
         backend: Arc::new(FakeBackend::default()),
         app_name: APP.into(),
+        marks: Default::default(),
     }
 }
 

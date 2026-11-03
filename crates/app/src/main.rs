@@ -79,6 +79,7 @@ fn startup() -> anyhow::Result<Prepared> {
                 store,
             }),
             app_name: APP_NAME.into(),
+            marks: Default::default(),
         },
         servers,
         active,

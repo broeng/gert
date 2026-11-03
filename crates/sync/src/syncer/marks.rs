@@ -10,9 +10,13 @@
 //! The cache then holds that ([`MarkSettled`]); while requests are open it
 //! holds the value last asked for, also over a list fetched meanwhile.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
-use model::RevisionId;
+use model::{ChangeNumber, RevisionId};
+use store::{ServerId, Store};
 
 /// What a mark came to once no request for it is open.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +26,26 @@ pub struct MarkSettled {
     /// The last request sent failed and the mark went back: the value it
     /// asked for and why it failed.
     pub refused: Option<(bool, String)>,
+}
+
+/// The mark ledgers of every server, so that the syncers made for one
+/// server one after another (a new login) share its requests on their way.
+/// Cheap to clone; give every syncer the same one
+/// ([`super::Syncer::with_marks`]).
+#[derive(Clone, Default)]
+pub struct MarkLedgers(Arc<Mutex<HashMap<ServerId, Shared>>>);
+
+pub(super) type Shared = Arc<Mutex<MarkLedger>>;
+
+impl MarkLedgers {
+    pub(super) fn for_server(&self, server: ServerId) -> Shared {
+        let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        all.entry(server).or_default().clone()
+    }
+}
+
+pub(super) fn lock(ledger: &Shared) -> MutexGuard<'_, MarkLedger> {
+    ledger.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The requests for the marks of one server that are on their way.
@@ -122,6 +146,90 @@ impl MarkLedger {
     }
 }
 
+/// A request in the ledger until it ends: [`OpenMark::end`] settles it,
+/// and if the request is dropped before that (its future cancelled), it
+/// ends as failed, so that the mark does not stay open for good.
+pub(super) struct OpenMark {
+    ledger: Shared,
+    store: Arc<Mutex<Store>>,
+    server: ServerId,
+    change: ChangeNumber,
+    revision: RevisionId,
+    path: String,
+    reviewed: bool,
+    number: u64,
+    open: bool,
+}
+
+impl OpenMark {
+    /// Enters a request asking for `reviewed` into `ledger` (already
+    /// locked as `marks`); `before` is the mark the cache has.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn begin(
+        ledger: &Shared,
+        marks: &mut MarkLedger,
+        store: &Arc<Mutex<Store>>,
+        server: ServerId,
+        change: ChangeNumber,
+        revision: &RevisionId,
+        path: &str,
+        reviewed: bool,
+        before: bool,
+    ) -> Self {
+        let number = marks.begin(revision, path, reviewed, before);
+        Self {
+            ledger: ledger.clone(),
+            store: store.clone(),
+            server,
+            change,
+            revision: revision.clone(),
+            path: path.to_owned(),
+            reviewed,
+            number,
+            open: true,
+        }
+    }
+
+    /// The request ended: `Ok` when it worked, else why not. When it was
+    /// the last open one for the mark, the cache gets what it settled to.
+    pub(super) fn end(mut self, result: Result<(), String>) -> Option<MarkSettled> {
+        self.open = false;
+        self.settle(result)
+    }
+
+    fn settle(&self, result: Result<(), String>) -> Option<MarkSettled> {
+        let mut marks = lock(&self.ledger);
+        let settled = marks.end(
+            &self.revision,
+            &self.path,
+            self.number,
+            self.reviewed,
+            result,
+        );
+        if let Some(s) = &settled {
+            let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = store.set_reviewed_path(
+                self.server,
+                self.change,
+                &self.revision,
+                &self.path,
+                s.reviewed,
+            ) {
+                log::warn!("settling the reviewed mark of {}: {e}", self.path);
+            }
+        }
+        settled
+    }
+}
+
+impl Drop for OpenMark {
+    fn drop(&mut self) {
+        if self.open {
+            self.settle(Err("the request was cancelled".into()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +315,41 @@ mod tests {
                 refused: Some((true, "no".into())),
             })
         );
+    }
+
+    #[test]
+    fn when_every_request_fails_the_mark_from_before_comes_back() {
+        let mut l = MarkLedger::default();
+        let on = l.begin(&rev(), "a", true, false);
+        let off = l.begin(&rev(), "a", false, false);
+        assert_eq!(l.end(&rev(), "a", off, false, Err("b".into())), None);
+        let settled = l.end(&rev(), "a", on, true, Err("a".into()));
+        // The last asked for off, which the mark is: nothing went back.
+        assert_eq!(
+            settled,
+            Some(MarkSettled {
+                reviewed: false,
+                refused: None
+            })
+        );
+        let on = l.begin(&rev(), "a", true, false);
+        let settled = l.end(&rev(), "a", on, true, Err("no".into()));
+        assert_eq!(
+            settled,
+            Some(MarkSettled {
+                reviewed: false,
+                refused: Some((true, "no".into())),
+            })
+        );
+    }
+
+    #[test]
+    fn syncers_of_one_server_share_its_ledger() {
+        let all = MarkLedgers::default();
+        let (a, b) = (all.for_server(ServerId(1)), all.for_server(ServerId(1)));
+        lock(&a).begin(&rev(), "a", true, false);
+        assert_eq!(lock(&b).asked(&rev()), [("a".to_owned(), true)]);
+        assert!(lock(&all.for_server(ServerId(2))).asked(&rev()).is_empty());
     }
 
     #[test]

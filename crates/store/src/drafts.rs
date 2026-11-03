@@ -931,7 +931,7 @@ impl Store {
     // ---- reviewed marks ----
 
     /// Whether `path` is marked reviewed in the cached file lists of patch
-    /// set `target`; `None` when none is cached.
+    /// set `target`; `None` when none with marks is cached.
     pub fn reviewed_path(
         &self,
         server: ServerId,
@@ -948,10 +948,11 @@ impl Store {
         })?;
         let mut any = None;
         for json in rows {
-            let paths: Vec<String> = match json? {
-                Some(j) => serde_json::from_str(&j)?,
-                None => Vec::new(),
+            // A list without marks yet says nothing either way.
+            let Some(json) = json? else {
+                continue;
             };
+            let paths: Vec<String> = serde_json::from_str(&json)?;
             if paths.iter().any(|p| p == path) {
                 return Ok(Some(true));
             }

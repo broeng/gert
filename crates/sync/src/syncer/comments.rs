@@ -568,43 +568,47 @@ impl Syncer {
         path: &str,
         reviewed: bool,
     ) -> MarkSent {
-        let unsent = |e: Error| MarkSent {
-            result: Err(e),
-            settled: None,
-        };
-        if let Err(e) = self.ensure_on_server(revision) {
-            return unsent(e);
-        }
-        let number = {
+        let mark = {
             let mut marks = self.marks();
-            let mut store = self.store();
-            let before = match store.reviewed_path(self.server, change, revision, path) {
-                Ok(before) => before.unwrap_or(!reviewed),
-                Err(e) => return unsent(e.into()),
-            };
-            if let Err(e) = store.set_reviewed_path(self.server, change, revision, path, reviewed) {
-                return unsent(e.into());
+            let before = self
+                .store()
+                .reviewed_path(self.server, change, revision, path)
+                .ok()
+                .flatten()
+                .unwrap_or(!reviewed);
+            let mark = super::marks::OpenMark::begin(
+                &self.marks,
+                &mut marks,
+                &self.store,
+                self.server,
+                change,
+                revision,
+                path,
+                reviewed,
+                before,
+            );
+            let written = self.ensure_on_server(revision).and_then(|()| {
+                self.store()
+                    .set_reviewed_path(self.server, change, revision, path, reviewed)
+                    .map_err(Error::from)
+            });
+            if let Err(e) = written {
+                // Not sent: settled like a request that failed.
+                drop(marks);
+                let settled = mark.end(Err(e.to_string()));
+                return MarkSent {
+                    result: Err(e),
+                    settled,
+                };
             }
-            marks.begin(revision, path, reviewed, before)
+            mark
         };
         let result = self
             .client
             .set_reviewed(change, revision, path, reviewed)
             .await
             .map_err(Error::from);
-        let settled = {
-            let mut marks = self.marks();
-            let answer = result.as_ref().map(|_| ()).map_err(ToString::to_string);
-            let settled = marks.end(revision, path, number, reviewed, answer);
-            if let Some(s) = &settled
-                && let Err(e) =
-                    self.store()
-                        .set_reviewed_path(self.server, change, revision, path, s.reviewed)
-            {
-                log::warn!("settling the reviewed mark of {path}: {e}");
-            }
-            settled
-        };
+        let settled = mark.end(result.as_ref().map(|_| ()).map_err(ToString::to_string));
         MarkSent { result, settled }
     }
 }

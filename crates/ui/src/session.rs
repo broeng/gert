@@ -245,6 +245,9 @@ pub struct Env {
     /// The application's name (`app`'s `APP_NAME`): every server's syncer
     /// starts the tags of the reviews it posts for local changes with it.
     pub app_name: String,
+    /// The reviewed mark requests on their way, per server, shared by the
+    /// syncers of each session of it.
+    pub marks: sync::MarkLedgers,
 }
 
 impl Env {
@@ -334,7 +337,8 @@ impl Session {
             base_url: setup.base_url.trim_end_matches('/').to_owned(),
             username: setup.username.clone(),
             syncer: Syncer::new(client, env.store.clone(), setup.server)
-                .with_app_name(&env.app_name),
+                .with_app_name(&env.app_name)
+                .with_marks(&env.marks),
             can_sync,
             unreachable: Arc::default(),
         })

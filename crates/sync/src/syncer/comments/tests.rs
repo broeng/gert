@@ -959,6 +959,61 @@ fn a_list_fetched_while_a_mark_is_on_its_way_keeps_it() {
 }
 
 #[test]
+fn a_list_fetched_while_a_mark_is_cleared_keeps_it_cleared() {
+    let f = fx();
+    cache_files(&f, &["a.rs"]);
+    f.syncer.marks().begin(&sha2(), "a.rs", false, true);
+    f.http
+        .push_response(200, ")]}'\n{\"a.rs\": {}, \"b.rs\": {}}");
+    f.http.push_response(200, ")]}'\n[\"a.rs\"]");
+    let list = block_on(f.syncer.refresh_files(&files_key())).unwrap();
+    assert_eq!(list.reviewed.as_deref(), Some(&[][..]));
+}
+
+#[test]
+fn a_mark_refused_before_it_is_sent_settles_back() {
+    let f = fx();
+    add_local_version(&f.syncer, Some(7), "sha2");
+    cache_files(&f, &["a.rs"]);
+    let sent = block_on(f.syncer.set_reviewed(CHANGE, &sha2(), "b.rs", true));
+    assert!(matches!(sent.result, Err(Error::Local(_))));
+    let settled = sent.settled.expect("settled");
+    assert!(!settled.reviewed);
+    assert!(matches!(settled.refused, Some((true, _))));
+    assert_eq!(reviewed(&f), ["a.rs"]);
+    // Nothing stays open.
+    assert!(f.syncer.marks().asked(&sha2()).is_empty());
+}
+
+#[test]
+fn a_dropped_mark_request_does_not_stay_open() {
+    let f = fx();
+    cache_files(&f, &["a.rs"]);
+    let mark = {
+        let mut marks = f.syncer.marks();
+        crate::syncer::marks::OpenMark::begin(
+            &f.syncer.marks,
+            &mut marks,
+            &f.syncer.store,
+            f.syncer.server,
+            CHANGE,
+            &sha2(),
+            "b.rs",
+            true,
+            false,
+        )
+    };
+    f.syncer
+        .store()
+        .set_reviewed_path(f.syncer.server, CHANGE, &sha2(), "b.rs", true)
+        .unwrap();
+    // Its future goes away before the answer.
+    drop(mark);
+    assert!(f.syncer.marks().asked(&sha2()).is_empty());
+    assert_eq!(reviewed(&f), ["a.rs"]);
+}
+
+#[test]
 fn a_redundant_failed_mark_does_not_flip_the_cache() {
     let f = fx();
     cache_files(&f, &["a.rs"]);

@@ -323,6 +323,7 @@ pub(crate) mod tests {
             store: Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
             backend,
             app_name: "test-app".into(),
+            marks: Default::default(),
         }
     }
 
