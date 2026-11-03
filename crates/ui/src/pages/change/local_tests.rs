@@ -1031,3 +1031,50 @@ fn a_chain_opens_an_older_version_at_that_version_and_steps_past_plain_commits(
     );
     assert!(f.http.requested().is_empty());
 }
+
+#[gpui_kit::test]
+fn a_long_chain_keeps_the_commits_nearest_and_says_there_are_more(cx: &mut TestAppContext) {
+    let repo = TestRepo::new();
+    repo.commit("Base");
+    for i in 0..26 {
+        repo.commit(&format!("Below {i}"));
+    }
+    let target = repo.commit("The change\n\nChange-Id: I1");
+    for i in 0..26 {
+        repo.commit(&format!("Above {i}"));
+    }
+    let store = store_with(
+        &[row("I1", None, LocalChangeState::Local, &[&target], "x")],
+        |_| {},
+    );
+    let number = store
+        .local_changes_by_change_id(SERVER, "I1")
+        .expect("rows")[0]
+        .number;
+    let project = ProjectSettings {
+        local_changes: true,
+        ..ProjectSettings::new("p", repo.path().to_string_lossy())
+    };
+    let f = page_in(cx, store, number, project, |_| {});
+    let mut rows = Vec::new();
+    for _ in 0..100 {
+        rows = cx.update(|cx| f.page.read(cx).chain_for_test());
+        if !rows.is_empty() {
+            break;
+        }
+        cx.executor().allow_parking();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cx.run_until_parked();
+    }
+    let subjects: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+    let at = rows.iter().position(|r| r.2).expect("this change");
+    // 25 above, nearest first kept; the commit and 24 below it.
+    assert_eq!(rows.len(), 1 + 25 + 1 + 24 + 1, "{subjects:?}");
+    assert_eq!(rows[0].0, "\u{2026}");
+    assert_eq!(subjects[1], "Above 24");
+    assert_eq!(subjects[at - 1], "Above 0");
+    assert_eq!(subjects[at], "The change");
+    assert_eq!(subjects[at + 1], "Below 25");
+    assert_eq!(subjects[rows.len() - 2], "Below 2");
+    assert_eq!(rows[rows.len() - 1].0, "\u{2026}");
+}

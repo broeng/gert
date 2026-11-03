@@ -20,6 +20,19 @@ use crate::checkouts::{CheckoutState, Checkouts};
 /// Commits read on each side of the commit, at most.
 const LIMIT: usize = 25;
 
+/// A chain read from the checkout.
+#[derive(Clone, Debug, Default)]
+pub struct Chain {
+    /// Newest first.
+    pub entries: Vec<ChainEntry>,
+    /// More commits were built on the commit than the chain shows (the
+    /// ones nearest the branch tips are left out).
+    pub more_above: bool,
+    /// The chain goes on below the last entry: the limit ended it, not a
+    /// remote-tracking branch or a Gerrit patch set.
+    pub more_below: bool,
+}
+
 /// One commit of a chain read from the checkout and what it is.
 #[derive(Clone, Debug)]
 pub struct ChainEntry {
@@ -29,7 +42,7 @@ pub struct ChainEntry {
 
 /// The chain of `sha` in the checkout of `project`, newest first: what was
 /// built on it, the commit itself, then what it was built on (see the
-/// module comment). `None` when there is no open checkout, it does not
+/// module comment), and whether a limit left commits out. `None` when there is no open checkout, it does not
 /// have the commit, or git or the store failed (logged). Git and SQLite
 /// run on the background executor.
 pub async fn read(
@@ -38,7 +51,7 @@ pub async fn read(
     sha: RevisionId,
     syncer: Syncer,
     cx: &mut AsyncApp,
-) -> Option<Vec<ChainEntry>> {
+) -> Option<Chain> {
     let checkout = Checkouts::opened(&checkouts?, &project, cx).await?;
     let CheckoutState::Open(repo) = checkout.state else {
         return None;
@@ -57,8 +70,9 @@ pub async fn read(
         };
         let Series {
             descendants,
+            more_descendants,
             ancestors,
-            ..
+            more_ancestors,
         } = series;
         let commits: Vec<CommitInfo> = descendants.into_iter().chain(ancestors).collect();
         let kinds = match syncer.classify_chain(&project, &commits) {
@@ -68,7 +82,15 @@ pub async fn read(
                 return None;
             }
         };
-        Some(cut(&sha, commits.into_iter().zip(kinds).collect()))
+        let all = commits.len();
+        let entries = cut(&sha, commits.into_iter().zip(kinds).collect());
+        // Cut at a Gerrit patch set: nothing more belongs to this chain.
+        let more_below = more_ancestors && entries.len() == all;
+        Some(Chain {
+            entries,
+            more_above: more_descendants,
+            more_below,
+        })
     })
     .await
 }

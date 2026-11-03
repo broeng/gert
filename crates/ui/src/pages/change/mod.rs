@@ -1185,8 +1185,8 @@ impl ChangePage {
         let (syncer, checkouts) = (self.session.syncer().clone(), self.checkouts.clone());
         self.related_task = Some(cx.spawn(async move |this, cx| {
             let read = local_chain::read(checkouts, project, sha.clone(), syncer, cx).await;
-            if let Some(entries) = read {
-                this.update(cx, |this, cx| this.apply_git_chain(&sha, entries, cx))
+            if let Some(chain) = read {
+                this.update(cx, |this, cx| this.apply_git_chain(&sha, chain, cx))
                     .ok();
             }
         }));
@@ -1195,7 +1195,7 @@ impl ChangePage {
     fn apply_git_chain(
         &mut self,
         sha: &RevisionId,
-        entries: Vec<local_chain::ChainEntry>,
+        chain: local_chain::Chain,
         cx: &mut Context<Self>,
     ) {
         let current = self
@@ -1207,7 +1207,15 @@ impl ChangePage {
             return;
         }
         let mut summaries = HashMap::new();
-        let rows: Vec<ChainRow> = entries
+        let more = || ChainRow {
+            label: "\u{2026}".to_owned(),
+            subject: "more commits not shown".to_owned(),
+            this: false,
+            open: None,
+            related: None,
+        };
+        let rows: Vec<ChainRow> = chain
+            .entries
             .iter()
             .map(|e| {
                 let this = e.commit.sha == *sha;
@@ -1283,6 +1291,13 @@ impl ChangePage {
                     related,
                 }
             })
+            .collect();
+        let rows: Vec<ChainRow> = chain
+            .more_above
+            .then(more)
+            .into_iter()
+            .chain(rows)
+            .chain(chain.more_below.then(more))
             .collect();
         // As for Gerrit's chain: the same rows again stay where the user
         // scrolled them.
