@@ -23,6 +23,7 @@ use crate::{
     filters::{FileStyle, skips},
     local_source::LocalLazy,
     session::Session,
+    timing::{self, Steps},
 };
 
 /// How many results the cache keeps (and so the longest queue that is
@@ -174,10 +175,12 @@ impl SyntaxCache {
                 let syncer = syncer.clone();
                 let job = key.clone();
                 let local = local.clone();
+                let mut steps = Steps::start();
                 let result = cx
-                    .background_spawn(
-                        async move { highlight_key(syncer, job, can_sync, local).await },
-                    )
+                    .background_spawn(async move {
+                        steps.lap("queued");
+                        highlight_key(syncer, job, can_sync, local, steps).await
+                    })
                     .await;
                 let stored = this.update(cx, |this, cx| {
                     match result {
@@ -257,15 +260,26 @@ pub fn ahead_paths<'a>(
 }
 
 /// Gets the diff (cache first, then the checkout, the network for a miss) and highlights it.
-/// Blocking: call from the background executor.
+/// Blocking: call from the background executor. Logs `steps` (see
+/// [`crate::timing`]): it shares the executor with the pages' own loads.
 async fn highlight_key(
     syncer: Syncer,
     key: DiffKey,
     can_sync: bool,
     local: LocalLazy,
+    mut steps: Steps,
 ) -> Result<Highlight, crate::diff_load::LoadError> {
     let (diff, _) = load_diff(syncer, key.clone(), can_sync, local).await?;
-    Ok(highlight_diff(&key.path, &diff))
+    steps.lap("diff");
+    let highlight = highlight_diff(&key.path, &diff);
+    steps.lap("highlighting");
+    log::debug!(
+        target: timing::TARGET,
+        "highlighting {} of change {} ahead: {steps}",
+        key.path,
+        key.change
+    );
+    Ok(highlight)
 }
 
 #[cfg(test)]

@@ -22,7 +22,10 @@ use gpui_kit::*;
 use local_git::{Comparison, Local, NotLocal, Repo};
 use model::{COMMIT_MSG_PATH, Diff, DiffKey, FileEntry, FilesKey, RevisionId};
 
-use crate::checkouts::{CheckoutState, Checkouts};
+use crate::{
+    checkouts::{CheckoutState, Checkouts},
+    timing::{self, Steps},
+};
 
 struct Core {
     repo: Repo,
@@ -363,7 +366,8 @@ pub fn lookup(
 /// Opens (waiting for an open in flight) the checkout of `project` and
 /// resolves `files` in it. [`Unserved::NoCheckout`] when there is no usable
 /// checkout or this takes longer than [`RESOLVE_TIMEOUT`] (logged), the
-/// resolve's reason when it cannot serve the comparison.
+/// resolve's reason when it cannot serve the comparison. Logs its steps'
+/// timing (see [`timing`]).
 async fn resolve_source(
     checkouts: &Entity<Checkouts>,
     project: &str,
@@ -372,18 +376,33 @@ async fn resolve_source(
 ) -> Resolved {
     let timer = cx.background_executor().timer(RESOLVE_TIMEOUT);
     let work = async {
+        let mut steps = Steps::start();
         let Some(ck) = Checkouts::opened(checkouts, project, cx).await else {
-            return Err(Unserved::NoCheckout);
+            return (Err(Unserved::NoCheckout), steps);
         };
+        steps.lap("opening");
         let CheckoutState::Open(repo) = ck.state else {
-            return Err(Unserved::NoCheckout);
+            return (Err(Unserved::NoCheckout), steps);
         };
         let files = files.clone();
-        cx.background_spawn(async move { LocalSource::resolve(repo, &files) })
-            .await
+        cx.background_spawn(async move {
+            steps.lap("queued");
+            let resolved = LocalSource::resolve(repo, &files);
+            steps.lap("git");
+            (resolved, steps)
+        })
+        .await
     };
     match futures::future::select(std::pin::pin!(work), std::pin::pin!(timer)).await {
-        Either::Left((source, _)) => source,
+        Either::Left(((source, steps), _)) => {
+            log::debug!(
+                target: timing::TARGET,
+                "resolving change {} in the checkout of {project}: {} in {steps}",
+                files.change,
+                if source.is_ok() { "served" } else { "not served" },
+            );
+            source
+        }
         Either::Right(_) => {
             log::warn!(
                 "the local checkout of {project} did not answer in {RESOLVE_TIMEOUT:?}; \
@@ -397,18 +416,36 @@ async fn resolve_source(
 /// The file list of the lazy source and the checkout it was made in, or
 /// `None` when there is no source, git cannot list it, or git takes longer
 /// than [`RESOLVE_TIMEOUT`] (logged). Call from a foreground task; git runs
-/// on the background executor.
+/// on the background executor. Logs its steps' timing (see [`timing`]);
+/// `files` is the comparison, for that line.
 pub async fn local_file_list(
     lazy: LocalLazy,
+    files: &FilesKey,
     cx: &mut AsyncApp,
 ) -> Option<(std::path::PathBuf, Vec<FileEntry>)> {
     let timer = cx.background_executor().timer(RESOLVE_TIMEOUT);
+    let mut steps = Steps::start();
     let work = cx.background_spawn(async move {
-        let source = lazy.get().await?;
-        Some((source.path().to_owned(), source.file_list()?))
+        steps.lap("queued");
+        let source = lazy.get().await;
+        steps.lap("waiting for the checkout");
+        let made = source.and_then(|s| Some((s.path().to_owned(), s.file_list()?)));
+        steps.lap("git");
+        (made, steps)
     });
     match futures::future::select(std::pin::pin!(work), std::pin::pin!(timer)).await {
-        Either::Left((made, _)) => made,
+        Either::Left(((made, steps), _)) => {
+            log::debug!(
+                target: timing::TARGET,
+                "local file list of change {}: {} in {steps}",
+                files.change,
+                match &made {
+                    Some((_, list)) => format!("{} files", list.len()),
+                    None => "none".to_owned(),
+                },
+            );
+            made
+        }
         Either::Right(_) => {
             log::warn!("the local file list took longer than {RESOLVE_TIMEOUT:?}; asking Gerrit");
             None

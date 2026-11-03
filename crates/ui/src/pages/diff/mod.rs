@@ -42,7 +42,7 @@ use crate::{
         DiffEvent, DiffSizing, DiffStatus, DiffView, ThreadContext,
         actions::{NextFile, PrevFile},
     },
-    diff_load::{DiffSource, LoadError, context_label, load_diff},
+    diff_load::{DiffSource, LoadError, context_label, load_diff, outcome},
     file_list::{Ask, FileList, FileListEvent, Files, Seed, seed_of},
     filters::{FileMatcher, FileStyle, next_unskipped, skips},
     hint::Hint,
@@ -56,6 +56,7 @@ use crate::{
     settings::{DiffSettings, FileFilters},
     syntax_cache::{Highlight, SyntaxCache, ahead_paths, diff_key, is_magic},
     theme::chip_colors,
+    timing::{self, Steps},
 };
 use prefs::{next_context, next_tab_size, next_whitespace, whitespace_label};
 
@@ -145,6 +146,9 @@ pub struct DiffPage {
     /// A `]` (true) or `[` pressed before the file list was loaded, done
     /// once it is.
     pending_step: Option<bool>,
+    /// The steps of opening the page, until its first diff is shown and
+    /// they are logged (see [`timing`]).
+    first_load: Option<Steps>,
     _subs: Vec<Subscription>,
 }
 
@@ -203,6 +207,7 @@ impl DiffPage {
             outbox,
             want_thread,
             pending_step: None,
+            first_load: Some(Steps::start()),
             _subs: Vec::new(),
         };
         this._subs
@@ -298,6 +303,9 @@ impl DiffPage {
         if !self.files.settled {
             return;
         }
+        if self.key.is_none() {
+            self.lap_first_load("file list");
+        }
         self.fetch(cx);
         if let Some(forward) = self.pending_step.take() {
             self.step_file(forward, cx);
@@ -335,6 +343,7 @@ impl DiffPage {
     }
 
     fn loaded(&mut self, l: Loaded, cx: &mut Context<Self>) {
+        self.lap_first_load("change and stored list");
         self.detail = l.detail;
         let step = self.pending_step.take();
         if let Some(e) = l.error {
@@ -429,16 +438,52 @@ impl DiffPage {
         // the local source only after the store missed.
         let local = self.files.local_lazy();
         self.task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(load_diff(syncer, key.clone(), can_sync, local))
+            let asked = std::time::Instant::now();
+            let task_key = key.clone();
+            let (queued, result) = cx
+                .background_spawn(async move {
+                    let queued = asked.elapsed();
+                    (queued, load_diff(syncer, task_key, can_sync, local).await)
+                })
                 .await;
             this.update(cx, |this, cx| {
+                this.lap_first_load("diff");
+                let outcome = outcome(&result);
                 this.diff_arrived(key, result, cx);
+                this.log_first_load(&outcome, queued);
                 cx.notify();
             })
             .ok();
         }));
         cx.notify();
+    }
+
+    fn lap_first_load(&mut self, step: &'static str) {
+        if let Some(steps) = &mut self.first_load {
+            steps.lap(step);
+        }
+    }
+
+    /// Logs how the page got to its first diff, once.
+    fn log_first_load(&mut self, outcome: &str, queued: std::time::Duration) {
+        let Some(mut steps) = self.first_load.take() else {
+            return;
+        };
+        steps.lap("making the view");
+        let list = if self.files.checkout().is_some() {
+            "made in the checkout"
+        } else if self.files.loaded {
+            "stored or from Gerrit"
+        } else {
+            "none"
+        };
+        log::debug!(
+            target: timing::TARGET,
+            "diff page of {} in change {}: {outcome} after {steps}; the diff waited \
+             {queued:.1?} for a thread; file list {list}",
+            self.route.path,
+            self.route.change,
+        );
     }
 
     fn diff_arrived(

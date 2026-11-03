@@ -344,7 +344,7 @@ impl FileList {
         let key = key.clone();
         self.listing = true;
         self.listing_task = Some(cx.spawn(async move |this, cx| {
-            let made = local_file_list(lazy, cx).await;
+            let made = local_file_list(lazy, &key, cx).await;
             this.update(cx, |this, cx| {
                 this.listing = false;
                 match made {

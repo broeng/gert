@@ -5,7 +5,11 @@
 use model::{Diff, DiffContext, DiffKey, PATCHSET_LEVEL_PATH};
 use sync::Syncer;
 
-use crate::{local_source::LocalLazy, session::is_unauthorized};
+use crate::{
+    local_source::LocalLazy,
+    session::is_unauthorized,
+    timing::{self, Steps},
+};
 
 /// Why a diff could not be shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,12 +57,40 @@ pub enum DiffSource {
 /// load: when it cannot serve, the diff comes from Gerrit, except for a
 /// local change or patch set, which only the checkout has. With `can_sync`
 /// false (offline, not signed in) a local diff still shows. Blocking
-/// (SQLite, git, network): call from the background executor.
+/// (SQLite, git, network): call from the background executor. Logs its
+/// steps' timing (see [`timing`]).
 pub async fn load_diff(
     syncer: Syncer,
     key: DiffKey,
     can_sync: bool,
     local: LocalLazy,
+) -> Result<(Diff, DiffSource), LoadError> {
+    let mut steps = Steps::start();
+    let result = load(syncer, &key, can_sync, local, &mut steps).await;
+    log::debug!(
+        target: timing::TARGET,
+        "diff of {} in change {}: {} in {steps}",
+        key.path,
+        key.change,
+        outcome(&result)
+    );
+    result
+}
+
+/// How a load ended, for the timing log.
+pub fn outcome(result: &Result<(Diff, DiffSource), LoadError>) -> String {
+    match result {
+        Ok((_, source)) => format!("{source:?}"),
+        Err(e) => format!("failed ({e})"),
+    }
+}
+
+async fn load(
+    syncer: Syncer,
+    key: &DiffKey,
+    can_sync: bool,
+    local: LocalLazy,
+    steps: &mut Steps,
 ) -> Result<(Diff, DiffSource), LoadError> {
     if key.path == PATCHSET_LEVEL_PATH {
         // Where patch set level comments live; not a file.
@@ -66,17 +98,23 @@ pub async fn load_diff(
             "patch set level comments have no diff".into(),
         ));
     }
-    match syncer.cached_diff(&key) {
+    let cached = syncer.cached_diff(key);
+    steps.lap("store");
+    match cached {
         Ok(Some(cached)) => return Ok((cached.diff, DiffSource::Cache)),
         Ok(None) => {}
         Err(e) => log::warn!("reading cached diff of {}: {e}", key.path),
     }
     // Only now is the checkout needed (it may still be resolving), so a
     // stored diff never waits for git.
-    if let Some(local) = local.get().await
-        && let Some(diff) = local.diff(&key)
-    {
-        return Ok((diff, DiffSource::Local));
+    let local = local.get().await;
+    steps.lap("waiting for the checkout");
+    if let Some(local) = local {
+        let diff = local.diff(key);
+        steps.lap("git");
+        if let Some(diff) = diff {
+            return Ok((diff, DiffSource::Local));
+        }
     }
     if key.is_local() {
         // Gerrit does not have it, and must not be asked.
@@ -89,11 +127,13 @@ pub async fn load_diff(
             "not cached, and not signed in yet".into(),
         ));
     }
-    syncer
-        .refresh_diff(&key)
+    let fetched = syncer
+        .refresh_diff(key)
         .await
         .map(|d| (d, DiffSource::Gerrit))
-        .map_err(|e| LoadError::from_sync(&e))
+        .map_err(|e| LoadError::from_sync(&e));
+    steps.lap("gerrit");
+    fetched
 }
 
 /// How a context reads in the UI.

@@ -44,6 +44,7 @@ mod switcher;
 mod syntax_cache;
 mod theme;
 mod time_fmt;
+mod timing;
 mod tracker;
 mod watching;
 mod window;
