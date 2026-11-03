@@ -852,10 +852,8 @@ impl Syncer {
         run: &mut Run<'_>,
     ) -> Result<(), Problem> {
         if lite.summary.status != ChangeStatus::New {
-            if row.state != LocalChangeState::Closed {
-                self.hold_closed(row, number, &lite.summary.status, run)?;
-            }
-            return Ok(());
+            // Every time: whatever was written since is held too.
+            return self.hold_closed(row, number, &lite.summary.status, run);
         }
         if row.state == LocalChangeState::Closed {
             // Restored: the Gerrit state is open again, but what was held
@@ -917,10 +915,13 @@ impl Syncer {
             .store()
             .hold_closed_local_change(self.server, row.id, number, &reason)
         {
-            Ok(_) => {
-                run.report.closed.push((row.id, number));
+            Ok(Some((reviews, drafts))) => {
+                if row.state != LocalChangeState::Closed || reviews + drafts > 0 {
+                    run.report.closed.push((row.id, number));
+                }
                 Ok(())
             }
+            Ok(None) => Ok(()),
             Err(e @ (store::Error::LocalTarget | store::Error::OtherGerritChange(_))) => {
                 Err(Problem::Skip(e.to_string()))
             }
@@ -1131,7 +1132,7 @@ impl Syncer {
                 .revisions
                 .iter()
                 .filter(|r| r.number > u.patch_set)
-                .any(|r| r.created.is_some_and(|c| c <= ours.date));
+                .any(|r| r.created.is_none_or(|c| c <= ours.date));
             if !newer_first {
                 continue;
             }
@@ -1218,20 +1219,30 @@ impl Syncer {
                     &nonce,
                     &run.claimant(),
                 )?;
-                if let Some(post) = claimed {
-                    self.post_claimed(
-                        row,
-                        number,
-                        detail,
-                        rev,
-                        post,
-                        &nonce,
-                        &mut current,
-                        unverified,
-                        run,
-                    )
-                    .await?;
+                let Some(post) = claimed else {
+                    continue;
+                };
+                // Posted before, and the claim was lost (a power cut
+                // before the store wrote it): settle, do not post again.
+                let prefix = self.review_tag_prefix(row.id, r.id);
+                if let Some(m) = mine_tagged(detail, run.me, |t| t.starts_with(&prefix)) {
+                    let m = m.clone();
+                    self.settle_found(row, number, detail, rev, &post, &nonce, &m, run)
+                        .await?;
+                    continue;
                 }
+                self.post_claimed(
+                    row,
+                    number,
+                    detail,
+                    rev,
+                    post,
+                    &nonce,
+                    &mut current,
+                    unverified,
+                    run,
+                )
+                .await?;
             }
             if !self.postable_comments(row.id, Some(ps))?.is_empty() {
                 let nonce = new_nonce();
@@ -1368,7 +1379,7 @@ impl Syncer {
             }
             return Ok(());
         }
-        let tag = self.local_tag(row.id, nonce);
+        let tag = self.local_tag(row.id, review.map(|r| r.id), nonce);
         let input = ReviewInput {
             labels: send_votes,
             comments: parts.comments.iter().map(|d| d.input()).collect(),
@@ -1584,8 +1595,25 @@ impl Syncer {
         Ok(text)
     }
 
-    fn local_tag(&self, change: LocalChangeId, nonce: &str) -> String {
-        format!("{}-local-{}-{nonce}", self.app_name, change.0)
+    /// The tag of a post: `<app>-local-<change>-r<review>-<nonce>`, or
+    /// `<app>-local-<change>-<nonce>` for a comment-only post. The review
+    /// id lets a run find a review that was posted although its claim was
+    /// lost ([`Syncer::review_tag_prefix`]).
+    fn local_tag(
+        &self,
+        change: LocalChangeId,
+        review: Option<PendingReviewId>,
+        nonce: &str,
+    ) -> String {
+        match review {
+            Some(r) => format!("{}{nonce}", self.review_tag_prefix(change, r)),
+            None => format!("{}-local-{}-{nonce}", self.app_name, change.0),
+        }
+    }
+
+    /// What every tag of review `review`'s posts starts with.
+    fn review_tag_prefix(&self, change: LocalChangeId, review: PendingReviewId) -> String {
+        format!("{}-local-{}-r{}-", self.app_name, change.0, review.0)
     }
 
     // ---- recovery ----
@@ -1618,23 +1646,27 @@ impl Syncer {
             // Never posted: nothing is claimed without a Gerrit change.
             return self.give_up(&row, &post, nonce, PendingReviewState::Pending, None, None);
         };
-        let detail = self.refresh_change(number).await?;
-        let tag = self.local_tag(change, nonce);
+        let detail = match self.refresh_change(number).await {
+            Ok(d) => d,
+            Err(Error::Api(ApiError::NotFound)) => {
+                let why = format!("change {number} is not on Gerrit any more");
+                return self.give_up_gone(&row, &post, nonce, &why);
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let tag = self.local_tag(change, post.review.as_ref().map(|r| r.id), nonce);
         let review_ps = post.review.as_ref().map(|r| r.patch_set);
-        let me = run.me;
-        let message = detail.messages.iter().find(|m| {
-            m.tag.as_deref() == Some(tag.as_str())
-                && (m.author.as_ref().is_some_and(|a| a.id == me)
-                    || m.real_author.as_ref().is_some_and(|a| a.id == me))
-                && (review_ps.is_none() || m.revision.is_none() || m.revision == review_ps)
-        });
+        let message = mine_tagged(&detail, run.me, |t| t == tag)
+            .filter(|m| review_ps.is_none() || m.revision.is_none() || m.revision == review_ps);
         let ps = review_ps
             .or_else(|| message.and_then(|m| m.revision))
             .or_else(|| post.drafts.iter().map(|d| d.patch_set).min());
         let Some(rev) = ps.and_then(|ps| detail.revision(ps)) else {
-            return Err(Problem::Skip(format!(
-                "the interrupted post's patch set is not on change {number}"
-            )));
+            let why = match ps {
+                Some(ps) => format!("PS {} is not on change {number} any more", ps.0),
+                None => format!("the post's patch set is not on change {number}"),
+            };
+            return self.give_up_gone(&row, &post, nonce, &why);
         };
         let Some(message) = message else {
             if detail.summary.status != ChangeStatus::New {
@@ -1658,44 +1690,115 @@ impl Syncer {
             .await?;
             return self.finish_change(&row, number, run);
         };
-        // It arrived. The votes it cast are in its text ("Patch Set 2:
-        // Code-Review+1"): the change's votes cover only the current patch
-        // set. Votes not there were not cast: held for a patch set that is
-        // not current, or not applied.
-        let parts = Parts::of(&post, rev.number);
+        let message = message.clone();
+        self.settle_found(&row, number, &detail, rev, &post, nonce, &message, run)
+            .await?;
+        self.finish_change(&row, number, run)
+    }
+
+    /// Gives up a post whose change or patch set is gone from Gerrit: the
+    /// review fails and the comments are held with `why`, so the claim
+    /// does not lock them for good.
+    fn give_up_gone(
+        &self,
+        row: &LocalChange,
+        post: &LocalPost,
+        nonce: &str,
+        why: &str,
+    ) -> Result<(), Problem> {
+        log::warn!(
+            "consolidation gave a post of local change {} up: {why}",
+            row.id.0
+        );
+        self.give_up(
+            row,
+            post,
+            nonce,
+            PendingReviewState::Failed,
+            Some(why.to_owned()),
+            Some(why),
+        )
+    }
+
+    /// Settles a claimed post that is found on the server already (its
+    /// change message `message`, by the signed-in account): removes the
+    /// drafts that were published with its tag (the others stay for a
+    /// later post) and gives the review the state its votes call for. The
+    /// votes it cast are in the message's text ("Patch Set 2:
+    /// Code-Review+1"); Gerrit leaves unchanged votes out of it, so on the
+    /// current patch set the change's vote list counts too.
+    #[allow(clippy::too_many_arguments)]
+    async fn settle_found(
+        &self,
+        row: &LocalChange,
+        number: ChangeNumber,
+        detail: &ChangeDetail,
+        rev: &Revision,
+        post: &LocalPost,
+        nonce: &str,
+        message: &model::ChangeMessage,
+        run: &mut Run<'_>,
+    ) -> Result<(), Problem> {
+        let parts = Parts::of(post, rev.number);
+        let tag = message.tag.clone().unwrap_or_default();
+        let posted: Vec<(LocalDraftId, u32)> = match self.client.get_comments(number).await {
+            Ok(published) => parts
+                .comments
+                .iter()
+                .filter(|d| {
+                    published.iter().any(|c| {
+                        c.tag.as_deref() == Some(tag.as_str())
+                            && c.path == d.path
+                            && c.patch_set == d.patch_set
+                            && c.message == d.message
+                    })
+                })
+                .map(|d| (d.local_id, d.version))
+                .collect(),
+            Err(e) => {
+                skip_or_stop(e.into())?;
+                parts.posted.clone()
+            }
+        };
         let cast = votes_in_message(&message.message);
+        let current = detail.current_patch_set;
+        let me = run.me;
         let votes: Votes = post
             .review
             .as_ref()
             .map(|r| r.labels.clone().into_iter().collect())
             .unwrap_or_default();
-        let (applied, missing): (Votes, Votes) = votes
-            .into_iter()
-            .partition(|(label, value)| cast.get(label) == Some(value));
-        let current = detail.current_patch_set;
+        let (applied, missing): (Votes, Votes) = votes.into_iter().partition(|(label, value)| {
+            cast.get(label) == Some(value)
+                || (current == Some(rev.number)
+                    && detail.votes.get(label).is_some_and(|all| {
+                        all.iter().any(|v| v.account.id == me && v.value == *value)
+                    }))
+        });
         let settled = if !missing.is_empty() && current == Some(rev.number) {
             let error = format!(
-                "the review was posted, but its message does not show {}",
+                "the review was posted, but Gerrit does not show {}",
                 describe_votes(&missing)
             );
             Some(Settled::failed(missing, error))
         } else if !missing.is_empty() {
             let drop_only =
-                drop_only_labels(&row, &detail, post.review.as_ref(), &missing, run.options);
+                drop_only_labels(row, detail, post.review.as_ref(), &missing, run.options);
             let reason = held_reason(rev.number, current, &missing, &drop_only);
             Some(Settled::held(missing, drop_only, reason))
         } else if !applied.is_empty() && current.is_some_and(|c| c != rev.number) {
             // Cast, on a patch set that is not current now; whether it
-            // was when they arrived, the message's date tells.
+            // was when they arrived, the message's date tells (a patch set
+            // without a time counts as maybe newer).
             let newer_first = detail
                 .revisions
                 .iter()
                 .filter(|r| r.number > rev.number)
-                .any(|r| r.created.is_some_and(|c| c <= message.date));
+                .any(|r| r.created.is_none_or(|c| c <= message.date));
             newer_first.then(|| {
                 let drop_only: BTreeSet<String> = applied
                     .iter()
-                    .filter(|(l, v)| is_approval(&detail, l, *v))
+                    .filter(|(l, v)| is_approval(detail, l, *v))
                     .map(|(l, _)| l.clone())
                     .collect();
                 let reason = landed_reason(rev.number, current.unwrap_or(rev.number), &applied);
@@ -1707,19 +1810,32 @@ impl Syncer {
         let outcome = settled
             .as_ref()
             .map_or(PostOutcome::Sent, |s| s.outcome.clone());
-        self.settle(&row, &post, nonce, &parts.posted, settled)?;
+        self.settle(row, post, nonce, &posted, settled)?;
         run.report.posts.push(PostReport {
-            local_change: change,
+            local_change: row.id,
             change: number,
             patch_set: rev.number,
             review: post.review.as_ref().map(|r| r.id),
-            comments: parts.comments.len(),
+            comments: posted.len(),
             votes: applied,
             recovered: true,
             outcome,
         });
-        self.finish_change(&row, number, run)
+        Ok(())
     }
+}
+
+/// The newest change message by `me` whose tag `matches`.
+fn mine_tagged(
+    detail: &ChangeDetail,
+    me: AccountId,
+    matches: impl Fn(&str) -> bool,
+) -> Option<&model::ChangeMessage> {
+    detail.messages.iter().rev().find(|m| {
+        m.tag.as_deref().is_some_and(&matches)
+            && (m.author.as_ref().is_some_and(|a| a.id == me)
+                || m.real_author.as_ref().is_some_and(|a| a.id == me))
+    })
 }
 
 /// What a claimed post sends to one revision.
@@ -1807,8 +1923,23 @@ fn votes_after(
             .filter(|(l, v)| is_approval(detail, l, *v))
             .map(|(l, _)| l.clone())
             .collect();
-        let reason = landed_reason(ps, current, &cast);
-        return Some(Settled::held(cast, drop_only, reason));
+        // Votes Gerrit did not take at all are held too, not lost.
+        let dropped = input.unapplied_labels(result);
+        let mut reason = if cast.is_empty() {
+            format!("PS {} was no longer current (PS {} is).", ps.0, current.0)
+        } else {
+            landed_reason(ps, current, &cast)
+        };
+        if !dropped.is_empty() {
+            reason.push_str(&format!(
+                " Gerrit did not apply {}.",
+                describe_votes(&dropped)
+            ));
+        }
+        let mut held = cast;
+        held.extend(dropped);
+        held.sort();
+        return Some(Settled::held(held, drop_only, reason));
     }
     let dropped = input.unapplied_labels(result);
     if dropped.is_empty() {

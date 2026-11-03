@@ -37,6 +37,29 @@ struct Http {
     queued: Arc<Mutex<Vec<Queued>>>,
     /// Answers built from the bodies of the posts so far, for one needle.
     dynamic: Arc<Mutex<Option<Dynamic>>>,
+    /// Every answer waits for one turn of the executor first, so that
+    /// two runs joined on one thread interleave.
+    yielding: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Pending once, then ready: lets other futures of a `join` run.
+struct YieldOnce(bool);
+
+impl std::future::Future for YieldOnce {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            std::task::Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
 }
 
 /// A needle and how to answer it from the posts' bodies so far.
@@ -132,7 +155,11 @@ impl HttpClient for Http {
                 .contains(needle.as_str())
                 .then(|| (200, format!(")]}}'\n{}", answer(&self.posts()))))
         });
+        let yielding = self.yielding.load(std::sync::atomic::Ordering::SeqCst);
         async move {
+            if yielding {
+                YieldOnce(false).await;
+            }
             let routed = routed.await;
             match over {
                 Some((0, why)) => Err(HttpError(why)),
@@ -1558,4 +1585,259 @@ fn a_second_run_in_the_same_process_waits_for_the_first() {
     f.gerrit("NEW", &["s1"], json!([]));
     f.posts_apply(json!({"Code-Review": 1}), 1);
     assert!(f.run().ran);
+}
+
+// ---- second review round ----
+
+#[test]
+fn losing_the_lease_mid_run_stops_before_the_next_post() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let first = f.review(&v[0], &[("Code-Review", 1)], "first");
+    let second = f.review(&v[0], &[("Verified", 1)], "second");
+    f.gerrit("NEW", &["s1"], json!([]));
+    // While the first post is answered, another run takes the lease over
+    // (as if this run's had expired).
+    let store = f.syncer.store.clone();
+    let server = f.syncer.server;
+    f.http.respond("/review", move |_| {
+        let far = Timestamp::now()
+            .checked_add(SignedDuration::from_hours(1))
+            .unwrap();
+        let later = far.checked_add(SignedDuration::from_hours(1)).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .take_consolidation_lease(server, "intruder", far, later)
+            .unwrap();
+        json!({"labels": {"Code-Review": 1}, "change_info": {"current_revision_number": 1}})
+    });
+    let report = f.run();
+    assert!(
+        matches!(report.stopped, Some(Error::LeaseLost)),
+        "{report:?}"
+    );
+    assert_eq!(f.http.posts().len(), 1, "no post after the lease was lost");
+    assert_eq!(f.reloaded(&first).state, PendingReviewState::Sent);
+    assert_eq!(f.reloaded(&second).state, PendingReviewState::Pending);
+    assert!(
+        f.syncer
+            .store()
+            .unfinished_local_posts(f.syncer.server)
+            .unwrap()
+            .is_empty()
+    );
+    // The intruder's lease is not ended by this run.
+    let now = Timestamp::now();
+    assert!(
+        !f.syncer
+            .store()
+            .take_consolidation_lease(f.syncer.server, "someone", now, now)
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_refused_post_holds_only_its_own_revisions_comments() {
+    let f = fx();
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1", "s2"]);
+    let on1 = f.draft(&row, &v[0], "on PS 1");
+    let on2 = f.draft(&row, &v[1], "on PS 2");
+    let r = f.review(&v[1], &[("Code-Review", 1)], "");
+    f.gerrit("NEW", &["s1", "s2"], json!([]));
+    f.posts_apply(json!({}), 2);
+    // The post to PS 2 is refused; PS 1's comment-only post goes through.
+    f.http
+        .queue("POST /changes/7/revisions/s2/review", 400, "bad line");
+    f.run();
+    let targets = f.http.post_targets();
+    assert_eq!(targets.len(), 2, "{targets:?}");
+    assert!(targets[0].contains("/revisions/s1/review"));
+    assert!(targets[1].contains("/revisions/s2/review"));
+    assert_eq!(f.load_draft(&on1), None, "posted on PS 1");
+    assert_eq!(
+        f.load_draft(&on2).unwrap().held_reason.as_deref(),
+        Some("Gerrit refused the post: bad line")
+    );
+    assert_eq!(f.reloaded(&r).state, PendingReviewState::Failed);
+}
+
+#[test]
+fn recovery_gives_a_post_up_when_its_change_is_gone() {
+    let f = fx();
+    let (_, d, r, _) = interrupted(&f);
+    f.http.routes.route("/changes/7?", 404, "Not found: 7");
+    let report = f.run();
+    assert!(report.stopped.is_none(), "{report:?}");
+    let r = f.reloaded(&r);
+    assert_eq!(r.state, PendingReviewState::Failed);
+    assert_eq!(
+        r.error.as_deref(),
+        Some("change 7 is not on Gerrit any more")
+    );
+    assert_eq!(
+        f.load_draft(&d).unwrap().held_reason.as_deref(),
+        Some("change 7 is not on Gerrit any more")
+    );
+    assert!(
+        f.syncer
+            .store()
+            .unfinished_local_posts(f.syncer.server)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(f.http.posts().len(), 1);
+}
+
+#[test]
+fn recovery_gives_a_post_up_when_its_patch_set_is_gone() {
+    let f = fx();
+    let (_, d, r, _) = interrupted(&f);
+    // PS 1 was deleted (only PS 2 is listed).
+    let mut c = change_json("NEW", &["s1", "s2"], json!([]));
+    c["revisions"].as_object_mut().unwrap().remove("s1");
+    f.gerrit_json(c);
+    f.run();
+    let r = f.reloaded(&r);
+    assert_eq!(r.state, PendingReviewState::Failed);
+    assert_eq!(r.error.as_deref(), Some("PS 1 is not on change 7 any more"));
+    assert!(f.load_draft(&d).unwrap().held_reason.is_some());
+    assert_eq!(f.http.posts().len(), 1);
+    f.assert_nothing_local(&[]);
+}
+
+#[test]
+fn a_draft_written_while_closed_stays_held_after_a_restore() {
+    let f = fx_with(eager());
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    f.review(&v[0], &[("Code-Review", 1)], "");
+    f.gerrit("ABANDONED", &["s1"], json!([]));
+    f.run();
+    assert_eq!(f.row(&row).state, LocalChangeState::Closed);
+    // Written while closed: held at once.
+    let late = f.draft(&row, &v[0], "written while closed");
+    assert!(late.held_reason.is_some());
+    f.run();
+    // Restored: nothing goes out.
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.posts_apply(json!({}), 1);
+    let report = f.run();
+    assert_eq!(report.reopened, [(row.id, CHANGE)]);
+    f.run();
+    assert!(f.http.posts().is_empty());
+    assert!(f.load_draft(&late).unwrap().held_reason.is_some());
+}
+
+#[test]
+fn a_review_posted_before_a_lost_claim_is_not_posted_again() {
+    let f = fx();
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let posted = f.draft(&row, &v[0], "a comment");
+    let r = f.review(&v[0], &[("Code-Review", 1)], "LGTM");
+    // Written after the lost post: still to send.
+    let later = f.draft(&row, &v[0], "written later");
+    // The change shows the review's post (its tag names the review), and
+    // the comments it published; the store lost the claim and the result.
+    let tag = format!("client-local-{}-r{}-lostnonce", row.id.0, r.id.0);
+    let mut c = change_json(
+        "NEW",
+        &["s1"],
+        json!([{"id": "m1", "author": {"_account_id": ME}, "date": "2024-01-03 00:00:00.000000000",
+                "message": "Patch Set 1: Code-Review+1\n\n(2 comments)", "tag": tag,
+                "_revision_number": 1}]),
+    );
+    c["labels"]["Code-Review"]["all"] = json!([{"_account_id": ME, "value": 1}]);
+    f.gerrit_json(c);
+    let comment = |path: &str, line: Option<u32>, message: &str| {
+        let mut c = json!({"id": message, "patch_set": 1, "message": message, "tag": tag,
+                           "updated": "2024-01-03 00:00:00.000000000",
+                           "author": {"_account_id": ME}, "unresolved": false});
+        if let Some(l) = line {
+            c["line"] = json!(l);
+        }
+        let _ = path;
+        c
+    };
+    f.http.routes.route_json(
+        "/changes/7/comments",
+        &json!({
+            "src/a.rs": [comment("src/a.rs", Some(7), "a comment")],
+            "/PATCHSET_LEVEL": [comment("/PATCHSET_LEVEL", None, "LGTM")],
+        })
+        .to_string(),
+    );
+    f.posts_apply(json!({}), 1);
+    let report = f.run();
+    assert_eq!(f.reloaded(&r).state, PendingReviewState::Sent, "{report:?}");
+    assert_eq!(f.load_draft(&posted), None);
+    // Only the later comment goes out, in a comment-only post.
+    let posts = f.http.posts();
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    assert!(posts[0].get("labels").is_none());
+    assert_eq!(
+        posts[0]["comments"]["src/a.rs"][0]["message"],
+        "written later"
+    );
+    assert!(posts[0]["comments"].get(PATCHSET_LEVEL_PATH).is_none());
+    assert_eq!(f.load_draft(&later), None);
+    f.assert_nothing_local(&[]);
+}
+
+#[test]
+fn two_runs_joined_on_one_thread_do_not_both_post() {
+    let a = fx();
+    let (_, v) = a.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    a.review(&v[0], &[("Code-Review", 1)], "");
+    let b = fx_on(a.syncer.store.clone(), a.syncer.server, quick());
+    for f in [&a, &b] {
+        f.http
+            .yielding
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        f.gerrit("NEW", &["s1"], json!([]));
+        f.posts_apply(json!({"Code-Review": 1}), 1);
+    }
+    let options = ConsolidateOptions::default();
+    let (ra, rb) = block_on(futures::future::join(
+        a.syncer.consolidate(&options),
+        b.syncer.consolidate(&options),
+    ));
+    assert_eq!(u8::from(ra.ran) + u8::from(rb.ran), 1, "{ra:?} {rb:?}");
+    assert_eq!(a.http.posts().len() + b.http.posts().len(), 1);
+}
+
+#[test]
+fn recovery_counts_an_unchanged_vote_the_change_shows() {
+    let f = fx();
+    let (_, _, r, tag) = interrupted(&f);
+    // Gerrit leaves a vote that did not change out of the message; the
+    // change's votes (current patch set) show it.
+    let mut c = change_json(
+        "NEW",
+        &["s1"],
+        json!([{"id": "m1", "author": {"_account_id": ME}, "date": "2024-01-03 00:00:00.000000000",
+                "message": "Patch Set 1:\n\n(2 comments)", "tag": tag, "_revision_number": 1}]),
+    );
+    c["labels"]["Code-Review"]["all"] = json!([{"_account_id": ME, "value": 2}]);
+    f.gerrit_json(c);
+    f.run();
+    assert_eq!(f.reloaded(&r).state, PendingReviewState::Sent);
+    assert_eq!(f.http.posts().len(), 1);
+}
+
+#[test]
+fn votes_gerrit_drops_after_a_new_patch_set_are_held_too() {
+    let f = fx();
+    let (_, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let r = f.review(&v[0], &[("Code-Review", 2), ("Verified", 1)], "");
+    f.gerrit("NEW", &["s1"], json!([]));
+    f.posts_apply(json!({"Code-Review": 2}), 2);
+    f.run();
+    let r = f.reloaded(&r);
+    assert_eq!(r.state, PendingReviewState::Held);
+    assert_eq!(r.labels.len(), 2);
+    assert!(
+        r.held_reason
+            .unwrap()
+            .contains("Gerrit did not apply Verified +1")
+    );
 }
