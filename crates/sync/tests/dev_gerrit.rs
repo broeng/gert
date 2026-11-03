@@ -650,7 +650,7 @@ fn consolidation_posts_one_tagged_review_and_keeps_other_drafts() {
     assert_eq!(code, 201, "{body}");
     let (row, review) = f.local_review_of(n, &ps, &[("Code-Review", 1)]);
 
-    let report = block_on(syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    let report = block_on(syncer.consolidate(&sync::ConsolidateOptions::default()));
     assert!(
         report.stopped.is_none() && report.errors.is_empty(),
         "{report:?}"
@@ -709,7 +709,7 @@ fn consolidation_posts_one_tagged_review_and_keeps_other_drafts() {
     );
 
     // Nothing left to send: the next run posts nothing.
-    let report = block_on(syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    let report = block_on(syncer.consolidate(&sync::ConsolidateOptions::default()));
     assert!(report.posts.is_empty(), "{report:?}");
     assert_eq!(tagged(n, tag).len(), 1);
 }
@@ -722,13 +722,22 @@ fn a_post_whose_answer_was_lost_is_found_by_its_tag_and_not_sent_again() {
     let ps = current_ps(&f, n);
     let (_, review) = f.local_review_of(n, &ps, &[("Code-Review", 1)]);
     f.lose_review_answer.store(true, Ordering::SeqCst);
-    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default()));
     assert!(report.stopped.is_some(), "{report:?}");
     let sending = f.review_now(&review);
     assert_eq!(sending.state, model::PendingReviewState::Sending);
     let nonce = sending.nonce.unwrap();
 
-    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    // A real run waits `CLAIM_STALE` before it recovers another run's
+    // post; this test has no other run, so it recovers at once.
+    let quick = f
+        .syncer
+        .clone()
+        .with_consolidation_timing(sync::ConsolidationTiming {
+            claim_stale: jiff::SignedDuration::from_secs(-1),
+            ..sync::ConsolidationTiming::default()
+        });
+    let report = block_on(quick.consolidate(&sync::ConsolidateOptions::default()));
     assert!(report.stopped.is_none(), "{report:?}");
     assert_eq!(report.posts.len(), 1);
     assert!(report.posts[0].recovered, "{report:?}");
@@ -795,7 +804,7 @@ fn gerrit_takes_votes_on_an_older_patch_set_and_drops_unknown_labels() {
     let older = detail.revision(model::PatchSetNumber(1)).unwrap().as_ref();
     // PS 1 has no probe.txt: comment on the commit message instead.
     let (row, review) = f.local_review_of_commit_message(m, &older, &[("Code-Review", 2)]);
-    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default()));
     assert!(report.stopped.is_none(), "{report:?}");
     let held = f.review_now(&review);
     assert_eq!(held.state, model::PendingReviewState::Held, "{report:?}");
@@ -882,7 +891,7 @@ fn a_restricted_vote_is_refused_and_the_comments_still_go_out() {
     );
 
     let (_, review) = f.local_review_of(n, &ps, &[("Code-Review", 2)]);
-    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default())).unwrap();
+    let report = block_on(f.syncer.consolidate(&sync::ConsolidateOptions::default()));
     assert!(report.stopped.is_none(), "{report:?}");
     let failed = f.review_now(&review);
     assert_eq!(

@@ -21,7 +21,8 @@ pub use error::{Error, PendingDraft};
 pub use events::diff_change;
 pub use poll::{PollPolicy, PollState};
 pub use syncer::{
-    ChainCommit, CommentsView, ConsolidateOptions, ConsolidateReport, DraftCounts, DraftSave,
-    FoundChange, NewChange, PostOutcome, PostReport, PublishOutcome, QueryUpdate, RefreshSource,
-    RetryReport, ReviewerAdded, Syncer, WatchOptions,
+    CLAIM_STALE, ChainCommit, CommentsView, ConsolidateOptions, ConsolidateReport,
+    ConsolidationTiming, DraftCounts, DraftSave, FoundChange, NewChange, PostOutcome, PostReport,
+    PublishOutcome, QueryUpdate, RefreshSource, RetryReport, ReviewerAdded, SLOW_RECHECK, Syncer,
+    WatchOptions,
 };

@@ -54,10 +54,9 @@ pub struct Syncer {
     /// (uploads, publishing, refreshing the draft list), so that a refresh
     /// never sees a draft that is uploaded but not yet recorded as such.
     drafts_lock: Arc<futures::lock::Mutex<()>>,
-    /// Lets one consolidation run at a time (see [`Syncer::consolidate`]).
-    consolidate_lock: Arc<futures::lock::Mutex<()>>,
     /// Starts the tag of the reviews consolidation posts.
     app_name: Arc<str>,
+    consolidation_timing: ConsolidationTiming,
 }
 
 impl Syncer {
@@ -67,8 +66,8 @@ impl Syncer {
             store,
             server,
             drafts_lock: Arc::default(),
-            consolidate_lock: Arc::default(),
             app_name: DEFAULT_APP_NAME.into(),
+            consolidation_timing: ConsolidationTiming::default(),
         }
     }
 
@@ -433,7 +432,8 @@ mod watch;
 pub use actions::NewChange;
 pub use comments::{CommentsView, DraftSave, PublishOutcome, RetryReport};
 pub use consolidate::{
-    ConsolidateOptions, ConsolidateReport, FoundChange, PostOutcome, PostReport,
+    CLAIM_STALE, ConsolidateOptions, ConsolidateReport, ConsolidationTiming, FoundChange,
+    PostOutcome, PostReport, SLOW_RECHECK,
 };
 pub use edits::ReviewerAdded;
 pub use local::ChainCommit;

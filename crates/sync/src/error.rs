@@ -15,6 +15,11 @@ pub enum Error {
     /// (a local patch set not known to be on Gerrit). Nothing was sent.
     #[error("commit {} exists only in the local checkout, not on the server", .0.short(12))]
     Local(RevisionId),
+    /// A consolidation run lost the server's consolidation lease (it was
+    /// held up longer than the lease lasts, and another run took over), so
+    /// it stopped before sending anything more.
+    #[error("another consolidation run took over")]
+    LeaseLost,
 }
 
 impl Error {
