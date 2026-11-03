@@ -242,7 +242,7 @@ fn a_round_skips_the_scan_until_the_refs_or_the_cache_move(cx: &mut TestAppConte
     assert_eq!(s.full_scans(cx), scans + 1);
 
     // The first commit was pushed for review (no local ref moves) and
-    // its change detail is cached: the cache generation moves, and the
+    // its change detail is cached: the generation moves, and the
     // change is no longer local.
     let mut d = detail(42, 1, 1);
     d.summary.project = "p".into();
@@ -262,6 +262,123 @@ fn a_round_skips_the_scan_until_the_refs_or_the_cache_move(cx: &mut TestAppConte
     s.assert_no_local_number_sent(&f);
 }
 
+/// A draft on the first version of the local change with `change_id`.
+fn draft_on(store: &Mutex<Store>, change_id: &str) -> model::Draft {
+    let mut store = store.lock().expect("store");
+    let row = store
+        .local_changes_by_change_id(SERVER, change_id)
+        .expect("rows")
+        .remove(0);
+    let version = store
+        .local_patch_sets(SERVER, row.id)
+        .expect("versions")
+        .remove(0);
+    let input = DraftInput {
+        path: "a.rs".into(),
+        side: Side::Revision,
+        parent: None,
+        location: Location::Line(1),
+        in_reply_to: None,
+        message: "keep me".into(),
+        unresolved: true,
+    };
+    let target = PatchSetRef {
+        number: version.number,
+        sha: version.sha,
+    };
+    store
+        .create_draft(SERVER, row.number, &target, &input, ts())
+        .expect("draft")
+}
+
+#[gpui_kit::test]
+fn a_change_merged_on_gerrit_goes_once_a_query_shows_it(cx: &mut TestAppContext) {
+    let f = fixture();
+    f.own("Merged elsewhere", ID_A);
+    f.own("Still mine", ID_B);
+    let s = start(cx, &f, Some("u"), true);
+    assert_eq!(s.subjects(cx), ["Merged elsewhere", "Still mine"]);
+    let scans = s.full_scans(cx);
+    // Only a summary, as a dashboard query caches it: no detail, and no
+    // local ref moves.
+    let mut merged = summary(77);
+    merged.project = "p".into();
+    merged.change_id = Some(ID_A.into());
+    merged.status = model::ChangeStatus::Merged;
+    s.store
+        .lock()
+        .expect("store")
+        .save_query_page(SERVER, "status:merged", &[merged], false, ts())
+        .expect("save query");
+    s.rescan(cx);
+    assert_eq!(s.full_scans(cx), scans + 1);
+    assert_eq!(s.subjects(cx), ["Still mine"]);
+}
+
+#[gpui_kit::test]
+fn unsent_data_coming_and_going_is_seen_without_a_ref_moving(cx: &mut TestAppContext) {
+    let f = fixture();
+    f.own("Keeps a draft", ID_A);
+    let s = start(cx, &f, Some("u"), true);
+    assert_eq!(s.subjects(cx), ["Keeps a draft"]);
+    let draft = draft_on(&s.store, ID_A);
+    let scans = s.full_scans(cx);
+    s.rescan(cx);
+    assert_eq!(s.full_scans(cx), scans + 1, "the row has unsent data now");
+    s.rescan(cx);
+    assert_eq!(s.full_scans(cx), scans + 1);
+
+    // The commit leaves the branch: the row stays, dimmed, for its draft.
+    f.repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    s.rescan(cx);
+    let page = s.page(cx);
+    let state = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            page.read(cx)
+                .local_rows()
+                .iter()
+                .map(|c| c.state)
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(state(cx), [LocalChangeState::Vanished]);
+    s.rescan(cx);
+    assert_eq!(s.full_scans(cx), scans + 2, "settled");
+
+    // The draft is deleted (no ref moves): the row goes.
+    s.store
+        .lock()
+        .expect("store")
+        .delete_draft(SERVER, draft.local_id)
+        .expect("delete");
+    s.rescan(cx);
+    assert_eq!(s.full_scans(cx), scans + 3);
+    assert!(state(cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_truncated_scan_drops_nothing_and_settles(cx: &mut TestAppContext) {
+    let f = fixture();
+    f.own("Older", ID_A);
+    f.own("Newer", ID_B);
+    let s = start(cx, &f, Some("u"), true);
+    assert_eq!(s.subjects(cx), ["Newer", "Older"]);
+    let scanner = s.scanner(cx).expect("a scanner");
+    scanner.update(cx, |s, _| s.set_limit(1));
+    let scans = s.full_scans(cx);
+    s.rescan(cx);
+    assert_eq!(s.full_scans(cx), scans + 1);
+    // Only the newest commit was seen, but the older change is not taken
+    // as gone, and the round settled.
+    assert_eq!(s.subjects(cx), ["Newer", "Older"]);
+    s.rescan(cx);
+    assert_eq!(s.full_scans(cx), scans + 1);
+    // A newer commit is still picked up.
+    f.own("Newest", ID_C);
+    s.rescan(cx);
+    assert_eq!(s.subjects(cx), ["Newer", "Newest", "Older"]);
+}
+
 #[gpui_kit::test]
 fn turning_the_option_off_removes_the_rows_without_unsent_data(cx: &mut TestAppContext) {
     let f = fixture();
@@ -269,33 +386,7 @@ fn turning_the_option_off_removes_the_rows_without_unsent_data(cx: &mut TestAppC
     f.own("With a draft", ID_B);
     let s = start(cx, &f, Some("u"), true);
     assert_eq!(s.subjects(cx), ["Plain", "With a draft"]);
-    {
-        let mut store = s.store.lock().expect("store");
-        let row = store
-            .local_changes_by_change_id(SERVER, ID_B)
-            .expect("rows")
-            .remove(0);
-        let version = store
-            .local_patch_sets(SERVER, row.id)
-            .expect("versions")
-            .remove(0);
-        let input = DraftInput {
-            path: "a.rs".into(),
-            side: Side::Revision,
-            parent: None,
-            location: Location::Line(1),
-            in_reply_to: None,
-            message: "keep me".into(),
-            unresolved: true,
-        };
-        let target = PatchSetRef {
-            number: version.number,
-            sha: version.sha,
-        };
-        store
-            .create_draft(SERVER, row.number, &target, &input, ts())
-            .expect("draft");
-    }
+    draft_on(&s.store, ID_B);
     let scans = s.full_scans(cx);
 
     // Saving the projects (the settings page does this) reaches the

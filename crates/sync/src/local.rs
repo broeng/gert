@@ -63,7 +63,7 @@
 //! plan computed before a consolidation changed a row cannot undo it: the
 //! store skips such an op as stale.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use model::{
     BranchTargets, ChangeStatus, LocalChangeState, LocalCommit, LocalScan, PatchSetNumber,
@@ -446,6 +446,17 @@ pub fn plan_reconcile(
         }
     }
     ops
+}
+
+/// The Change-Ids of a scan's commits, sorted, each once: what a scanner
+/// keeps for [`Syncer::local_generation`](crate::Syncer::local_generation).
+pub fn scan_change_ids(scan: &LocalScan) -> Vec<String> {
+    let ids: BTreeSet<String> = scan
+        .commits
+        .iter()
+        .filter_map(|c| c.commit.change_id.clone())
+        .collect();
+    ids.into_iter().collect()
 }
 
 /// The plan for a project whose `local_changes` option is off: every row

@@ -116,8 +116,27 @@ impl Syncer {
 
 impl Syncer {
     /// The signed-in account of the server (`GET /accounts/self/detail`).
+    /// Its email is kept in the cache ([`Syncer::account_email`]), so that
+    /// whoever asks first (the notification watch, the local change
+    /// scanner) answers for both, also after an offline start.
     pub async fn account_self(&self) -> Result<Account, Error> {
-        Ok(self.client.account_self().await?)
+        let account = self.client.account_self().await?;
+        let email = account
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty());
+        if let Err(e) = self.store().set_account_email(self.server, email) {
+            log::warn!("keeping the account email: {e}");
+        }
+        Ok(account)
+    }
+
+    /// The signed-in account's email as [`Syncer::account_self`] last
+    /// fetched it; `None` if never fetched or the account has none.
+    /// Blocking (SQLite).
+    pub fn account_email(&self) -> Result<Option<String>, Error> {
+        Ok(self.store().account_email(self.server)?)
     }
 
     /// The events of the server waiting for acknowledgement, oldest first,

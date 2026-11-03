@@ -181,28 +181,118 @@ fn turning_the_option_off_keeps_only_changes_with_unsent_data() {
     assert!(http.requests().is_empty());
 }
 
+/// A draft on the first version of the local change with `change_id`.
+fn draft_on(syncer: &Syncer, change_id: &str) -> model::Draft {
+    let mut store = syncer.store();
+    let c = store
+        .local_changes_by_change_id(syncer.server, change_id)
+        .unwrap()
+        .remove(0);
+    let p = store
+        .local_patch_sets(syncer.server, c.id)
+        .unwrap()
+        .remove(0);
+    store
+        .create_draft(
+            syncer.server,
+            c.number,
+            &model::PatchSetRef {
+                number: p.number,
+                sha: p.sha,
+            },
+            &model::DraftInput {
+                path: "a.rs".into(),
+                side: model::Side::Revision,
+                parent: None,
+                location: model::Location::Line(1),
+                in_reply_to: None,
+                message: "keep me".into(),
+                unresolved: true,
+            },
+            Timestamp::UNIX_EPOCH,
+        )
+        .unwrap()
+}
+
 #[test]
-fn the_cache_generation_moves_when_a_matching_change_is_cached() {
+fn the_generation_follows_the_cache_but_not_its_update_times() {
     let (http, syncer) = syncer();
     let ids = vec!["I2".to_owned()];
-    let empty = syncer.local_cache_generation("p", &ids).unwrap();
-    assert_eq!(empty, syncer.local_cache_generation("p", &ids).unwrap());
+    let empty = syncer.local_generation("p", &ids).unwrap();
+    assert_eq!(empty, syncer.local_generation("p", &ids).unwrap());
     http.push_response(200, change_42());
     block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
-    let cached = syncer.local_cache_generation("p", &ids).unwrap();
+    let cached = syncer.local_generation("p", &ids).unwrap();
     assert_ne!(cached, empty);
     // Unrelated Change-Ids and other projects do not see it.
     assert_eq!(
-        syncer
-            .local_cache_generation("p", &["I9".to_owned()])
-            .unwrap(),
+        syncer.local_generation("p", &["I9".to_owned()]).unwrap(),
         empty
     );
-    assert_eq!(syncer.local_cache_generation("q", &ids).unwrap(), empty);
-    // Fetching the same detail again changes nothing.
+    assert_eq!(syncer.local_generation("q", &ids).unwrap(), empty);
+    // Fetching the same detail again changes nothing, and neither does a
+    // new `updated` (a comment).
     http.push_response(200, change_42());
     block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
-    assert_eq!(syncer.local_cache_generation("p", &ids).unwrap(), cached);
+    assert_eq!(syncer.local_generation("p", &ids).unwrap(), cached);
+    http.push_response(200, change_42().replace("10:00:00.000", "11:30:00.000"));
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    assert_eq!(syncer.local_generation("p", &ids).unwrap(), cached);
+    // The status does.
+    http.push_response(200, change_42().replace("\"NEW\"", "\"MERGED\""));
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    assert_ne!(syncer.local_generation("p", &ids).unwrap(), cached);
+}
+
+#[test]
+fn the_generation_follows_the_rows_and_their_change_ids() {
+    let (http, syncer) = syncer();
+    let sc = scan(vec![commit("c2", "I2")]);
+    let (report, generation) = syncer.reconcile_local_keyed("p", &sc, &emails()).unwrap();
+    assert!(report.is_settled());
+    let ids = crate::local::scan_change_ids(&sc);
+    assert_eq!(ids, ["I2"]);
+    // Read after the plan was applied: the same as asking again.
+    assert_eq!(syncer.local_generation("p", &ids).unwrap(), generation);
+    // A second reconcile of the same scan changes nothing and agrees.
+    let (report, again) = syncer.reconcile_local_keyed("p", &sc, &emails()).unwrap();
+    assert!(!report.changed());
+    assert_eq!(again, generation);
+
+    // Unsent data on a row moves it, and so does its going away.
+    let draft = draft_on(&syncer, "I2");
+    let with_draft = syncer.local_generation("p", &ids).unwrap();
+    assert_ne!(with_draft, generation);
+    syncer
+        .store()
+        .delete_draft(syncer.server, draft.local_id)
+        .unwrap();
+    assert_eq!(syncer.local_generation("p", &ids).unwrap(), generation);
+
+    // A row whose commits left the scan still counts its Change-Id's
+    // cached change.
+    let without = syncer.local_generation("p", &[]).unwrap();
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    assert_ne!(syncer.local_generation("p", &[]).unwrap(), without);
+}
+
+#[test]
+fn the_account_email_is_kept_when_the_account_is_read() {
+    let (http, syncer) = syncer();
+    assert_eq!(syncer.account_email().unwrap(), None);
+    http.push_response(
+        200,
+        ")]}'\n{\"_account_id\": 1, \"email\": \" me@example.com \"}",
+    );
+    block_on(syncer.account_self()).unwrap();
+    assert_eq!(
+        syncer.account_email().unwrap().as_deref(),
+        Some("me@example.com")
+    );
+    http.push_response(200, ")]}'\n{\"_account_id\": 1}");
+    block_on(syncer.account_self()).unwrap();
+    assert_eq!(syncer.account_email().unwrap(), None);
 }
 
 #[test]

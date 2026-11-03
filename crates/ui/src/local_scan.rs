@@ -23,12 +23,15 @@
 //!
 //! For every project with the option on and an open checkout:
 //!
-//! 1. [`Repo::refs_fingerprint`] (one git call) and the cache generation
-//!    ([`sync::Syncer::local_cache_generation`] of the Change-Ids the last
-//!    scan saw); with the author emails and the enabled flag that is the
-//!    skip key. Equal to the one recorded: nothing to do.
+//! 1. [`Repo::refs_fingerprint`] (one git call) and the generation
+//!    ([`sync::Syncer::local_generation`]: the project's rows and the
+//!    cached Gerrit changes with the last scan's or the rows' Change-Ids);
+//!    with the author emails and the enabled flag that is the skip key.
+//!    Equal to the one recorded: nothing to do.
 //! 2. Otherwise [`Repo::scan`], the checkout's author emails, and the
-//!    reconcile. The key is recorded only when the report
+//!    reconcile ([`sync::Syncer::reconcile_local_keyed`], which also
+//!    returns the generation after its writes). The key is recorded only
+//!    when the report
 //!    [`is_settled`](store::ReconcileReport::is_settled), so a reconcile
 //!    that the store did not take as planned runs again next time.
 //!
@@ -45,7 +48,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui_kit::{AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use local_git::Repo;
-use sync::Syncer;
+use sync::{Syncer, local::scan_change_ids};
 
 use crate::{checkouts::Checkouts, session::Session};
 
@@ -70,7 +73,8 @@ struct SkipKey {
     /// The author emails, normalized and sorted.
     emails: Vec<String>,
     enabled: bool,
-    /// [`Syncer::local_cache_generation`] of `Memo::change_ids`.
+    /// [`Syncer::local_generation`] of `Memo::change_ids`: the project's
+    /// rows and the cached Gerrit changes the reconcile reads.
     generation: u64,
 }
 
@@ -90,6 +94,8 @@ struct Memo {
 /// What one round needs, gathered on the main thread.
 struct Round {
     syncer: Syncer,
+    /// How many commits a scan looks at ([`SCAN_LIMIT`]).
+    limit: usize,
     account_email: Option<String>,
     /// The projects with the option on and an open checkout.
     open: Vec<(String, Repo)>,
@@ -117,6 +123,8 @@ pub struct LocalScanner {
     account_email: Option<Option<String>>,
     email_task: Option<Task<()>>,
     memos: HashMap<String, Memo>,
+    /// [`SCAN_LIMIT`]; smaller in tests.
+    limit: usize,
     /// Bumped when the memos are dropped, so that a round that started
     /// before does not bring them back.
     epoch: u64,
@@ -141,6 +149,7 @@ impl LocalScanner {
             account_email: None,
             email_task: None,
             memos: HashMap::new(),
+            limit: SCAN_LIMIT,
             epoch: 0,
             task: None,
             again: false,
@@ -164,6 +173,14 @@ impl LocalScanner {
         }
         self.can_sync = session.is_some_and(Session::can_sync);
         self.syncer = session.map(|s| s.syncer().clone());
+    }
+
+    /// Scans look at only `limit` commits from now on.
+    #[cfg(test)]
+    pub(crate) fn set_limit(&mut self, limit: usize) {
+        self.limit = limit;
+        self.memos.clear();
+        self.epoch += 1;
     }
 
     #[cfg(test)]
@@ -199,6 +216,7 @@ impl LocalScanner {
         });
         let round = Round {
             syncer,
+            limit: self.limit,
             account_email: self.account_email.clone().flatten(),
             open,
             enabled,
@@ -281,6 +299,7 @@ fn author_emails(account: Option<&str>, repo: &[String]) -> Vec<String> {
 fn run(round: Round) -> Ran {
     let Round {
         syncer,
+        limit,
         account_email,
         open,
         enabled,
@@ -296,6 +315,7 @@ fn run(round: Round) -> Ran {
             &syncer,
             project,
             repo,
+            limit,
             account_email.as_deref(),
             memos.remove(project),
         ) {
@@ -349,6 +369,7 @@ fn scan_project(
     syncer: &Syncer,
     project: &str,
     repo: &Repo,
+    limit: usize,
     account_email: Option<&str>,
     memo: Option<Memo>,
 ) -> Result<Outcome, ScanError> {
@@ -358,7 +379,7 @@ fn scan_project(
             refs,
             emails: author_emails(account_email, &memo.repo_emails),
             enabled: true,
-            generation: syncer.local_cache_generation(project, &memo.change_ids)?,
+            generation: syncer.local_generation(project, &memo.change_ids)?,
         };
         if key == memo.key {
             return Ok(Outcome {
@@ -368,20 +389,13 @@ fn scan_project(
             });
         }
     }
-    let scan = repo.scan(SCAN_LIMIT)?;
+    let scan = repo.scan(limit)?;
     let repo_emails = repo.author_emails()?;
     let emails = author_emails(account_email, &repo_emails);
-    let mut change_ids: Vec<String> = scan
-        .commits
-        .iter()
-        .filter_map(|c| c.commit.change_id.clone())
-        .collect();
-    change_ids.sort_unstable();
-    change_ids.dedup();
-    // Read before the reconcile: a cache change in between makes the next
-    // pre-check differ, so it is never missed.
-    let generation = syncer.local_cache_generation(project, &change_ids)?;
-    let report = syncer.reconcile_local(project, &scan, &emails, true)?;
+    let change_ids = scan_change_ids(&scan);
+    // The generation is read under the reconcile's store lock, after its
+    // writes: what the next pre-check compares with.
+    let (report, generation) = syncer.reconcile_local_keyed(project, &scan, &emails)?;
     let memo = report.is_settled().then_some(Memo {
         key: SkipKey {
             refs: scan.fingerprint,
