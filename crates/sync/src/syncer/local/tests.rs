@@ -713,3 +713,51 @@ fn chain_commits_in_the_corners() {
     }
     assert_eq!(http.requests().len(), 2);
 }
+
+#[test]
+fn the_newer_local_version_is_the_newest_one_still_in_the_checkout() {
+    let (http, syncer) = syncer();
+    http.push_response(200, change_42());
+    block_on(syncer.refresh_change(ChangeNumber(42))).unwrap();
+    let created: Timestamp = "2024-02-01T09:59:32Z".parse().unwrap();
+    assert_eq!(
+        syncer
+            .newer_local_version(ChangeNumber(42), Some(created))
+            .unwrap(),
+        None
+    );
+
+    // Two local versions of 42 (I2), seen after its patch set 1.
+    let sc = scan(vec![commit("amended", "I2")]);
+    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
+    let sc = scan(vec![commit("amended2", "I2")]);
+    syncer.reconcile_local("p", &sc, &emails(), true).unwrap();
+    let newer = syncer
+        .newer_local_version(ChangeNumber(42), Some(created))
+        .unwrap()
+        .expect("a newer version");
+    assert_eq!(newer.sha.as_str(), "amended2");
+    assert_eq!(newer.ordinal, 2);
+
+    // Not when they were seen before the current patch set was made.
+    let later = Timestamp::now() + jiff::SignedDuration::from_secs(60);
+    assert_eq!(
+        syncer
+            .newer_local_version(ChangeNumber(42), Some(later))
+            .unwrap(),
+        None
+    );
+    // Not for a local change's number.
+    let own = ChangeNumber(ChangeNumber::LOCAL_BASE + 1);
+    assert_eq!(syncer.newer_local_version(own, None).unwrap(), None);
+
+    // Gone from the checkout: the row is deleted (it has no unsent data).
+    syncer
+        .reconcile_local("p", &scan(vec![]), &emails(), true)
+        .unwrap();
+    assert_eq!(
+        syncer.newer_local_version(ChangeNumber(42), None).unwrap(),
+        None
+    );
+    assert_eq!(http.requests().len(), 1);
+}

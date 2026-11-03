@@ -175,6 +175,39 @@ impl Syncer {
         versions_of_gerrit_change(&self.store(), self.server, number)
     }
 
+    /// The newest version of Gerrit change `number` that only the checkout
+    /// has, first seen after `since` (the creation of the change's current
+    /// patch set, when known): what the Submit warning asks about. Of the
+    /// versions [`Syncer::local_patch_sets_of`] lists, only those of rows
+    /// still in the checkout count (checking, local or ambiguous; not
+    /// vanished or closed). `None` when there is none. Blocking (SQLite).
+    pub fn newer_local_version(
+        &self,
+        number: ChangeNumber,
+        since: Option<Timestamp>,
+    ) -> Result<Option<LocalPatchSet>, Error> {
+        if number.is_local() {
+            return Ok(None);
+        }
+        let store = self.store();
+        let present: BTreeSet<_> = store
+            .local_changes_of_gerrit_change(self.server, number)?
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r.state,
+                    LocalChangeState::Checking
+                        | LocalChangeState::Local
+                        | LocalChangeState::Ambiguous
+                )
+            })
+            .map(|r| r.id)
+            .collect();
+        Ok(versions_of_gerrit_change(&store, self.server, number)?
+            .into_iter()
+            .rfind(|v| present.contains(&v.local_change) && since.is_none_or(|t| v.seen_at > t)))
+    }
+
     /// What each of `commits` (a relation chain read from the checkout of
     /// `project`) is, as far as the store knows, in the same order:
     ///
