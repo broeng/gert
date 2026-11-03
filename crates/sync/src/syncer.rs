@@ -416,6 +416,7 @@ mod actions;
 mod comments;
 mod edits;
 mod local;
+mod pending;
 mod watch;
 
 pub use actions::NewChange;

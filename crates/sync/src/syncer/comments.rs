@@ -55,7 +55,9 @@ use crate::{Error, PendingDraft};
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommentsView {
     pub comments: Vec<Comment>,
-    /// The user's drafts, except those being deleted.
+    /// The user's drafts, except those being deleted and the sealed
+    /// messages of pending reviews: those are shown, and edited, with
+    /// their review ([`Syncer::pending_reviews`]).
     pub drafts: Vec<Draft>,
     /// When the published comments were last fetched; `None` if never.
     pub fetched_at: Option<Timestamp>,
@@ -164,7 +166,7 @@ impl Syncer {
             let drafts = store
                 .load_drafts(server, change)?
                 .into_iter()
-                .filter(Draft::is_visible)
+                .filter(|d| d.is_visible() && !d.is_sealed())
                 .collect();
             Ok(CommentsView {
                 fetched_at: cached.as_ref().map(|c| c.fetched_at),
