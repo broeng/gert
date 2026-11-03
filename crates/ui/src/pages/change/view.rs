@@ -612,9 +612,9 @@ impl ChangePage {
         let has_requirements = !d.submit_requirements.is_empty();
         let requirements = has_requirements.then(|| self.requirements(cx));
         let votes = self.votes(cx);
-        // Not for anonymous sessions, which cannot reply, nor yet for local
-        // changes.
-        let reply = (self.session.can_comment() && !local).then(|| {
+        // Not for anonymous sessions, which cannot reply. On a local change
+        // it opens the local review, as `a` does.
+        let reply = self.session.can_comment().then(|| {
             h_flex().child(
                 Button::new("reply")
                     .label("Reply  (A)")
