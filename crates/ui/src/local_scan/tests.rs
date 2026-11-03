@@ -535,6 +535,15 @@ fn opening_a_local_row_sends_nothing_and_notifies_nothing(cx: &mut TestAppContex
         Route::Change(number)
     );
     s.assert_no_local_number_sent(&f);
+    // The change page does not even try: no error on it.
+    let change = cx
+        .update(|cx| s.shell.read(cx).change_page_for_test())
+        .expect("the change page");
+    cx.update(|cx| {
+        let page = change.read(cx);
+        assert!(page.detail().is_none());
+        assert_eq!(*page.status_for_test(), crate::pages::list::Status::Idle);
+    });
     let store = s.store.lock().expect("store");
     assert!(store.pending_events(SERVER).expect("events").is_empty());
     assert!(store.inbox_items(None, 10).expect("inbox").is_empty());

@@ -398,6 +398,11 @@ impl ChangePage {
     }
 
     #[cfg(test)]
+    pub(crate) fn status_for_test(&self) -> &Status {
+        &self.status
+    }
+
+    #[cfg(test)]
     pub(crate) fn focus_handle_for_test(&self) -> FocusHandle {
         self.focus.clone()
     }
@@ -583,7 +588,10 @@ impl ChangePage {
         if self.ticks.is_multiple_of(10) {
             cx.notify(); // keeps "updated 3m ago" current
         }
-        if !self.session.can_sync() || !self.loaded || self.status.busy() {
+        // Gerrit does not have a local change, and the guards would only
+        // turn the request into an error on the page.
+        if !self.session.can_sync() || !self.loaded || self.status.busy() || self.number.is_local()
+        {
             return;
         }
         let now = Timestamp::now();

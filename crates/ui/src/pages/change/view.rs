@@ -227,6 +227,27 @@ impl ChangePage {
 
     fn header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        if self.detail.is_none() && self.number.is_local() {
+            // A local change (its number is synthetic and never shown).
+            // Its own page comes in a later version; until then nothing is
+            // fetched for it (see `tick`).
+            return v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_lg().child("Local change"))
+                        .child(local_chip(cx))
+                        .children(self.server_badge.as_ref().map(|b| b.pill(cx))),
+                )
+                .child(
+                    div()
+                        .text_color(muted)
+                        .child("Opening local changes comes in a later version."),
+                )
+                .into_any_element();
+        }
         if self.detail.is_none() {
             let status = self.status_line(cx);
             let text = if self.loaded && matches!(self.status, Status::Failed(_)) {
