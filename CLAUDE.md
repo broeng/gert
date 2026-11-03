@@ -143,25 +143,34 @@ crates/
   local-git/    reads file lists and diffs from a local checkout of a
                 project through the `git` CLI, computed to match Gerrit's
                 diffs (line splitting, whitespace modes, renames, intraline
-                edits). Read-only, never fetches; blocking, so callers use
-                a background executor.
+                edits); finds the user's unpushed commits and maps lines
+                between commits for porting comments. Read-only, never
+                fetches; blocking, so callers use a background executor.
   model/        domain types: non-Option where semantically required, real
                 timestamps, newtypes for ids (ChangeNumber, AccountId, ...).
                 No I/O.
   store/        rusqlite cache + schema migrations: servers, query results,
                 change details, file lists, diffs, related changes,
-                preferences, comments, local drafts, and the notification
-                ledger, pending events and inbox.
+                preferences, comments, local drafts, the notification
+                ledger, pending events and inbox, and local changes
+                (`local_changes`, `local_patch_sets`, `pending_reviews`,
+                `consolidation_leases`, `local_post_claims`).
   sync/         polling and cache refresh (server -> store -> UI
                 notifications), and the write paths: drafts (saved to the
                 store first, then sent and retried), reviews, change actions,
                 reviewers, topic and hashtags; notification event detection,
-                rules and matching (`sync::notify`).
+                rules and matching (`sync::notify`); local changes:
+                reconciling scans (`sync::local`), the local search subset
+                and consolidation (`Syncer::consolidate`, porting through
+                the `sync::PortSource` trait).
   ui/           GPUI views on gpui-component: the shell and page navigation,
                 login, dashboard/search list, change page, diff page and diff
                 view, reply dialog, action menu, file filters, settings,
-                themes, project checkouts (`ui::checkouts`) and the local
-                diff source (`ui::local_source`). `examples/review.rs` runs
+                themes, project checkouts (`ui::checkouts`), the local
+                diff source (`ui::local_source`) and local changes
+                (`ui::local_scan`, `ui::consolidation`, `ui::local_port`,
+                `ui::change_detail`, `ui::local_chain`, the change page's
+                pending and held cards). `examples/review.rs` runs
                 the whole UI against a fake server; `examples/diff_viewer.rs`
                 shows the diff view alone.
   gert/         (directory `crates/app`) binary: wiring, config, keyring,
@@ -190,11 +199,12 @@ depend on GPUI, so they are testable without a UI. (`sync` exposes plain async/c
 - **Drafts are store-first.** The UI's draft outbox (`ui::outbox`) writes a
   draft to the local database, shows it as pending at once, then sends it;
   failures are recorded on the draft and shown in its card, and pending
-  drafts are retried. Votes, replies and change actions need a connection.
-  A general offline outbox for those (replay with conflicts shown to the user:
-  patch set moved on, thread resolved remotely) is not built yet, so don't
-  make choices that would prevent it (keep write state in `store`, not only
-  in view state).
+  drafts are retried. Votes, replies and change actions on Gerrit changes
+  need a connection. A general offline outbox for those (replay with
+  conflicts shown to the user: patch set moved on, thread resolved remotely)
+  is not built yet, so don't make choices that would prevent it (keep write
+  state in `store`, not only in view state). Its first piece exists: local
+  reviews (see "Local changes") are stored first and sent later.
 - **Several servers, one active at a time.** Config has `[[servers]]` (slug
   id, name, url, username, color, nested queries and bookmarks); the slug,
   not the URL, identifies a server in config, the cache (`servers.slug`) and
@@ -211,11 +221,82 @@ depend on GPUI, so they are testable without a UI. (`sync` exposes plain async/c
   When a checkout has the exact commits, a diff missing from the store and
   an uncached file list are computed from it (`ui::local_source`), so they
   show at once and offline; anything else (merge commits, rebased patch
-  set comparisons, `/COMMIT_MSG`, missing commits, git errors, a resolve
-  slower than 5 s) falls through to Gerrit. Order: store, then checkout,
+  set comparisons, `/COMMIT_MSG` unless a local version is involved,
+  missing commits, git errors, a resolve slower than 5 s) falls through to
+  Gerrit. Order: store, then checkout,
   then Gerrit; Gerrit's file list still replaces a local one. Local results
   are **never written to the store** and carry a "local" marker in the UI.
   Git is only ever read (no fetch, no locks, no repo writes).
+
+### Local changes
+
+The user's own unpushed commits, reviewed before they are on Gerrit and
+sent there automatically once pushed (the app never pushes).
+
+- **Discovery.** Per project: `local_changes = true` and `local_approval`
+  in `[[servers.projects]]` (project dialog; not for anonymous servers).
+  `ui::local_scan` (one scanner per signed-in server, off the UI thread,
+  skipped while refs and store are unchanged) takes commits on named local
+  branches and on no remote-tracking branch, with a `Change-Id` trailer and
+  the account's or checkout's author email, newest 200.
+  `Syncer::reconcile_local` makes one local change per Change-Id (project,
+  target branch) and a local patch set ("local 1", "local 2", ...) per SHA
+  seen; an unknown SHA of an open Gerrit change is a local patch set of
+  that change. A row is `Checking` until a lookup. A change gone from the
+  branches goes with its data, unless it has unsent data: then it stays
+  dimmed until a lookup settles it. Turning the option off removes rows
+  without unsent data.
+- **Synthetic numbers.** Local changes and patch sets get numbers from
+  reserved ranges (`ChangeNumber::LOCAL_BASE`, `PatchSetNumber::LOCAL_BASE`)
+  so pages, drafts and history work on them. They never reach a server:
+  `gerrit-api` refuses them (`Error::LocalNumber`; the fake panics), `sync`
+  refuses local SHAs on revision calls and drops them from batches, and
+  browser links and `g` refuse them. Details are synthesised from git and
+  the store (`ui::change_detail`; labels borrowed from a cached change of
+  the project and branch) and never stored as change details.
+- **Local reviews are store-first.** A comment on a local version is a
+  draft on its local numbers. The reply dialog ("Local review", Save) and
+  quick votes write a `pending_reviews` row whose message is a sealed
+  draft; it can be edited or cancelled until sent.
+- **The "ordinary draft" rule.** Only ordinary drafts (`Draft::is_ordinary`,
+  `drafts::ordinary()` in SQL: not on local numbers, not sealed, not
+  reserved for a consolidation post, not held) take part in upload, retry,
+  `publish_review`, merging server drafts and the counts. Every new draft
+  path must keep to it.
+- **Consolidation** (`Syncer::consolidate`, run per server by
+  `ui::consolidation::Consolidator` while online with a known account: on
+  the poll, after a scan that changed rows, after a saved review). A
+  batched lookup by `project~branch~Change-Id`; on an exact SHA match the
+  drafts and reviews move onto the Gerrit patch set and go out as one post
+  per review (comments inline, the message as a patch-set comment, Gerrit's
+  default notify, attention set rules off), tagged
+  `<app>-local-<change>-r<review>-<nonce>` so a lost answer is recovered,
+  not resent. A version amended before upload is **ported** through the
+  checkout (`ui::local_port`): comments on unchanged lines move, anything
+  else is **held** with a reason. A change found merged or abandoned has
+  everything held. Held items are on the Gerrit change's held card
+  (publish or drop, `w` keys). With nothing left the row is a
+  `Consolidated` tombstone (its local number redirects) until its commits
+  have been off the branches for a week. One run per server (a store
+  lease) and a claim per post; only the account that wrote an item sends
+  it.
+- **Approval rules.** An approval is a label's highest positive value.
+  Votes are cast only on the current patch set. On a local patch set of a
+  Gerrit change the **strict rule** holds: an approval goes only onto its
+  exact SHA, else it is held and may only be dropped. A purely local
+  change (votes given more than 5 minutes before Gerrit created the change)
+  takes the stricter of the review's snapshot and the project's
+  `local_approval` for a ported review: `follow` casts its votes, also when
+  comments were held; `exact-or-manual` holds them for a manual publish;
+  `exact` (default) holds approvals drop-only. An exact match is cast
+  under all three.
+- **In the UI:** a "Local changes" dashboard section (also closed and held
+  rows, opening the Gerrit change); "local N" entries in the patch set
+  dropdowns; local commits in relation chains (`ui::local_chain`); local
+  results first in free search (`sync::local::search`, a strict subset of
+  the query language); the "Local reviews" card (`l` keys); Submit warns
+  when the checkout has a newer local version that is not on Gerrit.
+  Consolidation results show as quiet page hints, not OS notifications.
 
 ### Notifications
 
@@ -278,7 +359,8 @@ depend on GPUI, so they are testable without a UI. (`sync` exposes plain async/c
   `ui::actions` or a module's own `actions`), and `ui::actions` gathers them,
   so the `?` help is built from the same table as the keymap.
 - The settings page edits `config.toml` (saved queries, startup page, file
-  filters, theme, review options, project checkouts); the user may also edit it by hand.
+  filters, theme, review options, project checkouts and local changes); the
+  user may also edit it by hand.
 - Never do I/O or heavy work on the main thread. Use background tasks, and
   update entities when the work finishes.
 
@@ -298,11 +380,13 @@ opening a change from a web UI link (`g`, `gert <link>`, or a
 servers); multiple servers with a switcher; desktop
 notifications with configurable rules and an in-app inbox; a tabbed settings
 page; per-project local checkouts that serve file lists and diffs when they
-have the commits.
+have the commits; local changes (unpushed commits reviewed locally, sent
+automatically once pushed, with porting and held items).
 
 Not built yet: Checks/CI results, further local git integration (fetching,
 checking out changes), query autocompletion, a configurable keymap and command palette,
-the general offline outbox, inline change edits, Gerrit's own
+the general offline outbox (votes, replies and actions on Gerrit changes),
+inline change edits, Gerrit's own
 dashboard sections, and packaging beyond cargo and Nix.
 
 ## Distribution and Nix
@@ -353,7 +437,8 @@ dashboard sections, and packaging beyond cargo and Nix.
   `#[cfg_attr(not(feature = "slow-tests"), ignore = "slow: --features slow-tests")]`.
 - **Opt-in, ignored by default:** `tests/dev_gerrit.rs` in `gerrit-api`,
   `sync` and `local-git` (which compares its diffs with Gerrit's; see its
-  header for the setup), and a test in `app`, run against the dev Gerrit
+  header for the setup; `sync`'s includes local changes end to end with a
+  real clone and `git push`), and a test in `app`, run against the dev Gerrit
   (`GERT_TEST_GERRIT=http://127.0.0.1:8080 cargo test -- --ignored`, refusing
   anything but localhost); `gerrit-api/tests/live.rs` reads a public server
   with `GERT_LIVE_TESTS=1`. Run these per crate and test target: a
