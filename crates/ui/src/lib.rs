@@ -11,6 +11,7 @@ mod comments;
 mod consolidation;
 pub mod diff;
 mod diff_load;
+mod file_list;
 pub mod filters;
 mod filters_dialog;
 mod goto;
