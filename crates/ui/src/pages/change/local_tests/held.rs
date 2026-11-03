@@ -122,6 +122,7 @@ fn held_page_with(cx: &mut TestAppContext, merged: bool, recorded: bool) -> (Fix
     let detail = detail.to_string();
     let f = page(cx, store, ChangeNumber(7), &ck, |http| {
         http.route_json("/changes/7?", &detail);
+        http.route_json("/accounts/self", r#"{"_account_id": 1, "username": "u"}"#);
         http.route_json(
             "POST /changes/7/revisions/",
             &json!({"labels": {"Verified": 1}, "change_info": {"current_revision_number": 3}})

@@ -223,6 +223,11 @@ fn fx_on(store: Arc<Mutex<Store>>, server: model::ServerId, timing: Consolidatio
         },
     )
     .unwrap();
+    // The signed-in account, as the server says (a held publish asks).
+    http.routes.route_json(
+        "/accounts/self",
+        &json!({"_account_id": ME, "username": "me"}).to_string(),
+    );
     Fx {
         http,
         syncer: Syncer::new(client, store, server).with_consolidation_timing(timing),

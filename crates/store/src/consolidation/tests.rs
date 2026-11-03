@@ -16,9 +16,11 @@ fn who() -> Claimant<'static> {
     Claimant {
         owner: "run-1",
         at: ts(T1),
+        account: None,
     }
 }
 const T1: &str = "2024-03-01T11:00:00Z";
+const T2: &str = "2024-03-01T12:00:00Z";
 
 /// A local change `IL` in project `p` with versions v1 and v2.
 fn setup() -> (Store, ServerId, LocalChange, LocalPatchSet, LocalPatchSet) {
@@ -912,6 +914,7 @@ fn only_claims_of_gone_runs_that_are_old_enough_are_recovered() {
     let by = Claimant {
         owner: "old-run",
         at: claimed_at,
+        account: None,
     };
     s.claim_local_post(
         id,
@@ -934,6 +937,7 @@ fn only_claims_of_gone_runs_that_are_old_enough_are_recovered() {
     let me = Claimant {
         owner: "new-run",
         at: ts("2024-03-01T12:00:00Z"),
+        account: None,
     };
     assert_eq!(
         s.adopt_local_post(id, c.id, "n1", &me, young).unwrap(),
@@ -953,6 +957,7 @@ fn only_claims_of_gone_runs_that_are_old_enough_are_recovered() {
     let third = Claimant {
         owner: "third-run",
         at: ts("2024-03-01T12:00:00Z"),
+        account: None,
     };
     assert!(
         s.recoverable_local_posts(id, "third-run", old)
@@ -1382,6 +1387,8 @@ fn publish(c: &LocalChange) -> HeldPublish {
         messages: vec![],
         comments: vec![],
         at: ts(T1),
+        author: model::AccountId(7),
+        author_name: Some("ann".into()),
     }
 }
 
@@ -1644,4 +1651,44 @@ fn a_closed_change_with_nothing_left_settles_as_a_tombstone() {
         s.settle_local_change(id, c.id).unwrap(),
         Some(LocalChangeState::Consolidated)
     );
+}
+
+#[test]
+fn a_post_keeps_the_account_of_its_first_claim() {
+    use PendingReviewState::*;
+    let (mut s, id, c, v1, v2) = setup();
+    let (_, r, _) = moved(&mut s, id, &c, &v1, &v2);
+    let first = Claimant {
+        owner: "run-a",
+        at: ts(T1),
+        account: Some(model::AccountId(7)),
+    };
+    s.claim_local_post(
+        id,
+        c.id,
+        Some((r.id, &[Pending][..])),
+        PatchSetNumber(1),
+        "n1",
+        &first,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        s.local_post_account(id, "n1").unwrap(),
+        Some(model::AccountId(7))
+    );
+    // Taken over by a run of another account: still the first one's.
+    let later = Claimant {
+        owner: "run-b",
+        at: ts(T2),
+        account: Some(model::AccountId(8)),
+    };
+    s.adopt_local_post(id, c.id, "n1", &later, ts(T2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.local_post_account(id, "n1").unwrap(),
+        Some(model::AccountId(7))
+    );
+    assert_eq!(s.local_post_account(id, "other").unwrap(), None);
 }

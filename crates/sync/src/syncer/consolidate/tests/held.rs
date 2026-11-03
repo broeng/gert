@@ -581,3 +581,99 @@ fn a_publish_that_fails_keeps_where_its_votes_were_given() {
         Err(Error::DropOnly(_))
     ));
 }
+
+// ---- account switches ----
+
+/// Signs `account` in (as the cache and the server know it).
+fn sign_in(f: &Fx, account: u64, name: &str) {
+    f.syncer
+        .store()
+        .set_account(f.syncer.server, AccountId(account), Some(name), None)
+        .unwrap();
+    f.http.routes.route_json(
+        "/accounts/self",
+        &json!({"_account_id": account, "username": name}).to_string(),
+    );
+}
+
+#[test]
+fn a_comment_only_post_that_arrived_before_a_switch_is_not_posted_again() {
+    let f = fx();
+    sign_in(&f, 2000, "other");
+    let (row, v) = f.local(CID, Some("main"), Some(CHANGE), &["s1"]);
+    let d = f.draft(&row, &v[0], "a comment");
+    f.gerrit("NEW", &["s1"], json!([]));
+    // The other account's run posts; the answer is lost.
+    f.http
+        .queue("POST /changes/7/revisions/", 0, "connection reset");
+    f.run();
+    assert_eq!(f.http.posts().len(), 1);
+    let tag = first_tag(&f);
+    // It did arrive, by the other account.
+    f.gerrit(
+        "NEW",
+        &["s1"],
+        json!([{"id": "m1", "author": {"_account_id": 2000}, "tag": tag,
+                "message": "Patch Set 1:\n\n(1 comment)",
+                "date": "2024-01-03 00:00:00.000000000", "_revision_number": 1}]),
+    );
+    f.http.routes.route_json(
+        "/changes/7/comments",
+        &json!({"src/a.rs": [{"id": "c1", "line": 7, "message": "a comment",
+                 "patch_set": 1, "tag": tag, "author": {"_account_id": 2000},
+                 "updated": "2024-01-03 00:00:00.000000000"}]})
+        .to_string(),
+    );
+    sign_in(&f, ME, "me");
+    let report = f.run();
+    assert!(report.posts.iter().any(|p| p.recovered), "{report:?}");
+    assert_eq!(f.http.posts().len(), 1, "not posted again");
+    assert_eq!(f.load_draft(&d), None);
+    assert!(
+        f.syncer
+            .store()
+            .unfinished_local_posts(f.syncer.server)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_held_publish_interrupted_across_a_switch_is_settled_not_offered_again() {
+    let f = fx();
+    let (_, r, _) = held_closed(&f);
+    sign_in(&f, 2000, "other");
+    f.http
+        .queue("POST /changes/7/revisions/", 0, "connection reset");
+    assert!(publish(&f, 1, &[HeldItem::Message(r.id)]).is_err());
+    let tag = first_tag(&f);
+    // The new review is the publisher's.
+    let sending = f
+        .syncer
+        .pending_reviews(CHANGE)
+        .unwrap()
+        .into_iter()
+        .find(|x| x.state == PendingReviewState::Sending)
+        .unwrap();
+    assert_eq!(sending.author, Some(AccountId(2000)));
+    f.gerrit(
+        "MERGED",
+        &["s1"],
+        json!([{"id": "m1", "author": {"_account_id": 2000}, "tag": tag,
+                "message": "Patch Set 1:\n\n(1 comment)",
+                "date": "2024-01-03 00:00:00.000000000", "_revision_number": 1}]),
+    );
+    sign_in(&f, ME, "me");
+    f.run();
+    assert_eq!(f.http.posts().len(), 1, "not posted again");
+    assert_eq!(
+        f.reloaded(&sending).state,
+        PendingReviewState::Sent,
+        "settled as sent"
+    );
+    // Not offered again: only the vote of the original review is held.
+    let held = f.syncer.held_items(CHANGE).unwrap();
+    assert_eq!(held.reviews.len(), 1);
+    assert_eq!(held.reviews[0].id, r.id);
+    assert_eq!(held.reviews[0].message, None);
+}

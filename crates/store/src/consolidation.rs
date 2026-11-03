@@ -172,12 +172,15 @@ pub struct LocalPost {
     pub drafts: Vec<Draft>,
 }
 
-/// Who claims a consolidation post, and when: the run's owner token and
-/// the time of the claim.
+/// Who claims a consolidation post, and when: the run's owner token, the
+/// time of the claim, and the Gerrit account the post goes out as (if
+/// known). A run that takes the post over later keeps the first claim's
+/// account, so it looks for the post among that account's messages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Claimant<'a> {
     pub owner: &'a str,
     pub at: Timestamp,
+    pub account: Option<model::AccountId>,
 }
 
 /// What the held card of a Gerrit change shows.
@@ -579,6 +582,28 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// The account the post claimed under `nonce` goes out as, as its
+    /// first claim recorded it; `None` if no claim records one.
+    pub fn local_post_account(
+        &self,
+        server: ServerId,
+        nonce: &str,
+    ) -> Result<Option<model::AccountId>, Error> {
+        use rusqlite::OptionalExtension;
+        let id: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT account_id FROM local_post_claims WHERE server_id = ?1 AND nonce = ?2",
+                params![server.0, nonce],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id
+            .flatten()
+            .and_then(|i| u64::try_from(i).ok())
+            .map(model::AccountId))
+    }
+
     /// Gives up `owner`'s consolidation lease; another owner's stays.
     pub fn end_consolidation_lease(&mut self, server: ServerId, owner: &str) -> Result<(), Error> {
         self.conn.execute(
@@ -960,11 +985,20 @@ fn record_claim(
     by: &Claimant<'_>,
 ) -> Result<(), Error> {
     conn.execute(
-        "INSERT INTO local_post_claims (server_id, nonce, local_change_id, owner, claimed_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO local_post_claims (server_id, nonce, local_change_id, owner, claimed_ms,
+             account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT (server_id, nonce) DO UPDATE
-             SET owner = excluded.owner, claimed_ms = excluded.claimed_ms",
-        params![server.0, nonce, change.0, by.owner, millis(by.at)],
+             SET owner = excluded.owner, claimed_ms = excluded.claimed_ms,
+                 account_id = COALESCE(local_post_claims.account_id, excluded.account_id)",
+        params![
+            server.0,
+            nonce,
+            change.0,
+            by.owner,
+            millis(by.at),
+            by.account.and_then(|a| i64::try_from(a.0).ok())
+        ],
     )?;
     Ok(())
 }

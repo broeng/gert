@@ -487,6 +487,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE pending_reviews ADD COLUMN author_id INTEGER;
     ALTER TABLE pending_reviews ADD COLUMN author_name TEXT;
     ",
+    // v19 -> v20: the Gerrit account a claimed consolidation post goes out
+    // as, so that a run under another account (after a sign-in) still
+    // finds the post among that account's messages and does not post it
+    // a second time. NULL when not known.
+    "
+    ALTER TABLE local_post_claims ADD COLUMN account_id INTEGER;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

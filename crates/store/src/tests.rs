@@ -1147,6 +1147,7 @@ fn v13_keeps_a_reserved_draft_claimable() {
             &crate::Claimant {
                 owner: "run",
                 at: model::Timestamp::UNIX_EPOCH,
+                account: None,
             },
         )
         .unwrap()

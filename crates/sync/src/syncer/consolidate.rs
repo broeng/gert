@@ -487,6 +487,7 @@ impl Run<'_> {
         Claimant {
             owner: &self.owner,
             at: Timestamp::now(),
+            account: Some(self.me),
         }
     }
 }
@@ -2063,24 +2064,12 @@ impl Syncer {
             // Never posted: nothing is claimed without a Gerrit change.
             return self.give_up(&row, &post, nonce, PendingReviewState::Pending, None, None);
         };
-        if let Some(r) = post
-            .review
-            .as_ref()
-            .filter(|r| r.author.is_some_and(|a| a != run.me))
-        {
-            // Claimed while another account was signed in: not this
-            // account's to post (nor to look for among its messages). The
-            // post's comments are held with it.
-            let reason = foreign_reason(r);
-            return self.give_up(
-                &row,
-                &post,
-                nonce,
-                PendingReviewState::Held,
-                Some(reason.clone()),
-                Some(&reason),
-            );
-        }
+        // The account the post went out as: the first claim's, which an
+        // earlier sign-in may have made.
+        let poster = self
+            .store()
+            .local_post_account(self.server, nonce)?
+            .unwrap_or(run.me);
         let detail = match self.refresh_change(number).await {
             Ok(d) => d,
             Err(Error::Api(ApiError::NotFound)) => {
@@ -2091,8 +2080,37 @@ impl Syncer {
         };
         let tag = self.local_tag(change, post.review.as_ref().map(|r| r.id), nonce);
         let review_ps = post.review.as_ref().map(|r| r.patch_set);
-        let message = mine_tagged(&detail, run.me, |t| t == tag)
+        // Arrived, whoever posted it: settled as sent below. The nonce makes
+        // the tag unique; the author must still be the claim's account (or
+        // this one), as nobody else posts our tags.
+        let message = tagged_by(&detail, &[poster, run.me], |t| t == tag)
             .filter(|m| review_ps.is_none() || m.revision.is_none() || m.revision == review_ps);
+        let foreign = poster != run.me
+            || post
+                .review
+                .as_ref()
+                .is_some_and(|r| r.author.is_some_and(|a| a != run.me));
+        if message.is_none() && foreign {
+            // Claimed for another account and not posted: not this
+            // account's to post. The review is held with its comments.
+            let reason = match &post.review {
+                Some(r) => foreign_reason(r),
+                None => format!(
+                    "written while signed in as account {}; it is sent only by that account, \
+                     or published from here",
+                    poster.0
+                ),
+            };
+            self.give_up(
+                &row,
+                &post,
+                nonce,
+                PendingReviewState::Held,
+                Some(reason.clone()),
+                Some(&reason),
+            )?;
+            return self.mark_drop_only(&row, number, &detail, run.options);
+        }
         let ps = review_ps
             .or_else(|| message.and_then(|m| m.revision))
             .or_else(|| post.drafts.iter().map(|d| d.patch_set).min());
@@ -2197,7 +2215,12 @@ impl Syncer {
         };
         let cast = votes_in_message(&message.message);
         let current = detail.current_patch_set;
-        let me = run.me;
+        // Who posted it: whoever the claim was made for.
+        let me = message
+            .real_author
+            .as_ref()
+            .or(message.author.as_ref())
+            .map_or(run.me, |a| a.id);
         let votes: Votes = post
             .review
             .as_ref()
@@ -2526,11 +2549,21 @@ fn mine_tagged(
     me: AccountId,
     matches: impl Fn(&str) -> bool,
 ) -> Option<&model::ChangeMessage> {
-    detail.messages.iter().rev().find(|m| {
-        m.tag.as_deref().is_some_and(&matches)
-            && (m.author.as_ref().is_some_and(|a| a.id == me)
-                || m.real_author.as_ref().is_some_and(|a| a.id == me))
-    })
+    tagged_by(detail, &[me], matches)
+}
+
+/// The newest change message by one of `accounts` whose tag `matches`.
+fn tagged_by<'a>(
+    detail: &'a ChangeDetail,
+    accounts: &[AccountId],
+    matches: impl Fn(&str) -> bool,
+) -> Option<&'a model::ChangeMessage> {
+    let by = |a: &Option<model::Account>| a.as_ref().is_some_and(|a| accounts.contains(&a.id));
+    detail
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.tag.as_deref().is_some_and(&matches) && (by(&m.author) || by(&m.real_author)))
 }
 
 /// What a claimed post sends to one revision.

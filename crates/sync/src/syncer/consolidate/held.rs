@@ -170,6 +170,9 @@ impl Syncer {
         setting: LocalApproval,
     ) -> Result<HeldPublished, Error> {
         let local_change = self.owner_of(items, held)?;
+        // Who publishes: the account as the server says now, not as last
+        // cached (another may have signed in since).
+        let me = self.account_self().await?;
         // Is `onto` current? Asked right before the post.
         let detail = self.refresh_change(gerrit).await?;
         let current = detail.current_patch_set.ok_or(Error::HeldChanged)?;
@@ -203,6 +206,8 @@ impl Syncer {
             messages: Vec::new(),
             comments: Vec::new(),
             at: Timestamp::now(),
+            author: me.id,
+            author_name: me.username.clone(),
         };
         for item in items {
             match item {
@@ -222,6 +227,7 @@ impl Syncer {
         let by = Claimant {
             owner,
             at: Timestamp::now(),
+            account: Some(me.id),
         };
         let claimed = match self
             .store()

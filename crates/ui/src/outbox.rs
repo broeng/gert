@@ -792,6 +792,7 @@ pub(crate) mod tests {
         let by = Claimant {
             owner: "another run",
             at: now,
+            account: None,
         };
         s.claim_local_post(server, row.id, None, PatchSetNumber(1), "n0", &by)
             .expect("claim")
