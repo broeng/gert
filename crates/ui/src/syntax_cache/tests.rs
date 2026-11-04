@@ -212,6 +212,7 @@ fn busy_with(cx: &mut TestAppContext, r: &Rig, path: &str) -> Cancel {
         c.in_flight = Some(InFlight {
             key: key(path),
             cancel: cancel.clone(),
+            claimed: false,
         });
     });
     cancel
@@ -226,6 +227,25 @@ fn the_job_in_flight_goes_on_while_its_key_is_queued(cx: &mut TestAppContext) {
     // It is not queued a second time.
     cx.read(|cx| assert_eq!(r.cache.read(cx).queued_for_test(), 1));
     queue(cx, &r, &["b.rs"], true);
+    assert!(cancel.is_cancelled());
+}
+
+#[gpui_kit::test]
+fn a_claimed_job_goes_on_without_its_key_in_the_queue(cx: &mut TestAppContext) {
+    let r = rig(cx, &[]);
+    let cancel = busy_with(cx, &r, "a.rs");
+    let claimed = r.cache.update(cx, |c, _| {
+        (
+            c.claim(&key("b.rs")),
+            c.claim(&key("a.rs")),
+            c.is_in_flight(&key("a.rs")),
+        )
+    });
+    assert_eq!(claimed, (false, true, true));
+    queue(cx, &r, &["b.rs"], true);
+    assert!(!cancel.is_cancelled());
+    // Turning highlighting off stops it all the same.
+    queue(cx, &r, &["b.rs"], false);
     assert!(cancel.is_cancelled());
 }
 

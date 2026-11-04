@@ -19,4 +19,6 @@ pub(crate) mod tests;
 
 pub use actions::{DIFF_VIEW, bind_keys};
 pub use layout::{Anchor, Expansion, FoldRow, Layout, LayoutOptions};
-pub use view::{DiffEvent, DiffSizing, DiffStatus, DiffView, DraftRequest, ThreadContext};
+pub use view::{
+    DiffEvent, DiffSizing, DiffStatus, DiffView, DraftRequest, GivenSyntax, ThreadContext,
+};

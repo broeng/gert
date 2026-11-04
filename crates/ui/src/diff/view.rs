@@ -77,10 +77,25 @@ pub struct ThreadContext {
     pub old_path: Option<String>,
 }
 
+/// What the owner knows of the syntax colors of a diff it hands the view.
+pub enum GivenSyntax {
+    /// Nothing: the view highlights the diff itself.
+    Unknown,
+    /// The colors (`None`: nothing to color), used at once, with no job and
+    /// no plain frame first.
+    Known(Option<DiffSyntax>),
+    /// Someone else is computing them, and the owner hands them over with
+    /// [`DiffView::set_syntax`] (or `Unknown` if that job fails). The diff
+    /// stays plain meanwhile.
+    Coming,
+}
+
 /// Syntax highlighting of the current diff.
 enum Syntax {
     /// Not computed (off, no path yet, or a carrier of threads).
     Idle,
+    /// The owner brings them ([`GivenSyntax::Coming`]).
+    Coming,
     /// Computing in the background; dropping the task stops the job.
     Pending(#[expect(dead_code, reason = "dropping the task stops the job")] Task<()>),
     /// Done; `None` when the file has nothing to color.
@@ -564,14 +579,12 @@ impl DiffView {
         self.start_syntax(cx);
     }
 
-    /// Like [`Self::set_diff_for`] with colors the owner already has (`None`:
-    /// not known, compute them): a known result is used at once, with no job
-    /// and no plain frame first.
+    /// Like [`Self::set_diff_for`] with what the owner knows of the colors.
     pub fn set_diff_for_cached(
         &mut self,
         path: &str,
         diff: Diff,
-        cached: Option<Option<DiffSyntax>>,
+        given: GivenSyntax,
         cx: &mut Context<Self>,
     ) {
         self.path = Some(path.to_owned());
@@ -579,30 +592,28 @@ impl DiffView {
         self.diff = Arc::new(diff);
         self.hint = None;
         self.rebuild(keep, cx);
-        self.install_or_start_syntax(cached, cx);
+        self.set_syntax(given, cx);
     }
 
-    /// Like [`Self::set_path`] with colors the owner already has.
-    pub fn set_path_cached(
-        &mut self,
-        path: &str,
-        cached: Option<Option<DiffSyntax>>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Like [`Self::set_path`] with what the owner knows of the colors.
+    pub fn set_path_cached(&mut self, path: &str, given: GivenSyntax, cx: &mut Context<Self>) {
         self.path = Some(path.to_owned());
-        self.install_or_start_syntax(cached, cx);
+        self.set_syntax(given, cx);
     }
 
-    fn install_or_start_syntax(
-        &mut self,
-        cached: Option<Option<DiffSyntax>>,
-        cx: &mut Context<Self>,
-    ) {
-        match cached {
-            Some(result) if !self.threads_only => {
+    /// Sets the colors of the current diff from what the owner knows; with
+    /// [`GivenSyntax::Unknown`] the view computes them itself.
+    pub fn set_syntax(&mut self, given: GivenSyntax, cx: &mut Context<Self>) {
+        match given {
+            GivenSyntax::Known(result) if !self.threads_only => {
                 // Also cancels a job for the previous diff.
                 self.syntax_gen += 1;
                 self.syntax = Syntax::Ready(result);
+                cx.notify();
+            }
+            GivenSyntax::Coming if !self.threads_only => {
+                self.syntax_gen += 1;
+                self.syntax = Syntax::Coming;
                 cx.notify();
             }
             _ => self.start_syntax(cx),

@@ -151,9 +151,29 @@ impl SyntaxCache {
         self.lru.insert(key, syntax);
     }
 
+    /// Whether the worker is on `key`. If so, the job is kept from now on,
+    /// also when a new queue leaves the key out, so that the caller can
+    /// wait for its result instead of highlighting the file a second time.
+    /// The cache notifies when a job ends ([`Self::is_in_flight`] then says
+    /// false, and [`Self::get`] has the result unless it failed).
+    pub fn claim(&mut self, key: &DiffKey) -> bool {
+        match &mut self.in_flight {
+            Some(job) if job.key == *key => {
+                job.claimed = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the worker is on `key`.
+    pub fn is_in_flight(&self, key: &DiffKey) -> bool {
+        self.in_flight.as_ref().is_some_and(|job| job.key == *key)
+    }
+
     /// Replaces the work queue: the worker highlights `keys` in order, one at
-    /// a time. The job in flight goes on if its key is still wanted, and is
-    /// cancelled otherwise. Keys already cached are skipped; diffs not in the
+    /// a time. The job in flight goes on if its key is still queued or
+    /// [claimed](Self::claim), and is cancelled otherwise. Keys already cached are skipped; diffs not in the
     /// cache are fetched through the session's syncer (only when it can
     /// sync), from `local` first when it serves them. The queue is cut at
     /// [`MAX_ENTRIES`]. With `enabled` false (the `syntax_highlighting`
@@ -175,6 +195,8 @@ impl SyntaxCache {
         if !enabled {
             if let Some(job) = self.in_flight.take() {
                 job.cancel.cancel();
+                // Whoever waits for it learns that it ended.
+                cx.notify();
             }
             self.worker = None;
             self.running = false;
@@ -197,7 +219,7 @@ impl SyntaxCache {
                         self.queue.push_back(key);
                     }
                 }
-                if !kept {
+                if !kept && !job.claimed {
                     job.cancel.cancel();
                 }
             }
@@ -257,6 +279,7 @@ impl SyntaxCache {
             self.in_flight = Some(InFlight {
                 key: key.clone(),
                 cancel: cancel.clone(),
+                claimed: false,
             });
             return Some((key, source, cancel));
         }
@@ -275,6 +298,28 @@ impl SyntaxCache {
     pub(crate) fn queued_for_test(&self) -> usize {
         self.queue.len()
     }
+
+    /// Pretends that the worker is on `key`, until [`Self::end_job_for_test`].
+    #[cfg(test)]
+    pub(crate) fn pretend_in_flight_for_test(&mut self, key: DiffKey) {
+        self.running = true;
+        self.in_flight = Some(InFlight {
+            key,
+            cancel: Cancel::default(),
+            claimed: false,
+        });
+    }
+
+    /// Ends the pretended job with `result` (`None`: it failed).
+    #[cfg(test)]
+    pub(crate) fn end_job_for_test(&mut self, result: Option<Highlight>, cx: &mut Context<Self>) {
+        if let (Some(job), Some(h)) = (self.in_flight.take(), result) {
+            self.lru.insert(job.key, h);
+        }
+        self.in_flight = None;
+        self.running = false;
+        cx.notify();
+    }
 }
 
 /// Where the worker gets a diff it highlights.
@@ -289,6 +334,8 @@ struct Source {
 struct InFlight {
     key: DiffKey,
     cancel: Cancel,
+    /// Someone waits for the result ([`SyntaxCache::claim`]).
+    claimed: bool,
 }
 
 /// The key of `path`'s diff in the comparison `files`.

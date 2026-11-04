@@ -1370,6 +1370,47 @@ fn a_cache_hit_for_a_refetched_diff_replaces_the_colors_at_once(cx: &mut TestApp
     assert!(view_syntax_is_marker(cx, &p));
 }
 
+/// A page on `src/a.rs` whose whitespace option is switched while the
+/// cache's worker is on the new diff: the view waits for that job.
+fn page_awaiting_the_worker(cx: &mut TestAppContext) -> Page {
+    let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(rust_body()));
+    let trailing = DiffKey {
+        whitespace: Whitespace::IgnoreTrailing,
+        ..a_key()
+    };
+    p.syntax
+        .update(cx, |c, _| c.pretend_in_flight_for_test(trailing.clone()));
+    press(cx, p.window, &[",", "w", "escape"]);
+    cx.update(|cx| {
+        let v = p.page.read(cx).view_for_test().expect("view");
+        // A job of its own would have colored it by now.
+        assert!(v.read(cx).syntax_for_test().is_none());
+        assert!(p.syntax.read(cx).is_in_flight(&trailing));
+    });
+    p
+}
+
+#[gpui_kit::test]
+fn the_view_takes_the_colors_of_the_workers_job_on_its_diff(cx: &mut TestAppContext) {
+    let p = page_awaiting_the_worker(cx);
+    p.syntax
+        .update(cx, |c, cx| c.end_job_for_test(Some(Some(marker())), cx));
+    cx.run_until_parked();
+    assert!(view_syntax_is_marker(cx, &p));
+}
+
+#[gpui_kit::test]
+fn the_view_colors_its_diff_itself_when_the_workers_job_fails(cx: &mut TestAppContext) {
+    let p = page_awaiting_the_worker(cx);
+    p.syntax.update(cx, |c, cx| c.end_job_for_test(None, cx));
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let v = p.page.read(cx).view_for_test().expect("view");
+        let colored = v.read(cx).syntax_for_test().cloned();
+        assert!(colored.is_some_and(|s| s.new.is_some()));
+    });
+}
+
 #[gpui_kit::test]
 fn a_miss_is_highlighted_by_the_view_and_stored(cx: &mut TestAppContext) {
     let p = diff_page_with(cx, seeded(), "src/a.rs", http_with(rust_body()));

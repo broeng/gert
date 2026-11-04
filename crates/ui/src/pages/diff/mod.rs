@@ -39,7 +39,7 @@ use crate::{
     checkouts::Checkouts,
     comments::{ChangeComments, CommentsEvent},
     diff::{
-        DiffEvent, DiffSizing, DiffStatus, DiffView, ThreadContext,
+        DiffEvent, DiffSizing, DiffStatus, DiffView, GivenSyntax, ThreadContext,
         actions::{NextFile, PrevFile},
     },
     diff_load::{DiffSource, LoadError, context_label, load_diff, outcome},
@@ -54,7 +54,7 @@ use crate::{
     servers::ServerBadge,
     session::{Session, is_unauthorized},
     settings::{DiffSettings, FileFilters},
-    syntax_cache::{Highlight, SyntaxCache, ahead_paths, diff_key, is_magic},
+    syntax_cache::{SyntaxCache, ahead_paths, diff_key, is_magic},
     theme::chip_colors,
     timing::{self, Steps},
 };
@@ -116,6 +116,9 @@ pub struct DiffPage {
     /// Finished syntax colors, shared by all pages: a hit is shown at once,
     /// and the view's own result for a miss is stored here.
     syntax: Entity<SyntaxCache>,
+    /// The key whose colors the view waits for from the cache's worker,
+    /// which was on it when the diff arrived.
+    awaited_syntax: Option<DiffKey>,
     /// The filter style of each entry of `files`.
     styles: Vec<FileStyle>,
     /// A note for the user (why a key did nothing, a failed request).
@@ -188,6 +191,7 @@ impl DiffPage {
             source: None,
             filters: filters.clone(),
             syntax,
+            awaited_syntax: None,
             styles: Vec::new(),
             hint: Hint::default(),
             server_badge: None,
@@ -212,6 +216,9 @@ impl DiffPage {
         };
         this._subs
             .push(cx.observe(&settings, |this, _, cx| this.settings_changed(cx)));
+        let syntax = this.syntax.clone();
+        this._subs
+            .push(cx.observe(&syntax, |this, _, cx| this.syntax_job_ended(cx)));
         this._subs.push(cx.observe(&filters, |this, _, cx| {
             this.restyle(cx);
             this.ahead(cx);
@@ -503,7 +510,7 @@ impl DiffPage {
                 self.key = Some(key.clone());
                 self.shown = Some(key.clone());
                 let path = self.route.path.clone();
-                let cached = self.syntax.update(cx, |c, _| c.get(&key));
+                let cached = self.given_syntax(&key, cx);
                 match &self.view {
                     Some(view) => view.update(cx, |v, cx| {
                         v.set_diff_for_cached(&path, diff, cached, cx);
@@ -533,12 +540,46 @@ impl DiffPage {
         }
     }
 
-    fn create_view(
-        &mut self,
-        diff: model::Diff,
-        cached: Option<Highlight>,
-        cx: &mut Context<Self>,
-    ) {
+    /// What the cache knows of `key`'s colors. When its worker is on the
+    /// key, the view waits for that job rather than doing it again.
+    fn given_syntax(&mut self, key: &DiffKey, cx: &mut Context<Self>) -> GivenSyntax {
+        let (cached, coming) = self.syntax.update(cx, |c, _| {
+            let cached = c.get(key);
+            let coming = cached.is_none() && c.claim(key);
+            (cached, coming)
+        });
+        self.awaited_syntax = coming.then(|| key.clone());
+        match cached {
+            Some(result) => GivenSyntax::Known(result),
+            None if coming => GivenSyntax::Coming,
+            None => GivenSyntax::Unknown,
+        }
+    }
+
+    /// A job of the syntax cache ended: hands the colors the view waits for
+    /// over, or lets the view do them itself when the job had no result.
+    fn syntax_job_ended(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.awaited_syntax.clone() else {
+            return;
+        };
+        let (cached, busy) = self
+            .syntax
+            .update(cx, |c, _| (c.get(&key), c.is_in_flight(&key)));
+        let given = match cached {
+            Some(result) => GivenSyntax::Known(result),
+            None if busy => return,
+            None => GivenSyntax::Unknown,
+        };
+        self.awaited_syntax = None;
+        if self.shown.as_ref() != Some(&key) {
+            return;
+        }
+        if let Some(view) = &self.view {
+            view.update(cx, |v, cx| v.set_syntax(given, cx));
+        }
+    }
+
+    fn create_view(&mut self, diff: model::Diff, cached: GivenSyntax, cx: &mut Context<Self>) {
         let (prefs, font) = {
             let s = self.settings.read(cx);
             (s.resolved(), s.font_family())
