@@ -8,11 +8,16 @@
 //! has the commit (merged history is no part of a chain), and stops after
 //! the first Gerrit patch set: the chain below it is that change's own,
 //! which its page shows from Gerrit. Up, it takes what was built on the
-//! commit on the local branches that contain it.
+//! commit on the checked-out branch, or when that does not have it on the
+//! local branches that do, keeping only the newest version of each change
+//! there ([`drop_older_versions`]): a branch left behind by a rebase still
+//! has the older ones.
 //!
 //! The chain of a Gerrit patch set is Gerrit's, but the checkout may have
 //! local work built on it: [`read_stack`] reads that, for the change page
 //! to put above the patch set in Gerrit's chain.
+
+use std::collections::HashMap;
 
 use gpui_kit::{AppContext as _, AsyncApp, Entity};
 use local_git::{Local, Series};
@@ -79,6 +84,7 @@ pub async fn read(
         if more_descendants || more_ancestors {
             log::debug!("the relation chain of {sha} has more than {GUARD} commits on a side");
         }
+        let above = descendants.len();
         let commits: Vec<CommitInfo> = descendants.into_iter().chain(ancestors).collect();
         let kinds = match syncer.classify_chain(&project, &commits) {
             Ok(k) => k,
@@ -87,7 +93,11 @@ pub async fn read(
                 return None;
             }
         };
-        let entries = cut(&sha, commits.into_iter().zip(kinds).collect());
+        let mut entries: Vec<_> = commits.into_iter().zip(kinds).collect();
+        let below = entries.split_off(above);
+        drop_older_versions(&mut entries);
+        entries.extend(below);
+        let entries = cut(&sha, entries);
         Some(Chain { entries })
     })
     .await
@@ -150,8 +160,10 @@ pub async fn read_stack(
         if series.more_descendants {
             log::debug!("more than {GUARD} commits were built on {sha}");
         }
+        let mut built_on: Vec<_> = series.descendants.into_iter().zip(kinds).collect();
+        drop_older_versions(&mut built_on);
         let mut stack = Stack::default();
-        for (commit, kind) in series.descendants.into_iter().zip(kinds) {
+        for (commit, kind) in built_on {
             match kind {
                 ChainCommit::Local { .. } | ChainCommit::LocalVersion { .. } => {
                     stack.entries.push(ChainEntry { commit, kind })
@@ -163,6 +175,33 @@ pub async fn read_stack(
         Some(stack)
     })
     .await
+}
+
+/// Leaves out of `entries` (commits built on the one on show) each version
+/// of a change that has a newer one among them. They come from several
+/// branches only when the checked-out branch does not have the commit on
+/// show (see [`local_git::Repo::series`]), and a branch a rebase left
+/// behind still has the older versions. Local versions are newer than the
+/// change's Gerrit patch sets; commits the store does not know all stay.
+fn drop_older_versions(entries: &mut Vec<(CommitInfo, ChainCommit)>) {
+    let version = |kind: &ChainCommit| match kind {
+        ChainCommit::Local {
+            change, ordinal, ..
+        }
+        | ChainCommit::LocalVersion {
+            change, ordinal, ..
+        } => Some((*change, (1, *ordinal))),
+        ChainCommit::Gerrit {
+            change, patch_set, ..
+        } => Some((*change, (0, patch_set.0))),
+        ChainCommit::Unknown => None,
+    };
+    let mut newest: HashMap<ChangeNumber, (u8, u32)> = HashMap::new();
+    for (change, v) in entries.iter().filter_map(|(_, k)| version(k)) {
+        let at = newest.entry(change).or_insert(v);
+        *at = (*at).max(v);
+    }
+    entries.retain(|(_, k)| version(k).is_none_or(|(change, v)| newest.get(&change) == Some(&v)));
 }
 
 /// `entries` without what comes after the first Gerrit patch set below
@@ -253,6 +292,41 @@ mod tests {
             shas(&super::cut(&"me".into(), entries[..3].to_vec())),
             ["up", "me", "mid"]
         );
+    }
+
+    fn local(n: u64, ordinal: u32) -> ChainCommit {
+        ChainCommit::Local {
+            change: ChangeNumber(ChangeNumber::LOCAL_BASE + n),
+            patch_set: PatchSetNumber(PatchSetNumber::LOCAL_BASE + ordinal),
+            ordinal,
+            newest: false,
+        }
+    }
+
+    #[test]
+    fn only_the_newest_version_of_a_change_stays_above_the_commit() {
+        let version = ChainCommit::LocalVersion {
+            change: ChangeNumber(7),
+            patch_set: PatchSetNumber(PatchSetNumber::LOCAL_BASE + 1),
+            ordinal: 1,
+        };
+        let mut entries = vec![
+            (commit("w1"), local(1, 1)),
+            (commit("w3"), local(1, 3)),
+            (commit("x"), ChainCommit::Unknown),
+            (commit("w2"), local(1, 2)),
+            (commit("y"), ChainCommit::Unknown),
+            (commit("g7"), gerrit(7, 2)),
+            (commit("v7"), version),
+            (commit("g7-old"), gerrit(7, 1)),
+            (commit("g8"), gerrit(8, 1)),
+        ];
+        drop_older_versions(&mut entries);
+        let entries: Vec<ChainEntry> = entries
+            .into_iter()
+            .map(|(commit, kind)| ChainEntry { commit, kind })
+            .collect();
+        assert_eq!(shas(&entries), ["w3", "x", "y", "v7", "g8"]);
     }
 
     #[test]
