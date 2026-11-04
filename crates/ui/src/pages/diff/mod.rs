@@ -280,11 +280,21 @@ impl DiffPage {
         let can_sync = self.session.can_sync();
         let route = self.route.clone();
         self.loading = true;
+        // The first load's steps go along, to be timed in the job.
+        let mut steps = self.first_load.take();
         self.task = Some(cx.spawn(async move |this, cx| {
-            let loaded = cx
-                .background_spawn(load_everything(syncer, can_sync, route))
+            let (loaded, steps) = cx
+                .background_spawn(async move {
+                    lap(&mut steps, "waiting for a thread");
+                    let loaded = load_everything(syncer, can_sync, route, &mut steps).await;
+                    (loaded, steps)
+                })
                 .await;
-            this.update(cx, |this, cx| this.loaded(loaded, cx)).ok();
+            this.update(cx, |this, cx| {
+                this.first_load = steps;
+                this.loaded(loaded, cx)
+            })
+            .ok();
         }));
     }
 
@@ -350,7 +360,7 @@ impl DiffPage {
     }
 
     fn loaded(&mut self, l: Loaded, cx: &mut Context<Self>) {
-        self.lap_first_load("change and stored list");
+        self.lap_first_load("back on the UI thread");
         self.detail = l.detail;
         let step = self.pending_step.take();
         if let Some(e) = l.error {
@@ -1494,24 +1504,37 @@ fn change_heading(number: model::ChangeNumber) -> String {
     }
 }
 
+/// Ends the step `name` of `steps`, if they are timed.
+fn lap(steps: &mut Option<Steps>, name: &'static str) {
+    if let Some(steps) = steps {
+        steps.lap(name);
+    }
+}
+
 /// The detail (from [`change_detail`], so with the local patch sets), the
 /// comparison and its stored file list. Gerrit is asked for the detail
 /// only when the cache lacks the patch sets of the route, never for a
 /// local change.
-async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Loaded {
+async fn load_everything(
+    syncer: Syncer,
+    can_sync: bool,
+    route: DiffRoute,
+    steps: &mut Option<Steps>,
+) -> Loaded {
     let fail = |detail: Option<ChangeDetail>, error: String| Loaded {
         detail,
         files_key: None,
         seed: Seed::Unread,
         error: Some(error),
     };
-    let mut detail = match change_detail::cached(&syncer, route.change) {
-        Ok(p) => p.map(|p| p.detail),
-        Err(e) => {
-            log::warn!("reading cached change {}: {e}", route.change);
-            None
-        }
-    };
+    let mut detail =
+        match change_detail::cached_timed(&syncer, route.change, &mut |name| lap(steps, name)) {
+            Ok(p) => p.map(|p| p.detail),
+            Err(e) => {
+                log::warn!("reading cached change {}: {e}", route.change);
+                None
+            }
+        };
     let has_revisions = |d: &Option<ChangeDetail>| {
         d.as_ref().is_some_and(|d| {
             d.revision(route.target).is_some() && route.base.is_none_or(|b| d.revision(b).is_some())
@@ -1519,7 +1542,9 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
     };
     if !has_revisions(&detail) && can_sync && !route.change.is_local() {
         let shown = change_detail::shown_locals(detail.as_ref(), route.change);
-        match change_detail::refreshed(&syncer, route.change, shown).await {
+        let refreshed = change_detail::refreshed(&syncer, route.change, shown).await;
+        lap(steps, "change from Gerrit");
+        match refreshed {
             Ok(d) => detail = Some(d),
             Err(e) if is_unauthorized(&e) => {
                 return fail(detail, "unauthorized".into());
@@ -1556,6 +1581,7 @@ async fn load_everything(syncer: Syncer, can_sync: bool, route: DiffRoute) -> Lo
     // list's renames. A miss is the file list's to fill: from the checkout,
     // and from Gerrit.
     let seed = seed_of(syncer.cached_files(&files_key));
+    lap(steps, "stored list");
     Loaded {
         detail: Some(d),
         files_key: Some(files_key),

@@ -60,6 +60,18 @@ pub struct Provided {
 /// `None` when nothing is cached (a Gerrit change) or the row is gone (a
 /// local change). Blocking (SQLite): call from the background executor.
 pub fn cached(syncer: &Syncer, number: ChangeNumber) -> Result<Option<Provided>, sync::Error> {
+    cached_timed(syncer, number, &mut |_| {})
+}
+
+/// [`cached`], calling `lap` as each part ends, for [`crate::timing`]:
+/// "stored change" (the read connection) and "local patch sets" (the
+/// writer connection, which waits for the store's writes) for a Gerrit
+/// change, "local change" for a local one.
+pub fn cached_timed(
+    syncer: &Syncer,
+    number: ChangeNumber,
+    lap: &mut dyn FnMut(&'static str),
+) -> Result<Option<Provided>, sync::Error> {
     if number.is_local() {
         let Some((row, versions)) = syncer.local_change(number)? else {
             return Ok(None);
@@ -67,6 +79,7 @@ pub fn cached(syncer: &Syncer, number: ChangeNumber) -> Result<Option<Provided>,
         let labels = syncer.labels_to_borrow(&row.project, row.branch.as_deref())?;
         let account = syncer.account()?;
         let detail = synthesise(&row, &versions, labels, account);
+        lap("local change");
         return Ok(Some(Provided {
             detail,
             fetched_at: None,
@@ -74,10 +87,14 @@ pub fn cached(syncer: &Syncer, number: ChangeNumber) -> Result<Option<Provided>,
         }));
     }
     let Some(c) = syncer.cached_change(number)? else {
+        lap("stored change");
         return Ok(None);
     };
+    lap("stored change");
+    let detail = merged(syncer, c.detail)?;
+    lap("local patch sets");
     Ok(Some(Provided {
-        detail: merged(syncer, c.detail)?,
+        detail,
         fetched_at: Some(c.fetched_at),
         local: None,
     }))
