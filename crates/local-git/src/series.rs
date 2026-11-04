@@ -9,8 +9,9 @@ use crate::{Error, Local, NotLocal, Repo, is_object_id};
 /// what was built on it. Made by [`Repo::series`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Series {
-    /// The commits on local branches that contain the commit and were
-    /// built on it, newest first and never a parent before its children.
+    /// The commits built on the commit, newest first and never a parent
+    /// before its children: on the checked-out branch when that contains
+    /// the commit, else on the local branches that do.
     pub descendants: Vec<CommitInfo>,
     /// There were more descendants than the limit: the ones furthest from
     /// the commit (nearest the branch tips) were left out.
@@ -26,11 +27,15 @@ pub struct Series {
 impl Repo {
     /// The series around `sha`: at most `limit` ancestors (the commit
     /// included) along first parents while no remote-tracking branch
-    /// (`refs/remotes/*`) has them, and at most `limit` descendants on the
-    /// named local branches (`refs/heads/*`) that contain it, those nearest
-    /// the commit. Neither side walks into history a remote-tracking
-    /// branch has (upstream commits merged into a branch, say). A detached
-    /// HEAD does not count, as in [`scan`](Self::scan). A commit that a
+    /// (`refs/remotes/*`) has them, and at most `limit` descendants, those
+    /// nearest the commit. The descendants are those on the checked-out
+    /// branch when it contains the commit: other branches may still hold
+    /// what it was rebased away from (older versions of a reordered
+    /// commit, say), which would crowd the chain. Otherwise they are those
+    /// on every named local branch (`refs/heads/*`) that contains it.
+    /// Neither side walks into history a remote-tracking branch has
+    /// (upstream commits merged into a branch, say). A detached HEAD does
+    /// not count, as in [`scan`](Self::scan). A commit that a
     /// remote-tracking branch has is still its own first ancestor.
     ///
     /// [`NotLocal::MissingCommit`] when the checkout has no such commit.
@@ -63,14 +68,14 @@ impl Repo {
         let out = self.git.run(
             &[
                 "for-each-ref",
-                "--format=%(objectname)",
+                "--format=%(HEAD) %(objectname)",
                 "--contains",
                 own.sha.as_str(),
                 "refs/heads/",
             ],
             None,
         )?;
-        let tips = object_ids(&out);
+        let tips = branch_tips(&out);
         let mut above = if tips.is_empty() {
             Vec::new()
         } else {
@@ -133,6 +138,26 @@ fn descendants_of(root: &str, out: &[u8]) -> Vec<String> {
         .zip(keep)
         .filter(|(_, k)| *k)
         .map(|(f, _)| f[0].to_owned())
+        .collect()
+}
+
+/// The tips of a `for-each-ref --format='%(HEAD) %(objectname)'` answer:
+/// only the checked-out branch's (marked `*`) when it is among them, else
+/// all of them.
+fn branch_tips(out: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(out);
+    let tips: Vec<(bool, &str)> = text
+        .lines()
+        .filter_map(|l| {
+            // The mark is `*` or a space.
+            let sha = l.get(2..)?;
+            is_object_id(sha).then_some((l.starts_with('*'), sha))
+        })
+        .collect();
+    let checked_out = tips.iter().any(|(head, _)| *head);
+    tips.into_iter()
+        .filter(|(head, _)| *head || !checked_out)
+        .map(|(_, sha)| sha.to_owned())
         .collect()
 }
 

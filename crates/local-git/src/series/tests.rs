@@ -57,7 +57,8 @@ fn descendants_on_every_branch_that_contains_it_newest_first() {
     r.git(&["checkout", "-q", "-b", "topic", &c1]);
     let t1 = r.commit("Topic one");
     let t2 = r.commit("Topic two");
-    // Built on c1 but on no branch: not part of the series.
+    // Built on c1 but on no branch: not part of the series. With HEAD
+    // detached, no branch is the checked-out one, so all count.
     r.git(&["checkout", "-q", "--detach"]);
     let detached = r.commit("Detached");
     let s = series(&r, &c1, 10);
@@ -70,6 +71,32 @@ fn descendants_on_every_branch_that_contains_it_newest_first() {
     assert!(!d.contains(&detached.as_str()));
     let at = |sha: &str| d.iter().position(|s| *s == sha);
     assert!(at(&t2) < at(&t1), "a child comes before its parent");
+}
+
+#[test]
+fn descendants_follow_the_checked_out_branch_when_it_contains_the_commit() {
+    let (_remote, r, base) = pushed();
+    let c1 = r.commit("One");
+    let w1 = r.commit("Wip");
+    // A branch left behind at the first version of the reordered commit.
+    r.git(&["branch", "old"]);
+    r.git(&["reset", "-q", "--hard", &c1]);
+    let c2 = r.commit("Two");
+    r.write("wip", b"again\n");
+    let w2 = r.commit("Wip");
+    let s = series(&r, &c1, 10);
+    assert_eq!(shas(&s.descendants), [w2.as_str(), c2.as_str()]);
+
+    // On a branch without the commit, every branch that has it counts.
+    r.git(&["checkout", "-q", "-b", "elsewhere", &base]);
+    let d = shas(&series(&r, &c1, 10).descendants)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(d.len(), 3, "{d:?}");
+    for sha in [&w1, &c2, &w2] {
+        assert!(d.contains(sha), "{sha} missing from {d:?}");
+    }
 }
 
 #[test]
