@@ -24,6 +24,7 @@ use crate::{
     change_detail::patch_set_label,
     diff_load::DiffSource,
     filters::{FileStyle, FilterAction},
+    labels::Mark,
     local_source::{local_chip, local_marker},
     pages::{
         diff::{PARENTS_DIFFER, PARENTS_DIFFER_HINT},
@@ -31,7 +32,7 @@ use crate::{
     },
     row::{browser_url, chips, has_merge_conflict, local_state_note},
     search_link::{account_query, person_query, project_query, search_link},
-    theme::chip_colors,
+    theme::{chip_colors, mark_color},
     time_fmt::{clock, relative},
 };
 
@@ -1143,6 +1144,17 @@ impl ChangePage {
         let label_width = if r.from_git { 112. } else { 64. };
         let rows = r.rows.iter().enumerate().map(|(i, row)| {
             let this_change = row.this;
+            // Until the chain's summaries arrive, this change's own row
+            // uses the detail the page already has.
+            let summary = row.related.as_ref().and_then(|c| {
+                r.summaries
+                    .get(&c.number)
+                    .or(own.filter(|s| s.number == c.number))
+            });
+            let review = row
+                .related
+                .as_ref()
+                .map_or(Mark::None, |c| review_mark(c, summary));
             h_flex()
                 .id(("related", i))
                 .gap_2()
@@ -1171,6 +1183,16 @@ impl ChangePage {
                         .debug_selector(move || format!("chain-row: {label}"))
                 })
                 .child(
+                    // A column of its own, so the approvals line up down the
+                    // chain.
+                    div()
+                        .w(px(16.))
+                        .flex_none()
+                        .text_center()
+                        .text_color(mark_color(&review, cx))
+                        .child(review.text()),
+                )
+                .child(
                     div()
                         .min_w_0()
                         .truncate()
@@ -1181,17 +1203,7 @@ impl ChangePage {
                 .children(
                     row.related
                         .as_ref()
-                        .map(|c| {
-                            related_pills(
-                                c,
-                                // Until the chain's summaries arrive, this change's
-                                // own row uses the detail the page already has.
-                                r.summaries
-                                    .get(&c.number)
-                                    .or(own.filter(|s| s.number == c.number)),
-                                cx,
-                            )
-                        })
+                        .map(|c| related_pills(c, summary, cx))
                         .into_iter()
                         .flatten(),
                 )
@@ -1633,18 +1645,32 @@ pub(super) fn related_subject(c: &RelatedChange) -> String {
         .map_or_else(|| "(no subject)".to_owned(), |k| k.subject.clone())
 }
 
-/// Negative votes that hold a change back: `Rejected` for Code-Review at its
-/// lowest, otherwise the label and vote (`Verified -1`).
+/// The Code-Review mark of a relation chain row, as the dashboard draws
+/// it: a check for the label's highest value, a cross for its lowest,
+/// otherwise the vote. Nothing for a closed change, whose status pill says
+/// enough, or before its summary is known.
+pub(super) fn review_mark(c: &RelatedChange, summary: Option<&ChangeSummary>) -> Mark {
+    if c.status != Some(ChangeStatus::New) {
+        return Mark::None;
+    }
+    summary
+        .and_then(|s| s.labels.get("Code-Review"))
+        .map_or(Mark::None, crate::labels::mark)
+}
+
+/// Negative votes that hold a change back, as the label and vote
+/// (`Verified -1`). Code-Review is left out: the chain's mark column
+/// ([`review_mark`]) shows it.
 pub(super) fn blocking_votes(summary: Option<&ChangeSummary>) -> Vec<String> {
     let Some(s) = summary else {
         return Vec::new();
     };
     s.labels
         .iter()
+        .filter(|(name, _)| *name != "Code-Review")
         .filter_map(|(name, l)| match crate::labels::mark(l) {
-            crate::labels::Mark::Rejected if name == "Code-Review" => Some("Rejected".to_owned()),
-            crate::labels::Mark::Rejected => Some(format!("{name} {}", l.min.unwrap_or(-1))),
-            crate::labels::Mark::Disliked(v) => Some(format!("{name} {v}")),
+            Mark::Rejected => Some(format!("{name} {}", l.min.unwrap_or(-1))),
+            Mark::Disliked(v) => Some(format!("{name} {v}")),
             _ => None,
         })
         .collect()

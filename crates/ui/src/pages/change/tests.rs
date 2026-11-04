@@ -1536,11 +1536,54 @@ fn blocking_votes_name_the_label_and_vote() {
             ..Default::default()
         },
     );
+    // Code-Review is the chain's mark column, not a pill.
     assert_eq!(
         super::view::blocking_votes(Some(&s)),
-        ["Rejected", "Style -1", "Verified -1"]
+        ["Style -1", "Verified -1"]
     );
     assert!(super::view::blocking_votes(None).is_empty());
+}
+
+#[test]
+fn the_chain_marks_code_review_of_open_changes() {
+    use super::view::review_mark;
+    use crate::labels::Mark;
+    use model::{ChangeStatus, LabelSummary, RelatedChange};
+    let mut s = crate::testing::summary(1);
+    s.labels.insert(
+        "Code-Review".into(),
+        LabelSummary {
+            approved: true,
+            ..Default::default()
+        },
+    );
+    s.labels.insert(
+        "Verified".into(),
+        LabelSummary {
+            rejected: true,
+            ..Default::default()
+        },
+    );
+    let related = |status| RelatedChange {
+        project: "p".into(),
+        change_id: None,
+        number: s.number,
+        patch_set: model::PatchSetNumber(1),
+        current_patch_set: None,
+        status: Some(status),
+        submittable: None,
+        work_in_progress: false,
+        commit: None,
+    };
+    let open = related(ChangeStatus::New);
+    assert_eq!(review_mark(&open, Some(&s)), Mark::Approved);
+    assert_eq!(review_mark(&open, None), Mark::None);
+    assert_eq!(
+        review_mark(&related(ChangeStatus::Merged), Some(&s)),
+        Mark::None
+    );
+    s.labels.remove("Code-Review");
+    assert_eq!(review_mark(&open, Some(&s)), Mark::None);
 }
 
 // ---- inline diffs from the local checkout ----
