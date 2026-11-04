@@ -9,7 +9,9 @@
 //!
 //! The cache is one GPUI entity owned by the shell and shared by the pages,
 //! like [`crate::settings::FileFilters`]. The UI thread only does the
-//! bookkeeping; fetching and highlighting run on the background executor.
+//! bookkeeping; fetching and highlighting run on the background executor,
+//! one job at a time, so that working ahead never takes more than one of
+//! its threads from the pages' own loads.
 
 use std::collections::VecDeque;
 
@@ -101,6 +103,12 @@ impl Lru {
 pub struct SyntaxCache {
     lru: Lru,
     queue: VecDeque<DiffKey>,
+    /// Where the worker gets the diffs; from the last `set_queue`.
+    source: Option<Source>,
+    /// The job the worker is on.
+    in_flight: Option<InFlight>,
+    /// Whether the worker runs (it ends when the queue is empty).
+    running: bool,
     /// The keys the last `set_queue` was given while enabled.
     #[cfg(test)]
     last_queue: Vec<DiffKey>,
@@ -125,6 +133,9 @@ impl SyntaxCache {
             queue: VecDeque::new(),
             #[cfg(test)]
             last_queue: Vec::new(),
+            source: None,
+            in_flight: None,
+            running: false,
             worker: None,
         }
     }
@@ -141,12 +152,13 @@ impl SyntaxCache {
     }
 
     /// Replaces the work queue: the worker highlights `keys` in order, one at
-    /// a time, and drops what it was doing. Keys already cached are skipped;
-    /// diffs not in the cache are fetched through the session's syncer (only
-    /// when it can sync), from `local` first when it serves them. The queue
-    /// is cut at [`MAX_ENTRIES`]. With `enabled` false (the `syntax_highlighting` preference is off) the queue is just
-    /// cleared. Callers pass the resolved preference, and call again when it
-    /// turns on.
+    /// a time. The job in flight goes on if its key is still wanted, and is
+    /// cancelled otherwise. Keys already cached are skipped; diffs not in the
+    /// cache are fetched through the session's syncer (only when it can
+    /// sync), from `local` first when it serves them. The queue is cut at
+    /// [`MAX_ENTRIES`]. With `enabled` false (the `syntax_highlighting`
+    /// preference is off) the worker stops. Callers pass the resolved
+    /// preference, and call again when it turns on.
     pub fn set_queue(
         &mut self,
         keys: Vec<DiffKey>,
@@ -155,37 +167,68 @@ impl SyntaxCache {
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
-        self.worker = None;
         self.queue.clear();
         #[cfg(test)]
         {
             self.last_queue = if enabled { keys.clone() } else { Vec::new() };
         }
-        if !enabled || keys.is_empty() {
+        if !enabled {
+            if let Some(job) = self.in_flight.take() {
+                job.cancel.cancel();
+            }
+            self.worker = None;
+            self.running = false;
             return;
         }
-        self.queue
-            .extend(keys.into_iter().take(self.lru.max_entries));
-        let (syncer, can_sync) = (session.syncer().clone(), session.can_sync());
+        self.source = Some(Source {
+            syncer: session.syncer().clone(),
+            can_sync: session.can_sync(),
+            local,
+        });
+        let keys = keys.into_iter().take(self.lru.max_entries);
+        match &self.in_flight {
+            Some(job) => {
+                let busy = &job.key;
+                let mut kept = false;
+                for key in keys {
+                    if key == *busy {
+                        kept = true;
+                    } else {
+                        self.queue.push_back(key);
+                    }
+                }
+                if !kept {
+                    job.cancel.cancel();
+                }
+            }
+            None => self.queue.extend(keys),
+        }
+        if !self.running && !self.queue.is_empty() {
+            self.start_worker(cx);
+        }
+    }
+
+    /// Works the queue off, one job at a time, until it is empty.
+    fn start_worker(&mut self, cx: &mut Context<Self>) {
+        self.running = true;
         self.worker = Some(cx.spawn(async move |this, cx| {
             loop {
-                let Ok(Some(key)) = this.update(cx, |this, _| this.next_key()) else {
+                let Ok(Some((key, source, cancel))) = this.update(cx, |this, _| this.next_job())
+                else {
                     return;
                 };
-                let syncer = syncer.clone();
                 let job = key.clone();
-                let local = local.clone();
                 let mut steps = Steps::start();
-                let cancel = Cancel::default();
                 let stop_on_drop = cancel.on_drop();
                 let result = cx
                     .background_spawn(async move {
                         steps.lap("queued");
-                        highlight_key(syncer, job, can_sync, local, cancel, steps).await
+                        highlight_key(source, job, cancel, steps).await
                     })
                     .await;
                 drop(stop_on_drop);
                 let stored = this.update(cx, |this, cx| {
+                    this.in_flight = None;
                     match result {
                         Ok(Ok(h)) => this.lru.insert(key, h),
                         Ok(Err(Cancelled)) => {}
@@ -200,13 +243,24 @@ impl SyntaxCache {
         }));
     }
 
-    /// The next queued key that is not cached yet.
-    fn next_key(&mut self) -> Option<DiffKey> {
+    /// The next queued key that is not cached yet, now in flight; `None`
+    /// ends the worker.
+    fn next_job(&mut self) -> Option<(DiffKey, Source, Cancel)> {
         while let Some(key) = self.queue.pop_front() {
-            if !self.lru.contains(&key) {
-                return Some(key);
+            if self.lru.contains(&key) {
+                continue;
             }
+            let Some(source) = self.source.clone() else {
+                break;
+            };
+            let cancel = Cancel::default();
+            self.in_flight = Some(InFlight {
+                key: key.clone(),
+                cancel: cancel.clone(),
+            });
+            return Some((key, source, cancel));
         }
+        self.running = false;
         None
     }
 
@@ -221,6 +275,20 @@ impl SyntaxCache {
     pub(crate) fn queued_for_test(&self) -> usize {
         self.queue.len()
     }
+}
+
+/// Where the worker gets a diff it highlights.
+#[derive(Clone)]
+struct Source {
+    syncer: Syncer,
+    can_sync: bool,
+    local: LocalLazy,
+}
+
+/// The worker's current job.
+struct InFlight {
+    key: DiffKey,
+    cancel: Cancel,
 }
 
 /// The key of `path`'s diff in the comparison `files`.
@@ -268,16 +336,19 @@ pub fn ahead_paths<'a>(
 /// background executor. Logs `steps` (see [`crate::timing`]): it shares the
 /// executor with the pages' own loads.
 async fn highlight_key(
-    syncer: Syncer,
+    source: Source,
     key: DiffKey,
-    can_sync: bool,
-    local: LocalLazy,
     cancel: Cancel,
     mut steps: Steps,
 ) -> Result<Result<Highlight, Cancelled>, crate::diff_load::LoadError> {
     if cancel.is_cancelled() {
         return Ok(Err(Cancelled));
     }
+    let Source {
+        syncer,
+        can_sync,
+        local,
+    } = source;
     let (diff, _) = load_diff(syncer, key.clone(), can_sync, local).await?;
     steps.lap("diff");
     let highlight = highlight_diff(&key.path, &diff, &cancel);

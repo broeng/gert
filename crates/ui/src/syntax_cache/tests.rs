@@ -5,9 +5,9 @@ use gpui_kit::{AppContext as _, Entity, TestAppContext};
 use model::{ChangeNumber, DiffKey, PatchSetNumber, PatchSetRef, Whitespace};
 use store::Store;
 
-use super::{Highlight, Lru, SyntaxCache};
+use super::{Highlight, InFlight, Lru, SyntaxCache};
 use crate::{
-    diff::syntax::{DiffSyntax, SideSyntax},
+    diff::syntax::{Cancel, DiffSyntax, SideSyntax},
     session::Session,
     tests::{URL, env_with, setup},
 };
@@ -191,6 +191,50 @@ fn a_new_queue_replaces_the_old_one(cx: &mut TestAppContext) {
     assert!(cached(cx, &r, "a.rs").is_none());
     assert!(cached(cx, &r, "b.rs").is_none());
     assert!(cached(cx, &r, "c.rs").is_some());
+}
+
+#[gpui_kit::test]
+fn the_worker_ends_with_its_queue_and_starts_again_for_a_new_one(cx: &mut TestAppContext) {
+    let r = rig(cx, &["a.rs", "b.rs"]);
+    queue(cx, &r, &["a.rs"], true);
+    cx.run_until_parked();
+    cx.read(|cx| assert!(!r.cache.read(cx).running));
+    queue(cx, &r, &["b.rs"], true);
+    cx.run_until_parked();
+    assert!(cached(cx, &r, "b.rs").is_some());
+}
+
+/// Pretends that the worker is on `path`, and returns the job's flag.
+fn busy_with(cx: &mut TestAppContext, r: &Rig, path: &str) -> Cancel {
+    let cancel = Cancel::default();
+    r.cache.update(cx, |c, _| {
+        c.running = true;
+        c.in_flight = Some(InFlight {
+            key: key(path),
+            cancel: cancel.clone(),
+        });
+    });
+    cancel
+}
+
+#[gpui_kit::test]
+fn the_job_in_flight_goes_on_while_its_key_is_queued(cx: &mut TestAppContext) {
+    let r = rig(cx, &[]);
+    let cancel = busy_with(cx, &r, "a.rs");
+    queue(cx, &r, &["b.rs", "a.rs"], true);
+    assert!(!cancel.is_cancelled());
+    // It is not queued a second time.
+    cx.read(|cx| assert_eq!(r.cache.read(cx).queued_for_test(), 1));
+    queue(cx, &r, &["b.rs"], true);
+    assert!(cancel.is_cancelled());
+}
+
+#[gpui_kit::test]
+fn turning_highlighting_off_cancels_the_job_in_flight(cx: &mut TestAppContext) {
+    let r = rig(cx, &[]);
+    let cancel = busy_with(cx, &r, "a.rs");
+    queue(cx, &r, &["a.rs"], false);
+    assert!(cancel.is_cancelled());
 }
 
 #[gpui_kit::test]
