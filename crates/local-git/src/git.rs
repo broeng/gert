@@ -1,8 +1,11 @@
 //! The one place that runs `git`, so no call can forget the safety flags.
+//! Every command reads the repository, except the push the user asks for
+//! ([`crate::push`]).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::Error;
 
@@ -49,6 +52,63 @@ impl Git {
     /// gets a closed stdin. Callers pass `--no-ext-diff --no-textconv`
     /// themselves on diff commands.
     pub(crate) fn run_raw(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Output, Error> {
+        let mut cmd = self.command(args);
+        cmd.stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+        let mut child = spawn(&mut cmd)?;
+        let input = child.stdin.take();
+        std::thread::scope(|s| {
+            // Written from a thread so a big answer cannot deadlock us
+            // against a full pipe. A broken pipe just means git was done.
+            if let (Some(mut pipe), Some(data)) = (input, stdin) {
+                s.spawn(move || {
+                    let _ = pipe.write_all(data);
+                });
+            }
+            child.wait_with_output().map_err(Error::Io)
+        })
+    }
+
+    /// Like [`run_raw`](Self::run_raw) without input, but a command still
+    /// running after `timeout` is killed ([`Error::TimedOut`]): for a
+    /// command that talks to a server, which may hang on a network or a
+    /// prompt nobody sees.
+    pub(crate) fn run_timed(&self, args: &[&str], timeout: Duration) -> Result<Output, Error> {
+        let mut cmd = self.command(args);
+        cmd.stdin(Stdio::null());
+        let mut child = spawn(&mut cmd)?;
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let (out, err) = (read_all(stdout), read_all(stderr));
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(Error::Io)? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                // A process that is gone by now cannot be killed; either
+                // way it is reaped.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::TimedOut {
+                    command: args.first().copied().unwrap_or_default().to_owned(),
+                    seconds: timeout.as_secs(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        Ok(Output {
+            status,
+            stdout: out.join().unwrap_or_default(),
+            stderr: err.join().unwrap_or_default(),
+        })
+    }
+
+    /// `git -C <dir> <GLOBAL_ARGS> <args>` in the environment every call
+    /// gets, with stdout and stderr piped.
+    fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(&self.dir).args(GLOBAL_ARGS).args(args);
         for var in REMOVED_ENV {
@@ -71,29 +131,10 @@ impl Git {
         cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
         log::trace!("git {}", args.join(" "));
         #[cfg(test)]
         spawn_log::record(args);
-        let mut child = cmd.spawn().map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => Error::GitNotFound,
-            _ => Error::Io(e),
-        })?;
-        let input = child.stdin.take();
-        std::thread::scope(|s| {
-            // Written from a thread so a big answer cannot deadlock us
-            // against a full pipe. A broken pipe just means git was done.
-            if let (Some(mut pipe), Some(data)) = (input, stdin) {
-                s.spawn(move || {
-                    let _ = pipe.write_all(data);
-                });
-            }
-            child.wait_with_output().map_err(Error::Io)
-        })
+        cmd
     }
 
     /// Like [`run_raw`](Self::run_raw), but a non-zero exit is an error.
@@ -105,6 +146,24 @@ impl Git {
             Err(failure(args, &out))
         }
     }
+}
+
+/// Reads `pipe` to its end on a thread of its own.
+fn read_all(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+fn spawn(cmd: &mut Command) -> Result<Child, Error> {
+    cmd.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => Error::GitNotFound,
+        _ => Error::Io(e),
+    })
 }
 
 /// The git commands this thread ran, for tests that check how many

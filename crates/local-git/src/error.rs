@@ -14,6 +14,8 @@ pub enum Error {
         status: String,
         stderr: String,
     },
+    #[error("git {command} did not finish within {seconds} seconds and was stopped")]
+    TimedOut { command: String, seconds: u64 },
     #[error("could not run git: {0}")]
     Io(#[source] std::io::Error),
     #[error("unexpected output from git {command}: {detail}")]

@@ -9,7 +9,9 @@
 //! from one commit to another ([`Repo::line_map`]) to carry comments over.
 //!
 //! The repository is only ever read: no fetch, no checkout, no gc (see
-//! [`git`] for the flags every invocation carries). Everything here is
+//! [`git`] for the flags every invocation carries). The one write is the
+//! push the user asks for ([`push`]), which takes the remote's own push
+//! rule and changes no configuration. Everything here is
 //! **blocking** `std::process` work; callers run it on a background executor.
 //!
 //! A comparison that Gerrit computes in ways we cannot reproduce (merge
@@ -26,6 +28,7 @@ mod files;
 mod git;
 mod intraline;
 mod line_map;
+pub mod push;
 mod series;
 
 pub use compare::{BaseKind, Comparison};
