@@ -40,6 +40,14 @@ fn commit(sha: &str, change_id: Option<&str>, branches: &[&str]) -> LocalCommit 
     }
 }
 
+/// `c` on a branch other than the checked-out one.
+fn off_head(c: LocalCommit) -> LocalCommit {
+    LocalCommit {
+        on_head: false,
+        ..c
+    }
+}
+
 /// `topic` tracks `origin/main`, `fix` tracks `origin/stable`, other
 /// branches go to `origin`'s default, `main`.
 fn targets() -> BranchTargets {
@@ -471,6 +479,54 @@ fn a_closed_change_id_is_skipped_unless_a_row_has_unsent_data() {
         // Gone from the branches it stays too.
         assert_eq!(h.plan(&scan(vec![])), []);
     }
+}
+
+#[test]
+fn only_head_makes_changes_and_rows_without_data_go_when_it_leaves_them() {
+    let mut h = H::new();
+    // c1 is only on a branch a rebase left behind: no change of its own.
+    let both = scan(vec![
+        commit("a1", Some("Ia"), &["topic"]),
+        off_head(commit("c1", Some("Ic"), &["topic-old"])),
+    ]);
+    assert!(h.run(&both).is_settled());
+    assert_eq!(h.rows(), s(&["main Ia checking [a1]"]));
+
+    // Ia and Ib were on HEAD; Ib got a draft. Then a rebase moved HEAD
+    // away from both, which another branch still has.
+    let mut h = H::new();
+    h.run(&scan(vec![
+        commit("a1", Some("Ia"), &["topic"]),
+        commit("b1", Some("Ib"), &["topic"]),
+    ]));
+    h.add_draft("Ib");
+    let left = scan(vec![
+        commit("n1", Some("In"), &["topic"]),
+        off_head(commit("a1", Some("Ia"), &["topic"])),
+        off_head(commit("b1", Some("Ib"), &["topic"])),
+    ]);
+    // While HEAD is detached nothing is made, and nothing goes.
+    let detached = LocalScan {
+        commits: left.commits.iter().cloned().map(off_head).collect(),
+        detached_head: true,
+        ..left.clone()
+    };
+    assert_eq!(h.plan(&detached), []);
+    // On a branch again: Ia goes, Ib stays for its draft, In is new.
+    assert!(h.run(&left).is_settled());
+    assert_eq!(
+        h.rows(),
+        s(&["main Ib checking [b1]", "main In checking [n1]"])
+    );
+    assert_eq!(h.plan(&left), []);
+    // A truncated scan does not delete by the HEAD rule either.
+    let mut h = H::new();
+    h.run(&scan(vec![commit("a1", Some("Ia"), &["topic"])]));
+    let truncated = LocalScan {
+        truncated: true,
+        ..scan(vec![off_head(commit("a1", Some("Ia"), &["topic"]))])
+    };
+    assert_eq!(h.plan(&truncated), []);
 }
 
 #[test]

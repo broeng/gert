@@ -248,7 +248,10 @@ sent there automatically once pushed, by the user or from the app.
   ("local 1", ...) per SHA seen; an unknown SHA of an open Gerrit change
   is a local patch set of that change. A change gone from the branches
   goes with its data, unless it has unsent data: then it stays until a
-  lookup settles it.
+  lookup settles it. Only commits the checked-out branch reaches make new
+  local changes; one HEAD no longer reaches (left on a branch a rebase
+  left behind) goes if it has no unsent data and is otherwise kept
+  unlisted. With HEAD detached (mid-rebase) this rule pauses.
 - **Synthetic numbers.** Local changes and patch sets get numbers from
   reserved ranges (`ChangeNumber::LOCAL_BASE`, `PatchSetNumber::LOCAL_BASE`)
   so pages, drafts and history work on them. They never reach a server:

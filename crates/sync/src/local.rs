@@ -30,6 +30,17 @@
 //! * Every commit of a change that the row does not have yet becomes its
 //!   next local patch set (oldest first); known ones are kept. The row's
 //!   subject, author and time are those of its newest commit in the scan.
+//! * The HEAD rule: only commits the checked-out branch reaches
+//!   ([`LocalCommit::on_head`]) make a new row. Other branches may still
+//!   have what a rebase moved away from (an earlier batch, a backup, a
+//!   squashed `fixup!`); their commits still add versions to rows that
+//!   exist and keep rows from vanishing. On a complete scan with HEAD on a
+//!   branch, a row (not a tombstone) without unsent data that HEAD reaches
+//!   nothing of (no version, no commit with its key) is deleted; one with
+//!   unsent data stays, and the store does not list it while HEAD reaches
+//!   none of its versions ([`store::Store::mark_local_versions_on_head`]).
+//!   While HEAD is detached (a rebase in progress, say) no row is made,
+//!   and none goes by this rule.
 //! * Vanishing is per change, never per version, only on a complete scan
 //!   ([`LocalScan::is_complete`]) and never without emails. Whether a
 //!   row's commits are still there goes by the whole scan, not by the
@@ -248,6 +259,18 @@ pub fn plan_reconcile(
     };
     let scan_keys: HashSet<Key> = scan.commits.iter().filter_map(key_for).collect();
     let by_key: HashMap<Key, &LocalChangeEntry> = entries.iter().map(|e| (key_of(e), e)).collect();
+    // A row that goes by the HEAD rule (see the module documentation).
+    let head_rule = complete && !scan.detached_head && !emails.is_empty();
+    let off_head = |e: &LocalChangeEntry| -> bool {
+        if !head_rule || e.has_unsent || e.change.state == LocalChangeState::Consolidated {
+            return false;
+        }
+        let key = key_of(e);
+        let shas: HashSet<&RevisionId> = e.patch_sets.iter().map(|p| &p.sha).collect();
+        !scan.commits.iter().any(|c| {
+            c.on_head && (shas.contains(&c.commit.sha) || key_for(c).as_ref() == Some(&key))
+        })
+    };
 
     let mut ops = Vec::new();
     // Versions that turned out to be Gerrit patch sets, whether or not
@@ -352,6 +375,20 @@ pub fn plan_reconcile(
                 Some(orphans.remove(i))
             }
         };
+        let group_on_head = g.all.iter().any(|c| c.on_head);
+        match target {
+            // Only HEAD makes new changes.
+            None if !group_on_head => continue,
+            Some(e) if !group_on_head && off_head(e) => {
+                handled.insert(e.change.id);
+                ops.push(LocalOp::Delete {
+                    seen: seen(e),
+                    else_state: None,
+                });
+                continue;
+            }
+            _ => {}
+        }
         let known: HashSet<&RevisionId> = target
             .map(|e| e.patch_sets.iter().map(|p| &p.sha).collect())
             .unwrap_or_default();
@@ -473,8 +510,12 @@ pub fn plan_reconcile(
                 }
             }
             // Still on a branch (also when its commits no longer pass the
-            // filters): nothing to do.
-            _ if present => {}
+            // filters): nothing to do, unless HEAD reaches none of it.
+            _ if present => {
+                if off_head(e) {
+                    ops.push(delete(None));
+                }
+            }
             LocalChangeState::Closed => ops.push(delete(None)),
             // Vanished. A row known to have unsent data is marked so
             // directly, so the scan settles at once; for the others the
