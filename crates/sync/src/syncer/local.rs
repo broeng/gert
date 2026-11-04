@@ -90,16 +90,11 @@ impl Syncer {
             let on_branch: Vec<RevisionId> =
                 scan.commits.iter().map(|c| c.commit.sha.clone()).collect();
             store.mark_local_versions_on_branch(self.server, project, &on_branch, now)?;
-            // And which the checked-out branch reaches, for the dashboard.
-            if !scan.detached_head {
-                let on_head: Vec<RevisionId> = scan
-                    .commits
-                    .iter()
-                    .filter(|c| c.on_head)
-                    .map(|c| c.commit.sha.clone())
-                    .collect();
-                store.mark_local_versions_on_head(self.server, project, &on_head)?;
-            }
+        }
+        if enabled && scan.knows_head() {
+            // Which versions the checked-out branch reaches, for the
+            // dashboard; known also when the scan's limit cut it short.
+            store.mark_local_versions_on_head(self.server, project, &scan.head_commits)?;
         }
         Ok(report)
     }

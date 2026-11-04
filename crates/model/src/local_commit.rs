@@ -59,9 +59,10 @@ pub struct LocalCommit {
     /// The local branches (`main`, not `refs/heads/main`) whose tips reach
     /// this commit, sorted by name.
     pub branches: Vec<String>,
-    /// The checked-out branch reaches this commit. Other branches may
-    /// still have commits a rebase moved away from (an earlier batch, a
-    /// backup), and only what HEAD reaches makes new local changes.
+    /// The checked-out branch reaches this commit (it is one of
+    /// [`LocalScan::head_commits`]). Other branches may still have commits
+    /// a rebase moved away from (an earlier batch, a backup), and only what
+    /// HEAD reaches makes new local changes.
     #[serde(default)]
     pub on_head: bool,
 }
@@ -95,6 +96,15 @@ pub struct LocalScan {
     /// [`LocalCommit::on_head`] and what HEAD reaches tells nothing.
     #[serde(default)]
     pub detached_head: bool,
+    /// Every commit the checked-out branch reaches that no remote-tracking
+    /// branch has, newest first: read apart from `commits`, so the limit
+    /// on those does not cut it (HEAD's own line is short next to all the
+    /// branches together). Empty with a detached HEAD.
+    #[serde(default)]
+    pub head_commits: Vec<RevisionId>,
+    /// `head_commits` hit its own, much larger guard.
+    #[serde(default)]
+    pub head_truncated: bool,
     pub targets: BranchTargets,
 }
 
@@ -103,6 +113,12 @@ impl LocalScan {
     /// is really gone from the named branches.
     pub fn is_complete(&self) -> bool {
         !self.truncated && !self.no_remotes
+    }
+
+    /// Whether `head_commits` is everything local that HEAD reaches, so a
+    /// commit missing from it is really not on HEAD's line.
+    pub fn knows_head(&self) -> bool {
+        !self.no_remotes && !self.detached_head && !self.head_truncated
     }
 }
 

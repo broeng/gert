@@ -19,6 +19,11 @@ const REF_FORMAT: &str = "--format=%(refname)%00%(objectname)%00%(symref)%00\
                           %(upstream:remotename)%00%(upstream:remoteref)%00%(HEAD)";
 
 const HEADS: &str = "refs/heads/";
+
+/// How many local commits HEAD may reach before [`Repo::scan`] gives up on
+/// listing them ([`LocalScan::head_truncated`]): far more than a chain of
+/// changes, so it only guards against remote-tracking branches far behind.
+const HEAD_LIMIT: usize = 5000;
 const REMOTES: &str = "refs/remotes/";
 
 /// One line of [`REF_FORMAT`] output.
@@ -50,8 +55,10 @@ impl Repo {
     /// first but never a parent before its children (`--date-order`;
     /// `--topo-order` would finish one line of history before the next, so
     /// the limit could drop a newer branch). [`LocalScan::truncated`] says
-    /// whether there were more. Those the checked-out branch reaches are
-    /// [`LocalCommit::on_head`].
+    /// whether there were more. Apart from that, every local commit the
+    /// checked-out branch reaches is listed in [`LocalScan::head_commits`]
+    /// (one more `rev-list`, without that limit), and those among the
+    /// commits are [`LocalCommit::on_head`].
     ///
     /// A detached HEAD does not count ([`LocalScan::detached_head`]: no
     /// commit is on HEAD then). Merge commits are included (see
@@ -136,15 +143,34 @@ impl Repo {
             }
         }
         fill_branches(&mut scan.commits, &heads);
-        match heads.iter().find(|r| r.head) {
-            Some(head) => {
-                let branch = head.name.strip_prefix(HEADS).unwrap_or(&head.name);
-                for c in &mut scan.commits {
-                    c.on_head = c.branches.iter().any(|b| b == branch);
-                }
-            }
-            None => scan.detached_head = true,
+        let Some(head) = heads.iter().find(|r| r.head) else {
+            scan.detached_head = true;
+            return Ok(scan);
+        };
+        let mut input = format!("{}\n", head.oid);
+        for oid in &remotes {
+            input.push('^');
+            input.push_str(oid);
+            input.push('\n');
         }
+        let max = format!("--max-count={}", HEAD_LIMIT.saturating_add(1));
+        let out = self
+            .git
+            .run(&["rev-list", &max, "--stdin"], Some(input.as_bytes()))?;
+        let mut on_head: Vec<RevisionId> = String::from_utf8_lossy(&out)
+            .lines()
+            .filter(|l| is_object_id(l))
+            .map(RevisionId::from)
+            .collect();
+        if on_head.len() > HEAD_LIMIT {
+            on_head.truncate(HEAD_LIMIT);
+            scan.head_truncated = true;
+        }
+        let set: HashSet<&RevisionId> = on_head.iter().collect();
+        for c in &mut scan.commits {
+            c.on_head = set.contains(&c.commit.sha);
+        }
+        scan.head_commits = on_head;
         Ok(scan)
     }
 

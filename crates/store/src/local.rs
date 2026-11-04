@@ -691,11 +691,11 @@ impl Store {
     }
 
     /// Records which versions of `project`'s local changes the checked-out
-    /// branch reaches: those whose commit is one of `on_head`, the
-    /// [`model::LocalCommit::on_head`] commits of a complete scan with HEAD
-    /// on a branch (never call it with an incomplete scan or a detached
-    /// HEAD, which say nothing about the others). Returns how many versions
-    /// changed.
+    /// branch reaches: those whose commit is one of `on_head`, a scan's
+    /// [`model::LocalScan::head_commits`] (never call it unless the scan
+    /// [`knows_head`](model::LocalScan::knows_head): with a detached HEAD
+    /// or a cut-off list they say nothing about the others). Returns how
+    /// many versions changed.
     pub fn mark_local_versions_on_head(
         &mut self,
         server: ServerId,

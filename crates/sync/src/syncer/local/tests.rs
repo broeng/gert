@@ -46,12 +46,15 @@ fn commit(sha: &str, change_id: &str) -> LocalCommit {
 }
 
 fn scan(commits: Vec<LocalCommit>) -> LocalScan {
+    let head_commits = commits.iter().map(|c| c.commit.sha.clone()).collect();
     LocalScan {
         fingerprint: 7,
         commits,
         truncated: false,
         no_remotes: false,
         detached_head: false,
+        head_commits,
+        head_truncated: false,
         targets: BranchTargets {
             upstreams: [(
                 "topic".to_owned(),

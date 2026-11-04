@@ -107,9 +107,17 @@ fn commits_the_checked_out_branch_reaches_are_on_head() {
     // Detached: nothing is on HEAD, and the scan says why.
     r.git(&["checkout", "-q", "--detach"]);
     let scan = repo.scan(200).expect("scan");
-    assert!(scan.detached_head);
+    assert!(scan.detached_head && !scan.knows_head());
+    assert!(scan.head_commits.is_empty());
     assert_eq!(scan.commits.len(), 3);
     assert!(scan.commits.iter().all(|c| !c.on_head));
+
+    // The limit on the scan's commits does not cut what HEAD reaches.
+    r.git(&["checkout", "-q", "main"]);
+    let scan = repo.scan(1).expect("scan");
+    assert!(scan.truncated && scan.knows_head());
+    assert_eq!(scan.commits.len(), 1);
+    assert_eq!(scan.head_commits, [rev(&next), rev(&shared)]);
 }
 
 #[test]

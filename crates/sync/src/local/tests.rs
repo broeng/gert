@@ -61,14 +61,22 @@ fn targets() -> BranchTargets {
     }
 }
 
-/// A complete scan, newest commit first.
+/// A complete scan, newest commit first; HEAD reaches the commits that
+/// are [`LocalCommit::on_head`].
 fn scan(commits: Vec<LocalCommit>) -> LocalScan {
+    let head_commits = commits
+        .iter()
+        .filter(|c| c.on_head)
+        .map(|c| c.commit.sha.clone())
+        .collect();
     LocalScan {
         fingerprint: 1,
         commits,
         truncated: false,
         no_remotes: false,
         detached_head: false,
+        head_commits,
+        head_truncated: false,
         targets: targets(),
     }
 }
@@ -519,13 +527,24 @@ fn only_head_makes_changes_and_rows_without_data_go_when_it_leaves_them() {
         s(&["main Ib checking [b1]", "main In checking [n1]"])
     );
     assert_eq!(h.plan(&left), []);
-    // A truncated scan does not delete by the HEAD rule either.
+    // A scan the limit cut short still knows what HEAD reaches: rows it
+    // did not even read go by the HEAD rule, those HEAD reaches stay.
     let mut h = H::new();
-    h.run(&scan(vec![commit("a1", Some("Ia"), &["topic"])]));
-    let truncated = LocalScan {
-        truncated: true,
-        ..scan(vec![off_head(commit("a1", Some("Ia"), &["topic"]))])
-    };
+    h.run(&scan(vec![
+        commit("a1", Some("Ia"), &["topic"]),
+        commit("b1", Some("Ib"), &["topic"]),
+    ]));
+    let mut truncated = scan(vec![commit("n1", Some("In"), &["topic"])]);
+    truncated.truncated = true;
+    truncated.head_commits.push("b1".into());
+    assert!(h.run(&truncated).is_settled());
+    assert_eq!(
+        h.rows(),
+        s(&["main Ib checking [b1]", "main In checking [n1]"])
+    );
+    // When HEAD's own list was cut short, the rule pauses.
+    truncated.head_commits = vec!["n1".into()];
+    truncated.head_truncated = true;
     assert_eq!(h.plan(&truncated), []);
 }
 
@@ -571,9 +590,11 @@ fn a_change_vanishes_only_when_all_its_commits_left_on_a_complete_scan() {
     // versions.
     assert_eq!(h.rows(), s(&["main I1 checking [c1 c1b]"]));
 
-    // Truncated or remote-less scans never vanish anything.
+    // Truncated or remote-less scans never vanish anything (HEAD still
+    // reaches the change: the HEAD rule is another matter).
     let mut truncated = scan(vec![]);
     truncated.truncated = true;
+    truncated.head_commits = vec!["c1b".into()];
     let mut no_remotes = scan(vec![]);
     no_remotes.no_remotes = true;
     for sc in [&truncated, &no_remotes] {

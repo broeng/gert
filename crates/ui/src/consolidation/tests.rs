@@ -1488,6 +1488,8 @@ fn a_tombstone_kept_by_the_scan_still_redirects() {
         truncated: false,
         no_remotes: false,
         detached_head: false,
+        head_commits: Vec::new(),
+        head_truncated: false,
         targets: Default::default(),
     };
     let report = syncer
