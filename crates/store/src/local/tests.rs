@@ -1106,6 +1106,43 @@ fn rows_with_a_post_in_flight_are_not_merged() {
 }
 
 #[test]
+fn a_change_whose_versions_head_does_not_reach_is_not_listed() {
+    let (mut s, server) = setup();
+    add(&mut s, server, upsert("Ia", Some("main"), &["a1", "a2"]));
+    add(&mut s, server, upsert("Ib", Some("main"), &["b1"]));
+    let gone = add(&mut s, server, upsert("Ic", Some("main"), &["c1"]));
+    s.set_local_change_state(server, gone.id, LocalChangeState::Vanished)
+        .unwrap();
+    let listed = |s: &Store| -> Vec<String> {
+        let mut ids: Vec<String> = s
+            .dashboard_local_changes(server)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.change_id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(listed(&s), ["Ia", "Ib", "Ic"]);
+    // HEAD reaches one version of a, none of b; a vanished change stays.
+    assert_eq!(
+        s.mark_local_versions_on_head(server, "p", &["a2".into()])
+            .unwrap(),
+        3
+    );
+    assert_eq!(listed(&s), ["Ia", "Ic"]);
+    // The same again changes nothing; b back on HEAD is listed again.
+    assert_eq!(
+        s.mark_local_versions_on_head(server, "p", &["a2".into()])
+            .unwrap(),
+        0
+    );
+    s.mark_local_versions_on_head(server, "p", &["a2".into(), "b1".into()])
+        .unwrap();
+    assert_eq!(listed(&s), ["Ia", "Ib", "Ic"]);
+}
+
+#[test]
 fn versions_off_every_named_branch_are_marked_by_a_complete_scan() {
     let (mut s, server) = setup();
     let row = add(&mut s, server, upsert("Ia", Some("main"), &["a1", "a2"]));

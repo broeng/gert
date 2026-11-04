@@ -532,6 +532,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE pending_reviews ADD COLUMN known_on_gerrit INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE pending_reviews ADD COLUMN offline INTEGER NOT NULL DEFAULT 0;
     ",
+    // v24 -> v25: whether a local version was reached from the checked-out
+    // branch in the last complete scan of its project with HEAD on a
+    // branch. A local change none of whose versions is, though still on
+    // another branch (one a rebase left behind), is kept for its unsent
+    // data but not listed. Existing versions count as on HEAD until the
+    // next such scan says otherwise.
+    "
+    ALTER TABLE local_patch_sets ADD COLUMN on_head INTEGER NOT NULL DEFAULT 1;
+    ",
 ];
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32, Error> {

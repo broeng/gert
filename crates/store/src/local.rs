@@ -566,15 +566,22 @@ impl Store {
     /// ones (found merged or abandoned, their review held) and any other
     /// with held items (held drafts on its versions or reserved for its
     /// post, held or failed reviews). Those open their Gerrit change, whose
-    /// held card shows the items. Tombstones are never listed.
+    /// held card shows the items. Tombstones are never listed, nor a change
+    /// of its own still on a branch that none of whose versions is on the
+    /// checked-out one ([`Store::mark_local_versions_on_head`]): it is kept
+    /// for its unsent data and listed again once HEAD reaches it.
     pub fn dashboard_local_changes(&self, server: ServerId) -> Result<Vec<LocalChange>, Error> {
         let numbers = patch_set_numbers("local_changes.id");
         query_changes(
             &self.conn,
             &format!(
                 "server_id = ?1 AND (
-                     (gerrit_number IS NULL
-                      AND state IN ('checking', 'local', 'ambiguous', 'vanished'))
+                     (gerrit_number IS NULL AND (state = 'vanished'
+                      OR (state IN ('checking', 'local', 'ambiguous')
+                          AND (EXISTS (SELECT 1 FROM local_patch_sets h
+                                  WHERE h.local_change_id = local_changes.id AND h.on_head)
+                               OR NOT EXISTS (SELECT 1 FROM local_patch_sets h
+                                  WHERE h.local_change_id = local_changes.id)))))
                      OR (gerrit_number IS NOT NULL AND state <> 'consolidated' AND (
                          state = 'closed'
                          OR EXISTS (SELECT 1 FROM pending_reviews r
@@ -681,6 +688,30 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(changed)
+    }
+
+    /// Records which versions of `project`'s local changes the checked-out
+    /// branch reaches: those whose commit is one of `on_head`, the
+    /// [`model::LocalCommit::on_head`] commits of a complete scan with HEAD
+    /// on a branch (never call it with an incomplete scan or a detached
+    /// HEAD, which say nothing about the others). Returns how many versions
+    /// changed.
+    pub fn mark_local_versions_on_head(
+        &mut self,
+        server: ServerId,
+        project: &str,
+        on_head: &[RevisionId],
+    ) -> Result<usize, Error> {
+        let shas: Vec<&str> = on_head.iter().map(RevisionId::as_str).collect();
+        Ok(self.conn.execute(
+            "UPDATE local_patch_sets
+             SET on_head = (sha IN (SELECT value FROM json_each(?3)))
+             WHERE server_id = ?1
+               AND local_change_id IN
+                   (SELECT id FROM local_changes WHERE server_id = ?1 AND project = ?2)
+               AND on_head IS NOT (sha IN (SELECT value FROM json_each(?3)))",
+            params![server.0, project, serde_json::to_string(&shas)?],
+        )?)
     }
 
     /// Records that a lookup started at `asked` found local change
