@@ -16,7 +16,7 @@ use crate::{Error, Local, NotLocal, Repo, is_object_id};
 /// One record per ref, fields separated by NUL. Ref names cannot contain
 /// control characters, so the newline between records is safe.
 const REF_FORMAT: &str = "--format=%(refname)%00%(objectname)%00%(symref)%00\
-                          %(upstream:remotename)%00%(upstream:remoteref)";
+                          %(upstream:remotename)%00%(upstream:remoteref)%00%(HEAD)";
 
 const HEADS: &str = "refs/heads/";
 const REMOTES: &str = "refs/remotes/";
@@ -31,6 +31,8 @@ struct RefRecord {
     upstream_remote: String,
     /// `branch.<b>.merge` of a local branch (`refs/heads/main`).
     upstream_ref: String,
+    /// The branch checked out in this worktree.
+    head: bool,
 }
 
 /// Checkouts already logged as having no remote-tracking branches, so that
@@ -48,9 +50,11 @@ impl Repo {
     /// first but never a parent before its children (`--date-order`;
     /// `--topo-order` would finish one line of history before the next, so
     /// the limit could drop a newer branch). [`LocalScan::truncated`] says
-    /// whether there were more.
+    /// whether there were more. Those the checked-out branch reaches are
+    /// [`LocalCommit::on_head`].
     ///
-    /// A detached HEAD does not count. Merge commits are included (see
+    /// A detached HEAD does not count ([`LocalScan::detached_head`]: no
+    /// commit is on HEAD then). Merge commits are included (see
     /// [`LocalCommit::is_merge`]); nothing is filtered by author. A
     /// repository without any remote-tracking branch is not scanned at all
     /// ([`LocalScan::no_remotes`]): its whole history would count as local.
@@ -121,6 +125,7 @@ impl Repo {
                     scan.commits.push(LocalCommit {
                         commit: parse_commit(sha, &data),
                         branches: Vec::new(),
+                        on_head: false,
                     });
                 }
                 // Gone since rev-list listed it (a gc in between, say).
@@ -131,6 +136,15 @@ impl Repo {
             }
         }
         fill_branches(&mut scan.commits, &heads);
+        match heads.iter().find(|r| r.head) {
+            Some(head) => {
+                let branch = head.name.strip_prefix(HEADS).unwrap_or(&head.name);
+                for c in &mut scan.commits {
+                    c.on_head = c.branches.iter().any(|b| b == branch);
+                }
+            }
+            None => scan.detached_head = true,
+        }
         Ok(scan)
     }
 
@@ -185,7 +199,8 @@ impl Repo {
     }
 
     /// A hash of every local and remote-tracking branch (name, commit,
-    /// symbolic target and upstream), the same as [`LocalScan::fingerprint`]
+    /// symbolic target, upstream and whether it is checked out, so a
+    /// switch of branches counts), the same as [`LocalScan::fingerprint`]
     /// of a scan that saw the same refs. One cheap `for-each-ref`, so a
     /// scanner can skip [`scan`](Self::scan) when nothing changed. Stable
     /// within one process run only.
@@ -212,8 +227,8 @@ fn parse_refs(raw: &[u8]) -> Result<Vec<RefRecord>, Error> {
             .split(|&b| b == 0)
             .map(|f| String::from_utf8_lossy(f).into_owned())
             .collect();
-        let Ok([name, oid, symref, upstream_remote, upstream_ref]) =
-            <[String; 5]>::try_from(fields)
+        let Ok([name, oid, symref, upstream_remote, upstream_ref, head]) =
+            <[String; 6]>::try_from(fields)
         else {
             return Err(Error::Parse {
                 command: "for-each-ref",
@@ -226,6 +241,7 @@ fn parse_refs(raw: &[u8]) -> Result<Vec<RefRecord>, Error> {
             symref,
             upstream_remote,
             upstream_ref,
+            head: head == "*",
         });
     }
     Ok(records)

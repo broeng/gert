@@ -68,6 +68,51 @@ fn branches_of<'a>(commits: &'a [LocalCommit], sha: &str) -> Vec<&'a str> {
 }
 
 #[test]
+fn commits_the_checked_out_branch_reaches_are_on_head() {
+    let (_remote, r, _base) = pushed();
+    let shared = r.commit("Shared");
+    let fixup = r.commit("fixup! Shared");
+    // A branch a rebase left behind, still with the fixup.
+    r.git(&["branch", "old"]);
+    r.git(&["reset", "-q", "--hard", &shared]);
+    let next = r.commit("Next");
+    let repo = open(&r);
+    let on_head = |scan: &LocalScan| -> Vec<(String, bool)> {
+        let mut v: Vec<_> = scan
+            .commits
+            .iter()
+            .map(|c| (c.commit.sha.to_string(), c.on_head))
+            .collect();
+        v.sort();
+        v
+    };
+    let mut want = vec![
+        (shared.clone(), true),
+        (fixup.clone(), false),
+        (next.clone(), true),
+    ];
+    want.sort();
+    let scan = repo.scan(200).expect("scan");
+    assert!(!scan.detached_head);
+    assert_eq!(on_head(&scan), want);
+
+    // Another branch checked out: the same refs, but a new fingerprint.
+    let before = repo.refs_fingerprint().expect("fingerprint");
+    r.git(&["checkout", "-q", "old"]);
+    assert_ne!(repo.refs_fingerprint().expect("fingerprint"), before);
+    let scan = repo.scan(200).expect("scan");
+    assert!(on_head(&scan).contains(&(fixup.clone(), true)));
+    assert!(on_head(&scan).contains(&(next.clone(), false)));
+
+    // Detached: nothing is on HEAD, and the scan says why.
+    r.git(&["checkout", "-q", "--detach"]);
+    let scan = repo.scan(200).expect("scan");
+    assert!(scan.detached_head);
+    assert_eq!(scan.commits.len(), 3);
+    assert!(scan.commits.iter().all(|c| !c.on_head));
+}
+
+#[test]
 fn unpushed_commits_on_named_branches_are_listed_with_their_branches() {
     let (_remote, r, base) = pushed();
     let c1 = r.commit(&format!("Main one\n\nChange-Id: {ID_A}"));

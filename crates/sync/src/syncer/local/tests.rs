@@ -41,6 +41,7 @@ fn commit(sha: &str, change_id: &str) -> LocalCommit {
             change_id: Some(change_id.into()),
         },
         branches: vec!["topic".into()],
+        on_head: true,
     }
 }
 
@@ -50,6 +51,7 @@ fn scan(commits: Vec<LocalCommit>) -> LocalScan {
         commits,
         truncated: false,
         no_remotes: false,
+        detached_head: false,
         targets: BranchTargets {
             upstreams: [(
                 "topic".to_owned(),

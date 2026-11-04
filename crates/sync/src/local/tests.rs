@@ -36,6 +36,7 @@ fn commit(sha: &str, change_id: Option<&str>, branches: &[&str]) -> LocalCommit 
             change_id: change_id.map(str::to_owned),
         },
         branches: branches.iter().map(|b| (*b).to_owned()).collect(),
+        on_head: true,
     }
 }
 
@@ -59,6 +60,7 @@ fn scan(commits: Vec<LocalCommit>) -> LocalScan {
         commits,
         truncated: false,
         no_remotes: false,
+        detached_head: false,
         targets: targets(),
     }
 }

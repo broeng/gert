@@ -59,6 +59,11 @@ pub struct LocalCommit {
     /// The local branches (`main`, not `refs/heads/main`) whose tips reach
     /// this commit, sorted by name.
     pub branches: Vec<String>,
+    /// The checked-out branch reaches this commit. Other branches may
+    /// still have commits a rebase moved away from (an earlier batch, a
+    /// backup), and only what HEAD reaches makes new local changes.
+    #[serde(default)]
+    pub on_head: bool,
 }
 
 impl LocalCommit {
@@ -85,6 +90,11 @@ pub struct LocalScan {
     /// would count as local, and nothing was scanned (`commits` is empty).
     /// Not a reason to take anything as vanished either.
     pub no_remotes: bool,
+    /// HEAD is on no branch that has commits (detached, as during a
+    /// rebase, or on a branch not born yet), so no commit is
+    /// [`LocalCommit::on_head`] and what HEAD reaches tells nothing.
+    #[serde(default)]
+    pub detached_head: bool,
     pub targets: BranchTargets,
 }
 
