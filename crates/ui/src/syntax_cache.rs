@@ -18,7 +18,7 @@ use model::{DiffKey, FileEntry, FilesKey, Whitespace};
 use sync::Syncer;
 
 use crate::{
-    diff::syntax::{DiffSyntax, highlight_diff},
+    diff::syntax::{Cancel, Cancelled, DiffSyntax, highlight_diff},
     diff_load::load_diff,
     filters::{FileStyle, skips},
     local_source::LocalLazy,
@@ -104,7 +104,7 @@ pub struct SyntaxCache {
     /// The keys the last `set_queue` was given while enabled.
     #[cfg(test)]
     last_queue: Vec<DiffKey>,
-    /// The worker; dropping it cancels the item in flight.
+    /// The worker; dropping it stops the job in flight.
     worker: Option<Task<()>>,
 }
 
@@ -176,15 +176,19 @@ impl SyntaxCache {
                 let job = key.clone();
                 let local = local.clone();
                 let mut steps = Steps::start();
+                let cancel = Cancel::default();
+                let stop_on_drop = cancel.on_drop();
                 let result = cx
                     .background_spawn(async move {
                         steps.lap("queued");
-                        highlight_key(syncer, job, can_sync, local, steps).await
+                        highlight_key(syncer, job, can_sync, local, cancel, steps).await
                     })
                     .await;
+                drop(stop_on_drop);
                 let stored = this.update(cx, |this, cx| {
                     match result {
-                        Ok(h) => this.lru.insert(key, h),
+                        Ok(Ok(h)) => this.lru.insert(key, h),
+                        Ok(Err(Cancelled)) => {}
                         Err(e) => log::debug!("highlighting {} ahead failed: {e}", key.path),
                     }
                     cx.notify();
@@ -259,23 +263,33 @@ pub fn ahead_paths<'a>(
         .collect()
 }
 
-/// Gets the diff (cache first, then the checkout, the network for a miss) and highlights it.
-/// Blocking: call from the background executor. Logs `steps` (see
-/// [`crate::timing`]): it shares the executor with the pages' own loads.
+/// Gets the diff (cache first, then the checkout, the network for a miss)
+/// and highlights it, until `cancel` says stop. Blocking: call from the
+/// background executor. Logs `steps` (see [`crate::timing`]): it shares the
+/// executor with the pages' own loads.
 async fn highlight_key(
     syncer: Syncer,
     key: DiffKey,
     can_sync: bool,
     local: LocalLazy,
+    cancel: Cancel,
     mut steps: Steps,
-) -> Result<Highlight, crate::diff_load::LoadError> {
+) -> Result<Result<Highlight, Cancelled>, crate::diff_load::LoadError> {
+    if cancel.is_cancelled() {
+        return Ok(Err(Cancelled));
+    }
     let (diff, _) = load_diff(syncer, key.clone(), can_sync, local).await?;
     steps.lap("diff");
-    let highlight = highlight_diff(&key.path, &diff);
+    let highlight = highlight_diff(&key.path, &diff, &cancel);
     steps.lap("highlighting");
+    let outcome = if highlight.is_ok() {
+        ""
+    } else {
+        " (cancelled)"
+    };
     log::debug!(
         target: timing::TARGET,
-        "highlighting {} of change {} ahead: {steps}",
+        "highlighting {} of change {} ahead{outcome}: {steps}",
         key.path,
         key.change
     );

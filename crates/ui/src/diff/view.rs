@@ -25,7 +25,7 @@ use super::{
         Row, ThreadSlot,
     },
     paint::{Palette, Style, SyntaxPaint, TEXT_INSET, line_highlights},
-    syntax::{DiffSyntax, highlight_diff},
+    syntax::{Cancel, DiffSyntax, highlight_diff},
 };
 
 /// How the widget takes its height.
@@ -81,8 +81,8 @@ pub struct ThreadContext {
 enum Syntax {
     /// Not computed (off, no path yet, or a carrier of threads).
     Idle,
-    /// Computing in the background; dropping the task cancels it.
-    Pending(#[expect(dead_code, reason = "dropping the task cancels the job")] Task<()>),
+    /// Computing in the background; dropping the task stops the job.
+    Pending(#[expect(dead_code, reason = "dropping the task stops the job")] Task<()>),
     /// Done; `None` when the file has nothing to color.
     Ready(Option<DiffSyntax>),
 }
@@ -651,10 +651,16 @@ impl DiffView {
             return;
         };
         let (diff, generation) = (self.diff.clone(), self.syntax_gen);
+        let cancel = Cancel::default();
+        let stop_on_drop = cancel.on_drop();
         self.syntax = Syntax::Pending(cx.spawn(async move |this, cx| {
+            let _stop_on_drop = stop_on_drop;
             let result = cx
-                .background_spawn(async move { highlight_diff(&path, &diff) })
+                .background_spawn(async move { highlight_diff(&path, &diff, &cancel) })
                 .await;
+            let Ok(result) = result else {
+                return;
+            };
             this.update(cx, |this, cx| {
                 if this.syntax_gen == generation {
                     this.syntax = Syntax::Ready(result.clone());

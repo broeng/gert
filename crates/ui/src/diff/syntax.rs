@@ -13,7 +13,14 @@
 //! `crates/component/src/highlighter/syntect_backend.rs` (Apache-2.0,
 //! Copyright Longbridge); see that file for the original.
 
-use std::{collections::HashMap, ops::Range, sync::Arc, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use model::{Diff, DiffChunk, DiffSide};
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
@@ -89,22 +96,66 @@ impl DiffSyntax {
     }
 }
 
-/// Highlights both sides of `diff` for the file at `path`. `None` when there
-/// is nothing to color: binary diffs, Gerrit's magic files, unknown languages
-/// or both sides over the limits.
-pub fn highlight_diff(path: &str, diff: &Diff) -> Option<DiffSyntax> {
+/// Stops a highlight job from another thread: [`highlight_diff`] checks it
+/// before every line, so a job nobody waits for any more ends within a line
+/// instead of holding a thread of the background executor for seconds (some
+/// grammars, Scala's among them, need milliseconds per line). Clones share
+/// the flag.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// A guard that cancels when dropped. The task that waits for the job
+    /// keeps it, so that dropping that task stops the job too: dropping a
+    /// GPUI task cannot stop a blocking job that is already running.
+    pub fn on_drop(&self) -> CancelOnDrop {
+        CancelOnDrop(self.clone())
+    }
+}
+
+/// See [`Cancel::on_drop`].
+pub struct CancelOnDrop(Cancel);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// The job was cancelled before it finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cancelled;
+
+/// Highlights both sides of `diff` for the file at `path`, until `cancel`
+/// says stop. `Ok(None)` when there is nothing to color: binary diffs,
+/// Gerrit's magic files, unknown languages or both sides over the limits.
+pub fn highlight_diff(
+    path: &str,
+    diff: &Diff,
+    cancel: &Cancel,
+) -> Result<Option<DiffSyntax>, Cancelled> {
     if diff.binary {
-        return None;
+        return Ok(None);
     }
     let old = side_lines(diff, DiffSide::Left);
     let new = side_lines(diff, DiffSide::Right);
     let first = new.lines.first().or(old.lines.first()).map(|(_, l)| *l);
-    let syntax = detect_syntax(path, first)?;
-    let result = DiffSyntax {
-        old: highlight_side(syntax, &old).map(Arc::new),
-        new: highlight_side(syntax, &new).map(Arc::new),
+    let Some(syntax) = detect_syntax(path, first) else {
+        return Ok(None);
     };
-    (result.old.is_some() || result.new.is_some()).then_some(result)
+    let result = DiffSyntax {
+        old: highlight_side(syntax, &old, cancel)?.map(Arc::new),
+        new: highlight_side(syntax, &new, cancel)?.map(Arc::new),
+    };
+    Ok((result.old.is_some() || result.new.is_some()).then_some(result))
 }
 
 /// The syntax for a file path, falling back to a shebang or other first-line
@@ -200,9 +251,13 @@ fn side_lines(diff: &Diff, side: DiffSide) -> SideLines<'_> {
 }
 
 /// Highlights one side, or `None` if it is empty or over the limits.
-fn highlight_side(syntax: &'static SyntaxReference, side: &SideLines<'_>) -> Option<SideSyntax> {
+fn highlight_side(
+    syntax: &'static SyntaxReference,
+    side: &SideLines<'_>,
+    cancel: &Cancel,
+) -> Result<Option<SideSyntax>, Cancelled> {
     if side.lines.is_empty() || side.total > MAX_SIDE_LINES || side.bytes > MAX_SIDE_BYTES {
-        return None;
+        return Ok(None);
     }
     let syntaxes = &*SYNTAXES;
     let mut parser = ParseState::new(syntax);
@@ -212,6 +267,9 @@ fn highlight_side(syntax: &'static SyntaxReference, side: &SideLines<'_>) -> Opt
     let mut buf = String::new();
 
     for &(number, line) in &side.lines {
+        if cancel.is_cancelled() {
+            return Err(Cancelled);
+        }
         if line.len() > MAX_LINE_BYTES {
             continue;
         }
@@ -262,7 +320,7 @@ fn highlight_side(syntax: &'static SyntaxReference, side: &SideLines<'_>) -> Opt
             *slot = spans;
         }
     }
-    Some(SideSyntax { lines: result })
+    Ok(Some(SideSyntax { lines: result }))
 }
 
 /// The theme's highlight name for a TextMate scope, or `None` to let an
@@ -416,6 +474,11 @@ mod tests {
             b: lines(b),
             ..Default::default()
         })
+    }
+
+    /// Highlights with a job nobody cancels.
+    fn highlight_diff(path: &str, diff: &Diff) -> Option<DiffSyntax> {
+        super::highlight_diff(path, diff, &Cancel::default()).expect("never cancelled")
     }
 
     fn diff(chunks: Vec<DiffChunk>) -> Diff {
@@ -694,6 +757,28 @@ mod tests {
             let _ = highlight_diff(path, &d);
         }
         let _ = highlight_diff("a.rs", &diff(Vec::new()));
+    }
+
+    #[test]
+    fn a_cancelled_job_stops_with_no_result() {
+        let d = diff(vec![common(&["fn a() {}", "fn b() {}"])]);
+        let cancel = Cancel::default();
+        let guard = cancel.on_drop();
+        assert!(matches!(
+            super::highlight_diff("a.rs", &d, &cancel),
+            Ok(Some(_))
+        ));
+        drop(guard);
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            super::highlight_diff("a.rs", &d, &cancel).map(|_| ()),
+            Err(Cancelled)
+        );
+        // Nothing to color needs no lines, so it is no error.
+        assert_eq!(
+            super::highlight_diff("a.unknownext", &d, &cancel).map(|s| s.is_none()),
+            Ok(true)
+        );
     }
 
     #[test]
