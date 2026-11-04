@@ -34,6 +34,7 @@ use crate::{
         settings::{SettingsEvent, SettingsPage, SettingsTab},
     },
     project_dialog::{ProjectContext, ProjectDialog, ProjectEvent},
+    push_dialog::{PushDialog, PushEvent, PushRequest},
     reply::{ReplyDialog, ReplyEvent, ReplyRequest, Sent},
     servers::{ACTIVE_SERVER_STATE, Connection, Servers},
     session::{
@@ -109,6 +110,7 @@ pub fn init(cx: &mut App) {
     crate::filters_dialog::actions::bind_keys(cx);
     crate::notify_rule_dialog::actions::bind_keys(cx);
     crate::project_dialog::actions::bind_keys(cx);
+    crate::push_dialog::actions::bind_keys(cx);
     crate::goto::bind_keys(cx);
     crate::switcher::bind_keys(cx);
 }
@@ -146,6 +148,8 @@ pub struct Shell {
     rule_dialog_subs: Vec<Subscription>,
     project_dialog: Option<Entity<ProjectDialog>>,
     project_dialog_subs: Vec<Subscription>,
+    push_dialog: Option<Entity<PushDialog>>,
+    push_dialog_subs: Vec<Subscription>,
     /// The Go to dialog while it is open (modal, like the others).
     goto: Option<Entity<GotoDialog>>,
     goto_subs: Vec<Subscription>,
@@ -224,6 +228,7 @@ impl Shell {
             let modal = modal.or_else(|| this.filters_dialog.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.rule_dialog.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.project_dialog.as_ref().map(|d| d.focus_handle(cx)));
+            let modal = modal.or_else(|| this.push_dialog.as_ref().map(|d| d.focus_handle(cx)));
             let modal = modal.or_else(|| this.goto.as_ref().map(|d| d.focus_handle(cx)));
             if let Some(handle) = modal {
                 window.focus(&handle, cx);
@@ -265,6 +270,8 @@ impl Shell {
             rule_dialog_subs: Vec::new(),
             project_dialog: None,
             project_dialog_subs: Vec::new(),
+            push_dialog: None,
+            push_dialog_subs: Vec::new(),
             goto: None,
             goto_subs: Vec::new(),
             switcher: None,
@@ -353,6 +360,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
             || self.goto.is_some()
             || self.switcher.is_some();
         dialog
@@ -1122,6 +1130,7 @@ impl Shell {
         self.drop_filters_dialog();
         self.drop_rule_dialog();
         self.drop_project_dialog();
+        self.drop_push_dialog();
         self.drop_goto();
         self.drop_switcher();
         let mut route = self.nav.current().clone();
@@ -1543,6 +1552,9 @@ impl Shell {
                 }
                 ChangeEvent::Search(q) => this.search(q.clone(), window, cx),
                 ChangeEvent::LocalReviewSaved => this.consolidate(&owner, Request::Now, cx),
+                ChangeEvent::Push(request) => {
+                    this.open_push_dialog((**request).clone(), window, cx)
+                }
                 ChangeEvent::OpenChange(n) => this.navigate(Route::Change(*n), window, cx),
                 ChangeEvent::OpenChangeAt(n, view) => {
                     this.remember_selection(cx);
@@ -1842,6 +1854,7 @@ impl Shell {
         self.drop_filters_dialog();
         self.drop_rule_dialog();
         self.drop_project_dialog();
+        self.drop_push_dialog();
         if let Some(first) = self.servers.keys().first().cloned() {
             let start = self.start_route();
             self.nav.visit(&first, start);
@@ -1926,6 +1939,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
             || self.goto.is_some()
         {
             return;
@@ -1944,6 +1958,7 @@ impl Shell {
             self.drop_filters_dialog();
             self.drop_rule_dialog();
             self.drop_project_dialog();
+            self.drop_push_dialog();
         }
         let session = self.servers.get(key).and_then(|e| e.session.clone());
         self.servers.set_connection(key, Connection::Unauthorized);
@@ -1981,6 +1996,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
         {
             return;
         }
@@ -2080,6 +2096,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
         {
             return;
         }
@@ -2188,6 +2205,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
         {
             return;
         }
@@ -2239,6 +2257,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
         {
             return;
         }
@@ -2309,6 +2328,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
         {
             return;
         }
@@ -2345,6 +2365,67 @@ impl Shell {
 
     fn close_project_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.drop_project_dialog();
+        let handle = self.page.focus_handle(cx);
+        window.focus(&handle, cx);
+        self.retry_redirect(window, cx);
+        cx.notify();
+    }
+
+    // ---- push dialog ----
+
+    /// Opens the push dialog for a local version of a change on the active
+    /// server.
+    fn open_push_dialog(
+        &mut self,
+        request: PushRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reply.is_some()
+            || self.menu.is_some()
+            || self.filters_dialog.is_some()
+            || self.rule_dialog.is_some()
+            || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
+        {
+            return;
+        }
+        let Some(session) = self.session().cloned() else {
+            return;
+        };
+        let owner = session.key.clone();
+        let Some(checkouts) = self.checkouts(&owner, cx) else {
+            return;
+        };
+        let dialog =
+            cx.new(|cx| PushDialog::new(request, checkouts, session.base_url.clone(), window, cx));
+        self.push_dialog_subs.push(cx.subscribe_in(
+            &dialog,
+            window,
+            move |this, _, ev: &PushEvent, window, cx| match ev {
+                PushEvent::Close => this.close_push_dialog(window, cx),
+                PushEvent::Pushed(note) => {
+                    this.close_push_dialog(window, cx);
+                    if let Page::Change(p) = &this.page {
+                        p.update(cx, |p, cx| p.say(note.clone(), cx));
+                    }
+                    // Finds the commits on Gerrit and sends the reviews.
+                    this.consolidate(&owner, Request::Now, cx);
+                }
+            },
+        ));
+        self.push_dialog = Some(dialog);
+        cx.notify();
+    }
+
+    /// Takes the dialog away for everything that replaces the page under it.
+    fn drop_push_dialog(&mut self) {
+        self.push_dialog_subs.clear();
+        self.push_dialog = None;
+    }
+
+    fn close_push_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_push_dialog();
         let handle = self.page.focus_handle(cx);
         window.focus(&handle, cx);
         self.retry_redirect(window, cx);
@@ -2446,6 +2527,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
             || self.goto.is_some()
             || self.switcher.is_some();
         let servers = self.link_servers();
@@ -2509,6 +2591,7 @@ impl Shell {
             || self.filters_dialog.is_some()
             || self.rule_dialog.is_some()
             || self.project_dialog.is_some()
+            || self.push_dialog.is_some()
             || self.goto.is_some()
         {
             return;
@@ -2897,6 +2980,7 @@ impl Render for Shell {
                     .children(self.filters_dialog.clone())
                     .children(self.rule_dialog.clone())
                     .children(self.project_dialog.clone())
+                    .children(self.push_dialog.clone())
                     .children(self.goto.clone())
                     .children(self.switcher.clone()),
             )

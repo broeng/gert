@@ -215,6 +215,12 @@ fn page_in(
                 ChangeEvent::ReplaceChangeAt(n, v) => format!("replace {n} at {:?}", v.target),
                 ChangeEvent::Advance(n, at, note) => format!("advance {n} at {at:?}: {note}"),
                 ChangeEvent::LocalReviewSaved => "local review saved".to_owned(),
+                ChangeEvent::Push(r) => format!(
+                    "push {} {} {}",
+                    r.version,
+                    r.sha,
+                    r.branch.as_deref().unwrap_or("-")
+                ),
                 _ => "other".to_owned(),
             };
             log.lock().expect("log").push(text);
@@ -400,6 +406,13 @@ fn a_local_change_shows_its_header_files_and_message_without_the_network(cx: &mu
     assert_eq!(f.hint(cx).as_deref(), Some(crate::action_menu::LOCAL));
     f.press(cx, "r");
     assert_eq!(f.hint(cx).as_deref(), Some(crate::reviewed::LOCAL));
+    // The version can be pushed (the shell opens the dialog).
+    f.chord(cx, "l u");
+    assert_eq!(
+        f.events.lock().expect("log").clone(),
+        [format!("push local 1 {} main", ck.local)]
+    );
+    f.events.lock().expect("log").clear();
     // Expanding a file diffs it in the checkout, the commit message too.
     f.press(cx, "shift-i");
     cx.update(|cx| {
@@ -495,6 +508,14 @@ fn a_gerrit_change_lists_its_local_version_and_shows_its_files_from_the_checkout
     let quick =
         |cx: &mut TestAppContext| cx.update(|cx| f.page.read(cx).quick_buttons_for_test(cx).len());
     assert_eq!(quick(cx), 1, "a quick vote on PS 3");
+    // The newest version is local: it can be pushed, to the change's
+    // branch, also while PS 3 is on show.
+    f.chord(cx, "l u");
+    assert_eq!(
+        f.events.lock().expect("log").clone(),
+        [format!("push local 1 {} main", ck.local)]
+    );
+    f.events.lock().expect("log").clear();
 
     // The local version as the target: its files come from the checkout.
     let local = f.local_patch_set(cx, 1);

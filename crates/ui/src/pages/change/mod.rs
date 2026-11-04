@@ -42,8 +42,8 @@ use std::{
 use gpui_kit::*;
 use jiff::Timestamp;
 use model::{
-    ChangeDetail, ChangeNumber, DiffKey, DiffPair, FileCommentCounts, LocalApproval, LocalChange,
-    PatchSetNumber, PendingReviewId, Thread, ThreadId,
+    ChangeDetail, ChangeNumber, ChangeStatus, DiffKey, DiffPair, FileCommentCounts, LocalApproval,
+    LocalChange, LocalChangeState, PatchSetNumber, PendingReviewId, Thread, ThreadId,
 };
 use sync::PollPolicy;
 
@@ -65,6 +65,7 @@ use crate::{
     nav::{ChangeView, DiffRoute},
     outbox::{self, DraftOutbox},
     pages::list::Status,
+    push_dialog::PushRequest,
     reply, reviewed,
     row::browser_url,
     servers::ServerBadge,
@@ -121,6 +122,8 @@ pub enum ChangeEvent {
     Search(String),
     /// A quick vote on a local version was saved as a local review.
     LocalReviewSaved,
+    /// The Push button or `l u`: the push dialog for this local version.
+    Push(Box<PushRequest>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1032,6 +1035,56 @@ impl ChangePage {
     fn project_checkout(&mut self, _: &ProjectCheckout, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(d) = &self.detail {
             cx.emit(ChangeEvent::ProjectSettings(d.summary.project.clone()));
+        }
+    }
+
+    /// What the Push button and `l u` push: the change's newest version,
+    /// whatever is on show, when it is a local one of an open change (of a
+    /// local change, one not consolidated or held), on a server with an
+    /// account and checkouts. Its ancestors that the remote lacks go with
+    /// it.
+    pub(super) fn push_request(&self) -> Option<PushRequest> {
+        self.session.username.as_ref()?;
+        self.checkouts.as_ref()?;
+        let d = self.detail.as_ref()?;
+        let shown = d.revisions.last().filter(|r| r.number.is_local())?;
+        let branch = if d.summary.number.is_local() {
+            let row = self.local_row.as_ref()?;
+            if !matches!(
+                row.state,
+                LocalChangeState::Local | LocalChangeState::Checking
+            ) {
+                return None;
+            }
+            row.branch.clone()
+        } else {
+            if d.summary.status != ChangeStatus::New {
+                return None;
+            }
+            Some(d.summary.branch.clone())
+        };
+        Some(PushRequest {
+            project: d.summary.project.clone(),
+            sha: shown.sha.clone(),
+            version: change_detail::patch_set_label(&d.revisions, shown.number),
+            subject: shown
+                .commit
+                .as_ref()
+                .map_or_else(|| d.summary.subject.clone(), |c| c.subject.clone()),
+            branch,
+        })
+    }
+
+    /// The Push button and `l u`.
+    pub(super) fn push_local(&mut self, _: &PushLocal, _: &mut Window, cx: &mut Context<Self>) {
+        match self.push_request() {
+            Some(request) => cx.emit(ChangeEvent::Push(Box::new(request))),
+            None => self.hint.say(
+                "Nothing to push: the newest version of an open change is not a local one",
+                false,
+                cx,
+                |p| &mut p.hint,
+            ),
         }
     }
 

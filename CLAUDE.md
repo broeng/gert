@@ -88,7 +88,7 @@ Claude writes most of the code and the user reviews it. So:
 | Config | TOML at `<config_dir>/gert/config.toml`, read with `toml` and written with `toml_edit` so the user's comments and formatting survive; cache DB in `<cache_dir>/gert/` (via `directories`) |
 | Syntax highlighting | `syntect` with `two-face`'s syntax set, versions and features equal to gpui-component's workspace |
 | File filters | `globset`, gitignore-style |
-| Local checkouts | the `git` CLI at runtime (spawned, read-only plumbing commands), diffed in Rust with `imara-diff` (histogram) |
+| Local checkouts | the `git` CLI at runtime (spawned, read-only plumbing commands, plus the push the user asks for), diffed in Rust with `imara-diff` (histogram) |
 | Errors | `thiserror` in library crates, `anyhow` only in `app` |
 | Logging | `log` facade (as Zed/GPUI use it), `env_logger` in `app` |
 
@@ -144,8 +144,10 @@ crates/
                 project through the `git` CLI, computed to match Gerrit's
                 diffs (line splitting, whitespace modes, renames, intraline
                 edits); finds the user's unpushed commits and maps lines
-                between commits for porting comments. Read-only, never
-                fetches; blocking, so callers use a background executor.
+                between commits for porting comments; pushes a commit for
+                review by a remote's own push rule (`local_git::push`, the
+                one write). Never fetches; blocking, so callers use a
+                background executor.
   model/        domain types: non-Option where semantically required, real
                 timestamps, newtypes for ids (ChangeNumber, AccountId, ...).
                 No I/O.
@@ -169,7 +171,8 @@ crates/
                 dialog, action menu, file filters, settings,
                 themes, project checkouts (`ui::checkouts`), the local
                 diff source (`ui::local_source`) and local changes
-                (`ui::local_scan`, `ui::consolidation`, ...).
+                (`ui::local_scan`, `ui::consolidation`, ...), the push
+                dialog (`ui::push_dialog`).
                 `examples/review.rs` runs
                 the whole UI against a fake server; `examples/diff_viewer.rs`
                 shows the diff view alone.
@@ -228,12 +231,13 @@ depend on GPUI, so they are testable without a UI. (`sync` exposes plain async/c
   Gerrit. Order: store, then checkout,
   then Gerrit; Gerrit's file list still replaces a local one. Local results
   are **never written to the store** and carry a "local" marker in the UI.
-  Git is only ever read (no fetch, no locks, no repo writes).
+  Git is only ever read (no fetch, no locks, no repo writes), except the
+  push for review the user starts (see "Local changes").
 
 ### Local changes
 
 The user's own unpushed commits, reviewed before they are on Gerrit and
-sent there automatically once pushed (the app never pushes).
+sent there automatically once pushed, by the user or from the app.
 
 - **Discovery.** Per project: `local_changes = true` and `local_approval`
   in `[[servers.projects]]` (project dialog; not for anonymous servers).
@@ -300,6 +304,15 @@ sent there automatically once pushed (the app never pushes).
   after saving) are held by the strict rule, since Gerrit could not
   confirm the change was not there yet; saving starts a lookup at once,
   so this takes a very quick push.
+- **Pushing.** When a change's newest version is local, the change page
+  has a Push button (`l u`, `ui::push_dialog`). It offers only push rules
+  the checkout's remotes already have with `HEAD` as the source
+  (`remote.<name>.push = HEAD:refs/for/main`), ranked by how much they
+  look like this Gerrit server and change (`refs/for/`, the change's
+  branch, host, port 29418, project path), and runs
+  `git push <remote> <sha><rule after HEAD>`. The app never writes git
+  config and never makes up a refspec. A push that goes through asks for
+  a consolidation run at once.
 - **In the UI:** closed and held rows on the dashboard open the Gerrit
   change; free search lists local results first, from a strict subset of
   the query language; consolidation shows quiet page hints, not OS
@@ -391,7 +404,8 @@ servers); multiple servers with a switcher; desktop
 notifications with configurable rules and an in-app inbox; a tabbed settings
 page; per-project local checkouts that serve file lists and diffs when they
 have the commits; local changes (unpushed commits reviewed locally, sent
-automatically once pushed, with porting and held items).
+automatically once pushed, with porting and held items, and pushed for
+review from the change page by a remote's push rule).
 
 Not built yet: Checks/CI results, further local git integration (fetching,
 checking out changes), query autocompletion, a configurable keymap and command palette,

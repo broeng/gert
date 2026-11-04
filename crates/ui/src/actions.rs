@@ -124,6 +124,9 @@ actions!(
         /// `l c`: cancel the selected pending review (its message stays as a
         /// draft).
         CancelPendingReview,
+        /// `l u` on the change page: push the change's newest version, a
+        /// local one, for review (the push dialog).
+        PushLocal,
         /// `w n` / `w p` on the change page: select the next / previous
         /// item of the held card (votes, messages and comments that a local
         /// review's consolidation held; `w` for "withheld", since `h` and
@@ -272,6 +275,10 @@ pub fn help_groups() -> Vec<HelpGroup> {
         g(
             "Project checkout (settings, Projects tab)",
             crate::project_dialog::actions::entries(),
+        ),
+        g(
+            "Push for review ( L U )",
+            crate::push_dialog::actions::entries(),
         ),
         g("Diff preferences panel ( , )", diff_prefs_entries()),
         g("Go to a change ( G )", crate::goto::entries()),
@@ -506,6 +513,11 @@ pub fn change_entries() -> Vec<Entry> {
             "L C",
             KeyBinding::new("l c", CancelPendingReview, Some(k)),
             "Cancel the selected local review; its message stays as a draft",
+        ),
+        e(
+            "L U",
+            KeyBinding::new("l u", PushLocal, Some(k)),
+            "Push the change's newest version, a local one, to Gerrit for review by a push rule of the checkout's remotes",
         ),
         // `w` for "withheld": the held card. Not `h`, which (like `l`)
         // scrolls an inline diff that has the focus.
@@ -1099,6 +1111,7 @@ mod tests {
             .chain(crate::filters_dialog::actions::entries())
             .chain(crate::notify_rule_dialog::actions::entries())
             .chain(crate::project_dialog::actions::entries())
+            .chain(crate::push_dialog::actions::entries())
             .chain(crate::goto::entries())
             .chain(crate::switcher::entries())
             .collect()

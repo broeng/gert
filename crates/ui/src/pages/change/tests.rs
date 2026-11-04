@@ -202,6 +202,7 @@ fn page_in_with(
                 ChangeEvent::Reply(_) => "reply".to_owned(),
                 ChangeEvent::Actions(_) => "actions".to_owned(),
                 ChangeEvent::SubmitChain(_) => "submit chain".to_owned(),
+                ChangeEvent::Push(r) => format!("push {} {}", r.version, r.sha.short(8)),
                 ChangeEvent::ManageFilters { project } => format!("manage filters {project}"),
                 ChangeEvent::ProjectSettings(project) => format!("project settings {project}"),
                 ChangeEvent::Search(q) => format!("search {q}"),

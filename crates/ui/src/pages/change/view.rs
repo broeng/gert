@@ -381,6 +381,14 @@ impl ChangePage {
                     .bg(cx.theme().primary)
                     .on_click(cx.listener(|this, _, _, cx| this.submit_chain(cx)))
             });
+        let push = self.push_request().map(|r| {
+            Button::new("push-local")
+                .label(format!("Push {} for review  (l u)", r.version))
+                .small()
+                .custom(crate::theme::vote_button(true, false, cx))
+                .bg(cx.theme().primary)
+                .on_click(cx.listener(|this, _, w, cx| this.push_local(&PushLocal, w, cx)))
+        });
         let local = c.number.is_local();
         // Where a local change stands with Gerrit, as on its dashboard row.
         let local_note = self
@@ -454,6 +462,7 @@ impl ChangePage {
             }))
             .child(div().flex_1())
             .children(submit_chain)
+            .children(push)
             .children(quick)
             .child(status);
         Some(bar.into_any_element())
@@ -1759,6 +1768,7 @@ impl Render for ChangePage {
             .on_action(cx.listener(Self::toggle_filter))
             .on_action(cx.listener(Self::manage_filters))
             .on_action(cx.listener(Self::project_checkout))
+            .on_action(cx.listener(Self::push_local))
             .on_action(cx.listener(Self::open_in_browser))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))
